@@ -1,21 +1,28 @@
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createPool, withTransaction, type Pool } from "./index.js";
+import {
+  createPool,
+  createTestDatabase,
+  withTransaction,
+  type Pool,
+  type TestDatabase,
+} from "./index.js";
 
 const URL =
   process.env["DATABASE_URL"] ?? "postgres://crossover:crossover@localhost:5432/crossover";
-const TABLE = `t101_${process.pid}_${Date.now()}`;
+const TABLE = "t101";
 
+let db: TestDatabase;
 let pool: Pool;
 
 beforeAll(async () => {
-  pool = createPool(URL);
+  db = await createTestDatabase({ url: URL });
+  pool = db.pool;
   await pool.query(`CREATE TABLE ${TABLE} (id int PRIMARY KEY, v text)`);
 });
 
 afterAll(async () => {
-  await pool.query(`DROP TABLE IF EXISTS ${TABLE}`);
-  await pool.end();
+  await db.drop();
 });
 
 describe("createPool", () => {

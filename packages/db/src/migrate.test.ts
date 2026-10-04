@@ -2,31 +2,25 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { createPool, listMigrations, migrate, type Pool } from "./index.js";
+import {
+  createTestDatabase,
+  listMigrations,
+  migrate,
+  type Pool,
+  type TestDatabase,
+} from "./index.js";
 
-const URL =
-  process.env["DATABASE_URL"] ?? "postgres://crossover:crossover@localhost:5432/crossover";
-// T103 will provide createTestDatabase(); until then each test gets its own database.
-const DB = `t102_${process.pid}_${Date.now()}`;
-
-let admin: Pool;
+let db: TestDatabase;
 let pool: Pool;
 let dir: string;
 
 beforeAll(async () => {
-  admin = createPool(URL);
-  await admin.query(`CREATE DATABASE ${DB}`);
-  const u = new globalThis.URL(URL);
-  u.pathname = `/${DB}`;
-  pool = createPool(u.toString());
-  // DROP DATABASE ... WITH (FORCE) can kill a still-closing connection; that's expected.
-  pool.on("error", () => {});
+  db = await createTestDatabase();
+  pool = db.pool;
 });
 
 afterAll(async () => {
-  await pool.end();
-  await admin.query(`DROP DATABASE IF EXISTS ${DB} WITH (FORCE)`);
-  await admin.end();
+  await db.drop();
 });
 
 beforeEach(async () => {

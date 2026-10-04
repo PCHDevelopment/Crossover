@@ -64,3 +64,5 @@ export async function withTransaction<T>(
 }
 
 export * from "./migrate.js";
+
+export * from "./testing.js";
