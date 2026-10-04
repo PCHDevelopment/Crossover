@@ -1,0 +1,1653 @@
+# Agent Collaboration Platform — Technical Architecture
+
+**Version 0.2** · Revision of v0.1 that closes the gaps found in the design review. Product decisions from the original conversation are unchanged. Technical decisions made in this revision are recorded in §0.2 with their reasoning so any of them can be revisited.
+
+---
+
+# 0. About This Revision
+
+## 0.1 What changed from v0.1
+
+| Area | v0.1 | v0.2 |
+|---|---|---|
+| Authority | Lead was the only authority role | Separate **Room Owner** (always human) with override over any lead, human or agent (§6) |
+| Deliberation | Lead "resolves disputes" | Explicit proposal → positions → decision flow with escalation ladder (§7) |
+| Autonomy | "Full autonomy, pull back later" with no mechanism | Pause, revoke, freeze, budgets, risk tiers, per-capability approval gates built into the protocol from day one (§22) |
+| Latency | "Between Git and Google Docs" | Quantified NFRs: ChangeSet visible to all in p95 < 500 ms (§3) |
+| Workspace storage | Object storage + PostgreSQL, unspecified | Git used internally as the storage and merge engine, never exposed in APIs (§9) |
+| Merge semantics | "Overlapping" undefined | Hunk-level three-way merge, atomic ChangeSets, conflicts are always "ChangeSet vs. current head" (§10–11) |
+| Semantic breakage | Unaddressed | Asynchronous workspace health checks on every head; checkpoints gated on green (§12) |
+| Human editing | Unaddressed | Editor buffers are drafts flushed as ChangeSets within seconds; client-side rebase (§13) |
+| Sandbox ↔ workspace | "Generate candidate file changes" | Working-copy model with explicit sync and submit, behind-head notifications (§14) |
+| Agent onboarding | Unaddressed | Invite tokens, agent manifests, room-scoped credentials; **MCP is the primary MVP path** (§15) |
+| Agent attention | Firehose subscription | Filtered subscriptions, per-participant inbox, deterministic digests, wake-up webhooks (§17) |
+| Tasks | Missing assign/release/cancel, no leases | Full lifecycle with atomic claims, leases, review rules (§8) |
+| Memory | No concurrency control | Compare-and-set writes, namespaces, history (§18) |
+| Event ledger | Mechanics unspecified | Single writer per room, gap-free sequences, idempotency keys, redaction (§19) |
+| Security | Capabilities only | Threat model, OPA policy engine, secrets vault, sandbox egress control, provenance labels (§21, §23) |
+| Git | Export only | Upstream sync, checkpoint attribution, PR-based export (§24) |
+| Room lifetime | "Temporary" vs. "persistent history" contradiction | Rooms are bounded projects whose history persists after archive (§5) |
+| Phase alignment | MCP/A2A listed in both MVP stack and Phase 2 | MCP in Phase 1, A2A in Phase 2 (§32) |
+
+## 0.2 Decision log
+
+| # | Decision | Reasoning | Alternative rejected |
+|---|---|---|---|
+| D1 | Git (bare repo per room) is the internal storage and merge engine | Gives content-addressed storage, three-way merge (`git merge-tree`), history and diffs for free; commits take milliseconds, so it doesn't threaten latency targets. APIs stay Git-agnostic so the Workspace Change Graph can replace it | Custom blob store + custom merge in v1 (months of work before the first demo) |
+| D2 | A conflict is always "one ChangeSet vs. current head", never "A vs. B" | Handles any number of concurrent writers uniformly; canonical never contains conflict markers and never stops moving | Pairwise conflict objects (break down at three or more writers) |
+| D3 | The submitter resolves first, then the lead, then the owner | The submitter has the most context and the cheapest fix is a rebase; the lead only sees genuinely hard conflicts | Lead resolves every conflict (lead becomes a bottleneck) |
+| D4 | Semantic validation is asynchronous and non-blocking | Blocking every ChangeSet on tests would make the p95 < 500 ms target impossible | Synchronous CI gate per ChangeSet |
+| D5 | Single writer per room (room actor with ownership lease) | Gives a total order, gap-free sequences and serialized merges without distributed locking | Multi-writer with optimistic retries |
+| D6 | Agents work in a server-side sandbox working copy exposed through standard coding tools | Existing coding agents expect a filesystem and a shell; this gives them one while keeping Model A (server-side workspace) | Raw REST file API only (poor fit for real coding agents) |
+| D7 | MCP server is the primary MVP agent interface | Claude Code, Codex, Cursor and most agent frameworks already speak MCP; it's the shortest path to "external agents join a room" | CLI-first (forces every agent to learn a new tool) |
+| D8 | Room Owner is always human and cannot be held by an agent | Preserves the human supervision you asked for (Q11) even when an agent is lead | Lead as sole authority |
+| D9 | OPA (embedded via WASM) evaluates every authorization decision | Capabilities are already policy-shaped; policy-as-code makes every grant and denial auditable and testable | Hand-rolled permission checks |
+| D10 | Plugins run server-side in a Plugin Runner; agents never see credentials | Prompt-injected agents can't leak what they never hold | Credentials injected into agent sandboxes |
+| D11 | Sandboxes use Docker with the gVisor runtime on dedicated hosts | Cheap, meaningful isolation upgrade over plain Docker without Firecracker's operational cost | Plain Docker on app hosts |
+| D12 | Agent CLI in Go; agent SDKs in TypeScript and Python | Go ships as one static binary agents can install anywhere; Python is where agent frameworks live | TypeScript CLI (requires Node on the agent's host) |
+| D13 | Human editor flushes drafts after 1.5 s idle | Small, frequent ChangeSets keep human conflicts tiny and make the workspace feel live without CRDTs | Save-only flushing (large, conflict-prone ChangeSets) |
+| D14 | Tier 3 (irreversible / production) capabilities are never in default bundles and expire within 24 h | Full autonomy stays the default for everything that can be undone | Approval prompts for everything (contradicts Q4) |
+
+---
+
+# 1. Product Vision
+
+Build a **real-time multiplayer development environment where humans and autonomous agents collaborate as first-class project participants over a shared room, workspace, task state, memory, and execution environment**.
+
+The product is not simply:
+- chat with agents,
+- Slack with bots,
+- a multi-agent orchestrator,
+- or a conventional IDE.
+
+It combines:
+- collaboration,
+- shared project state,
+- shared source artifacts,
+- task coordination,
+- agent interoperability,
+- isolated execution,
+- and eventually a new low-latency source-control model.
+
+The initial target user is a developer collaborating directly with external coding agents. The architecture should later generalize to broader multi-agent teamwork.
+
+---
+
+# 2. Core Principles
+
+## 2.1 The Room is the primary collaboration unit
+
+A **Room** is a bounded project environment containing humans and agents. It has a lifecycle (§5): it is active while the project runs, and its history persists after it is archived.
+
+Agents are room-scoped for the MVP rather than persistent identities reused across projects.
+
+## 2.2 Humans and agents are different client types
+
+Humans get a rich GUI. Agents get machine-optimized interfaces (MCP, CLI, REST, WebSocket, SDK; A2A later). Both operate on the same authoritative server-side room state.
+
+## 2.3 Chat is not the database
+
+Messages are one category of room event. Authoritative project state includes participants, roles, capabilities, tasks, decisions, memory, workspace revisions, conflicts, sandbox activity, plugin activity, and room events.
+
+## 2.4 No inferred project structure
+
+The platform never infers tasks, decisions, ownership, completion, or mentions from conversation. Every structural change is an explicit command.
+
+## 2.5 Canonical server-side workspace
+
+The canonical workspace is the source of truth for every participant. Editor buffers and sandbox working copies are explicitly marked as non-authoritative drafts.
+
+## 2.6 Full autonomy with explicit authorization
+
+Agents act without approval prompts within their granted capabilities. Full autonomy never means unlimited permissions.
+
+## 2.7 Humans own the room
+
+Every room has exactly one human **Room Owner** whose authority sits above any project role. An agent may lead the project; it may never own the room.
+
+## 2.8 Every agent action is attributable and revocable
+
+Every mutation records its actor. Every capability can be revoked while the agent is working, and the revocation takes effect on the agent's next command.
+
+## 2.9 Participant content is untrusted data
+
+Content written by one participant is data, never instructions, for every other participant. The platform labels provenance; capabilities contain the blast radius.
+
+---
+
+# 3. Non-Functional Requirements (MVP)
+
+"Between Git and Google Docs" is defined by these targets:
+
+| Requirement | Target |
+|---|---|
+| ChangeSet submitted → applied → visible to all subscribers | p95 < 500 ms, p99 < 1 s (same region) |
+| Human keystroke → visible to others as committed change | ≤ 3 s typical (1.5 s idle flush + apply + broadcast) |
+| Presence / cursor update propagation | p95 < 150 ms |
+| Merge time for a typical ChangeSet (≤ 20 files) | p95 < 50 ms |
+| Sandbox cold start (warm image, repo ≤ 200 MB) | p95 < 10 s |
+| Sandbox resume from hibernation | p95 < 3 s |
+| Participants per room | ≤ 10 (≤ 8 agents) |
+| Concurrent sandboxes per room | ≤ 10 |
+| Repository size at import | ≤ 1 GB working tree, ≤ 50,000 files |
+| Text-mergeable file size | ≤ 5 MB; larger files are binary blobs (§9.4) |
+| Sustained event rate per room | 50 events/s |
+| Availability | 99.5% (single AWS region) |
+| Durability of applied ChangeSets | No loss of any acknowledged ChangeSet (RPO = 0 for metadata, seconds for repository objects with replica) |
+
+---
+
+# 4. High-Level Architecture
+
+```text
+                              COLLABORATION ROOM
+
+  Human Client                                              Agent Clients
+  Web (React)                                      MCP / CLI / REST / WS / SDK
+       │                                                         │
+       └──────────────────┐                   ┌──────────────────┘
+                          ▼                   ▼
+                 ┌──────────────────────────────────┐
+                 │        Realtime Gateway          │  stateless, WS + REST
+                 │  auth · routing · fan-out        │
+                 └───────────────┬──────────────────┘
+                                 │ routes commands to room owner node
+                 ┌───────────────▼──────────────────┐
+                 │       ROOM KERNEL (room actor)   │  single writer per room
+                 │                                  │
+                 │ Participants / Authority / Roles │
+                 │ Policy (OPA)                     │
+                 │ Messages · Tasks · Decisions     │
+                 │ Memory · Inbox · Presence        │
+                 │ Event Ledger                     │
+                 └──────┬──────────┬───────────┬────┘
+                        │          │           │
+          ┌─────────────┘          │           └──────────────┐
+          ▼                        ▼                          ▼
+  WORKSPACE SERVICE         EXECUTION SERVICE            PLUGIN RUNNER
+  bare Git repo per room    sandbox orchestration        MCP servers / plugins
+  apply pipeline / merge    working-copy sync            credential injection
+  conflicts / health        exec / logs                  (agents never see secrets)
+  search index / checkpoint
+          │                        │                          │
+          ▼                        ▼                          ▼
+  EBS (repo) + S3           Sandbox hosts                Secrets Manager
+  PostgreSQL (metadata)     Docker + gVisor              STS / GitHub App
+```
+
+## 4.1 Deployment
+
+Start as a **modular monolith**:
+
+- **App nodes** run the gateway, room kernel, workspace service and plugin runner as modules in one TypeScript/Node process (plugin runner child processes are isolated per invocation).
+- **Sandbox hosts** are separate EC2 instances. They are a hard security boundary and never share a host with app nodes.
+- **Shared infrastructure:** PostgreSQL (RDS), Redis (ElastiCache), S3, Secrets Manager.
+
+Logical module boundaries are explicit in code (separate packages with interface contracts) so subsystems can be split into services later.
+
+## 4.2 Room affinity (single writer)
+
+Each active room is owned by exactly one app node at a time.
+
+- Ownership is a row in `room_leases` (room_id, node_id, fencing_token, expires_at), renewed every 5 s with a 15 s expiry.
+- The gateway routes all mutating commands for a room to its owner node; reads may be served from any node via PostgreSQL.
+- On owner failure, another node acquires the lease with an incremented fencing token. Every write the room actor performs carries the fencing token; writes with a stale token are rejected by a PostgreSQL check, so a "zombie" owner cannot corrupt state.
+- The room's bare Git repository lives on the owner node's EBS volume, with an async replica on a standby node (§9.2). On failover, the new owner attaches from the replica and reconciles against PostgreSQL (§19.4).
+
+---
+
+# 5. Room Lifecycle
+
+```text
+ACTIVE ──freeze──▶ PAUSED ──resume──▶ ACTIVE
+  │                  │
+  └──archive──▶ ARCHIVED ──(30-day grace)──▶ DELETED
+                  │
+                  └──export bundle
+```
+
+| State | Behavior |
+|---|---|
+| `ACTIVE` | Normal operation |
+| `PAUSED` | Owner froze the room. All agent mutations rejected with `ROOM_PAUSED`; agent sandboxes stopped (volumes kept); humans can read, owner can still act |
+| `ARCHIVED` | Read-only. Sandboxes destroyed. Repository, ledger, memory, tasks and decisions retained (default 1 year). Exportable as a bundle |
+| `DELETED` | Hard-deleted after a 30-day grace period from the delete request |
+
+- **Archive triggers:** owner action, or 30 days with no mutations (owner notified 7 days before).
+- **Export bundle:** `git bundle` of the full repository + `events.jsonl` + `memory.json` + `tasks.json` + `decisions.json`.
+- This resolves the v0.1 tension: rooms are bounded projects (agents and sandboxes live and die with them), but their history persists.
+
+Room schema:
+
+```text
+Room
+  id
+  slug
+  name
+  objective
+  status            ACTIVE | PAUSED | ARCHIVED | DELETED
+  owner_id          human participant
+  lead_participant_id
+  workspace_id
+  settings          health_command, review_required_default, egress_allowlist, budgets
+  last_sequence
+  created_at
+  archived_at
+```
+
+---
+
+# 6. Participants, Authority, and Roles
+
+## 6.1 Two orthogonal layers
+
+**Authority layer** (who governs the room):
+
+| Authority | Held by | Count |
+|---|---|---|
+| Owner | Human only | Exactly 1 |
+| Admin | Human only | 0..n |
+| Member | Human or agent | 0..n |
+
+**Project role layer** (how work is organized):
+
+| Role | Count | Default capability bundle |
+|---|---|---|
+| Lead | Exactly 1 | Developer bundle + task assign/cancel/reopen, conflict resolve, decision decide, review, checkpoint create |
+| Developer | 0..n | messages, tasks (claim/update own), workspace read/write, memory read/write, sandbox exec, decisions propose |
+| Reviewer | 0..n | Read everything, messages, tasks review, decisions propose, memory write |
+| Observer | 0..n | Read everything except sandbox output; no mutations other than presence |
+
+A participant has one authority level and one project role. Example: Peter = Owner + Developer while ArchitectAgent = Member + Lead.
+
+## 6.2 Owner and admin powers
+
+The owner (and admins, except where noted) can:
+
+- invite and remove participants,
+- grant and revoke capabilities beyond role defaults (Tier 3 grants: owner only),
+- appoint or replace the lead,
+- pause, resume or remove any agent,
+- freeze, resume, archive the room (owner only),
+- override any lead decision (veto, §7.3),
+- set budgets and the sandbox egress allowlist,
+- redact events (§19.6).
+
+## 6.3 Limits on an agent lead
+
+An agent holding Lead **cannot**:
+
+- grant capabilities it does not itself hold, or any Tier 3 capability,
+- remove or change the role of a human participant,
+- change the owner or admins,
+- un-pause a participant paused by a human,
+- override a human owner's veto.
+
+## 6.4 Lead transfer
+
+- The owner appoints a lead at any time (`room.set_lead`).
+- The current lead may hand off (`room.transfer_lead`); the recipient must accept within 10 minutes.
+- If an **agent** lead is disconnected for more than 10 minutes, lead reverts to the owner automatically (`lead.changed`, reason `lead_unavailable`). Human leads do not auto-revert.
+
+## 6.5 Participant schema
+
+```text
+Participant
+  id
+  room_id
+  kind               HUMAN | AGENT
+  display_name
+  authority          OWNER | ADMIN | MEMBER
+  role               LEAD | DEVELOPER | REVIEWER | OBSERVER
+  status             INVITED | ACTIVE | PAUSED | REMOVED
+  capability_grants  [] (beyond role defaults, see §21)
+  budgets            overrides of room defaults (§22.3)
+  agent_manifest     (agents only, §15.2)
+  user_id            (humans only, platform account)
+  joined_at
+  last_seen_at
+```
+
+---
+
+# 7. Deliberation and Decisions
+
+You asked that the lead deliberate, as in a real project. Deliberation is an explicit object, not a chat convention.
+
+## 7.1 Decision lifecycle
+
+```text
+PROPOSED ──▶ ACCEPTED ──▶ SUPERSEDED
+    │
+    ├──────▶ REJECTED
+    │
+    └──────▶ WITHDRAWN (by proposer)
+
+ACCEPTED/REJECTED ──(owner veto within 24 h)──▶ VETOED
+```
+
+1. **Propose.** Any participant with `decisions.propose` opens a decision with context and options.
+2. **Positions.** Participants add positions: a chosen option plus argument. Positions are structured, so an agent lead can read all arguments without parsing chat.
+3. **Decide.** The lead accepts one option (or rejects the proposal) with a written rationale. The lead may set a `decide_by` deadline when proposing or after.
+4. **Veto.** The owner may veto an accepted or rejected decision within 24 hours; the decision moves to `VETOED` and the owner's rationale is recorded. The owner may then decide directly.
+5. **Supersede.** A later accepted decision can supersede an earlier one; the old one moves to `SUPERSEDED` with a link.
+
+## 7.2 Decision schema
+
+```text
+Decision
+  id
+  room_id
+  title
+  context              markdown
+  options[]            { id, summary, detail }
+  positions[]          { participant_id, option_id, argument, created_at }
+  status
+  outcome_option_id
+  rationale
+  proposed_by
+  decided_by
+  vetoed_by
+  decide_by
+  links[]              task / changeset / conflict / memory key / file@revision
+  supersedes           decision id
+  version              (optimistic concurrency)
+  created_at
+  decided_at
+```
+
+## 7.3 Escalation ladder
+
+Disputes of every kind (task ownership, review disagreements, conflicts, design choices) follow the same ladder:
+
+```text
+participants discuss ──▶ lead decides ──▶ owner may veto / decide
+```
+
+Workspace conflicts have their own fast path in front of this ladder (§11.3).
+
+## 7.4 Decisions vs. memory
+
+- A **Decision** is a choice made with authority and rationale. It answers "what did we decide, who decided, and why?"
+- A **Memory entry** is knowledge any participant can write. It answers "what do we know?"
+- Accepted decisions are mirrored automatically into the reserved, read-only memory namespace `decisions/<decision-id>` so agents that read memory see them. This is a deterministic projection, not inference.
+
+---
+
+# 8. Task System
+
+Task creation and management are explicit. No task is generated from chat.
+
+## 8.1 Task schema
+
+| Field | Purpose |
+|---|---|
+| `id` | Stable identifier |
+| `room_id` | Owning room |
+| `title` | Short task name |
+| `description` | Full task explanation |
+| `requirements` | Explicit completion criteria (list) |
+| `owner_id` | Assigned human or agent (null when OPEN) |
+| `created_by` | Creator |
+| `status` | Lifecycle state (§8.2) |
+| `priority` | Optional ordering (P0–P3) |
+| `dependencies` | Other task IDs |
+| `artifacts` | Related files / ChangeSets |
+| `reviewer_id` | Optional reviewer (defaults to lead) |
+| `review_required` | If false, submitting goes straight to DONE (default from room settings: true) |
+| `blocked_reason` | Required when BLOCKED |
+| `lease_expires_at` | Agent claim lease (§8.4) |
+| `reviews[]` | `{ reviewer_id, verdict, comments, revision, created_at }` |
+| `version` | Optimistic concurrency |
+| `created_at` / `updated_at` | Audit timestamps |
+
+## 8.2 Lifecycle
+
+```text
+           assign / claim
+   OPEN ─────────────────▶ CLAIMED ──start──▶ IN_PROGRESS ◀──▶ BLOCKED
+    ▲                        │                    │
+    │  release / lease expiry│                    │ submit
+    └────────────────────────┴────────────────────┤
+                                                  ▼
+                       request_changes ◀──── REVIEW ──approve──▶ DONE
+                       (back to IN_PROGRESS)                       │
+                                                                   │ reopen (lead)
+                                                                   ▼
+                                                              IN_PROGRESS
+
+   Any non-DONE state ──cancel (lead/owner)──▶ CANCELLED
+```
+
+| Transition | Command | Who |
+|---|---|---|
+| OPEN → CLAIMED | `tasks.claim` | Any participant with `tasks.claim` |
+| OPEN → CLAIMED | `tasks.assign` | Lead, owner, admin |
+| CLAIMED → IN_PROGRESS | `tasks.start` | Task owner; requires all dependencies DONE unless lead sets `override_dependencies` |
+| IN_PROGRESS ↔ BLOCKED | `tasks.block` / `tasks.unblock` | Task owner, lead |
+| IN_PROGRESS → REVIEW | `tasks.submit` | Task owner (→ DONE directly if `review_required=false`) |
+| REVIEW → DONE | `tasks.review(approve)` | Reviewer or lead; requires workspace health green at the reviewed revision unless lead overrides (§12) |
+| REVIEW → IN_PROGRESS | `tasks.review(request_changes)` | Reviewer or lead |
+| CLAIMED/IN_PROGRESS/BLOCKED → OPEN | `tasks.release` | Task owner, lead; or automatic lease expiry |
+| DONE → IN_PROGRESS | `tasks.reopen` | Lead, owner |
+| any non-DONE → CANCELLED | `tasks.cancel` | Lead, owner |
+
+A participant cannot approve a task they own.
+
+## 8.3 Atomic claims and updates
+
+- `tasks.claim` is a conditional update (`WHERE status = 'OPEN' AND version = $v`). Exactly one claimant wins; others receive `CONFLICT_VERSION` with the current task.
+- All task updates take `expected_version`.
+
+## 8.4 Claim leases (agents only)
+
+- An agent's claim carries a 15-minute lease, renewed by any command the agent makes that references the task (ChangeSet with `task_id`, task update, message with the task in `refs`) or by `tasks.heartbeat`.
+- If the lease expires **and** the agent is disconnected, the task returns to OPEN (`task.lease_expired`) and the lead is notified through the inbox.
+- Human claims do not expire; the lead may reassign.
+
+---
+
+# 9. Canonical Workspace
+
+The workspace is server-side and authoritative. Participants change it only through ChangeSets.
+
+## 9.1 Storage engine (D1)
+
+Each room has a **bare Git repository** used purely as an internal storage and merge engine:
+
+- Each applied ChangeSet becomes one commit on the internal ref `refs/room/canonical`.
+- **PostgreSQL is the source of truth for the head.** The table `workspace_revisions(revision, commit_sha, changeset_id, created_at)` maps a monotonically increasing integer **workspace revision** to a commit. The Git ref is a cache of the latest row (§19.4).
+- **File revisions** are per-path integers in `file_revisions(path, revision, workspace_revision, blob_sha, actor_id)`, incremented whenever that path changes.
+- No Git concepts (SHAs, branches, refs) appear in the public API. Clients see workspace revisions and file revisions only.
+
+The Git CLI (≥ 2.38) runs on the workspace node. `git merge-tree --write-tree` performs three-way merges in memory without a worktree.
+
+## 9.2 Durability
+
+- Primary repository on the owner node's EBS volume.
+- After each commit, an async `git push` to a replica bare repository on a standby node (lag target < 2 s).
+- Hourly incremental `git bundle` to S3; full bundle daily.
+- If the primary and replica both fail, the repository is rebuilt from the latest S3 bundle plus ChangeSet payloads stored in PostgreSQL/S3 since that bundle. Every acknowledged ChangeSet's payload is persisted before acknowledgment, which is what makes RPO = 0 hold.
+
+## 9.3 Ignore rules
+
+- The repository's `.gitignore` files are honored, plus an optional `.roomignore` at the root.
+- Ignored paths never enter ChangeSets. Sandboxes keep `node_modules`, build output, caches and other generated files locally.
+
+## 9.4 Large and binary files
+
+- Files over 5 MB, or detected as binary, are stored as blobs in S3 and referenced by pointer in the repository (Git LFS-compatible pointer format).
+- They are never text-merged. Any concurrent modification of the same binary path is a conflict.
+- Upstream repositories using Git LFS keep their pointers unchanged.
+
+## 9.5 Search
+
+The workspace node maintains a checked-out working tree of the canonical head (updated after every commit). `workspace.search` runs ripgrep against it, which is fast enough for repositories up to the NFR limit. A trigram index (e.g. Zoekt) is a Phase 2 upgrade for larger repositories.
+
+## 9.6 File operations (read side)
+
+```text
+workspace.list        path, revision?
+workspace.read        path, revision?   → content + file_revision + workspace_revision
+workspace.search      query, glob?, revision? (head only in MVP)
+workspace.diff        from_revision, to_revision, paths?
+workspace.history     path? , limit, before?
+workspace.blame       path, revision?
+```
+
+All writes go through `workspace.apply_changeset` (§10). Create, modify, rename and delete are operations inside a ChangeSet, not separate endpoints.
+
+---
+
+# 10. ChangeSets and the Apply Pipeline
+
+## 10.1 ChangeSet schema
+
+```text
+ChangeSet
+  id
+  workspace_id
+  actor_id
+  idempotency_key
+  source                 EDITOR | SANDBOX | API | UPSTREAM | RESOLUTION
+  task_id                optional
+  conflict_id            set when resolving a conflict
+  message                short description
+
+  base_workspace_revision
+  base_file_revisions    { path: file_revision }
+
+  operations[]
+    create   path, content | blob_ref
+    modify   path, patch (unified diff) | content
+    rename   from, to, (optional modify of content)
+    delete   path
+
+  status                 PENDING | APPLIED | CONFLICT | REJECTED
+  rejection_reason
+  applied_revision
+  created_at
+  applied_at
+```
+
+Limits: ≤ 500 operations and ≤ 25 MB of text per ChangeSet.
+
+## 10.2 Guarantees
+
+- **Atomic.** A ChangeSet applies completely or not at all. If any file conflicts, nothing is applied.
+- **Serialized.** The room's workspace queue applies ChangeSets one at a time in arrival order (D5).
+- **Idempotent.** Resubmitting with the same `idempotency_key` returns the original result.
+
+## 10.3 Apply algorithm
+
+```text
+1. Authorize       actor holds workspace.write for every touched path (path scopes, §21)
+2. Validate        paths normalized, not ignored, within size limits;
+                   secret scan (§23.3); circuit breakers (§22.4)
+3. Persist payload ChangeSet row + payload stored before processing (durability)
+4. Materialize     build a commit C = base_commit + operations
+5. Merge
+     if base_revision == head:      fast-forward, result = C
+     else:                          git merge-tree --write-tree base_commit head_commit C
+6. Classify
+     clean merge                    → step 7
+     content or structural conflict → status CONFLICT, create Conflict (§11), stop
+7. Parse check     for languages with a tree-sitter grammar, if the merged result fails to
+                   parse in a file where neither side's version failed → treat as CONFLICT
+                   (source=EDITOR drafts that already fail to parse are allowed through)
+8. Commit          commit-tree → PostgreSQL txn: workspace_revisions row, file_revisions rows,
+                   ChangeSet APPLIED, event workspace.changeset.applied → update Git ref
+9. Respond         { status: APPLIED, applied_revision }
+10. Async          health check scheduling (§12), search tree update, replica push
+```
+
+## 10.4 What counts as overlapping
+
+The merge uses Git's diff3 semantics at hunk level:
+
+- **Content conflict:** both sides change the same lines, or change lines that are directly adjacent (no unchanged line between the hunks). This is deliberately conservative.
+- **Structural conflicts:**
+  - modify vs. delete of the same path,
+  - rename vs. rename of the same path to different targets,
+  - rename vs. modify where the rename target already exists,
+  - add vs. add of the same path with different content,
+  - any concurrent modification of a binary path.
+
+Renames are explicit operations, so rename detection never relies on heuristics.
+
+---
+
+# 11. Conflicts
+
+## 11.1 Model (D2)
+
+A conflict is always between **one ChangeSet and the current head**. Canonical never contains conflict markers and keeps advancing while a conflict is open. Files are never frozen.
+
+```text
+Conflict
+  id
+  workspace_id
+  changeset_id                 the ChangeSet that could not apply
+  submitter_id
+  base_revision
+  head_revision_at_detection
+  files[]
+    path
+    kind                       CONTENT | MODIFY_DELETE | RENAME | ADD_ADD | BINARY
+    hunks[]                    { base, ours (submitter), theirs (head), line ranges }
+  counterparty_changesets[]    applied ChangeSets between base and head that touched
+                               the conflicting regions (for attribution and pinging)
+  status                       OPEN | ESCALATED | RESOLVED | ABANDONED
+  attempts                     number of failed resolution submissions
+  resolver_id
+  resolution_changeset_id
+  created_at
+  escalated_at
+  resolved_at
+```
+
+## 11.2 Why this handles many writers
+
+Peter, Agent A and Agent C all editing `auth.ts` produces at most one open conflict per ChangeSet that lost the race, each against whatever head existed when it was applied. No pairwise bookkeeping is needed.
+
+## 11.3 Resolution ladder (D3)
+
+```text
+1. SUBMITTER  (window: 10 min for agents, no limit for humans)
+     - receives targeted inbox item + conflict payload
+     - submits a RESOLUTION ChangeSet based on the current head
+     - may ping counterparties in the room channel (refs → conflict)
+           │
+           │ 2 failed attempts, window expires, or submitter calls conflicts.escalate
+           ▼
+2. LEAD
+     - resolves with a RESOLUTION ChangeSet, or abandons the ChangeSet
+           │
+           │ lead is the submitter, or a human disputes the resolution
+           ▼
+3. OWNER     final say
+```
+
+- A resolution ChangeSet is a normal ChangeSet. If the head moved again and it conflicts, the same conflict stays open and `attempts` increments.
+- `conflicts.abandon` discards the original ChangeSet (submitter, lead or owner).
+- Human submitters resolve in the editor's merge view (§13.3).
+
+## 11.4 Reducing conflicts: edit intents
+
+Participants can publish advisory **edit intents** (`presence.set_intent { paths, ranges?, task_id? }`). Intents appear in presence and in agents' `sandbox.behind` notifications. They are advisory only and never block writes; they let agents choose not to touch a region someone else is about to change.
+
+---
+
+# 12. Workspace Health (Semantic Validation)
+
+Edits that don't overlap can still break the build (Peter renames a function while Agent B adds a call to the old name). Health checks catch this without blocking ChangeSets (D4).
+
+## 12.1 Mechanism
+
+- The room has a configurable `health_command` (e.g. `npm run typecheck && npm test`), set by the lead or owner. Default: none until configured; the import flow suggests one based on the repository.
+- A dedicated **system health sandbox** runs the command against each new head.
+- **Coalescing:** at most one run in progress and one queued. A queued run always targets the latest head, so bursts of ChangeSets produce few runs.
+- Each run emits `workspace.health` with `{ revision, status: GREEN | RED | ERROR, duration, failing_summary, log_ref }`.
+- On RED, the event identifies the last GREEN revision, giving the range of suspect ChangeSets. Authors of ChangeSets in that range receive an inbox item.
+
+## 12.2 Effects of health status
+
+| Action | Requirement |
+|---|---|
+| ChangeSet apply | None (never blocked by health) |
+| Task REVIEW → DONE | Health GREEN at a revision that includes the task's artifacts (lead may override) |
+| Checkpoint export (§24) | Head GREEN (owner may override) |
+| UI | Health badge in the room header, red range highlighted in history |
+
+---
+
+# 13. Human Editor Model
+
+## 13.1 Drafts
+
+- A Monaco buffer is a **draft**: local and non-authoritative. The UI shows a draft indicator on files with unflushed edits.
+- Each buffer tracks its `base_file_revision`.
+
+## 13.2 Flushing (D13)
+
+A draft is flushed as a ChangeSet (`source = EDITOR`) when any of these happen:
+
+- 1.5 s with no typing,
+- 10 s of continuous typing,
+- explicit save,
+- switching files or closing the tab.
+
+Flushes are small, so human conflicts are small.
+
+## 13.3 Incoming changes to an open file
+
+When `workspace.changeset.applied` touches a file open in the editor:
+
+| Buffer state | Behavior |
+|---|---|
+| Clean (no unflushed edits) | Replace content; map cursor and selections through the diff |
+| Dirty | Client runs the same diff3 algorithm (base, buffer, new canonical) in the browser |
+| → merges cleanly | Buffer silently rebased to the new base; cursor mapped |
+| → conflicts | Buffer kept; banner "auth.ts changed underneath you"; the next flush returns a Conflict, which opens Monaco's three-way merge view |
+
+## 13.4 Live presence
+
+- Human cursors, selections and open files are broadcast through the presence channel (Redis, ephemeral, never in the ledger).
+- Agent edit intents (§11.4) render as highlighted regions in the editor.
+
+---
+
+# 14. Execution Architecture and Sandbox Sync
+
+## 14.1 Model (D6)
+
+Each participant that needs execution gets an isolated sandbox containing a **working copy** of the canonical workspace. For agents, the working copy is their filesystem: they read, edit and run commands there, then submit their changes.
+
+```text
+                       CANONICAL WORKSPACE (head = r42)
+                                   │
+            ┌──────────────────────┼──────────────────────┐
+            ▼                      ▼                      ▼
+     Peter sandbox           Agent A sandbox         Agent B sandbox
+     base r42 (follows head) base r39 + local edits  base r42, clean
+            │                      │
+            │                      └── changes.submit ──▶ ChangeSet(base r39) ──▶ apply pipeline
+            │
+            └── terminal for tests / scripts
+```
+
+## 14.2 Working-copy state
+
+Each sandbox tracks:
+
+- `base_revision`: the canonical revision its working copy started from,
+- local modifications relative to that base (computed with `git status`/`git diff` inside the sandbox; the sandbox clone is ordinary Git internally),
+- ignored and generated files, which never leave the sandbox.
+
+## 14.3 Materialization
+
+- On first use (`sandbox.*` or a coding tool call through MCP), the Execution Service starts a container and fetches the canonical head from the workspace node over an internal Git endpoint, authenticated with a sandbox-scoped read token.
+- Sandbox hosts keep a per-room reference repository so new sandboxes fetch only missing objects.
+
+## 14.4 Staying current
+
+The sandbox never changes files underneath a running agent without warning.
+
+- When canonical advances, the sandbox owner receives `sandbox.behind { behind_by, changed_paths, overlaps_local_changes, intents }`.
+- **Auto-sync:** if the sandbox has no running process and none of the changed paths overlap local modifications, it fast-forwards automatically and emits `sandbox.synced`.
+- **Explicit sync:** otherwise the agent calls `sandbox.sync`. The sandbox stashes local modifications as a temporary commit, fetches head, and rebases.
+  - Clean → returns `{ synced_to: r42 }`.
+  - Conflicts → conflict markers are left in the affected files (the format coding agents already understand), and the call returns the conflicted paths. The agent fixes them and continues.
+- **Human sandboxes** run in follow-head mode: they always auto-sync, because humans edit through the editor, not the sandbox.
+
+## 14.5 Submitting
+
+`changes.submit { paths?, message, task_id? }`:
+
+1. The sandbox computes the diff between `base_revision` and the working tree (tracked + new non-ignored files; optional path filter).
+2. It packages the diff as a ChangeSet with `base_workspace_revision = base_revision` and `source = SANDBOX`.
+3. The apply pipeline (§10) processes it.
+4. On APPLIED, the sandbox fast-forwards its base to the new revision. On CONFLICT, the agent receives the Conflict and typically runs `sandbox.sync` then resubmits.
+
+Tests run in a sandbox only validate that sandbox's view. Canonical truth comes from workspace health (§12).
+
+## 14.6 Lifecycle and limits
+
+| Setting | Default |
+|---|---|
+| Creation | Lazy, on first use |
+| Hibernation | After 30 min idle: container stopped, volume kept |
+| Volume retention | Until participant leaves or room is archived |
+| CPU / memory / disk | 2 vCPU / 4 GB / 20 GB |
+| Exec timeout | 10 min (owner may raise to 60) |
+| Background processes | Allowed (dev servers); killed on hibernation |
+
+## 14.7 Isolation (D11)
+
+- Docker with the **gVisor (`runsc`)** runtime on dedicated sandbox hosts.
+- **Network egress default-deny** except through an egress proxy allowlist: package registries (npm, PyPI, crates.io, Go proxy, Maven Central), GitHub read-only, plus any domains the owner adds per room.
+- Cloud metadata endpoints (IMDS) blocked.
+- No platform or plugin credentials in sandboxes, ever (§21.4).
+- One sandbox per participant; sandboxes cannot reach each other.
+
+## 14.8 Output
+
+- `sandbox.exec` stdout/stderr streams over a dedicated WebSocket channel (`sandbox.output`), not the event ledger.
+- Output is stored in S3 as chunked log objects (30-day retention).
+- The ledger records only `sandbox.exec.started` and `sandbox.exec.finished { exit_code, duration_ms, log_ref }`.
+
+## 14.9 Future execution options
+
+Firecracker microVMs, Kubernetes scheduling, customer-hosted runners, local runners (Phase 2+).
+
+---
+
+# 15. Agent Onboarding and Identity
+
+## 15.1 Joining a room
+
+```text
+Owner/admin                    Platform                         Agent operator
+    │  room.invite(role, caps)    │                                   │
+    │────────────────────────────▶│                                   │
+    │  ◀── one-time join token ───│                                   │
+    │      (expires 24 h)         │                                   │
+    │── shares token ────────────────────────────────────────────────▶│
+    │                             │  POST /v1/rooms/{id}/join         │
+    │                             │  { token, manifest }              │
+    │                             │◀──────────────────────────────────│
+    │                             │── access token + refresh token ──▶│
+    │  ◀── participant.joined ────│                                   │
+```
+
+- The join token encodes the intended role and capability bundle; it is single-use.
+- Optionally the owner can require approval of the manifest before the agent becomes ACTIVE.
+
+## 15.2 Agent manifest
+
+```text
+AgentManifest
+  name                 display name in the room
+  operator             person or org responsible, with contact
+  vendor / model       self-declared (e.g. "Anthropic / claude-opus-…")
+  client               mcp | cli | sdk-ts | sdk-python | rest | a2a
+  client_version
+  wake_webhook_url     optional (§17.4)
+  description          what the agent is good at
+```
+
+Vendor and model are self-declared and displayed as such; they are not trusted for authorization.
+
+## 15.3 Credentials
+
+- **Opaque access tokens** (1 h) validated server-side on every command against Redis, plus refresh tokens (30 days, rotated on use). Opaque tokens make revocation immediate, which JWTs would not.
+- Removing or pausing a participant revokes its tokens and closes its WebSocket connections.
+- Humans authenticate to the platform with GitHub or Google OAuth; room access comes from membership.
+
+## 15.4 Interfaces by priority (D7)
+
+| Priority | Interface | Who uses it |
+|---|---|---|
+| 1 | **MCP server** (remote streamable HTTP, or local stdio shim via `room mcp`) | Claude Code, Codex, Cursor, any MCP-capable agent |
+| 2 | **CLI** (`room`, Go binary) | Shell-driven agents, scripts, humans in a terminal |
+| 3 | **REST + WebSocket** | Custom agents |
+| 4 | **SDKs** (TypeScript, Python) | Agent frameworks |
+| Phase 2 | **A2A adapter** | Agent-to-agent interoperability |
+
+The MCP server exposes two groups of tools:
+
+- **Coding tools** that operate on the agent's sandbox working copy and mirror what coding agents expect: `read_file`, `write_file`, `edit_file`, `list_dir`, `grep`, `bash`, plus `submit_changes` and `sync`.
+- **Room tools** for collaboration: tasks, messages, memory, decisions, inbox, conflicts.
+
+An agent connected through MCP therefore works almost exactly as it would on a local machine, except that its filesystem lives in the room's sandbox and its changes become ChangeSets.
+
+---
+
+# 16. Agent Protocol
+
+The native Room Protocol models the collaboration domain directly. Every operation is available over REST, WebSocket, CLI, SDK and (where it makes sense) MCP.
+
+## 16.1 Operations
+
+```text
+ROOM
+  room.get_state           view=summary|full, paginated sections
+  room.digest              since=sequence (§17.3)
+  room.events.subscribe    filters (§17.1), after=sequence
+  room.events.list         after, limit, types?
+  room.set_lead            owner/admin
+  room.transfer_lead / room.accept_lead
+  room.freeze / room.resume / room.archive          owner
+  room.invite              owner/admin
+
+PARTICIPANTS & PRESENCE
+  participants.list / participants.get
+  participants.set_role                              owner/admin (lead within limits, §6.3)
+  participants.pause / participants.resume / participants.remove
+  presence.update          status, open_files, cursor (humans)
+  presence.set_intent      paths, ranges?, task_id?
+
+CAPABILITIES
+  capabilities.list        participant_id
+  capabilities.grant / capabilities.revoke
+  approvals.list / approvals.decide                  (§22.2)
+
+MESSAGES
+  messages.list            before/after, limit
+  messages.send            body, mentions[], refs[], reply_to?
+  messages.edit            (author only; original kept in ledger)
+
+INBOX
+  inbox.list               unacked_only
+  inbox.ack                ids[]
+
+TASKS
+  tasks.list / tasks.get
+  tasks.create / tasks.update                        expected_version
+  tasks.claim / tasks.assign / tasks.release
+  tasks.start / tasks.block / tasks.unblock
+  tasks.submit / tasks.review / tasks.reopen / tasks.cancel
+  tasks.heartbeat
+
+WORKSPACE
+  workspace.list / workspace.read / workspace.search
+  workspace.diff / workspace.history / workspace.blame
+  workspace.apply_changeset
+  workspace.changeset.get  status of a submitted ChangeSet
+  workspace.health.get     latest health per revision
+
+CONFLICTS
+  conflicts.list / conflicts.get
+  conflicts.escalate / conflicts.abandon
+  (resolution = workspace.apply_changeset with conflict_id)
+
+SANDBOX
+  sandbox.status / sandbox.exec / sandbox.exec.cancel
+  sandbox.sync / sandbox.reset (discard local changes)
+  changes.submit / changes.diff (local, unsubmitted)
+
+MEMORY
+  memory.list / memory.get / memory.history
+  memory.put               expected_revision
+  memory.delete            expected_revision
+
+DECISIONS
+  decisions.list / decisions.get
+  decisions.propose / decisions.add_position
+  decisions.decide / decisions.withdraw / decisions.veto
+
+TOOLS
+  tools.list / tools.invoke
+
+GIT
+  git.import / git.pull_upstream
+  checkpoints.create / checkpoints.list / checkpoints.export
+```
+
+## 16.2 Command envelope
+
+Every mutating command carries:
+
+```json
+{
+  "id": "cmd_01J…",
+  "method": "tasks.claim",
+  "params": { "task_id": "task_12", "expected_version": 3 },
+  "idempotency_key": "agentA-7f3c…"
+}
+```
+
+Idempotency keys are stored for 24 hours per participant. A duplicate returns the original response.
+
+## 16.3 Error model
+
+```json
+{
+  "error": {
+    "code": "CONFLICT_VERSION",
+    "message": "Task was updated by another participant",
+    "retryable": true,
+    "details": { "current": { … } }
+  }
+}
+```
+
+| Code | Meaning |
+|---|---|
+| `UNAUTHENTICATED` | Missing or invalid token |
+| `FORBIDDEN` | Policy denied the action (details name the missing capability) |
+| `NOT_FOUND` | Resource missing |
+| `VALIDATION` | Malformed request |
+| `CONFLICT_VERSION` | Optimistic concurrency failure (tasks, memory, decisions) |
+| `CONFLICT_MERGE` | ChangeSet could not apply; details carry the Conflict id |
+| `APPROVAL_REQUIRED` | Action queued for human approval (§22.2); details carry the approval id |
+| `PARTICIPANT_PAUSED` / `ROOM_PAUSED` | Participant or room frozen |
+| `RATE_LIMITED` / `BUDGET_EXCEEDED` | Throttled (§22.3); details carry retry-after |
+| `CIRCUIT_BREAKER` | ChangeSet held for review (§22.4) |
+
+## 16.4 Versioning
+
+REST paths are prefixed `/v1/`. WebSocket clients send `hello { protocol_version, client, client_version }`; the server replies with the negotiated version. Events carry `schema_version`. Breaking changes require a new major version with a 6-month overlap.
+
+## 16.5 Provenance on every returned item
+
+Every message, memory entry, decision position, task description and tool result returned to an agent carries:
+
+```json
+"provenance": { "author_id": "agent_4", "author_kind": "AGENT", "trust": "participant" }
+```
+
+`trust` is one of `system` (platform-generated), `participant` (written by a room member), or `external` (fetched from outside: web pages, GitHub issues, plugin output). SDKs and the MCP server render these labels so agents can tell data from platform instructions (§23.2).
+
+## 16.6 Conceptual division
+
+```text
+A2A           → who agents talk to (Phase 2)
+MCP           → what agents can use, and the primary way agents join (Phase 1)
+Room Protocol → where collaboration lives
+```
+
+---
+
+# 17. Agent Attention
+
+Every event an agent reads costs it tokens and time. The platform tells agents what is relevant to them instead of streaming everything.
+
+## 17.1 Filtered subscriptions
+
+```text
+room.events.subscribe {
+  after: 9182,
+  profile: "relevant" | "all" | "custom",
+  types:   ["task.*", "workspace.conflict.*"],      (custom)
+  scopes: {
+    tasks:    "mine" | "all",
+    files:    "touched" | ["src/auth/**"],
+    mentions: true
+  }
+}
+```
+
+The default profile for agents is **`relevant`**: events where the agent is the target (assigned, mentioned, review requested, conflict on its ChangeSet, its task changed, its sandbox is behind), lead decisions, lead changes, room status changes, and health turning RED on a range that includes its ChangeSets.
+
+## 17.2 Inbox
+
+Each participant has an **inbox** of targeted items that require attention: assignments, review requests, mentions, conflicts, approvals, lease warnings, escalations, veto notices.
+
+- Items persist until acknowledged (`inbox.ack`).
+- An agent reconnecting after a gap checks its inbox first instead of replaying every event.
+
+## 17.3 Deterministic digests
+
+`room.digest { since }` returns a compact structured summary of everything since a sequence number: counts, new and changed tasks, applied ChangeSets with paths, open conflicts, decisions, memory keys changed, health status. It is generated deterministically from the ledger (no LLM), so it is cheap and reproducible.
+
+## 17.4 Wake-up webhooks
+
+Agents run elsewhere and may not hold a WebSocket open. If the manifest sets `wake_webhook_url`, the platform POSTs a signed (HMAC-SHA256) notification when a new inbox item arrives, rate-limited to one per agent per 30 s with batching.
+
+## 17.5 Mentions
+
+Mentions are explicit: the client sends `mentions: [participant_id]` in `messages.send`. The server does not parse `@names` from message text (§2.4). Human clients convert `@` autocomplete selections into the array.
+
+## 17.6 Loop protection
+
+If two or more agents exchange more than 20 messages with no non-message state change (no task, ChangeSet, decision or memory mutation) in between, the platform throttles those agents' `messages.send` to one per minute and sends an inbox item to the lead and owner. Any non-message mutation resets the counter.
+
+---
+
+# 18. Shared Memory / Room Blackboard
+
+Hidden model context windows are never shared. The room maintains four layers:
+
+```text
+1. EVENT HISTORY            everything that happened (ledger)
+2. CURRENT ROOM STATE       participants, tasks, workspace revisions, …
+3. SHARED MEMORY            explicitly written knowledge (this section)
+4. PRIVATE AGENT CONTEXT    held by each agent outside the platform
+```
+
+## 18.1 Schema
+
+```text
+MemoryEntry
+  key                 path-like, e.g. architecture/database
+  value               text or JSON (≤ 64 KB; larger content goes in a workspace file + source_ref)
+  content_type        text/markdown | application/json
+  author_id
+  revision            increments on every write
+  created_at
+  updated_at
+  source_refs[]       task / decision / changeset / file@revision / message
+  deleted             tombstone flag
+```
+
+## 18.2 Concurrency
+
+- `memory.put` requires `expected_revision` (`0` to create). A mismatch returns `CONFLICT_VERSION` with the current entry, so concurrent writers never silently overwrite each other.
+- `memory.delete` writes a tombstone; history is retained.
+- `memory.history(key)` returns all revisions.
+
+## 18.3 Namespaces
+
+| Namespace | Writable by |
+|---|---|
+| `decisions/*` | System only (mirror of accepted decisions, §7.4) |
+| `agents/<participant-id>/*` | That participant only (visible to all) |
+| everything else | Any participant with `memory.write` |
+
+## 18.4 Rules
+
+- Writes are explicit; entries are revisioned.
+- The blackboard is authoritative for shared knowledge; embeddings and vector search (Phase 2) are derived indexes and never authoritative.
+- Private agent memory, chat history and canonical room state remain separate.
+
+---
+
+# 19. Event Ledger
+
+## 19.1 Event schema
+
+```json
+{
+  "sequence": 9182,
+  "room_id": "room_123",
+  "actor_id": "agent_4",
+  "type": "workspace.changeset.applied",
+  "schema_version": 1,
+  "timestamp": "2026-10-03T21:04:11.482Z",
+  "causation_id": "cmd_01J…",
+  "payload": {},
+  "payload_hash": "sha256:…",
+  "redacted": false
+}
+```
+
+## 19.2 Write path (D5)
+
+```text
+command ─▶ room actor (owner node)
+             ├─ authorize (OPA)
+             ├─ validate
+             └─ PostgreSQL transaction
+                  ├─ SELECT … FROM rooms WHERE id = $room FOR UPDATE   (+ fencing check)
+                  ├─ write state rows (task, memory, …)
+                  ├─ INSERT event with sequence = last_sequence + 1
+                  └─ UPDATE rooms SET last_sequence = last_sequence + 1
+             commit
+             └─ publish event to Redis channel room:{id}
+```
+
+- Because one actor writes each room inside one transaction, sequences are **gap-free** and totally ordered.
+- **The event table is the outbox.** If the Redis publish fails or a gateway misses a message, gateways detect a sequence gap and backfill from PostgreSQL. Clients do the same with `room.events.list?after=`.
+
+## 19.3 What goes in the ledger
+
+**In:** every meaningful state change (catalog below).
+**Out:** presence, cursors, typing, edit intents, sandbox output streams. These are ephemeral (Redis) or stored separately (S3 logs).
+
+## 19.4 Workspace and ledger consistency
+
+A ChangeSet touches both Git and PostgreSQL:
+
+1. Write Git objects (`merge-tree`, `commit-tree`). Unreferenced objects are harmless.
+2. Commit the PostgreSQL transaction (revision row + event).
+3. Update the Git ref.
+
+If the node crashes between steps 2 and 3, the new owner reconciles on startup by setting the ref to the commit of the latest `workspace_revisions` row. PostgreSQL always wins.
+
+## 19.5 Event catalog
+
+```text
+room.created / room.paused / room.resumed / room.archived
+lead.changed / lead.transfer_offered
+
+participant.invited / participant.joined / participant.left
+participant.role_changed / participant.paused / participant.resumed / participant.removed
+
+capability.granted / capability.revoked / capability.denied
+approval.requested / approval.decided
+
+message.sent / message.edited
+
+task.created / task.updated / task.claimed / task.assigned / task.released
+task.started / task.blocked / task.unblocked / task.submitted
+task.reviewed / task.reopened / task.cancelled / task.lease_expired
+
+decision.proposed / decision.position_added / decision.decided
+decision.withdrawn / decision.vetoed / decision.superseded
+
+memory.updated / memory.deleted
+
+workspace.changeset.applied / workspace.changeset.rejected
+workspace.conflict.created / workspace.conflict.escalated
+workspace.conflict.resolved / workspace.conflict.abandoned
+workspace.health
+workspace.upstream_synced
+
+checkpoint.created / checkpoint.exported
+
+sandbox.created / sandbox.hibernated / sandbox.synced
+sandbox.exec.started / sandbox.exec.finished
+
+tool.invoked / tool.completed / tool.failed
+
+budget.exceeded / circuit_breaker.tripped / loop.detected
+event.redacted
+```
+
+## 19.6 Redaction
+
+The ledger is immutable in structure, but payloads can be redacted:
+
+- The owner can redact any event's payload (e.g. a pasted secret). The payload is replaced with a tombstone, `redacted = true`, and an `event.redacted` event records who, when and why. `payload_hash` is kept for audit.
+- The secret scanner (§23.3) blocks most secrets before they are written.
+
+## 19.7 Retention
+
+Active rooms: indefinite. Archived rooms: 1 year by default, then deleted with the room.
+
+---
+
+# 20. Realtime Architecture
+
+- **Gateway nodes are stateless.** They terminate WebSocket and REST connections, authenticate, forward mutating commands to the room's owner node, and subscribe to Redis channels for fan-out.
+- **Ordering:** clients receive events in sequence order. A client that sees a gap fetches the missing range.
+- **Backpressure:** each connection has a send buffer limit (1,000 events or 5 MB). When exceeded, the server closes the connection with `resync_required`; the client reconnects with `after = last_sequence` or calls `room.digest`.
+- **Presence:** heartbeats every 15 s with a 45 s TTL in Redis; presence updates go over a separate ephemeral channel.
+- **Commands** can be sent over WebSocket frames or REST with identical semantics.
+
+Mutation flow:
+
+```text
+Client ─▶ Gateway ─▶ Room actor (owner node) ─▶ PostgreSQL txn ─▶ event
+                                                                   │
+                                   Redis pub/sub ◀─────────────────┘
+                                         │
+                              all gateways ─▶ all subscribed participants
+```
+
+No participant distributes canonical state to another participant. The server remains authoritative.
+
+---
+
+# 21. Capabilities, Plugins, and Secrets
+
+## 21.1 Capability format
+
+```text
+<resource>.<action>[:<scope>]
+
+workspace.read
+workspace.write:src/api/**          path-scoped
+github.create_pull_request:org/repo
+aws.read_logs:arn:aws:logs:…
+aws.deploy_lambda:function/staging-*
+browser.navigate
+sandbox.exec
+```
+
+A participant's effective capabilities = role bundle (§6.1) + explicit grants − explicit revocations.
+
+## 21.2 Risk tiers (D14)
+
+| Tier | Description | Examples | Default |
+|---|---|---|---|
+| 0 | Read | `workspace.read`, `github.read_repository`, `aws.read_logs` | In role bundles |
+| 1 | Room-internal writes | `workspace.write`, `tasks.*`, `memory.write`, `sandbox.exec` | In role bundles |
+| 2 | External, reversible side effects | `github.create_pull_request`, `slack.post_message`, `browser.navigate` | Granted by owner/admin, no expiry |
+| 3 | External, irreversible or production | `aws.deploy_lambda:prod-*`, push to protected branch, delete external resources | Owner only, expires ≤ 24 h, never in bundles |
+
+Full autonomy applies to every tier the agent has been granted. Approval gates (§22.2) are an option the owner can turn on per capability, not the default.
+
+## 21.3 Policy engine (D9)
+
+- Every command passes through `authorize(principal, action, resource, context)`, evaluated by **OPA** compiled to WASM and embedded in the Node process (`@open-policy-agent/opa-wasm`), so there is no network hop.
+- Policies (Rego) encode role bundles, path scopes, authority rules (§6.3), tier rules, budgets, approval gates and room status.
+- Policy bundles are versioned in the platform repository and unit-tested with `opa test`.
+- Every denial emits `capability.denied`; allows on Tier 2–3 capabilities are logged as `tool.invoked`.
+
+## 21.4 Plugin Runner (D10)
+
+- Plugins (GitHub, AWS, Browser, Slack, Google Drive, Database, Deployment) run **server-side** in the Plugin Runner, each invocation in an isolated child process or container. Platform-hosted MCP servers implement most plugins.
+- Flow: agent calls `tools.invoke` → kernel authorizes → Plugin Runner fetches credentials → executes → returns result labeled `trust: external` where it contains outside content.
+- **Agents never receive credentials.** A prompt-injected agent can at most misuse its granted capabilities; it cannot exfiltrate keys.
+- Shell access is not a plugin; it is `sandbox.exec`.
+
+## 21.5 Secrets
+
+- The owner connects integrations per room:
+  - **GitHub:** GitHub App installation, scoped to selected repositories.
+  - **AWS:** an IAM role in the customer's account assumed via STS with an external ID; scoped by the role's own policy.
+  - Others: OAuth tokens.
+- Long-lived secrets are stored in AWS Secrets Manager, encrypted with a per-room KMS key.
+- The Plugin Runner mints short-lived credentials per invocation (STS sessions ≤ 15 min, GitHub installation tokens ≤ 1 h).
+
+---
+
+# 22. Autonomy Controls (Pull-Back Mechanisms)
+
+You chose full autonomy and wanted to be able to pull it back later. These controls exist in the protocol from day one so pulling back never requires a protocol change.
+
+## 22.1 Immediate controls
+
+| Control | Effect | Who |
+|---|---|---|
+| `participants.pause` | All commands rejected with `PARTICIPANT_PAUSED`; running sandbox processes suspended (SIGSTOP); claims frozen (leases don't expire) | Owner, admin, lead (lead cannot pause humans) |
+| `participants.remove` | Tokens revoked, sockets closed, sandbox destroyed, tasks released to OPEN | Owner, admin |
+| `capabilities.revoke` | Effective on the next command (authorization is evaluated per command); in-flight `sandbox.exec` killed if `sandbox.exec` is revoked | Owner, admin |
+| `room.freeze` | Room → PAUSED (§5) | Owner |
+
+## 22.2 Approval gates
+
+Any capability grant can carry `requires_approval: true`. Invocations then return `APPROVAL_REQUIRED` with an approval id, appear in the owner's and lead's inbox, and execute when approved (`approvals.decide`). Approvals expire after 24 h. Default: off for all capabilities.
+
+## 22.3 Budgets
+
+Per-agent defaults (owner can change per room or per agent):
+
+| Budget | Default |
+|---|---|
+| Commands | 120 / min |
+| Messages | 10 / min |
+| ChangeSets | 60 / hour |
+| Tool invocations | 100 / hour |
+| Sandbox compute | 4 vCPU-hours / day |
+
+Exceeding a budget returns `BUDGET_EXCEEDED` with `retry_after` and emits `budget.exceeded`.
+
+## 22.4 Circuit breakers
+
+A ChangeSet is held (`CIRCUIT_BREAKER`) and sent to the lead's and owner's inbox for approval when it:
+
+- deletes more than 50 files, or removes more than 30% of the lines in the repository,
+- modifies files matching protected patterns the owner configured (default: `.github/workflows/**`, `**/*.pem`, `**/.env*`, `infra/prod/**`),
+- comes from an agent that has had more than 5 ChangeSets rejected or abandoned in the last 30 minutes.
+
+---
+
+# 23. Security and Threat Model
+
+## 23.1 Threats and mitigations
+
+| Threat | Mitigations |
+|---|---|
+| Prompt injection between agents (one agent's message, memory entry or file tells another to do something harmful) | Provenance labels (§16.5); capability containment; Tier 3 never default; circuit breakers; agents never hold credentials |
+| Injection from external content (web pages, GitHub issues, plugin output) | Labeled `trust: external`; browser and fetch plugins run in the Plugin Runner, not in sandboxes with workspace write |
+| Malicious or compromised agent operator | Room-scoped tokens; least-privilege role bundles; owner can pause/remove instantly; full audit trail |
+| Sandbox escape | gVisor runtime; dedicated sandbox hosts; no credentials in sandboxes; IMDS blocked |
+| Data exfiltration from sandbox | Egress default-deny with allowlist proxy; egress logs per sandbox |
+| Credential theft | Secrets Manager + KMS; short-lived minted credentials; plugin execution server-side only |
+| Secrets committed into the workspace or chat | Secret scanning on ChangeSets, messages and memory writes; blocking + redaction |
+| Supply-chain attack via dependency install | Registry allowlist; sandbox isolation limits blast radius to that sandbox; workspace health runs in its own sandbox |
+| Runaway agent loops or cost | Budgets, loop detection, circuit breakers |
+| Cross-room data leakage | Every query scoped by `room_id` with PostgreSQL row-level security as a second line of defense; per-room KMS keys |
+| Token theft | Short-lived opaque tokens, refresh rotation with reuse detection (reuse revokes the whole token family) |
+
+## 23.2 Agent-facing content framing
+
+The MCP server and SDKs wrap participant and external content in clearly delimited, labeled blocks and never present it as platform instructions. Platform-originated guidance comes only through `trust: system` items. This does not make injection impossible; capability containment is the real control.
+
+## 23.3 Secret scanning
+
+- Gitleaks-compatible rules run on every ChangeSet, message and memory write.
+- High-confidence matches are blocked with `VALIDATION` (details name the file and line).
+- Lower-confidence matches are allowed but flagged to the author and owner.
+
+---
+
+# 24. Git Interoperability
+
+Git is a compatibility and export layer. It is not the realtime synchronization protocol, and Git concepts never appear in the core API.
+
+## 24.1 Import
+
+- `git.import { repo, branch }` clones from GitHub through the room's GitHub App installation into the room repository.
+- The room records `upstream = { repo, branch, last_synced_sha, last_synced_room_revision }`.
+- The import flow suggests a `health_command` from the repository (package.json scripts, Makefile, pyproject).
+
+## 24.2 Pulling upstream changes
+
+`git.pull_upstream` (lead or owner):
+
+1. Fetch the upstream branch.
+2. Compute the diff `last_synced_sha → new upstream sha`.
+3. Submit it as a ChangeSet with `source = UPSTREAM`, actor `system:upstream`, `base_workspace_revision = last_synced_room_revision`.
+4. Conflicts go through the normal conflict flow with the lead as submitter-of-record.
+
+Upstream changes are just another concurrent writer, so no special merge path is needed.
+
+## 24.3 Checkpoints and export
+
+- `checkpoints.create { message }` (lead or owner) marks a workspace revision. Requires health GREEN (owner may override).
+- `checkpoints.export`:
+  - **Default (squashed):** one commit per checkpoint on the upstream branch `room/<room-slug>`, containing all changes since the previous checkpoint.
+  - **Optional (fine-grained):** one commit per ChangeSet.
+- **Attribution:** the commit author is the checkpoint creator; every contributing participant is credited with a `Co-authored-by:` trailer. Humans use their linked GitHub identity; agents use `<agent-name> <agent-id@agents.<platform-domain>>`.
+- **Push policy:** export pushes only to `room/*` branches and then opens a pull request (`github.create_pull_request`, Tier 2). Pushing directly to the default or a protected branch is Tier 3.
+
+---
+
+# 25. Observability and Cost
+
+## 25.1 Platform observability
+
+- OpenTelemetry traces across gateway → room actor → workspace → sandbox → plugin runner; structured JSON logs; metrics in CloudWatch or Prometheus.
+- Key SLIs:
+  - ChangeSet submit → broadcast latency (target p95 < 500 ms),
+  - apply queue depth and merge duration,
+  - sandbox cold start and resume time,
+  - WebSocket reconnect and resync rate,
+  - health-check queue time,
+  - policy evaluation latency.
+
+## 25.2 Room-level visibility (in the UI)
+
+Per participant: commands, ChangeSets applied / conflicted / rejected, conflict rate, tasks completed, review rejections, sandbox compute used, tool invocations, denials, budget headroom.
+
+## 25.3 Cost model
+
+- The platform pays for sandboxes, health checks, storage and bandwidth. Per-room quotas cap sandbox compute (default 40 vCPU-hours/day per room).
+- Agent LLM costs are borne by each agent's operator.
+- Hibernation after 30 minutes idle is the main cost control.
+
+---
+
+# 26. Failure Modes
+
+| Failure | Behavior |
+|---|---|
+| Room owner node crashes | Lease expires (≤ 15 s); another node acquires it with a new fencing token, attaches the repository replica, reconciles the Git ref against PostgreSQL (§19.4); clients reconnect and backfill by sequence |
+| Repository replica lagging at failover | Missing commits rebuilt from persisted ChangeSet payloads in PostgreSQL/S3 |
+| Redis unavailable | Presence degrades; gateways poll PostgreSQL for new events (1 s interval) until Redis returns; no data loss |
+| PostgreSQL failover (RDS Multi-AZ) | Commands fail with retryable errors for ~30–60 s; clients retry with idempotency keys |
+| Gateway restart | Clients reconnect with `after = last_sequence` |
+| Agent disconnects mid-task | Lease expiry returns the task to OPEN after 15 min; sandbox hibernates; unsubmitted work stays in the sandbox volume |
+| Agent disconnects mid-ChangeSet submission | Agent retries with the same idempotency key and receives the original result |
+| Agent lead disconnects | Lead reverts to owner after 10 min (§6.4) |
+| Sandbox host fails | Sandboxes on it restart on another host from their volumes (EBS snapshots every 15 min); in-flight execs fail with retryable errors |
+| Health sandbox fails | Health status `ERROR`; checkpoints blocked until GREEN or owner override |
+| Plugin provider outage (GitHub, AWS) | `tools.invoke` fails with retryable error; no retries by the platform on non-idempotent tools |
+
+---
+
+# 27. Human UI
+
+```text
+┌──────────────────────────────────────────────────────────────────────┐
+│ Project Alpha   Lead: ArchitectAgent   Owner: Peter   ● GREEN r42  4 live │
+├─────────────┬──────────────────────────────┬─────────────────────────┤
+│             │                              │                         │
+│ Files       │  Workspace                   │  Collaboration          │
+│             │                              │                         │
+│ src/        │  auth.ts   ● draft           │  Agent A: submitted     │
+│   auth.ts ⚑ │                              │  CS-118 for task #4     │
+│   api.ts    │  code editor                 │                         │
+│             │  [Agent B intent: L40–62]    │  Peter: reviewing       │
+│             │                              │                         │
+│             │                              │  Inbox (2)              │
+├─────────────┴──────────────────────────────┴─────────────────────────┤
+│ Tasks │ Decisions │ Memory │ Conflicts │ Activity │ Terminal │ Controls │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+Additions over v0.1:
+
+- **Header:** owner, lead, health badge with current revision.
+- **Editor:** draft indicator, other participants' cursors, agent edit intents, three-way merge view for conflicts.
+- **Inbox** in the collaboration panel.
+- **Conflicts tab:** open conflicts, status on the resolution ladder, one-click escalate.
+- **Decisions tab:** proposals with positions, decide and veto actions.
+- **Controls tab (owner/admin):** participants with roles and capabilities, pause/resume/remove, approval queue, budgets, egress allowlist, room freeze.
+- **Terminal tab:** the human's own sandbox, plus read-only views of agents' sandbox output.
+
+---
+
+# 28. MVP Technology Stack
+
+| Layer | Choice |
+|---|---|
+| Human frontend | React + TypeScript |
+| Editor | Monaco (with three-way merge view) |
+| Client-side merge | `node-diff3` |
+| Backend (gateway, kernel, workspace, plugin runner) | TypeScript / Node, modular monolith |
+| Primary DB | PostgreSQL (RDS Multi-AZ) with row-level security |
+| Realtime | WebSockets |
+| Presence / pub-sub / token cache | Redis (ElastiCache) |
+| Workspace storage | Bare Git repository per room (Git CLI ≥ 2.38, `merge-tree`) on EBS + replica + S3 bundles |
+| Large files / logs / archives | S3 |
+| Parse checks | tree-sitter |
+| Search | ripgrep over a checked-out head (Zoekt in Phase 2) |
+| Policy engine | OPA compiled to WASM, embedded |
+| Sandbox | Docker + gVisor on dedicated EC2 hosts; egress proxy (Squid or Envoy) |
+| Secrets | AWS Secrets Manager + KMS, STS, GitHub App |
+| Secret scanning | Gitleaks rules |
+| Agent interfaces | MCP server, REST + WebSocket |
+| Agent CLI | Go (single static binary) |
+| Agent SDKs | TypeScript, Python |
+| Observability | OpenTelemetry, CloudWatch |
+| Deployment | AWS, single region |
+
+Performance-critical workspace components can later move to Rust or Go behind the existing module interface.
+
+---
+
+# 29. MVP Scope
+
+## Included
+
+### Human
+- Web application with workspace/editor, drafts, live cursors, merge view
+- Collaboration panel, inbox
+- Tasks, decisions (with deliberation), shared memory, conflicts, activity
+- Owner controls: pause, revoke, freeze, budgets, approvals
+
+### Agents
+- MCP server (primary), CLI, REST + WebSocket, TypeScript and Python SDKs
+- Invite tokens, manifests, room-scoped credentials
+- Filtered subscriptions, inbox, digests, wake-up webhooks
+
+### Room
+- Shared channel with explicit mentions and references
+- Owner + one lead (human or agent), roles, capability grants
+- Explicit tasks with leases and review
+- Decisions with positions, lead decisions, owner veto
+- Shared memory with compare-and-set
+- Event ledger with replay, presence
+- Room lifecycle including archive and export
+
+### Workspace
+- Git-backed canonical workspace (internal only)
+- ChangeSets, atomic apply, three-way merge, conflicts with resolution ladder
+- Workspace health checks
+- Revision history, diffs, blame, search
+- Git import, upstream pull, checkpoints, PR export
+
+### Execution
+- Per-participant sandbox with working-copy sync and submit
+- Terminal and test execution
+- Server-side plugins: GitHub, Browser, AWS (read + staging deploy)
+
+### Safety
+- OPA policy, risk tiers, approval gates, budgets, circuit breakers
+- Egress control, secret scanning, provenance labels
+
+## Not included initially
+
+- private messages,
+- agent hosting,
+- automatic task inference,
+- persistent agents across rooms,
+- A2A adapter,
+- CRDT or keystroke-level collaborative editing,
+- native source-control replacement,
+- local filesystem synchronization,
+- vector search over memory,
+- general-purpose non-developer workflows,
+- enterprise-grade RBAC (SSO/SCIM, org-wide policy management),
+- desktop app.
+
+---
+
+# 30. MVP Demo Flow
+
+1. Peter creates `Project Alpha` and becomes **Owner**.
+2. Peter imports a GitHub repository; the platform suggests `npm run typecheck && npm test` as the health command.
+3. Peter invites three external agents (Claude Code and two others) via join tokens; they connect through MCP.
+4. Peter appoints ArchitectAgent as **Lead** and takes the Developer role himself.
+5. The lead proposes a decision ("session tokens vs. JWT"); agents add positions; the lead decides; the decision appears in memory under `decisions/`.
+6. The lead creates four tasks and assigns them. Agent A and Agent B claim theirs.
+7. Peter opens `auth.ts`. Agent A publishes an edit intent on lines 40–62, visible in Peter's editor.
+8. Agent A edits authentication in its sandbox; Agent B edits API routes in its sandbox.
+9. Peter edits a different part of `auth.ts`; his draft flushes within seconds and appears for everyone.
+10. Agent A submits; its ChangeSet merges cleanly with Peter's edit (non-overlapping). Peter sees the diff immediately.
+11. Agent C submits a ChangeSet that overlaps Agent A's change. The platform creates **Conflict #7** (Agent C's ChangeSet vs. head) and sends it to Agent C.
+12. Agent C syncs, but its two resolution attempts fail; the conflict escalates to the lead, who resolves it.
+13. Workspace health turns RED on r40 (Agent B called a function Peter renamed). Agent B gets an inbox item and fixes it; health returns GREEN.
+14. Agent B tries to use `aws.deploy_lambda:prod-api`; policy denies it (Tier 3 not granted). Peter sees the denial in Activity.
+15. Peter pauses Agent C for a moment to show the control, then resumes it.
+16. The lead approves the reviewed tasks (health GREEN).
+17. The lead creates a checkpoint; it exports to `room/project-alpha` with co-author trailers and opens a pull request on GitHub.
+
+---
+
+# 31. Architectural State Separation
+
+The system contains three distinct shared-state domains:
+
+```text
+Collaboration State
+participants / authority / roles / capabilities / tasks / messages / decisions / memory / inbox
+
+Development State
+files / ChangeSets / revisions / conflicts / health / checkpoints
+
+Execution State
+sandboxes / working copies / processes / tools / logs
+```
+
+All three feed one immutable, gap-free room event stream. Ephemeral state (presence, cursors, intents, process output) is deliberately kept out of it.
+
+---
+
+# 32. Evolution Path
+
+## Phase 1 — MVP
+
+```text
+Realtime collaboration with owner + lead governance
+Git-backed canonical workspace (internal)
+ChangeSets, merge, conflict ladder, health checks
+Explicit tasks, decisions, shared memory
+External agents via MCP, CLI, REST/WS, SDKs
+Docker + gVisor sandboxes with working-copy sync
+Policy engine, autonomy controls, egress control
+Git import, upstream sync, checkpoint export, PRs
+```
+
+## Phase 2
+
+```text
+A2A interoperability
+Local filesystem sync (Model B)
+Remote and customer-hosted runners; Firecracker
+Zoekt search index; vector search over memory
+Syntax-aware (AST) merge for common languages
+Richer review workflows
+Workspace snapshots and branching rooms
+```
+
+## Phase 3
+
+```text
+Operation-based collaboration for human editing (CRDT / OT)
+AST-aware source editing for agents
+Native Workspace Change Graph replacing internal Git storage
+Low-latency collaborative code synchronization
+```
+
+A note on priorities for Phase 3: agents edit in large batches, often from a stale read, while CRDTs mainly benefit humans typing concurrently. In agent-heavy rooms, fast rebasing plus syntax-aware merging is likely to matter more than keystroke-level CRDTs. Measure conflict rates by participant type in Phase 1 before committing to either.
+
+## Phase 4
+
+```text
+Native source-control platform with Git import/export
+Persistent agents across rooms
+Hosted agents
+Generalized non-developer collaboration
+Enterprise deployments (SSO, SCIM, org policy, BYO cloud)
+```
+
+---
+
+# 33. Core Product Thesis
+
+The product should be built around:
+
+> **A shared server-side project state that both humans and autonomous agents continuously operate against through interfaces optimized for each participant type, governed by humans and bounded by explicit capabilities.**
+
+The long-term differentiator is not simply multi-agent coordination. It is the combination of:
+
+```text
+human + agent collaboration
+        +
+explicit project state and governance
+        +
+shared realtime workspace
+        +
+isolated execution
+        +
+native low-latency change history
+```
+
+The MVP uses Git internally as a storage engine and externally as a compatibility layer. The long-term platform replaces Git's collaboration cadence with a native **Workspace Change Graph** designed for continuous human-agent teamwork.
+
+---
+
+# 34. Open Questions (Product Calls)
+
+These are not technical gaps; they need your decision:
+
+1. **Pricing and quotas:** who pays for sandbox compute, and what the free tier allows.
+2. **Agent vetting:** whether to keep a directory of verified agents or treat every agent as anonymous.
+3. **Bring-your-own runners:** whether to pull customer-hosted sandboxes into Phase 1 for teams that can't run code on a third-party platform.
+4. **Multi-room projects:** whether one repository can back several concurrent rooms (e.g. a feature room and a bugfix room).
