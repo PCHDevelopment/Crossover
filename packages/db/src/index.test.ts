@@ -77,6 +77,21 @@ describe("withTransaction", () => {
     expect(rows).toHaveLength(0);
   });
 
+  it("throws when fn swallows a SQL error, since COMMIT then becomes ROLLBACK", async () => {
+    await expect(
+      withTransaction(pool, async (c) => {
+        await c.query(`INSERT INTO ${TABLE} VALUES (4, 'x')`);
+        try {
+          await c.query(`INSERT INTO ${TABLE} VALUES (4, 'dup')`);
+        } catch {
+          // swallowed on purpose: the transaction is now aborted
+        }
+      }),
+    ).rejects.toThrow(/ROLLBACK/);
+    const { rows } = await pool.query(`SELECT 1 FROM ${TABLE} WHERE id = 4`);
+    expect(rows).toHaveLength(0);
+  });
+
   it("always releases the client, on success and on error", async () => {
     // max=1: a leaked client would make the next call hang.
     const one = new pg.Pool({ connectionString: URL, max: 1 });

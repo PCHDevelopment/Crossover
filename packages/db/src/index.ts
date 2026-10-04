@@ -45,7 +45,14 @@ export async function withTransaction<T>(
       throw err;
     }
     try {
-      await client.query("COMMIT");
+      const res = await client.query("COMMIT");
+      // If fn swallowed a SQL error the transaction is aborted, and PostgreSQL
+      // answers COMMIT with the tag ROLLBACK and no error. Nothing was written.
+      if (res.command === "ROLLBACK") {
+        throw new Error(
+          "withTransaction: COMMIT was turned into ROLLBACK (transaction was aborted)",
+        );
+      }
     } catch (err) {
       discard = true;
       throw err;
