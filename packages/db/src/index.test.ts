@@ -1,12 +1,7 @@
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import {
-  createPool,
-  createTestDatabase,
-  withTransaction,
-  type Pool,
-  type TestDatabase,
-} from "./index.js";
+import { createPool, withTransaction, type Pool } from "./index.js";
+import { createTestDatabase, type TestDatabase } from "./testing.js";
 
 const URL =
   process.env["DATABASE_URL"] ?? "postgres://crossover:crossover@localhost:5432/crossover";

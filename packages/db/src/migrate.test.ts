@@ -2,13 +2,8 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import {
-  createTestDatabase,
-  listMigrations,
-  migrate,
-  type Pool,
-  type TestDatabase,
-} from "./index.js";
+import { listMigrations, migrate, type Pool } from "./index.js";
+import { createTestDatabase, type TestDatabase } from "./testing.js";
 
 let db: TestDatabase;
 let pool: Pool;
