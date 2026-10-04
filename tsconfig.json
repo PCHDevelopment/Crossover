@@ -1,11 +1,8 @@
 {
   "files": [],
   "references": [
-    {
-      "path": "packages/protocol"
-    },
-    {
-      "path": "packages/db"
-    }
+    { "path": "packages/protocol" },
+    { "path": "packages/db" },
+    { "path": "packages/workspace" }
   ]
 }
