@@ -18,7 +18,9 @@ export function normalizePath(p: string): string {
   if (normalized.includes("\\")) throw new PathValidationError("Path must use POSIX separators");
   const segments = normalized.split("/");
   if (segments.includes("..")) throw new PathValidationError("Path contains a parent segment");
-  if (segments.includes(".git")) throw new PathValidationError("Path contains a .git segment");
+  // Windows strips trailing dots/spaces and may alias .git to its short name (§10.3).
+  if (segments.some((segment) => /^(?:\.git|git~1)[ .]*$/i.test(segment)))
+    throw new PathValidationError("Path contains a Git metadata segment");
   if (Buffer.byteLength(normalized, "utf8") > 4096)
     throw new PathValidationError("Path exceeds 4096 bytes");
   const result = posix.normalize(normalized).replace(/\/$/, "");
