@@ -36,7 +36,7 @@ export const DEFAULT_RETRYABLE: Readonly<Record<ErrorCode, boolean>> = {
   PARTICIPANT_PAUSED: false,
   ROOM_PAUSED: false,
   RATE_LIMITED: true,
-  BUDGET_EXCEEDED: false,
+  BUDGET_EXCEEDED: true,
   CIRCUIT_BREAKER: false,
   STALE_FENCE: false,
 };

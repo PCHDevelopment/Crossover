@@ -22,9 +22,10 @@ describe("CrossoverError", () => {
     expect(Object.keys(body.error).sort()).toEqual(["code", "message", "retryable"]);
   });
 
-  it("defaults CONFLICT_VERSION and RATE_LIMITED to retryable, FORBIDDEN not", () => {
+  it("defaults CONFLICT_VERSION, RATE_LIMITED and BUDGET_EXCEEDED to retryable, FORBIDDEN not", () => {
     expect(new CrossoverError("CONFLICT_VERSION", "x").retryable).toBe(true);
     expect(new CrossoverError("RATE_LIMITED", "x").retryable).toBe(true);
+    expect(new CrossoverError("BUDGET_EXCEEDED", "x").retryable).toBe(true);
     expect(new CrossoverError("FORBIDDEN", "x").retryable).toBe(false);
   });
 
