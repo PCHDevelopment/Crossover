@@ -1,7 +1,7 @@
 import { mkdtemp, writeFile, rm, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { assertGitVersion, git, GitError } from "./git.js";
 
 const dirs: string[] = [];
@@ -12,10 +12,58 @@ async function fixture(source: string) {
   return { dir, env: { PATH: dir } };
 }
 afterEach(async () => {
+  vi.unstubAllEnvs();
   await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
 describe("git", () => {
+  it("round-trips non-UTF-8 blob bytes in buffer mode", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "crossover-binary-"));
+    dirs.push(dir);
+    const repo = join(dir, "room.git");
+    await git(["init", "--bare", repo], { timeoutMs: 5000 });
+    const bytes = Buffer.from([0, 255, 254, 128, 195, 40, 10]);
+    const { stdout } = await git(["hash-object", "-w", "--stdin"], {
+      gitDir: repo,
+      input: bytes,
+      timeoutMs: 5000,
+    });
+    const result = await git(["cat-file", "blob", stdout.trim()], {
+      gitDir: repo,
+      encoding: "buffer",
+      timeoutMs: 5000,
+    });
+    expect(result.stdout).toEqual(bytes);
+    expect(Buffer.isBuffer(result.stderr)).toBe(true);
+  });
+
+  it("drops inherited Git settings while retaining explicit overrides", async () => {
+    vi.stubEnv("GIT_DIR", "/untrusted/repo");
+    vi.stubEnv("GIT_CONFIG_COUNT", "1");
+    vi.stubEnv("GIT_CONFIG_KEY_0", "core.hooksPath");
+    vi.stubEnv("GIT_CONFIG_VALUE_0", "/untrusted/hooks");
+    vi.stubEnv("GIT_FUTURE_SETTING", "untrusted");
+    const f = await fixture(
+      'process.stdout.write(JSON.stringify(Object.fromEntries(Object.entries(process.env).filter(([k]) => k.startsWith("GIT_")))));',
+    );
+    const result = await git([], {
+      env: { ...f.env, GIT_INDEX_FILE: "/explicit/index", GIT_CONFIG_NOSYSTEM: "0" },
+      timeoutMs: 5000,
+    });
+    expect(JSON.parse(result.stdout)).toEqual({
+      GIT_INDEX_FILE: "/explicit/index",
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_TERMINAL_PROMPT: "0",
+    });
+  });
+
+  it("keeps error diagnostics as text in buffer mode", async () => {
+    const f = await fixture('process.stderr.write("bad blob"); process.exit(7);');
+    await expect(
+      git([], { env: f.env, encoding: "buffer", timeoutMs: 5000 }),
+    ).rejects.toMatchObject({ exitCode: 7, stderr: "bad blob" });
+  });
+
   it("runs Git with stdin and an explicit bare repository", async () => {
     const dir = await mkdtemp(join(tmpdir(), "crossover-repo-"));
     dirs.push(dir);
