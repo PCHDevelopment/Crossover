@@ -62,3 +62,5 @@ export async function withTransaction<T>(
     client.release(discard ? true : undefined);
   }
 }
+
+export * from "./migrate.js";
