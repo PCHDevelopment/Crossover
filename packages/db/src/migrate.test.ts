@@ -19,6 +19,8 @@ beforeAll(async () => {
   const u = new globalThis.URL(URL);
   u.pathname = `/${DB}`;
   pool = createPool(u.toString());
+  // DROP DATABASE ... WITH (FORCE) can kill a still-closing connection; that's expected.
+  pool.on("error", () => {});
 });
 
 afterAll(async () => {
