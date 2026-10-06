@@ -3,3 +3,4 @@ export const PROTOCOL_VERSION = 1;
 
 export * from "./errors.js";
 export * from "./ids.js";
+export * from "./events.js";
