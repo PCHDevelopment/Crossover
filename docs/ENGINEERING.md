@@ -38,7 +38,7 @@ These implement ARCHITECTURE §28. Lead decisions that refine it:
 | Redis         | `ioredis`                                                                                                                                                 |
 | IDs           | Prefixed ULIDs, e.g. `room_01J…` (T105)                                                                                                                   |
 | Policy        | `authorize()` interface (T208) with a TypeScript rule set first; OPA-WASM (D9) replaces the implementation behind the same interface in a later milestone |
-| Git           | Git CLI ≥ 2.38 via `execFile` (never a shell string)                                                                                                      |
+| Git           | Git CLI ≥ 2.40 (refines ARCHITECTURE D1's 2.38: merge-tree --merge-base), via `execFile` (never a shell string)                                           |
 
 New runtime dependencies need a one-line justification in the PR.
 

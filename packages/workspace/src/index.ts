@@ -4,3 +4,5 @@ export { normalizePath, PathValidationError } from "./path.js";
 export { initRoomRepo } from "./repo.js";
 export { materialize } from "./materialize.js";
 export type { Operation } from "./operations.js";
+export { merge } from "./merge.js";
+export type { MergeResult, MergeFile, MergeStage, MergeMessage } from "./merge.js";

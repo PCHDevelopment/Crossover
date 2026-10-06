@@ -22,6 +22,7 @@ export class GitError extends Error {
     readonly timedOut = false,
     readonly signal: NodeJS.Signals | null = null,
     options?: ErrorOptions,
+    readonly stdout: string | Buffer = "",
   ) {
     super(message, options);
     this.name = "GitError";
@@ -80,6 +81,7 @@ export function git(
               error.killed && error.signal === "SIGKILL",
               error.signal ?? null,
               { cause: error },
+              stdout,
             ),
           );
           return;
@@ -99,7 +101,7 @@ export async function assertGitVersion(options: GitOptions = { timeoutMs: 10_000
   const match = /^git version (\d+)\.(\d+)(?:\.|\s|$)/.exec(stdout.trim());
   const major = Number(match?.[1]);
   const minor = Number(match?.[2]);
-  if (!match || major < 2 || (major === 2 && minor < 38)) {
-    throw new GitError("Git >= 2.38 is required", 0, stderr);
+  if (!match || major < 2 || (major === 2 && minor < 40)) {
+    throw new GitError("Git >= 2.40 is required", 0, stderr);
   }
 }
