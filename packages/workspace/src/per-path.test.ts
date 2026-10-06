@@ -264,4 +264,11 @@ it("redacts unauthorized conflict paths and content", async () => {
     [f.room],
   );
   expect(JSON.stringify(stored.rows[0]?.conflicts)).not.toContain("secrets/file.txt");
+  const durable = await db.pool.query<{ files: unknown; counterparty_changesets: unknown }>(
+    "SELECT files, counterparty_changesets FROM conflicts WHERE room_id = $1",
+    [f.room],
+  );
+  expect(JSON.stringify(durable.rows[0]?.files)).not.toContain("secrets/file.txt");
+  expect(durable.rows[0]?.files).toMatchObject([{ path: null, reason: "unauthorized" }]);
+  expect(durable.rows[0]?.counterparty_changesets).toEqual([]);
 });

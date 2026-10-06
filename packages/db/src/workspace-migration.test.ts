@@ -12,6 +12,11 @@ beforeAll(async () => {
     INSERT INTO workspaces (id, room_id, repo_path)
     VALUES ('ws_1', 'room_ws1', '/repos/1.git'), ('ws_2', 'room_ws2', '/repos/2.git');
   `);
+  await db.pool.query(`
+    INSERT INTO participants (id, room_id, kind, display_name, authority, role, status)
+    VALUES ('actor_1', 'room_ws1', 'HUMAN', 'Actor 1', 'OWNER', 'LEAD', 'ACTIVE'),
+           ('actor_2', 'room_ws2', 'HUMAN', 'Actor 2', 'OWNER', 'LEAD', 'ACTIVE');
+  `);
   for (const workspace of ["ws_1", "ws_2"]) {
     for (const number of [0, 1, 2]) await revision(workspace, number);
   }
@@ -155,6 +160,11 @@ describe("0014_workspace", () => {
     expect(rows[0].created_at).toBeInstanceOf(Date);
     // Deduplication is owned by the command layer, not a second uniqueness rule here.
     await changeset("cs_same_key");
+    await db.pool.query(
+      `INSERT INTO conflicts (id, workspace_id, room_id, changeset_id, submitter_id,
+       base_revision, head_revision_at_detection, files)
+       VALUES ('conflict_future', 'ws_1', 'room_ws1', 'cs_payload', 'actor_1', 0, 0, '[]')`,
+    );
     await db.pool.query(
       `UPDATE changesets SET task_id = 'task_future', conflict_id = 'conflict_future',
        base_file_revisions = $2 WHERE room_id = $1 AND id = 'cs_payload'`,
