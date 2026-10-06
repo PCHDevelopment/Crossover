@@ -18,5 +18,8 @@
     "@crossover/protocol": "workspace:*",
     "ioredis": "^6.0.0",
     "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@crossover/policy": "workspace:*"
   }
 }

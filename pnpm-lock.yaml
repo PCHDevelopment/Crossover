@@ -57,6 +57,10 @@ importers:
       zod:
         specifier: ^4.6.5
         version: 4.6.5
+    devDependencies:
+      '@crossover/policy':
+        specifier: workspace:*
+        version: link:../policy
 
   packages/ledger:
     dependencies:
@@ -69,6 +73,15 @@ importers:
       zod:
         specifier: ^4.6.5
         version: 4.6.5
+
+  packages/policy:
+    dependencies:
+      '@crossover/db':
+        specifier: workspace:*
+        version: link:../db
+      '@crossover/protocol':
+        specifier: workspace:*
+        version: link:../protocol
 
   packages/protocol:
     dependencies:
