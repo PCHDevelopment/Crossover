@@ -115,6 +115,7 @@ async function setup(tools?: Parameters<typeof registerMcp>[1]["tools"]) {
     url: `${url}/mcp`,
     room: room.id,
     owner,
+    ownerId: participant.id,
     agent: joined.one_time as TokenPair,
     agentId: (joined.response as { participant_id: string }).participant_id,
   };
@@ -192,6 +193,115 @@ describe("MCP server (T707)", () => {
     expect(JSON.parse((diff.content as { text: string }[])[0]!.text).diff).toContain(
       "Crossover MCP",
     );
+  });
+
+  it("rejects traversal and .git paths at the MCP boundary", async () => {
+    const s = await setup();
+    const client = await connect(s.url, s.agent.access_token);
+    for (const path of ["../secret", ".git/config"]) {
+      const result = await client
+        .callTool({ name: "read_file", arguments: { path } })
+        .catch((error: unknown) => error);
+      if (result instanceof Error) continue; // SDK surfaced the tool validation failure.
+      const toolResult = result as { isError?: boolean; content?: { text: string }[] };
+      expect(toolResult.isError).toBe(true);
+      expect(JSON.parse(toolResult.content![0]!.text)).toMatchObject({
+        error: { code: "VALIDATION" },
+      });
+    }
+  });
+
+  it("scoped DENY hides names and search content and returns FORBIDDEN as isError", async () => {
+    const s = await setup();
+    const owner = await connect(s.url, s.owner.access_token);
+    const agent = await connect(s.url, s.agent.access_token);
+    const seeded = await owner.callTool({
+      name: "apply_changeset",
+      arguments: {
+        source: "API",
+        message: "Seed scoped files",
+        base_workspace_revision: 0,
+        operations: [
+          { type: "create", path: "secrets/TOPSECRET", content: "needle private value" },
+          { type: "create", path: "public/readme", content: "public value" },
+        ],
+      },
+    });
+    expect(seeded.isError).toBeFalsy();
+    await pool.query(
+      `INSERT INTO capability_grants
+       (id, room_id, participant_id, effect, capability, created_by)
+       VALUES ($1, $2, $3, 'DENY', 'workspace.read:secrets/**', $4)`,
+      [newId("grant"), s.room, s.agentId, s.ownerId],
+    );
+
+    const list = await agent.callTool({ name: "list_dir", arguments: {} });
+    expect(list.isError).toBeFalsy();
+    const entries = JSON.parse((list.content as { text: string }[])[0]!.text).entries;
+    expect(entries.map((entry: { path: string }) => entry.path)).toContain("public");
+    expect(entries.map((entry: { path: string }) => entry.path)).not.toContain("secrets");
+
+    const grep = await agent.callTool({
+      name: "grep",
+      arguments: { query: "needle private value" },
+    });
+    expect(grep.isError).toBeFalsy();
+    expect(JSON.parse((grep.content as { text: string }[])[0]!.text).matches).toEqual([]);
+
+    const read = await agent.callTool({
+      name: "read_file",
+      arguments: { path: "secrets/TOPSECRET" },
+    });
+    expect(read.isError).toBe(true);
+    expect(JSON.parse((read.content as { text: string }[])[0]!.text)).toMatchObject({
+      error: { code: "FORBIDDEN" },
+    });
+  });
+
+  it("retries apply_changeset idempotently with the same result", async () => {
+    const s = await setup();
+    const owner = await connect(s.url, s.owner.access_token);
+    const args = {
+      source: "API" as const,
+      message: "Idempotent MCP apply",
+      base_workspace_revision: 0,
+      operations: [{ type: "create" as const, path: "docs/retry.md", content: "once" }],
+      idempotency_key: "mcp-retry-key",
+    };
+    const first = await owner.callTool({ name: "apply_changeset", arguments: args });
+    const retry = await owner.callTool({ name: "apply_changeset", arguments: args });
+    expect(first.isError).toBeFalsy();
+    expect(retry.isError).toBeFalsy();
+    const firstBody = JSON.parse((first.content as { text: string }[])[0]!.text);
+    const retryBody = JSON.parse((retry.content as { text: string }[])[0]!.text);
+    expect(retryBody).toEqual(firstBody);
+    expect(
+      await pool.query("SELECT id FROM changesets WHERE room_id = $1", [s.room]),
+    ).toMatchObject({ rowCount: 1 });
+  });
+
+  it("returns workspace conflicts as normal MCP tool results", async () => {
+    const s = await setup();
+    const owner = await connect(s.url, s.owner.access_token);
+    const agent = await connect(s.url, s.agent.access_token);
+    const apply = (client: Client, message: string, base: number, content: string) =>
+      client.callTool({
+        name: "apply_changeset",
+        arguments: {
+          source: "API",
+          message,
+          base_workspace_revision: base,
+          operations: [{ type: base === 0 ? "create" : "modify", path: "docs/shared.md", content }],
+        },
+      });
+    expect((await apply(owner, "Create shared file", 0, "base\n")).isError).toBeFalsy();
+    expect((await apply(owner, "Advance shared file", 1, "head\n")).isError).toBeFalsy();
+    const conflict = await apply(agent, "Submit stale edit", 1, "agent\n");
+    expect(conflict.isError).toBeFalsy();
+    expect(JSON.parse((conflict.content as { text: string }[])[0]!.text)).toMatchObject({
+      status: "CONFLICT",
+      conflicts: [expect.objectContaining({ path: "docs/shared.md" })],
+    });
   });
 
   it.each([
