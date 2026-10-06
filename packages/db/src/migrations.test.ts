@@ -287,6 +287,9 @@ describe("0005_participants", () => {
 
   it("limits user_id to humans and agent_manifest to agents", async () => {
     const room = await makeRoom();
+    await db.pool.query(
+      "INSERT INTO users (id, display_name, provider, provider_subject) VALUES ('user_1', 'U', 'test', 'u1') ON CONFLICT DO NOTHING",
+    );
     await add(room, { user_id: "user_1" });
     await add(room, { kind: "AGENT", agent_manifest: JSON.stringify({ name: "bot" }) });
     await expect(add(room, { kind: "AGENT", user_id: "user_1" })).rejects.toMatchObject({

@@ -14,6 +14,14 @@ let n = 0;
 beforeAll(async () => {
   db = await createTestDatabase();
   pool = db.pool;
+  await pool.query(
+    "INSERT INTO users (id, display_name, provider, provider_subject) VALUES ('user_abc', 'Peter', 'test', 'abc')",
+  );
+  // Participants reference users (T216), so the fixed ids the tests use must exist.
+  await pool.query(
+    `INSERT INTO users (id, display_name, provider, provider_subject)
+     SELECT 'user_' || g, 'Peter', 'test', 'user_' || g FROM generate_series(1, 3000) g`,
+  );
 });
 
 afterAll(async () => {
