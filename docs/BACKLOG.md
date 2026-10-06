@@ -19,7 +19,9 @@ Conventions are in `docs/ENGINEERING.md`. Section references (§) point to `docs
 | M4 Messages, inbox, decisions, memory | T401–T412 | S1 (T401–T403, T410), S2 (T404–T409, T411–T412) |
 | M5 Workspace engine                   | T501–T520 | S2                                              |
 | M6 Conflicts and health               | T601–T610 | S2                                              |
-| M7 Gateway, MCP, end-to-end           | T701–T712 | S1 (T701–T706), S2 (T707–T711), O1 (T712)       |
+| M7 Gateway, MCP, end-to-end           | T701–T713 | S1 (T701–T706, T713), S2 (T707–T711), O1 (T712) |
+| M8 Git interoperability (§24)         | T801–T806 | S2                                              |
+| M9 Safety controls (§22–23)           | T901–T906 | S1 (T902, T904–T906), S2 (T901, T903)           |
 
 **Start here:** S1 → T101, T105, T114 (independent). S2 → T501, T505 (only need the scaffold).
 
@@ -336,6 +338,16 @@ Deps: T208 · Migration: —
 Every `FORBIDDEN` from `authorize()` appends `capability.denied { action, resource, missing_capability }` in a separate transaction (the command's own transaction rolls back).
 
 - A denied command leaves exactly one `capability.denied` event and no other change.
+
+### T216 · Platform user accounts — S1
+
+Deps: T202, T701 · Migration: `0017_users`
+
+Minimal platform identity for humans (§15.3): `users(id usr_…, display_name, provider, provider_subject, created_at)` with unique `(provider, provider_subject)`. A development login (`provider = 'dev'`, enabled only by config) issues a user session token; GitHub/Google OAuth plug into the same table later. The gateway resolves the user principal for roomless commands (`room.create`) from it, and `participants.user_id` references `users.id`.
+
+- Dev login is refused unless explicitly enabled.
+- `room.create` through the gateway records the creating user as the owner's `user_id`.
+- Same provider subject twice resolves to the same user.
 
 ---
 
@@ -882,3 +894,126 @@ Deps: T702–T711 · Migration: —
 `apps/server` wiring all modules; e2e test: create room → invite → agent joins via MCP → lead creates task → agent claims, applies a ChangeSet, submits → lead approves.
 
 - Runs in CI against docker services.
+
+### T713 · Background lease renewal — S1
+
+Deps: T117, T701 · Migration: —
+
+A per-node loop that renews every lease in `RoomLeases.heldRooms()` at a third of the TTL, so a room with open WebSocket subscribers but no recent commands keeps its owner. On `STALE_FENCE` the room is forgotten and its actor drained; on shutdown `releaseAll()` runs. Add an `onAcquire(roomId)` option to `RoomLeases`, run on the room's actor before the first command after any acquisition; T712 wires workspace `reconcileRef` into it (§19.4, §26).
+
+- With a fake clock, an idle held room is renewed before expiry and keeps its fencing token.
+- A room taken over by another node is dropped from `heldRooms()` on the next tick.
+- Shutdown releases all leases; another node acquires immediately.
+- `onAcquire` runs exactly once per acquisition (including re-acquire after expiry), before the first command; a throwing hook fails that command and leaves the room unacquired.
+
+---
+
+## M8 Git interoperability (§24) — S2
+
+### T801 · `git.import`
+
+Deps: T202, T512 · Migration: `0018_upstream`
+
+`git.import { url, branch }` (owner/lead) clones into the room repository through an injected `GitCredentialProvider` (public HTTPS repos work with none; the GitHub App provider arrives with the plugin runner). Records `upstream { url, branch, last_synced_sha, last_synced_room_revision }` and writes the imported tree as workspace revision 1 with `source = UPSTREAM`, actor `system:upstream`.
+
+- Import of a fixture repo produces revision 1 whose tree equals the upstream branch tip.
+- Importing into a room whose workspace already has revisions beyond 0 → `VALIDATION`.
+- No credential ever appears in events, responses or logs.
+
+### T802 · Health command suggestion
+
+Deps: T801 · Migration: —
+
+After import, suggest a `health_command` (§24.1) from `package.json` scripts (`typecheck`, `test`), `Makefile` targets or `pyproject.toml`, returned in the import response; never applied automatically.
+
+- Fixture repos for each ecosystem produce the expected suggestion; a repo with none yields `null`.
+
+### T803 · `git.pull_upstream`
+
+Deps: T801 · Migration: —
+
+Fetch the upstream branch, diff `last_synced_sha → new tip`, and submit it as an `UPSTREAM` ChangeSet based on `last_synced_room_revision` through the normal apply pipeline (§24.2). Conflicts follow the normal flow with the lead as submitter of record.
+
+- Non-overlapping upstream and room edits merge; overlapping ones create a conflict.
+- `upstream.last_synced_*` advance only when the ChangeSet applies.
+
+### T804 · Checkpoints
+
+Deps: T512, T609 · Migration: `0019_checkpoints`
+
+`checkpoints.create { message }` (lead/owner) marks the current workspace revision; requires health GREEN unless the owner overrides (§24.3). `checkpoints.list`. Emits `checkpoint.created`.
+
+- RED health blocks creation without override.
+
+### T805 · Checkpoint export
+
+Deps: T804, T801 · Migration: —
+
+`checkpoints.export { mode: squashed | per_changeset }` builds commits on `room/<slug>` (never the default or protected branch) with the checkpoint creator as author and `Co-authored-by:` trailers for every contributing participant (§24.3); pushes through the credential provider. Emits `checkpoint.exported`.
+
+- Squashed export: one commit per checkpoint with the right tree and trailers.
+- Push target outside `room/*` is refused.
+
+### T806 · Pull request on export
+
+Deps: T805 · Migration: —
+
+After export, open a pull request through a `PullRequestProvider` interface (Tier 2 `github.create_pull_request`); a fake provider in tests, the GitHub implementation with the plugin runner.
+
+- Export with PR returns the provider's PR URL; without the capability → `FORBIDDEN`.
+
+---
+
+## M9 Safety controls (§22–23)
+
+### T901 · Secret scanning on ChangeSets — S2
+
+Deps: T512 · Migration: —
+
+Gitleaks-compatible rule subset (AWS keys, GitHub tokens, private key blocks, generic high-entropy assignments) run in apply step 2 (§10.3, §23.3). High confidence → `VALIDATION` naming file and line; low confidence → applied but flagged to author and owner via inbox.
+
+- Fixtures for each rule; no plaintext secret is echoed back in errors or events.
+
+### T902 · Secret scanning on messages and memory — S1
+
+Deps: T901, T401, T408 · Migration: —
+
+Same scanner on `messages.send/edit` and `memory.put`.
+
+- A message containing a private key block is rejected; a low-confidence match is flagged.
+
+### T903 · Circuit breakers — S2
+
+Deps: T512, T402 · Migration: `0021_changeset_held` (adds `HELD` to the status CHECK)
+
+Hold a ChangeSet (`CIRCUIT_BREAKER`, status `HELD`) that deletes > 50 files or > 30% of lines, touches protected patterns (default `.github/workflows/**`, `**/*.pem`, `**/.env*`, `infra/prod/**`), or comes from an agent with > 5 rejected/abandoned ChangeSets in 30 min (§22.4). Lead/owner approve or reject via inbox.
+
+- Each trigger tested; an approved held ChangeSet then applies through the normal pipeline.
+
+### T904 · Budgets and rate limits — S1
+
+Deps: T117 · Migration: —
+
+Per-participant budgets (§22.3: 120 commands/min, 10 messages/min, 60 ChangeSets/h, 100 tool invocations/h) in Redis, enforced in the dispatcher before the transaction. `BUDGET_EXCEEDED` with `retry_after`; `budget.exceeded` event. Owner overrides per room/participant from `settings`/`budgets`.
+
+- Fake clock; the window resets; Redis down → fail open with a logged warning (commands keep working).
+
+### T905 · Approval gates — S1
+
+Deps: T210, T402 · Migration: `0020_approvals`
+
+Grants with `requires_approval` make invocations return `APPROVAL_REQUIRED` with an approval id; `approvals.list`, `approvals.decide` (owner/lead); approved actions execute; approvals expire after 24 h (§22.2).
+
+- Approve executes exactly once (idempotent); reject and expiry never execute.
+
+### T906 · Event redaction — S1
+
+Deps: T208 · Migration: —
+
+`events.redact { sequence, reason }` (owner only) replaces the payload with a tombstone, sets `redacted`, keeps `payload_hash`, and appends `event.redacted` (§19.6).
+
+- Redacted payload is gone from reads and digests; hash unchanged; non-owner → `FORBIDDEN`.
+
+---
+
+**Not yet broken down** (next planning pass): sandboxes and execution (§14, needed for real health checks and agent coding tools), the plugin runner (§21.4), the web UI (§27), the Go CLI and the TypeScript/Python SDKs.
