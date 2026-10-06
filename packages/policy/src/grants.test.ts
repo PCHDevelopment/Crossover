@@ -244,7 +244,7 @@ describe("grants and denies against resource.path (the way workspace commands au
     expect(await outcomeAt(f, "workspace.write", "src/My File ü.md")).toBe("allowed");
   });
 
-  it.each(["src/../secrets/k", "/etc/passwd", "a//b", "./a", "a/./b", "src\\a", "a\u0000b", ""])(
+  it.each(["src/../secrets/k", "/etc/passwd", "a//b", "./a", "a/./b", "src\\a", "a\u0000b"])(
     "an unsafe path (%j) fails closed",
     async (path) => {
       const f = await fixture("DEVELOPER");
@@ -269,6 +269,79 @@ describe("grants and denies against resource.path (the way workspace commands au
     const f = await fixture("DEVELOPER");
     await addGrant(f, "tasks.create:x/**", { effect: "DENY" });
     expect(await outcomeAt(f, "tasks.create", "x/y")).toBe("allowed");
+  });
+});
+
+describe("the gate of a per-path command (T218)", () => {
+  const gate = (f: Fixture, action: string, perPath: boolean | undefined) =>
+    authorize(
+      f.principal,
+      action,
+      { room_id: f.room },
+      { method: "x", params: {}, client: pool, ...(perPath === undefined ? {} : { perPath }) },
+    ).then(
+      () => "allowed",
+      (e: { code?: string }) => e.code,
+    );
+
+  it("lets in a holder of an ungated scoped grant, but only for a per-path command", async () => {
+    const f = await fixture("REVIEWER");
+    await addGrant(f, "workspace.write:docs/**");
+    expect(await gate(f, "workspace.write", true)).toBe("allowed");
+    expect(await gate(f, "workspace.write", false)).toBe("FORBIDDEN");
+    expect(await gate(f, "workspace.write", undefined)).toBe("FORBIDDEN");
+  });
+
+  it("then leaves the decision to the per-path checks", async () => {
+    const f = await fixture("REVIEWER");
+    await addGrant(f, "workspace.write:docs/**");
+    expect(await outcomeAt(f, "workspace.write", "docs/a.md")).toBe("allowed");
+    expect(await outcomeAt(f, "workspace.write", "src/a.ts")).toBe("FORBIDDEN");
+  });
+
+  it("needs a live, ungated grant of that capability", async () => {
+    const f = await fixture("REVIEWER");
+    expect(await gate(f, "workspace.write", true)).toBe("FORBIDDEN"); // nothing
+    await addGrant(f, "workspace.read:docs/**"); // another capability
+    await addGrant(f, "workspace.write:docs/**", { requires_approval: true }); // gated
+    await addGrant(f, "workspace.write:old/**", { expires: "-1 minute" }); // expired
+    await addGrant(f, "workspace.write:ended/**", { ended: true }); // ended
+    expect(await gate(f, "workspace.write", true)).toBe("FORBIDDEN");
+    await addGrant(f, "workspace.write:src/**");
+    expect(await gate(f, "workspace.write", true)).toBe("allowed");
+  });
+
+  it("is still refused when the whole capability was revoked", async () => {
+    const f = await fixture("REVIEWER");
+    await addGrant(f, "workspace.write:docs/**");
+    await addGrant(f, "workspace.write", { effect: "DENY" });
+    expect(await gate(f, "workspace.write", true)).toBe("FORBIDDEN");
+  });
+
+  it("doesn't turn a path check into a gate: a path in the resource ignores the flag", async () => {
+    const f = await fixture("REVIEWER");
+    await addGrant(f, "workspace.write:docs/**");
+    const res = await authorize(
+      f.principal,
+      "workspace.write",
+      { room_id: f.room, path: "src/a.ts" },
+      { method: "x", params: {}, client: pool, perPath: true },
+    ).then(
+      () => "allowed",
+      (e: { code?: string }) => e.code,
+    );
+    expect(res).toBe("FORBIDDEN");
+  });
+});
+
+describe("the workspace root", () => {
+  it("is a valid thing to check: an unscoped grant or deny covers it, a scoped one doesn't", async () => {
+    const f = await fixture("DEVELOPER");
+    expect(await outcomeAt(f, "workspace.read", "")).toBe("allowed"); // bundle
+    await addGrant(f, "workspace.read:secrets/**", { effect: "DENY" });
+    expect(await outcomeAt(f, "workspace.read", "")).toBe("allowed");
+    await addGrant(f, "workspace.read", { effect: "DENY" });
+    expect(await outcomeAt(f, "workspace.read", "")).toBe("FORBIDDEN:revoked");
   });
 });
 

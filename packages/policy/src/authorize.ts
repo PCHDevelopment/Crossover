@@ -4,6 +4,7 @@ import {
   capabilityMatches,
   capabilityMatchesPath,
   isSafeRequestPath,
+  parseCapability,
   PATH_SCOPED_RESOURCES,
 } from "./capability.js";
 import { loadLiveGrants } from "./grants.js";
@@ -32,6 +33,13 @@ export interface PolicyContext {
   params: unknown;
   /** The command's transaction (or any connection). */
   client: Pool | PoolClient;
+  /**
+   * Set only on the command-level gate of a command that declared `perPathAuthorize` (T218):
+   * one that authorizes every path it touches itself. For such a gate, a live ungated scoped
+   * grant of the capability is enough to get in; the per-path checks then decide. Per-path
+   * checks never carry it.
+   */
+  perPath?: boolean;
 }
 
 /**
@@ -91,7 +99,8 @@ export async function authorize(
   // the resource, not in the action. Scoped grants and denies are matched against that path,
   // so `workspace.write:secrets/**` applies to it just as to `workspace.write:secrets/k`.
   const path = pathOf(action, base, resource);
-  if (path !== undefined && !isSafeRequestPath(path)) {
+  // "" names the workspace root (listing it): not a path to test against scopes, but fine.
+  if (path !== undefined && path !== "" && !isSafeRequestPath(path)) {
     throw forbidden(action, { reason: "invalid_path" });
   }
   const covers = (capability: string): boolean =>
@@ -116,6 +125,17 @@ export async function authorize(
     });
   }
   if (inBundle) return;
+  // A per-path command's gate (T218): holding an ungated scoped grant of the capability is
+  // enough to reach the handler, which authorizes each path itself. A DENY covering the whole
+  // capability already refused above.
+  if (
+    context.perPath === true &&
+    path === undefined &&
+    action === base &&
+    grants.some((g) => !g.requires_approval && hasScopeOf(g.capability, base))
+  ) {
+    return;
+  }
   if (!isCapability(base)) throw forbidden(action, { reason: "unknown_capability" });
   throw forbidden(action, { role: participant.role, authority: participant.authority });
 }
@@ -128,6 +148,16 @@ function pathOf(action: string, base: string, resource: PolicyResource): string 
   if (action !== base || typeof resource.path !== "string") return undefined;
   const root = base.split(".", 1)[0] ?? "";
   return PATH_SCOPED_RESOURCES.has(root) ? resource.path : undefined;
+}
+
+/** Is `capability` a scoped grant (has a `:scope`) of `base`? */
+function hasScopeOf(capability: string, base: string): boolean {
+  try {
+    const parsed = parseCapability(capability);
+    return parsed.base === base && parsed.scope !== undefined;
+  } catch {
+    return false;
+  }
 }
 
 function forbidden(action: string, extra: Record<string, unknown>): CrossoverError {

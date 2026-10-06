@@ -33,6 +33,8 @@ export function registerWorkspaceCommands(
   dispatcher.registerCommand({
     method: "workspace.apply_changeset",
     action: "workspace.write",
+    // Authorizes every touched path, and every path a merge changes (below).
+    perPathAuthorize: true,
     mutating: true,
     params: changesetParamsSchema,
     execute: (ctx, params) => apply(ctx, params, deps),
