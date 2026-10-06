@@ -25,7 +25,7 @@ type Entry = {
   type: "file" | "directory" | "symlink" | "submodule";
   size?: number;
 };
-async function entries(repo: string, tree: string, path?: string): Promise<Entry[]> {
+export async function entries(repo: string, tree: string, path?: string): Promise<Entry[]> {
   const { stdout } = await git(
     ["ls-tree", "-l", "-z", "--full-tree", tree, ...(path === undefined ? [] : ["--", path])],
     {
