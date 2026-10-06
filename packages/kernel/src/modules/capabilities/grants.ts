@@ -1,7 +1,9 @@
 import {
   effectiveCapabilities,
+  capabilityMatches,
   isAuthorityPower,
   isCapability,
+  loadLiveGrants,
   parseCapability,
   ROLE_BUNDLES,
   tierOf,
@@ -76,8 +78,8 @@ function validation(message: string, details?: Record<string, unknown>): Crossov
  * Register `capabilities.grant`, `capabilities.revoke` and `capabilities.list` (T210).
  *
  * Effective capabilities = role bundle + live grants - live denies (§21.1). `revoke` ends the
- * grants named by its capability string and, if the role bundle covers the capability,
- * records a DENY (so `sandbox.exec` can be taken from a developer). `grant` of a capability
+ * grants named by its capability string and, if the role bundle or a broader grant still
+ * covers the capability, records a DENY (so `sandbox.exec` can be taken from a developer). `grant` of a capability
  * ends the DENY with the same string. `authorize()` reads both on every command, so a change
  * applies to the next command.
  */
@@ -186,8 +188,16 @@ export function registerCapabilityCommands(dispatcher: Dispatcher): void {
       );
       const grantsEnded = ended.rowCount ?? 0;
 
-      // A capability the role bundle gives can only be taken away with a DENY.
-      const denied = isCapability(base) && ROLE_BUNDLES[target.role].has(base);
+      // A capability the role bundle gives, or a broader grant still gives (an unscoped grant
+      // and a scoped revoke), can only be taken away with a DENY.
+      const { grants: remaining } = await loadLiveGrants(
+        ctx.client,
+        ctx.room_id,
+        params.participant_id,
+      );
+      const denied =
+        (isCapability(base) && ROLE_BUNDLES[target.role].has(base)) ||
+        remaining.some((g) => capabilityMatches(g.capability, params.capability));
       if (denied) {
         await ctx.client.query(
           `INSERT INTO capability_grants

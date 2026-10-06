@@ -3,6 +3,7 @@ import { createTestDatabase, type TestDatabase } from "@crossover/db/testing";
 import { authorize } from "@crossover/policy";
 import { CrossoverError, newId, type RoomEvent } from "@crossover/protocol";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { z } from "zod";
 import { Dispatcher } from "../../dispatcher.js";
 import type { Principal } from "../../principal.js";
 import { registerCapabilityCommands } from "./grants.js";
@@ -405,13 +406,59 @@ describe("capabilities.revoke", () => {
       method: "tasks.create",
       action: "tasks.create",
       mutating: true,
-      params: (await import("zod")).z.object({}),
+      params: z.object({}),
       execute: async () => ({ response: { ok: true } }),
     });
     await run(r, r.dev, "tasks.create");
     await revoke(r, r.owner, r.dev, "tasks.create");
     const err = await rejects(run(r, r.dev, "tasks.create"), "FORBIDDEN");
     expect(err.details).toMatchObject({ reason: "revoked" });
+  });
+});
+
+describe("path-scoped capabilities through a command, as workspace.apply_changeset uses them", () => {
+  /** Mirrors workspace/apply.ts: action `workspace.write`, then a per-path `ctx.authorize`. */
+  async function withApply(): Promise<Room> {
+    const r = await setup();
+    r.d.registerCommand({
+      method: "workspace.apply_changeset",
+      action: "workspace.write",
+      mutating: true,
+      params: z.object({ paths: z.array(z.string()) }),
+      execute: async (ctx, params) => {
+        for (const path of params.paths) await ctx.authorize("workspace.write", { path });
+        return { response: { applied: params.paths } };
+      },
+    });
+    return r;
+  }
+  const apply = (r: Room, who: Principal, paths: string[]) =>
+    run(r, who, "workspace.apply_changeset", { paths });
+
+  it("a scoped revoke refuses a ChangeSet that touches the revoked path, and only that one", async () => {
+    const r = await withApply();
+    await apply(r, r.dev, ["src/a.ts", "secrets/key.pem"]);
+    await revoke(r, r.owner, r.dev, "workspace.write:secrets/**");
+    const err = await rejects(apply(r, r.dev, ["src/a.ts", "secrets/key.pem"]), "FORBIDDEN");
+    expect(err.details).toMatchObject({ reason: "revoked" });
+    await rejects(apply(r, r.dev, ["secrets/.env"]), "FORBIDDEN");
+    await apply(r, r.dev, ["src/a.ts", "docs/My File.md"]);
+  });
+
+  it("a scoped revoke also narrows an explicit unscoped grant", async () => {
+    const r = await withApply();
+    await rejects(apply(r, r.reviewer, ["src/a.ts"]), "FORBIDDEN"); // no coarse permission yet
+    await grant(r, r.owner, r.reviewer, "workspace.write");
+    const out = await revoke(r, r.owner, r.reviewer, "workspace.write:docs/**");
+    expect(out.response).toMatchObject({ grants_ended: 0, denied: true });
+    await apply(r, r.reviewer, ["src/a.ts"]);
+    await rejects(apply(r, r.reviewer, ["docs/a.md"]), "FORBIDDEN");
+  });
+
+  it("a scoped grant alone doesn't pass the unscoped command-level check (it means 'every scope')", async () => {
+    const r = await withApply();
+    await grant(r, r.owner, r.reviewer, "workspace.write:src/**");
+    await rejects(apply(r, r.reviewer, ["src/a.ts"]), "FORBIDDEN");
   });
 });
 

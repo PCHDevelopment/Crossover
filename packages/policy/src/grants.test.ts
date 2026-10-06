@@ -70,6 +70,22 @@ async function addGrant(
 const check = (f: Fixture, action: string) =>
   authorize(f.principal, action, { room_id: f.room }, { method: "x", params: {}, client: pool });
 
+/** The way workspace.apply / workspace.read call it: path in the resource, not the action. */
+const checkPath = (f: Fixture, action: string, path: string) =>
+  authorize(
+    f.principal,
+    action,
+    { room_id: f.room, path },
+    { method: "x", params: {}, client: pool },
+  );
+
+const outcomeAt = (f: Fixture, action: string, path: string) =>
+  checkPath(f, action, path).then(
+    () => "allowed",
+    (e: { code?: string; details?: { reason?: string } }) =>
+      e.code === "FORBIDDEN" && e.details?.reason ? `FORBIDDEN:${e.details.reason}` : e.code,
+  );
+
 const outcome = (f: Fixture, action: string) =>
   check(f, action).then(
     () => "allowed",
@@ -190,6 +206,69 @@ describe("grants in authorize()", () => {
     expect(await outcome(f, "nothing.here")).toBe("FORBIDDEN:unknown_capability");
     await addGrant(f, "nothing.here");
     expect(await outcome(f, "nothing.here")).toBe("allowed");
+  });
+});
+
+describe("grants and denies against resource.path (the way workspace commands authorize)", () => {
+  it("a scoped DENY applies to a path named in the resource", async () => {
+    const f = await fixture("DEVELOPER");
+    await addGrant(f, "workspace.write:secrets/**", { effect: "DENY" });
+    expect(await outcomeAt(f, "workspace.write", "secrets/key.pem")).toBe("FORBIDDEN:revoked");
+    expect(await outcomeAt(f, "workspace.write", "secrets/.env")).toBe("FORBIDDEN:revoked");
+    expect(await outcomeAt(f, "workspace.write", "secrets/a/b/c")).toBe("FORBIDDEN:revoked");
+    expect(await outcomeAt(f, "workspace.write", "src/a.ts")).toBe("allowed");
+    expect(await outcomeAt(f, "workspace.read", "secrets/key.pem")).toBe("allowed"); // other action
+    expect(await outcome(f, "workspace.write")).toBe("allowed"); // no path: coarse check unchanged
+  });
+
+  it("a scoped GRANT covers matching paths and only those", async () => {
+    const f = await fixture("REVIEWER");
+    await addGrant(f, "workspace.write:src/**");
+    expect(await outcomeAt(f, "workspace.write", "src/a/b.ts")).toBe("allowed");
+    expect(await outcomeAt(f, "workspace.write", "docs/a.md")).toBe("FORBIDDEN");
+    expect(await outcomeAt(f, "workspace.write", "src")).toBe("FORBIDDEN");
+  });
+
+  it("an unscoped grant or deny covers every path", async () => {
+    const f = await fixture("REVIEWER");
+    await addGrant(f, "workspace.write");
+    expect(await outcomeAt(f, "workspace.write", "any/where.txt")).toBe("allowed");
+    await addGrant(f, "workspace.write", { effect: "DENY" });
+    expect(await outcomeAt(f, "workspace.write", "any/where.txt")).toBe("FORBIDDEN:revoked");
+  });
+
+  it("file names with spaces and unicode are matched, not rejected", async () => {
+    const f = await fixture("DEVELOPER");
+    await addGrant(f, "workspace.write:docs/**", { effect: "DENY" });
+    expect(await outcomeAt(f, "workspace.write", "docs/My File ü.md")).toBe("FORBIDDEN:revoked");
+    expect(await outcomeAt(f, "workspace.write", "src/My File ü.md")).toBe("allowed");
+  });
+
+  it.each(["src/../secrets/k", "/etc/passwd", "a//b", "./a", "a/./b", "src\\a", "a\u0000b", ""])(
+    "an unsafe path (%j) fails closed",
+    async (path) => {
+      const f = await fixture("DEVELOPER");
+      expect(await outcomeAt(f, "workspace.write", path)).toBe("FORBIDDEN:invalid_path");
+    },
+  );
+
+  it("a gated scoped grant makes matching paths wait for approval", async () => {
+    const f = await fixture("REVIEWER");
+    await addGrant(f, "workspace.write:deploy/**", { requires_approval: true });
+    expect(await outcomeAt(f, "workspace.write", "deploy/prod.yml")).toBe("APPROVAL_REQUIRED");
+    expect(await outcomeAt(f, "workspace.write", "src/a.ts")).toBe("FORBIDDEN");
+  });
+
+  it("an explicit scope in the action wins over a path in the resource", async () => {
+    const f = await fixture("DEVELOPER");
+    await addGrant(f, "workspace.write:secrets/**", { effect: "DENY" });
+    expect(await outcomeAt(f, "workspace.write:src/a.ts", "secrets/k")).toBe("allowed");
+  });
+
+  it("ignores resource.path for resources that aren't path-scoped", async () => {
+    const f = await fixture("DEVELOPER");
+    await addGrant(f, "tasks.create:x/**", { effect: "DENY" });
+    expect(await outcomeAt(f, "tasks.create", "x/y")).toBe("allowed");
   });
 });
 

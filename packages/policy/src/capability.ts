@@ -102,3 +102,35 @@ export function capabilityMatches(granted: string, requested: string): boolean {
 export function tierOf(capability: string): Tier {
   return capabilityTier(parseCapability(capability).base);
 }
+
+/**
+ * Is `path` a workspace path a request may name: relative, `/`-separated, no empty, `.` or
+ * `..` segments, no control characters? (Spaces and other printable characters are fine in a
+ * file name, unlike in a capability scope.)
+ */
+export function isSafeRequestPath(path: string): boolean {
+  if (typeof path !== "string" || path === "" || path.length > MAX_CAPABILITY_LENGTH * 8)
+    return false;
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f\\]/.test(path) || path.startsWith("/")) return false;
+  return path.split("/").every((segment) => segment !== "" && segment !== "." && segment !== "..");
+}
+
+/**
+ * Does the grant `granted` cover `base` (`<resource>.<action>`) applied to the workspace path
+ * `path`? Like {@link capabilityMatches} with a request of `base:path`, but the path is taken
+ * as is, so file names with spaces work. Fails closed (`false`) for a malformed grant or an
+ * unsafe path; it never throws.
+ */
+export function capabilityMatchesPath(granted: string, base: string, path: string): boolean {
+  if (!isSafeRequestPath(path)) return false;
+  let g: ParsedCapability;
+  try {
+    g = parseCapability(granted);
+  } catch {
+    return false;
+  }
+  if (g.base !== base) return false;
+  if (g.scope === undefined) return true;
+  return PATH_SCOPED_RESOURCES.has(g.resource) && pathGlobMatch(g.scope, path);
+}
