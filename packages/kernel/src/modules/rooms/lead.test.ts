@@ -137,7 +137,7 @@ const ageOffer = (r: Room, minutes: number) =>
 describe("room.set_lead", () => {
   it("lets the owner appoint an agent: one lead remains, the old lead becomes a developer", async () => {
     const r = await setup();
-    expect(await can(r, r.agent, "tasks.assign")).toBe(false);
+    expect(await can(r, r.agent, "decisions.decide")).toBe(false);
     const out = await setLead(r, r.owner, r.agent);
     expect(out.response).toEqual({
       lead: r.agent.participant_id,
@@ -157,8 +157,8 @@ describe("room.set_lead", () => {
     });
     await expectOneLead(r, r.agent.participant_id);
     expect(await roleOf(r.owner)).toBe("DEVELOPER");
-    expect(await can(r, r.agent, "tasks.assign")).toBe(true); // the lead bundle
-    expect(await can(r, r.owner, "tasks.assign")).toBe(false);
+    expect(await can(r, r.agent, "decisions.decide")).toBe(true); // the lead bundle
+    expect(await can(r, r.owner, "decisions.decide")).toBe(false); // owner authority adds no decisions power
   });
 
   it("lets an admin appoint a human, or put the owner back", async () => {

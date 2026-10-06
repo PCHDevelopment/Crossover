@@ -226,9 +226,24 @@ export const AUTHORITY_POWERS: Readonly<Record<Authority, ReadonlySet<Capability
   MEMBER: new Set<Capability>(),
 };
 
-/** Role bundle plus authority powers. */
+/**
+ * Task management that §8.2 gives to "lead, owner, admin" alike: owners and admins can assign,
+ * cancel and reopen tasks whatever their project role. Unlike {@link AUTHORITY_POWERS} these
+ * are ordinary capabilities that can also be granted to anyone, so they are not in that set.
+ */
+const GOVERNING_TASK_CAPABILITIES = [
+  "tasks.assign",
+  "tasks.cancel",
+  "tasks.reopen",
+] as const satisfies readonly Capability[];
+
+/** Role bundle plus authority powers (and, for owners and admins, task management). */
 export function effectiveCapabilities(role: Role, authority: Authority): ReadonlySet<Capability> {
-  return new Set<Capability>([...ROLE_BUNDLES[role], ...AUTHORITY_POWERS[authority]]);
+  return new Set<Capability>([
+    ...ROLE_BUNDLES[role],
+    ...AUTHORITY_POWERS[authority],
+    ...(authority === "MEMBER" ? [] : GOVERNING_TASK_CAPABILITIES),
+  ]);
 }
 
 /**

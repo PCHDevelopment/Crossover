@@ -38,6 +38,37 @@ export function registerTaskLifecycleCommands(dispatcher: Dispatcher): void {
       return takeTask(ctx, task, actor.id, "task.claimed");
     },
   });
+
+  dispatcher.registerCommand({
+    method: "tasks.assign",
+    mutating: true,
+    params: taskVersionParams.extend({ participant_id: z.string().min(1).max(100) }),
+    execute: async (ctx, p) => {
+      const task = await loadTask(ctx.client, ctx.room_id, p.task_id, true);
+      if (task.status !== "OPEN" || task.version !== p.expected_version)
+        throw versionConflict(task);
+      const { rows } = await ctx.client.query<{ status: string }>(
+        "SELECT status FROM participants WHERE id = $1 AND room_id = $2",
+        [p.participant_id, ctx.room_id],
+      );
+      const status = rows[0]?.status;
+      if (status === undefined) {
+        throw new CrossoverError("NOT_FOUND", `Participant ${p.participant_id} not found`);
+      }
+      if (status !== "ACTIVE") {
+        throw new CrossoverError(
+          "VALIDATION",
+          `Participant ${p.participant_id} is ${status}, not active`,
+          {
+            details: { participant_id: p.participant_id, status },
+          },
+        );
+      }
+      return takeTask(ctx, task, p.participant_id, "task.assigned", {
+        assigned_by: ctx.principal.participant_id,
+      });
+    },
+  });
 }
 
 /** Mark `task` as owned by `ownerId` (claim or assign): `OPEN → CLAIMED`, version + 1, lease for agents. */

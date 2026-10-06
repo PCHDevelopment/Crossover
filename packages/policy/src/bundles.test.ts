@@ -4,6 +4,7 @@ import {
   AUTHORITY_POWERS,
   CAPABILITIES,
   effectiveCapabilities,
+  isAuthorityPower,
   isCapability,
   ROLE_BUNDLES,
   ROLES,
@@ -197,6 +198,21 @@ describe("authority powers (§6.2)", () => {
         for (const c of AUTHORITY_POWERS[authority]) expect(effective.has(c)).toBe(true);
       }
     }
+  });
+
+  it("owners and admins can assign, cancel and reopen tasks whatever their role (§8.2); members can't unless their role does", () => {
+    for (const authority of ["OWNER", "ADMIN"] as const) {
+      for (const role of ROLES) {
+        const effective = effectiveCapabilities(role, authority);
+        for (const c of ["tasks.assign", "tasks.cancel", "tasks.reopen"] as const) {
+          expect(effective.has(c), `${authority}/${role} ${c}`).toBe(true);
+        }
+      }
+    }
+    expect(effectiveCapabilities("DEVELOPER", "MEMBER").has("tasks.assign")).toBe(false);
+    expect(effectiveCapabilities("LEAD", "MEMBER").has("tasks.assign")).toBe(true);
+    // They stay grantable: not an authority power.
+    expect(isAuthorityPower("tasks.assign")).toBe(false);
   });
 
   it("an owner who is an observer still has owner powers (authority is separate from role)", () => {
