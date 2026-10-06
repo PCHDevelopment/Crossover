@@ -226,7 +226,11 @@ describe("room.invite", () => {
         });
       }
       expect(await count("invites", `room_id = '${s.room}'`)).toBe(0);
-      expect(await count("events", `room_id = '${s.room}'`)).toBe(events);
+      // Nothing but one capability.denied event per refusal (T215).
+      expect(await count("events", `room_id = '${s.room}'`)).toBe(events + 5);
+      expect(await count("events", `room_id = '${s.room}' AND type <> 'capability.denied'`)).toBe(
+        events,
+      );
     });
 
     it("a participant demoted from admin can't invite on the next command", async () => {

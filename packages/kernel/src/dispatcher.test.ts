@@ -575,7 +575,8 @@ describe("dispatch: authorization", () => {
       details: { missing_capability: "messages.send" },
     });
     expect(await effects(room)).toEqual([]);
-    expect(await lastSeq(room)).toBe(0);
+    // The only trace is the denial itself (T215), in a transaction of its own.
+    expect((await eventRows(room)).map((e) => e.type)).toEqual(["capability.denied"]);
     expect(
       (await pool.query("SELECT 1 FROM idempotency_keys WHERE idempotency_key = $1", [key]))
         .rowCount,
@@ -697,7 +698,12 @@ describe("dispatch: ctx.authorize (finer-grained checks)", () => {
       ),
     ).rejects.toMatchObject({ code: "FORBIDDEN", details: { path: "secrets/key" } });
     expect(await effects(room)).toEqual([]);
-    expect(await lastSeq(room)).toBe(0);
+    const rows = await eventRows(room);
+    expect(rows.map((e) => e.type)).toEqual(["capability.denied"]); // not changeset.applied
+    expect(rows[0].payload).toMatchObject({
+      action: "workspace.write",
+      resource: { path: "secrets/key" },
+    });
   });
 
   it("is available to reads too", async () => {
@@ -942,7 +948,7 @@ describe("dispatch: reads", () => {
       execute: async () => ({ response: 1, events: [{ type: "message.sent" as const }] }),
     });
     await expect(d.dispatch(principal(room), envelope("room.digest"))).rejects.toThrow(/read-only/);
-    expect(await lastSeq(room)).toBe(0);
+    expect((await eventRows(room)).map((e) => e.type)).toEqual(["capability.denied"]); // only the denied read above
   });
 
   it("a read doesn't need an idempotency key, and doesn't leak its connection", async () => {
