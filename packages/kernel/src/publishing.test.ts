@@ -279,6 +279,7 @@ describe("RedisEventPublisher", () => {
     const room = await newRoom();
     const { sub, received } = await subscribe([roomChannel(room)]);
     const publisher = new RedisEventPublisher(REDIS_URL);
+    await publisher.ready();
     try {
       const { d } = setup(publisher);
       const out = await d.dispatch(principal(room), envelope("messages.send", { n: 3 }));
@@ -301,6 +302,7 @@ describe("RedisEventPublisher", () => {
     const [a, b] = [await newRoom(), await newRoom()];
     const { sub, received } = await subscribe([roomChannel(a)]);
     const publisher = new RedisEventPublisher(REDIS_URL);
+    await publisher.ready();
     try {
       const { d } = setup(publisher);
       await d.dispatch(principal(b), envelope("messages.send", { n: 2 }));
@@ -322,6 +324,16 @@ describe("RedisEventPublisher", () => {
     } finally {
       await publisher.close();
     }
+  });
+
+  it("ready() resolves once connected, and rejects when Redis is unreachable", async () => {
+    const up = new RedisEventPublisher(REDIS_URL);
+    await up.ready();
+    await up.ready(); // already ready: immediate
+    await up.close();
+    const down = new RedisEventPublisher("redis://127.0.0.1:1");
+    await expect(down.ready(300)).rejects.toThrow(/not ready after 300 ms/);
+    await down.close();
   });
 
   it("can share a caller's client without closing it", async () => {

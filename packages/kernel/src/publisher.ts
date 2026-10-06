@@ -48,6 +48,27 @@ export class RedisEventPublisher implements EventPublisher {
     }
   }
 
+  /**
+   * Resolve once the connection is ready. The default client doesn't queue commands while
+   * disconnected (so an outage can't stall commands), which also means a publish issued
+   * before the first connection completes fails; call this at startup. Rejects after
+   * `timeoutMs`.
+   */
+  ready(timeoutMs = 5_000): Promise<void> {
+    if (this.redis.status === "ready") return Promise.resolve();
+    return new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.redis.off("ready", onReady);
+        reject(new Error(`Redis not ready after ${timeoutMs} ms`));
+      }, timeoutMs);
+      const onReady = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      this.redis.once("ready", onReady);
+    });
+  }
+
   async publish(roomId: string, events: readonly RoomEvent[]): Promise<void> {
     if (events.length === 0) return;
     const channel = roomChannel(roomId);
