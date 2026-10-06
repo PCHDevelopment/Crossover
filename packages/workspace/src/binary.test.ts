@@ -1,7 +1,8 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import * as gitModule from "./git.js";
 import { classifyConflicts } from "./conflicts.js";
 import { git } from "./git.js";
 import { materialize } from "./materialize.js";
@@ -12,6 +13,7 @@ import { BINARY_SIZE, readMergeBlob } from "./binary.js";
 
 const dirs: string[] = [];
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
@@ -47,7 +49,20 @@ describe("binary and large file policy", () => {
   it("rejects identical concurrent binary edits even when Git would merge cleanly", async () => {
     const f = await fixture("old\0data");
     const changed = await f.change("new\0data");
-    const result = await binaryConflict(f, changed, changed);
+    const spy = vi.spyOn(gitModule, "git");
+    const result = await merge(f.repo, f.base, changed, changed);
+    expect(result.clean).toBe(false);
+    if (result.clean) throw new Error("Expected binary conflict");
+    const batchCalls = spy.mock.calls
+      .filter(([args]) => args[0] === "cat-file")
+      .map(([args]) => args[1]);
+    expect(batchCalls).toEqual([
+      "--batch-check=%(objectname) %(objecttype) %(objectsize)",
+      "--batch",
+    ]);
+    expect(await classifyConflicts(f.repo, result)).toMatchObject([
+      { path: "file", kind: "BINARY", hunks: [] },
+    ]);
     expect(result.conflicts.files[0]?.stages.map((entry) => entry.stage)).toEqual([1, 2, 3]);
   });
 
@@ -59,6 +74,23 @@ describe("binary and large file policy", () => {
       await f.change("head\n" + middle + "last\n"),
       await f.change("first\n" + middle + "candidate\n"),
     );
+  });
+
+  it("classifies a text-to-binary switch as a concurrent binary conflict", async () => {
+    const f = await fixture("old text\n");
+    await binaryConflict(f, await f.change("head\0binary"), await f.change("candidate text\n"));
+  });
+
+  it("skips blob classification when head and candidate changed different paths", async () => {
+    const f = await fixture("old\n");
+    const head = await f.change("head\n");
+    const candidate = await materialize(f.repo, f.base, [
+      { type: "create", path: "other", content: "candidate\n" },
+    ]);
+    const spy = vi.spyOn(gitModule, "git");
+    const result = await merge(f.repo, f.base, head, candidate);
+    expect(result.clean).toBe(true);
+    expect(spy.mock.calls.some(([args]) => args[0] === "cat-file")).toBe(false);
   });
 
   it("allows one-sided binary edits and fast-forwards", async () => {
