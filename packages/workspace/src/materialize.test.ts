@@ -2,7 +2,8 @@ import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CrossoverError } from "@crossover/protocol";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import * as gitModule from "./git.js";
 import { git, GitError } from "./git.js";
 import { materialize } from "./materialize.js";
 import type { Operation } from "./operations.js";
@@ -21,10 +22,95 @@ async function fixture() {
 }
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
 describe("materialize", () => {
+  const patch = (path = "file", before = "old", after = "new") =>
+    `--- a/${path}\n+++ b/${path}\n@@ -1 +1 @@\n-${before}\n+${after}\n`;
+
+  it("applies patches in sequence with full-content operations and quoted filenames", async () => {
+    const f = await fixture();
+    const commit = await materialize(f.repo, f.base, [
+      { type: "create", path: "file", content: "old\n" },
+      { type: "modify", path: "file", patch: patch() },
+      { type: "modify", path: "file", patch: patch("file", "new", "final") },
+      { type: "rename", from: "file", to: "renamed" },
+      { type: "modify", path: "renamed", patch: patch("renamed", "final", "renamed") },
+      { type: "create", path: "tab\tname", content: "old\n" },
+      {
+        type: "modify",
+        path: "tab\tname",
+        patch: '--- "a/tab\\tname"\n+++ "b/tab\\tname"\n@@ -1 +1 @@\n-old\n+new\n',
+      },
+    ]);
+    expect(await f.read(commit, "renamed")).toBe("renamed\n");
+    expect(await f.read(commit, "tab\tname")).toBe("new\n");
+  });
+
+  it.each([
+    patch("other"),
+    patch().replace("--- a/file", "--- a/other"),
+    patch().replace("--- a/file", "--- /dev/null").replace("@@ -1 +1 @@\n-old", "@@ -0,0 +1 @@"),
+    patch()
+      .replace("+++ b/file", "+++ /dev/null")
+      .replace("@@ -1 +1 @@\n-old\n+new", "@@ -1 +0,0 @@\n-old"),
+    "diff --git a/file b/file\nold mode 100644\nnew mode 100755\n",
+    "diff --git a/file b/other\nsimilarity index 100%\nrename from file\nrename to other\n",
+    patch() + patch("other"),
+  ])("rejects patches that change paths or structure", async (input) => {
+    const f = await fixture();
+    const base = await materialize(f.repo, f.base, [
+      { type: "create", path: "file", content: "old\n" },
+    ]);
+    const spy = vi.spyOn(gitModule, "git");
+    await expect(
+      materialize(f.repo, base, [{ type: "modify", path: "file", patch: input }]),
+    ).rejects.toMatchObject({
+      code: "VALIDATION",
+      details: { path: "file", reason: "patch_path_mismatch" },
+    });
+    expect(spy.mock.calls.some(([args]) => args.includes("--cached"))).toBe(false);
+  });
+
+  it("reports failed patch diagnostics and cleans temporary files", async () => {
+    const f = await fixture();
+    const base = await materialize(f.repo, f.base, [
+      { type: "create", path: "file", content: "different\n" },
+    ]);
+    const before = (await readdir(tmpdir()))
+      .filter((name) => name.startsWith("crossover-index-"))
+      .sort();
+    await expect(
+      materialize(f.repo, base, [{ type: "modify", path: "file", patch: patch() }]),
+    ).rejects.toMatchObject({
+      code: "VALIDATION",
+      details: {
+        path: "file",
+        reason: "patch_failed",
+        message: expect.stringContaining("patch does not apply"),
+      },
+    });
+    expect(
+      (await readdir(tmpdir())).filter((name) => name.startsWith("crossover-index-")).sort(),
+    ).toEqual(before);
+  });
+
+  it("batches blob writes and releases directory prefixes after deletion", async () => {
+    const f = await fixture();
+    const spy = vi.spyOn(gitModule, "git");
+    const commit = await materialize(f.repo, f.base, [
+      { type: "create", path: "dir/a", content: "a" },
+      { type: "create", path: "dir/b", content: "b" },
+      { type: "delete", path: "dir/a" },
+      { type: "delete", path: "dir/b" },
+      { type: "create", path: "dir", content: "file now" },
+    ]);
+    expect(spy.mock.calls.filter(([args]) => args[0] === "hash-object")).toHaveLength(1);
+    expect(await f.read(commit, "dir")).toBe("file now");
+  });
+
   it("applies all text operations in order, preserving untouched files and canonical", async () => {
     const f = await fixture();
     const first = await materialize(f.repo, f.base, [
@@ -131,6 +217,55 @@ describe("materialize", () => {
       { type: "rename", from: "run.sh", to: "renamed.sh" },
     ]);
     expect((await git(["ls-tree", commit], f.options)).stdout).toMatch(/^100755 blob /);
+  });
+
+  it.each(["160000", "120000"])("handles content replacement on mode %s", async (mode) => {
+    const f = await fixture();
+    const sha =
+      mode === "160000"
+        ? f.base
+        : (
+            await git(["hash-object", "-w", "--stdin"], { ...f.options, input: "target" })
+          ).stdout.trim();
+    const tree = (
+      await git(["mktree"], {
+        ...f.options,
+        input: `${mode} ${mode === "160000" ? "commit" : "blob"} ${sha}\tentry\n`,
+      })
+    ).stdout.trim();
+    const base = (
+      await git(["commit-tree", tree, "-p", f.base], {
+        ...f.options,
+        input: "Non-regular entry\n",
+        env: {
+          GIT_AUTHOR_NAME: "Test",
+          GIT_AUTHOR_EMAIL: "test@example.com",
+          GIT_COMMITTER_NAME: "Test",
+          GIT_COMMITTER_EMAIL: "test@example.com",
+        },
+      })
+    ).stdout.trim();
+    for (const operation of [
+      { type: "modify", path: "entry", content: "replacement" },
+      { type: "rename", from: "entry", to: "new", content: "replacement" },
+    ] satisfies Operation[]) {
+      if (mode === "160000") {
+        await expect(materialize(f.repo, base, [operation])).rejects.toMatchObject({
+          code: "VALIDATION",
+          details: { path: "entry", reason: "not_a_file" },
+        });
+      } else {
+        const modified = await materialize(f.repo, base, [operation]);
+        expect(await f.read(modified, operation.type === "rename" ? "new" : "entry")).toBe(
+          "replacement",
+        );
+        expect((await git(["ls-tree", modified], f.options)).stdout).toMatch(/^120000 blob /);
+      }
+    }
+    const renamed = await materialize(f.repo, base, [{ type: "rename", from: "entry", to: "new" }]);
+    expect((await git(["ls-tree", renamed], f.options)).stdout).toBe(
+      `${mode} ${mode === "160000" ? "commit" : "blob"} ${sha}\tnew\n`,
+    );
   });
 
   it("cleans temporary indexes on success, validation failure and Git failure", async () => {
