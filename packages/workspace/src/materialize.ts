@@ -3,11 +3,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CrossoverError } from "@crossover/protocol";
 import { git, GitError } from "./git.js";
-import type { Operation } from "./operations.js";
+import type { ContentEncoding, Operation } from "./operations.js";
 import { normalizePath } from "./path.js";
 import { patchFailure, validatePatch } from "./patch.js";
 import { validateIntroducedPaths } from "./ignore.js";
 import { validateFileSize } from "./binary.js";
+import { contentBytes, contentSize } from "./content.js";
 
 type Entry = { mode: string; sha: string };
 type Reason = "exists" | "missing" | "rename_target_exists" | "not_a_file" | "patch_path_mismatch";
@@ -39,7 +40,7 @@ export async function materialize(
     if ("content" in operation && operation.content !== undefined)
       validateFileSize(
         operation.type === "rename" ? operation.to : operation.path,
-        Buffer.byteLength(operation.content),
+        contentSize(operation.content, operation.encoding),
       );
   }
   const dir = await mkdtemp(join(tmpdir(), "crossover-index-"));
@@ -102,14 +103,20 @@ export async function materialize(
         invalid(path, reason);
     };
     const contents = normalized.filter(
-      (operation): operation is Operation & { content: string } =>
-        "content" in operation && operation.content !== undefined,
+      (
+        operation,
+      ): operation is Operation & {
+        content: string | Buffer;
+        encoding?: ContentEncoding | undefined;
+      } => "content" in operation && operation.content !== undefined,
     );
     const blobs = new Map<Operation, string>();
     if (contents.length) {
       const files = contents.map((_, index) => join(dir, `blob-${index}`));
       await Promise.all(
-        contents.map((operation, index) => writeFile(files[index]!, operation.content)),
+        contents.map((operation, index) =>
+          writeFile(files[index]!, contentBytes(operation.content, operation.encoding)),
+        ),
       );
       // Generated temp paths contain no newlines; filters never alter submitted text.
       const hashes = (
