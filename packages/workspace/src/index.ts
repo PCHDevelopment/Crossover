@@ -2,3 +2,5 @@ export { git, assertGitVersion, GitError } from "./git.js";
 export type { GitOptions, GitResult } from "./git.js";
 export { normalizePath, PathValidationError } from "./path.js";
 export { initRoomRepo } from "./repo.js";
+export { materialize } from "./materialize.js";
+export type { Operation } from "./operations.js";

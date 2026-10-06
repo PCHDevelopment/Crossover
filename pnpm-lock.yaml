@@ -42,7 +42,11 @@ importers:
 
   packages/protocol: {}
 
-  packages/workspace: {}
+  packages/workspace:
+    dependencies:
+      '@crossover/protocol':
+        specifier: workspace:*
+        version: link:../protocol
 
 packages:
 
