@@ -1,4 +1,4 @@
-import type { Pool } from "@crossover/db";
+import type { Pool, PoolClient } from "@crossover/db";
 import { acquireLease, DEFAULT_LEASE_TTL_MS, releaseLease, renewLease } from "@crossover/ledger";
 import { CrossoverError } from "@crossover/protocol";
 
@@ -43,6 +43,26 @@ export class RoomLeases {
     }
     this.held.set(roomId, lease.fencing_token);
     return lease.fencing_token;
+  }
+
+  /**
+   * Acquire the lease for a room that is being created, on `db` (the creating transaction),
+   * without remembering it: the row only exists if that transaction commits, so call
+   * {@link adopt} afterwards. Throws `STALE_FENCE` if another node somehow owns the room.
+   */
+  async acquireFor(db: Pool | PoolClient, roomId: string): Promise<number> {
+    const lease = await acquireLease(db, roomId, this.nodeId, this.ttlMs);
+    if (!lease) {
+      throw new CrossoverError("STALE_FENCE", `Room ${roomId} is owned by another node`, {
+        details: { room_id: roomId, node_id: this.nodeId },
+      });
+    }
+    return lease.fencing_token;
+  }
+
+  /** Remember a lease acquired with {@link acquireFor} once its transaction has committed. */
+  adopt(roomId: string, token: number): void {
+    this.held.set(roomId, token);
   }
 
   /** Forget a room's token (after a `STALE_FENCE`), so the next `ensure` re-acquires. */
