@@ -7,6 +7,7 @@ export interface GitOptions {
   timeoutMs: number;
   env?: NodeJS.ProcessEnv;
   encoding?: "utf8" | "buffer";
+  maxBuffer?: number;
 }
 
 export interface GitResult<T extends string | Buffer = string> {
@@ -69,7 +70,7 @@ export function git(
         encoding: options.encoding === "buffer" ? "buffer" : "utf8",
         timeout: options.timeoutMs,
         killSignal: "SIGKILL",
-        maxBuffer: 32 * 1024 * 1024,
+        maxBuffer: options.maxBuffer ?? 32 * 1024 * 1024,
       },
       (error, stdout, stderr) => {
         if (error) {

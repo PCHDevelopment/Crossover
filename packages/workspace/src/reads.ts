@@ -7,7 +7,7 @@ import { git } from "./git.js";
 import { normalizePath, PathValidationError } from "./path.js";
 
 const revision = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional();
-function pathSchema(root = false) {
+export function pathSchema(root = false) {
   return z.string().transform((value, ctx) => {
     if (root && ["", ".", "./"].includes(value)) return "";
     try {
@@ -55,7 +55,7 @@ async function entries(repo: string, tree: string, path?: string): Promise<Entry
       };
     });
 }
-async function snapshot(ctx: CommandContext, selected?: number) {
+export async function snapshot(ctx: CommandContext, selected?: number) {
   const ws = (
     await ctx.client.query<{ id: string; repo_path: string }>(
       "SELECT id, repo_path FROM workspaces WHERE room_id = $1",
