@@ -11,6 +11,8 @@ import { isId, type Id } from "./ids.js";
  * - Subscriptions, listings, reads and diffs are read-only.
  */
 export const METHODS = {
+  /** Not in the §16.1 list: creates a room, so it has no room to be scoped to (T202). */
+  "room.create": { mutating: true },
   "room.get_state": { mutating: false },
   "room.digest": { mutating: false },
   "room.events.subscribe": { mutating: false },

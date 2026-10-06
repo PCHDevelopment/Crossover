@@ -5,6 +5,7 @@ import {
   CrossoverError,
   isMethodName,
   METHODS,
+  newId,
   type CommandEnvelope,
   type EventType,
   type RoomEvent,
@@ -47,6 +48,37 @@ export interface CommandContext {
    * update (§19.4 step 3) and for publishing events (T118).
    */
   afterCommit(callback: () => void | Promise<void>): void;
+}
+
+/** A platform user acting outside any room, e.g. to create one (no participant exists yet). */
+export interface UserPrincipal {
+  user_id: string;
+  display_name: string;
+}
+
+/** What a roomless command gets while it runs inside the transaction that creates its room. */
+export interface RoomlessContext {
+  client: PoolClient;
+  user: UserPrincipal;
+  /** The id reserved for the room this command creates; `execute` must insert that room. */
+  room_id: string;
+  command_id: string;
+  idempotency_key: string;
+  /** Run once the transaction has committed (see `CommandContext.afterCommit`). */
+  afterCommit(callback: () => void | Promise<void>): void;
+}
+
+export interface RoomlessCommandDefinition<S extends z.ZodType, R> {
+  /** A method in the catalog, marked mutating. */
+  method: string;
+  params: S;
+  /**
+   * Must create the room row with id `ctx.room_id` (and whatever else it needs, such as its
+   * owner). The dispatcher then takes the new room's lease and appends the returned events
+   * as sequence 1, 2, … in the same transaction. Events need an explicit `actor_id`: there is
+   * no principal yet.
+   */
+  execute(ctx: RoomlessContext, params: z.infer<S>): Promise<CommandResult<R>>;
 }
 
 export interface CommandResult<R> {
@@ -140,6 +172,10 @@ interface Registered {
  */
 export class Dispatcher {
   private readonly commands = new Map<string, Registered>();
+  private readonly roomlessCommands = new Map<
+    string,
+    RoomlessCommandDefinition<z.ZodType, unknown>
+  >();
   private readonly pool: Pool;
   private readonly authorize: Authorizer;
   private readonly onAfterCommitError: NonNullable<DispatcherOptions["onAfterCommitError"]>;
@@ -175,13 +211,34 @@ export class Dispatcher {
         `registerCommand: ${def.method} is ${METHODS[def.method].mutating ? "mutating" : "read-only"} in the catalog but registered with mutating: ${def.mutating}`,
       );
     }
-    if (this.commands.has(def.method)) {
+    if (this.commands.has(def.method) || this.roomlessCommands.has(def.method)) {
       throw new Error(`registerCommand: ${def.method} is already registered`);
     }
     this.commands.set(def.method, {
       def: def as unknown as CommandDefinition<z.ZodType, unknown>,
       action: def.action ?? def.method,
     });
+  }
+
+  /**
+   * Register a command that creates its own room (so there is no room to scope it to yet),
+   * called through {@link dispatchRoomless}. A method is either room-bound or roomless:
+   * `dispatch` answers `NOT_FOUND` for a roomless method and vice versa.
+   */
+  registerRoomlessCommand<S extends z.ZodType, R>(def: RoomlessCommandDefinition<S, R>): void {
+    if (!isMethodName(def.method)) {
+      throw new Error(`registerRoomlessCommand: "${def.method}" is not in the method catalog`);
+    }
+    if (!METHODS[def.method].mutating) {
+      throw new Error(`registerRoomlessCommand: ${def.method} must be a mutating method`);
+    }
+    if (this.commands.has(def.method) || this.roomlessCommands.has(def.method)) {
+      throw new Error(`registerRoomlessCommand: ${def.method} is already registered`);
+    }
+    this.roomlessCommands.set(
+      def.method,
+      def as unknown as RoomlessCommandDefinition<z.ZodType, unknown>,
+    );
   }
 
   async dispatch(principal: Principal, envelopeInput: unknown): Promise<DispatchResult> {
@@ -208,6 +265,138 @@ export class Dispatcher {
     return def.mutating
       ? this.runMutating(principal, envelope, def, action, params)
       : this.runRead(principal, envelope, def, action, params);
+  }
+
+  /**
+   * Run a roomless command (e.g. `room.create`) for a platform user. Like a mutating
+   * command, but the room doesn't exist yet: one transaction contains the idempotency check
+   * (scoped to the user), `execute` (which inserts the room), the new room's lease (acquired
+   * inside the transaction) and the events (sequence 1, 2, …). After the commit this node
+   * keeps the lease, so the room's first command doesn't need to acquire it again.
+   *
+   * Creating a room needs no capability beyond being an authenticated user; there is no
+   * authorizer hook here.
+   */
+  async dispatchRoomless(user: UserPrincipal, envelopeInput: unknown): Promise<DispatchResult> {
+    if (
+      !user ||
+      typeof user.user_id !== "string" ||
+      user.user_id === "" ||
+      typeof user.display_name !== "string" ||
+      user.display_name === ""
+    ) {
+      throw validation("A user with a user_id and display_name is required", []);
+    }
+    const parsedEnvelope = commandEnvelopeSchema.safeParse(envelopeInput);
+    if (!parsedEnvelope.success) {
+      throw validation("Invalid command envelope", parsedEnvelope.error.issues);
+    }
+    const envelope = parsedEnvelope.data;
+
+    const def = this.roomlessCommands.get(envelope.method);
+    if (!def) {
+      throw new CrossoverError("NOT_FOUND", `Unknown method ${envelope.method}`, {
+        details: { method: envelope.method },
+      });
+    }
+    const parsedParams = def.params.safeParse(envelope.params);
+    if (!parsedParams.success) {
+      throw validation(`Invalid params for ${envelope.method}`, parsedParams.error.issues);
+    }
+    const params: unknown = parsedParams.data;
+    const key = envelope.idempotency_key;
+    if (key === undefined) throw validation("idempotency_key is required", []);
+
+    let requestHash: string;
+    try {
+      requestHash = hashRequest({
+        user_id: user.user_id,
+        method: envelope.method,
+        params: envelope.params,
+      });
+    } catch (err) {
+      throw validation("params must be plain JSON data", [{ message: (err as Error).message }]);
+    }
+
+    // The room id is reserved up front. A replay returns the stored response (which names the
+    // room that was created the first time), so this id is simply unused then.
+    const room_id = newId("room");
+    const afterCommit: (() => void | Promise<void>)[] = [];
+    let token: number | undefined;
+
+    const result = await withTransaction(this.pool, async (client): Promise<DispatchResult> => {
+      let ran = false;
+      const stored = await withIdempotency(
+        client,
+        `user:${user.user_id}`,
+        key,
+        requestHash,
+        async () => {
+          ran = true;
+          const ctx: RoomlessContext = {
+            client,
+            user,
+            room_id,
+            command_id: envelope.id,
+            idempotency_key: key,
+            afterCommit: (callback) => void afterCommit.push(callback),
+          };
+          const out = await def.execute(ctx, params);
+          if (out.afterCommit) afterCommit.push(out.afterCommit);
+          // The room row exists now, so its lease can be taken (and seen by appendEvents)
+          // inside this transaction.
+          token = await this.leases.acquireFor(client, room_id);
+          const emitted: NewEvent[] = (out.events ?? []).map((e) => {
+            if (e.actor_id === undefined) {
+              throw new Error(`${envelope.method}: events of a roomless command need an actor_id`);
+            }
+            return {
+              type: e.type,
+              actor_id: e.actor_id,
+              causation_id: envelope.id,
+              ...(e.payload !== undefined ? { payload: e.payload } : {}),
+              ...(e.schema_version !== undefined ? { schema_version: e.schema_version } : {}),
+            };
+          });
+          const events = await appendEvents(client, room_id, emitted, token);
+          return { response: out.response, events };
+        },
+      );
+      return { response: stored.response, events: stored.events, replayed: !ran };
+    });
+
+    if (!result.replayed && token !== undefined) this.leases.adopt(room_id, token);
+    // Callbacks and publishing happen outside any room actor here: the room is new and nothing
+    // else can be addressing it yet.
+    await this.afterCommitWork(room_id, envelope, afterCommit, result);
+    return result;
+  }
+
+  /**
+   * After a commit: run the command's `afterCommit` callbacks on the actor, so no other
+   * command for the room can slip in between the commit and (say) the Git ref update (a
+   * replay registers none), then publish the events (never for a replay).
+   */
+  private async afterCommitWork(
+    room_id: string,
+    envelope: CommandEnvelope,
+    callbacks: readonly (() => void | Promise<void>)[],
+    result: DispatchResult,
+  ): Promise<void> {
+    for (const callback of callbacks) {
+      try {
+        await callback();
+      } catch (error) {
+        this.onAfterCommitError(error, {
+          method: envelope.method,
+          command_id: envelope.id,
+          room_id,
+        });
+      }
+    }
+    if (this.publisher && !result.replayed && result.events.length > 0) {
+      await this.publish(this.publisher, room_id, envelope, result.events);
+    }
   }
 
   private async publish(
@@ -363,23 +552,7 @@ export class Dispatcher {
         throw err;
       }
 
-      // Committed. Run the callbacks on the actor, so no other command for this room can
-      // slip in between the commit and (say) the Git ref update. A replay registers none.
-      for (const callback of afterCommit) {
-        try {
-          await callback();
-        } catch (error) {
-          this.onAfterCommitError(error, {
-            method: envelope.method,
-            command_id: envelope.id,
-            room_id,
-          });
-        }
-      }
-
-      if (this.publisher && !result.replayed && result.events.length > 0) {
-        await this.publish(this.publisher, room_id, envelope, result.events);
-      }
+      await this.afterCommitWork(room_id, envelope, afterCommit, result);
       return result;
     });
   }
