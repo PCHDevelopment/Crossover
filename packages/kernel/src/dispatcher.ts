@@ -91,6 +91,13 @@ export interface CommandResult<R> {
    * finished executing. Runs after any callbacks registered through `ctx`.
    */
   afterCommit?: () => void | Promise<void>;
+  /**
+   * A secret to hand to the caller exactly once, such as a freshly minted token. Returned as
+   * `DispatchResult.one_time` on the first execution only: it is **never** stored with the
+   * idempotency key, appended to the ledger, published, or logged, so an idempotent replay
+   * gets the stored `response` but no `one_time`. Mutating room commands only.
+   */
+  oneTime?: unknown;
 }
 
 export interface CommandDefinition<S extends z.ZodType, R> {
@@ -125,6 +132,8 @@ export interface DispatchResult<R = unknown> {
   events: RoomEvent[];
   /** True when an idempotent duplicate returned the stored result; nothing ran or was written. */
   replayed: boolean;
+  /** See `CommandResult.oneTime`. Present only on the first execution of a command. */
+  one_time?: unknown;
 }
 
 export interface DispatcherOptions {
@@ -495,6 +504,7 @@ export class Dispatcher {
     return this.actors.get(room_id).submit(async () => {
       const token = await this.leases.ensure(room_id);
       const afterCommit: (() => void | Promise<void>)[] = [];
+      let oneTime: unknown;
       let result: DispatchResult;
       try {
         result = await withTransaction(this.pool, async (client): Promise<DispatchResult> => {
@@ -532,6 +542,7 @@ export class Dispatcher {
               };
               const out = await def.execute(ctx, params);
               if (out.afterCommit) afterCommit.push(out.afterCommit);
+              oneTime = out.oneTime;
               const emitted: NewEvent[] = (out.events ?? []).map((e) => ({
                 type: e.type,
                 actor_id: e.actor_id ?? principal.participant_id,
@@ -553,7 +564,8 @@ export class Dispatcher {
       }
 
       await this.afterCommitWork(room_id, envelope, afterCommit, result);
-      return result;
+      // The one-time secret rides back to this caller only; it is not part of `stored`.
+      return oneTime === undefined || result.replayed ? result : { ...result, one_time: oneTime };
     });
   }
 }
