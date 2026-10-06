@@ -68,6 +68,7 @@ Migrations live in `packages/db/migrations` and are numbered globally (`0001_…
 - No secrets in code, tests, fixtures or logs. Tokens are stored hashed.
 - Tests: unit tests for logic; integration tests against real PostgreSQL (T103) for anything touching the DB. Concurrency claims (atomic claims, gap-free sequences) need a test that actually races.
 - Public functions get a short doc comment when the name doesn't say it all. Reference the architecture section (`§8.3`) where it explains _why_.
+- On every room lease acquisition (including failover), run workspace `reconcileRef(pool, roomId)` before the first command (§19.4, §26). T712 wires this through T713's lease-acquired hook; PostgreSQL history is authoritative, and failed recovery prevents activating that room. The hook repairs Git's cached ref without changing workspace rows or emitting events.
 
 ## Local setup
 
