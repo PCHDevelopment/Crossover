@@ -9,3 +9,6 @@ export type { MergeResult, MergeFile, MergeStage, MergeMessage } from "./merge.j
 export { classifyConflicts } from "./conflicts.js";
 export type { ConflictKind, ClassifiedConflict } from "./conflicts.js";
 export type { ConflictHunk, LineRange } from "./hunks.js";
+export { changesetParamsSchema } from "./changeset.js";
+export type { ChangesetParams } from "./changeset.js";
+export { provisionWorkspace } from "./provision.js";

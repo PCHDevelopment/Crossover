@@ -78,9 +78,15 @@ importers:
 
   packages/workspace:
     dependencies:
+      '@crossover/db':
+        specifier: workspace:*
+        version: link:../db
       '@crossover/protocol':
         specifier: workspace:*
         version: link:../protocol
+      zod:
+        specifier: ^4.6.5
+        version: 4.6.5
 
 packages:
 
