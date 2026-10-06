@@ -19,7 +19,7 @@ Conventions are in `docs/ENGINEERING.md`. Section references (§) point to `docs
 | M4 Messages, inbox, decisions, memory | T401–T412 | S1 (T401–T403, T410), S2 (T404–T409, T411–T412) |
 | M5 Workspace engine                   | T501–T520 | S2                                              |
 | M6 Conflicts and health               | T601–T610 | S2                                              |
-| M7 Gateway, MCP, end-to-end           | T701–T713 | S1 (T701–T706, T713), S2 (T707–T711), O1 (T712) |
+| M7 Gateway, MCP, end-to-end           | T701–T713 | S1 (T701–T709, T713), S2 (T710–T711), O1 (T712) |
 | M8 Git interoperability (§24)         | T801–T806 | S2                                              |
 | M9 Safety controls (§22–23)           | T901–T906 | S1 (T902, T904–T906), S2 (T901, T903)           |
 
@@ -853,7 +853,7 @@ POST to the manifest's `wake_webhook_url` on new inbox items, HMAC-SHA256 signed
 
 - Signature verifiable with a documented algorithm; rate limit tested with a fake clock.
 
-### T707 · MCP server skeleton — S2
+### T707 · MCP server skeleton — S1
 
 Deps: T701 · Migration: —
 
@@ -861,13 +861,13 @@ Create `packages/mcp` with `@modelcontextprotocol/sdk`, Streamable HTTP transpor
 
 - `tools/list` works for an authenticated agent; unauthenticated → 401.
 
-### T708 · MCP task tools — S2
+### T708 · MCP task tools — S1
 
 Deps: T707, T312 · Migration: —
 
 Tools wrapping every `tasks.*` command, with JSON schemas derived from the zod schemas (no hand-copied schemas).
 
-### T709 · MCP collaboration tools — S2
+### T709 · MCP collaboration tools — S1
 
 Deps: T707, T403, T409, T406 · Migration: —
 
