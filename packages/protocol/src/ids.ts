@@ -3,6 +3,7 @@ import { randomFillSync } from "node:crypto";
 /** Entity ID prefixes (ENGINEERING.md, T105). */
 export const ID_PREFIXES = [
   "room",
+  "ws",
   "part",
   "task",
   "dec",

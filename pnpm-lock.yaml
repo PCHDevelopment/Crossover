@@ -81,6 +81,9 @@ importers:
       '@crossover/db':
         specifier: workspace:*
         version: link:../db
+      '@crossover/kernel':
+        specifier: workspace:*
+        version: link:../kernel
       '@crossover/protocol':
         specifier: workspace:*
         version: link:../protocol

@@ -12,3 +12,5 @@ export type { ConflictHunk, LineRange } from "./hunks.js";
 export { changesetParamsSchema } from "./changeset.js";
 export type { ChangesetParams } from "./changeset.js";
 export { provisionWorkspace } from "./provision.js";
+export { registerWorkspaceCommands } from "./apply.js";
+export type { WorkspaceCommandDeps, ApplyResponse } from "./apply.js";

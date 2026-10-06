@@ -12,6 +12,7 @@
   "dependencies": {
     "@crossover/protocol": "workspace:*",
     "@crossover/db": "workspace:*",
+    "@crossover/kernel": "workspace:*",
     "zod": "^4.6.5"
   },
   "scripts": {

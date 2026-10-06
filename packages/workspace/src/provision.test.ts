@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { withTransaction } from "@crossover/db";
 import { createTestDatabase, type TestDatabase } from "@crossover/db/testing";
-import { newId } from "@crossover/protocol";
+import { isId, newId } from "@crossover/protocol";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { git } from "./git.js";
 import { provisionWorkspace } from "./provision.js";
@@ -29,6 +29,7 @@ it("serializes racing provisioning and preserves the existing workspace on retry
     withTransaction(db.pool, (client) => provisionWorkspace(client, room, root));
   const ids = await Promise.all([provision(), provision()]);
   expect(ids[0]).toBe(ids[1]);
+  expect(isId(ids[0], "ws")).toBe(true);
   const { rows } = await db.pool.query(
     `SELECT w.repo_path, r.commit_sha FROM workspaces w JOIN workspace_revisions r
      ON r.workspace_id = w.id AND r.room_id = w.room_id WHERE w.room_id = $1 AND r.revision = 0`,
