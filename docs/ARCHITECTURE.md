@@ -851,6 +851,7 @@ The native Room Protocol models the collaboration domain directly. Every operati
 
 ```text
 ROOM
+  room.create              slug, name, objective (platform user, no room yet; creator becomes Owner)
   room.get_state           view=summary|full, paginated sections
   room.digest              since=sequence (§17.3)
   room.events.subscribe    filters (§17.1), after=sequence

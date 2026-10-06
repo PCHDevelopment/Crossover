@@ -337,6 +337,16 @@ Every `FORBIDDEN` from `authorize()` appends `capability.denied { action, resour
 
 - A denied command leaves exactly one `capability.denied` event and no other change.
 
+### T216 · Platform user accounts — S1
+
+Deps: T202, T701 · Migration: `0017_users`
+
+Minimal platform identity for humans (§15.3): `users(id usr_…, display_name, provider, provider_subject, created_at)` with unique `(provider, provider_subject)`. A development login (`provider = 'dev'`, enabled only by config) issues a user session token; GitHub/Google OAuth plug into the same table later. The gateway resolves the user principal for roomless commands (`room.create`) from it, and `participants.user_id` references `users.id`.
+
+- Dev login is refused unless explicitly enabled.
+- `room.create` through the gateway records the creating user as the owner's `user_id`.
+- Same provider subject twice resolves to the same user.
+
 ---
 
 ## M3 Tasks — S1
