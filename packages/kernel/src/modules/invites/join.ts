@@ -94,6 +94,23 @@ export function registerJoinCommand(dispatcher: Dispatcher): void {
       const invite = rows[0];
       if (!invite) throw invalid();
 
+      // Joining adds a participant and an event, so it is a mutation: refused in a frozen or
+      // archived room (§5), with the invite left unspent.
+      const room = await ctx.client.query<{ status: string }>(
+        "SELECT status FROM rooms WHERE id = $1",
+        [ctx.room_id],
+      );
+      const roomStatus = room.rows[0]?.status;
+      if (roomStatus !== "ACTIVE") {
+        throw new CrossoverError(
+          roomStatus === "DELETED" ? "UNAUTHENTICATED" : "ROOM_PAUSED",
+          roomStatus === "DELETED"
+            ? "Invalid or expired token"
+            : `Room is ${roomStatus?.toLowerCase()}`,
+          roomStatus === "DELETED" ? {} : { details: { room_status: roomStatus } },
+        );
+      }
+
       const { manifest } = params;
       const participantId = newId("part");
       await ctx.client.query(
