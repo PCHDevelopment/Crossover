@@ -11,10 +11,14 @@ import { updateCanonicalRef } from "./reconcile.js";
 import { registerWorkspaceReads } from "./reads.js";
 import { registerWorkspaceHistory } from "./history.js";
 import { registerWorkspaceBlame } from "./blame.js";
+import { registerWorkspaceSearch } from "./search.js";
+import { withSearchTree } from "./search-tree.js";
 
 export interface WorkspaceCommandDeps {
   /** Failure is reported after commit; startup reconcileRef restores the DB-authoritative head. */
   updateCanonicalRef?: (repo: string, commit: string, expected: string) => Promise<void>;
+  /** A failed checkout refresh is repaired by the next search against the committed DB head. */
+  refreshSearchTree?: (repo: string, commit: string) => Promise<void>;
 }
 
 export type ApplyResponse =
@@ -36,6 +40,7 @@ export function registerWorkspaceCommands(
   registerWorkspaceReads(dispatcher);
   registerWorkspaceHistory(dispatcher);
   registerWorkspaceBlame(dispatcher);
+  registerWorkspaceSearch(dispatcher);
 }
 
 async function apply(
@@ -157,6 +162,10 @@ async function apply(
   );
   ctx.afterCommit(async () => {
     await (deps.updateCanonicalRef ?? updateCanonicalRef)(ws.repo_path, commit, head.commit_sha);
+  });
+  ctx.afterCommit(async () => {
+    if (deps.refreshSearchTree) await deps.refreshSearchTree(ws.repo_path, commit);
+    else await withSearchTree(ws.repo_path, commit, async () => {});
   });
   return {
     response: { status: "APPLIED" as const, changeset_id: id, applied_revision: revision },
