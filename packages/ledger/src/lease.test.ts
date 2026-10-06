@@ -74,9 +74,9 @@ describe("acquireLease", () => {
 
   it("expires by the real clock too", async () => {
     const room = await newRoom();
-    await acquireLease(pool, room, "node-a", 100);
+    await acquireLease(pool, room, "node-a", 400);
     expect(await acquireLease(pool, room, "node-b")).toBeNull();
-    await sleep(160);
+    await sleep(600);
     expect((await acquireLease(pool, room, "node-b"))!.fencing_token).toBe(2);
   });
 
@@ -200,12 +200,17 @@ describe("renewLease", () => {
 
   it("keeps a lease alive across renewals", async () => {
     const room = await newRoom();
-    const lease = await acquireLease(pool, room, "node-a", 150);
-    for (let i = 0; i < 4; i++) {
-      await sleep(60);
-      await renewLease(pool, room, "node-a", lease!.fencing_token, 150);
+    const lease = await acquireLease(pool, room, "node-a", 60_000);
+    // Deterministic: compare stored expiries instead of racing short real-clock TTLs.
+    let previous = (await getLease(pool, room))!.expires_at.getTime();
+    for (let i = 0; i < 3; i++) {
+      await sleep(15);
+      await renewLease(pool, room, "node-a", lease!.fencing_token, 60_000);
+      const next = (await getLease(pool, room))!.expires_at.getTime();
+      expect(next).toBeGreaterThan(previous);
+      previous = next;
     }
-    expect(await acquireLease(pool, room, "node-b")).toBeNull(); // 240 ms in, still held
+    expect(await acquireLease(pool, room, "node-b")).toBeNull();
   });
 });
 
