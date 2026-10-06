@@ -375,7 +375,7 @@ describe("room.transfer_lead and room.accept_lead", () => {
 
   it("asks the dispatcher's configured authorizer whether the recipient can accept, as the recipient", async () => {
     const asked: { who: string; action: string; room: unknown; method: string }[] = [];
-    let deny: string | undefined;
+    const denied = new Set<string>();
     const spy: Authorizer = async (principal, action, resource, context) => {
       if (action === "room.accept_lead") {
         asked.push({
@@ -384,7 +384,7 @@ describe("room.transfer_lead and room.accept_lead", () => {
           room: resource.room_id,
           method: context.method,
         });
-        if (principal.participant_id === deny) {
+        if (denied.has(principal.participant_id)) {
           throw new CrossoverError("FORBIDDEN", "stub says no");
         }
         return;
@@ -402,7 +402,7 @@ describe("room.transfer_lead and room.accept_lead", () => {
         method: "room.transfer_lead",
       },
     ]);
-    deny = r.human.participant_id;
+    denied.add(r.human.participant_id);
     const err = await rejects(offer(r, r.agent, r.human), "VALIDATION");
     expect(err.message).toMatch(/can't accept/);
   });
