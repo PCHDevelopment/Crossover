@@ -1,5 +1,5 @@
 import type { PoolClient } from "@crossover/db";
-import { CrossoverError } from "@crossover/protocol";
+import { CrossoverError, newId } from "@crossover/protocol";
 import { git } from "./git.js";
 import { initRoomRepo } from "./repo.js";
 
@@ -23,7 +23,7 @@ export async function provisionWorkspace(
   const { rows } = await client.query<{ id: string }>(
     `INSERT INTO workspaces (id, room_id, repo_path) VALUES ($1, $2, $3)
      ON CONFLICT (room_id) DO UPDATE SET room_id = EXCLUDED.room_id RETURNING id`,
-    [`ws_${roomId}`, roomId, repo],
+    [newId("ws"), roomId, repo],
   );
   const id = rows[0]!.id;
   await client.query(
