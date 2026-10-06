@@ -10,6 +10,7 @@ import { treeChanges } from "./tree-changes.js";
 import { updateCanonicalRef } from "./reconcile.js";
 import { registerWorkspaceReads } from "./reads.js";
 import { registerWorkspaceHistory } from "./history.js";
+import { registerWorkspaceBlame } from "./blame.js";
 
 export interface WorkspaceCommandDeps {
   /** Failure is reported after commit; startup reconcileRef restores the DB-authoritative head. */
@@ -34,6 +35,7 @@ export function registerWorkspaceCommands(
   });
   registerWorkspaceReads(dispatcher);
   registerWorkspaceHistory(dispatcher);
+  registerWorkspaceBlame(dispatcher);
 }
 
 async function apply(
