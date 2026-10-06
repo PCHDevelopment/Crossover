@@ -58,10 +58,12 @@ describe("git", () => {
   });
 
   it("keeps error diagnostics as text in buffer mode", async () => {
-    const f = await fixture('process.stderr.write("bad blob"); process.exit(7);');
+    const f = await fixture(
+      'process.stdout.write(Buffer.from([0, 255])); process.stderr.write("bad blob"); process.exit(7);',
+    );
     await expect(
       git([], { env: f.env, encoding: "buffer", timeoutMs: 5000 }),
-    ).rejects.toMatchObject({ exitCode: 7, stderr: "bad blob" });
+    ).rejects.toMatchObject({ exitCode: 7, stderr: "bad blob", stdout: Buffer.from([0, 255]) });
   });
 
   it("runs Git with stdin and an explicit bare repository", async () => {
@@ -95,11 +97,14 @@ describe("git", () => {
   });
 
   it("retains the exit code and stderr in a typed error", async () => {
-    const f = await fixture('process.stderr.write("bad revision"); process.exit(7);');
+    const f = await fixture(
+      'process.stdout.write("conflict output"); process.stderr.write("bad revision"); process.exit(7);',
+    );
     await expect(git(["status"], { env: f.env, timeoutMs: 5000 })).rejects.toMatchObject({
       name: "GitError",
       exitCode: 7,
       stderr: "bad revision",
+      stdout: "conflict output",
       timedOut: false,
     });
   });
@@ -118,7 +123,7 @@ describe("git", () => {
 });
 
 describe("assertGitVersion", () => {
-  it.each(["2.38.0", "2.51.1", "3.0.0", "2.39.3 (Apple Git-145)"])(
+  it.each(["2.40.0", "2.51.1", "3.0.0", "2.40.3 (Apple Git-145)"])(
     "accepts %s",
     async (version) => {
       const f = await fixture(
@@ -127,7 +132,7 @@ describe("assertGitVersion", () => {
       await expect(assertGitVersion({ env: f.env, timeoutMs: 5000 })).resolves.toBeUndefined();
     },
   );
-  it.each(["2.37.9", "1.99.0", "unrecognized"])("rejects %s", async (version) => {
+  it.each(["2.39.9", "2.38.0", "1.99.0", "unrecognized"])("rejects %s", async (version) => {
     const f = await fixture(
       `process.stdout.write(${JSON.stringify("git version ")} + ${JSON.stringify(version)});`,
     );

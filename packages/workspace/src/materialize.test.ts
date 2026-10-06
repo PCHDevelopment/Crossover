@@ -13,6 +13,8 @@ const dirs: string[] = [];
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "crossover-materialize-"));
   dirs.push(root);
+  // Other test files also materialize commits concurrently; observe only this fixture's indexes.
+  vi.stubEnv("TMPDIR", root);
   const repo = await initRoomRepo(root, "room_test");
   const options = { gitDir: repo, timeoutMs: 5000 };
   const base = (await git(["rev-parse", "refs/room/canonical"], options)).stdout.trim();
@@ -23,6 +25,7 @@ async function fixture() {
 
 afterEach(async () => {
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
