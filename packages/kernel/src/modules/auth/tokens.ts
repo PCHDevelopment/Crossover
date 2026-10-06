@@ -148,8 +148,9 @@ export async function revokeFamily(db: Db, familyId: string): Promise<number> {
 }
 
 /**
- * Revoke every token a participant holds (removal or pause, §15.3). Returns how many were
- * newly revoked.
+ * Revoke every token a participant holds, for when they are removed (§15.3). Pausing does
+ * not revoke tokens: a paused participant keeps authenticating and its commands are refused
+ * with `PARTICIPANT_PAUSED`. Returns how many were newly revoked.
  */
 export async function revokeParticipantTokens(db: Db, participantId: string): Promise<number> {
   const { rowCount } = await db.query(

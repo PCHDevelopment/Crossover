@@ -47,7 +47,16 @@ async function fixture(authorize: Authorizer = allowAll) {
     params: { source: "API", message: "Edit", base_workspace_revision: base, operations },
   });
   const dispatch = (input: ReturnType<typeof request>) =>
-    dispatcher.dispatch({ room_id: room, participant_id: "actor" }, input);
+    dispatcher.dispatch(
+      {
+        room_id: room,
+        participant_id: "actor",
+        kind: "HUMAN",
+        authority: "MEMBER",
+        role: "DEVELOPER",
+      },
+      input,
+    );
   const apply = (operations: Operation[], base = 0) => dispatch(request(operations, base));
   const rowsFor = async (
     table: "changesets" | "workspace_revisions" | "file_revisions" | "events",

@@ -62,7 +62,13 @@ async function fixture() {
   });
   const apply = (path: string, base: number) =>
     dispatcher.dispatch(
-      { participant_id: "actor", room_id: room },
+      {
+        participant_id: "actor",
+        room_id: room,
+        kind: "HUMAN",
+        authority: "MEMBER",
+        role: "DEVELOPER",
+      },
       {
         id: newId("cmd"),
         method: "workspace.apply_changeset",
