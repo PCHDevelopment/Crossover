@@ -41,3 +41,38 @@ jobs:
       - run: pnpm lint
       - run: pnpm typecheck
       - run: pnpm test
+
+  workspace-benchmark:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: crossover
+          POSTGRES_PASSWORD: crossover
+          POSTGRES_DB: crossover
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U crossover"
+          --health-interval 2s
+          --health-retries 15
+    env:
+      DATABASE_URL: postgres://crossover:crossover@localhost:5432/crossover
+      BENCH_OUTPUT: ${{ github.workspace }}/benchmark-results.json
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm --filter @crossover/workspace bench
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: workspace-benchmark
+          path: benchmark-results.json
