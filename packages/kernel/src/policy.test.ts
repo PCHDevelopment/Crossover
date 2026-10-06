@@ -4,7 +4,8 @@ import { authorize } from "@crossover/policy";
 import { newId } from "@crossover/protocol";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
-import { Dispatcher, type Principal } from "./dispatcher.js";
+import { Dispatcher } from "./dispatcher.js";
+import type { Principal } from "./principal.js";
 
 // The real policy wired into the real dispatcher: commands declare their capability as the
 // `action`, and `authorize` from @crossover/policy is the dispatcher's authorizer.
@@ -39,8 +40,15 @@ async function login(roomId: string, role: string, authority = "MEMBER") {
      VALUES ($1, $2, 'HUMAN', 'Ada', $3, $4, 'ACTIVE')`,
     [id, roomId, authority, role],
   );
-  // Only who and where; the policy re-reads role and authority from the database.
-  const principal: Principal = { participant_id: id, room_id: roomId };
+  // The snapshot `authenticate` would return. The policy re-reads role and authority from
+  // the database, so these fields are not what decides.
+  const principal: Principal = {
+    participant_id: id,
+    room_id: roomId,
+    kind: "HUMAN",
+    authority: authority as Principal["authority"],
+    role: role as Principal["role"],
+  };
   return { id, principal };
 }
 
