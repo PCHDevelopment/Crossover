@@ -36,6 +36,8 @@ export interface CommandContext {
   room_id: string;
   /** The command envelope's id; it becomes the events' `causation_id`. */
   command_id: string;
+  /** The envelope's idempotency key: always set for mutating commands, undefined for reads. */
+  idempotency_key: string | undefined;
   /**
    * Run the policy check again for a finer-grained resource (e.g. each path of a ChangeSet).
    * Same principal, same transaction; `room_id` is filled in. Throws `FORBIDDEN` to deny.
@@ -213,6 +215,7 @@ export class Dispatcher {
         principal,
         room_id,
         command_id: envelope.id,
+        idempotency_key: envelope.idempotency_key,
         authorize: (a, resource) =>
           this.authorize(
             principal,
@@ -283,6 +286,7 @@ export class Dispatcher {
                 principal,
                 room_id,
                 command_id: envelope.id,
+                idempotency_key: key,
                 authorize: (a, resource) =>
                   this.authorize(
                     principal,
