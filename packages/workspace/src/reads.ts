@@ -7,6 +7,11 @@ import { git } from "./git.js";
 import { normalizePath, PathValidationError } from "./path.js";
 
 const revision = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional();
+export const workspaceReadParamsSchema = z.strictObject({ path: pathSchema(), revision });
+export const workspaceListParamsSchema = z.strictObject({
+  path: pathSchema(true).default(""),
+  revision,
+});
 export function pathSchema(root = false) {
   return z.string().transform((value, ctx) => {
     if (root && ["", ".", "./"].includes(value)) return "";
@@ -143,7 +148,7 @@ export function registerWorkspaceReads(dispatcher: Dispatcher): void {
     action: "workspace.read",
     perPathAuthorize: true,
     mutating: false,
-    params: z.strictObject({ path: pathSchema(), revision }),
+    params: workspaceReadParamsSchema,
     execute: async (ctx, params) => {
       await ctx.authorize("workspace.read", { path: params.path });
       const ws = await snapshot(ctx, params.revision);
@@ -180,7 +185,7 @@ export function registerWorkspaceReads(dispatcher: Dispatcher): void {
     // Every returned file is checked, and directories are shown only when they contain one.
     perPathAuthorize: true,
     mutating: false,
-    params: z.strictObject({ path: pathSchema(true).default(""), revision }),
+    params: workspaceListParamsSchema,
     execute: async (ctx, params) => {
       const ws = await snapshot(ctx, params.revision);
       let tree = ws.commit;

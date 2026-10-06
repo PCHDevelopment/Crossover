@@ -1,5 +1,6 @@
 import type { Pool } from "@crossover/db";
 import { createTestDatabase, type TestDatabase } from "@crossover/db/testing";
+import { withTransaction } from "@crossover/db";
 import {
   Dispatcher,
   findOrCreateUser,
@@ -16,16 +17,21 @@ import { newId } from "@crossover/protocol";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { z } from "zod";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import Fastify, { type FastifyInstance } from "fastify";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { registerMcp } from "./server.js";
-import { BASE_TOOLS } from "./tools.js";
+import { BASE_TOOLS, MCP_TOOLS } from "./tools.js";
+import { provisionWorkspace, registerWorkspaceCommands } from "@crossover/workspace";
 
 let db: TestDatabase;
 let pool: Pool;
 let n = 0;
 const apps: FastifyInstance[] = [];
 const clients: Client[] = [];
+const workspaceDirs: string[] = [];
 
 beforeAll(async () => {
   db = await createTestDatabase();
@@ -36,6 +42,7 @@ afterAll(async () => {
   await Promise.all(clients.map((c) => c.close().catch(() => undefined)));
   await Promise.all(apps.map((a) => a.close()));
   await db.drop();
+  await Promise.all(workspaceDirs.map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
 const manifest = {
@@ -54,6 +61,7 @@ async function setup(tools?: Parameters<typeof registerMcp>[1]["tools"]) {
   registerInviteCommands(dispatcher);
   registerJoinCommand(dispatcher);
   registerCapabilityCommands(dispatcher);
+  registerWorkspaceCommands(dispatcher);
   const app = Fastify();
   registerMcp(app, { dispatcher, pool, ...(tools ? { tools } : {}) });
   apps.push(app);
@@ -77,6 +85,9 @@ async function setup(tools?: Parameters<typeof registerMcp>[1]["tools"]) {
     room: { id: string };
     participant: { id: string };
   };
+  const workspaceDir = await mkdtemp(join(tmpdir(), "crossover-mcp-workspace-"));
+  workspaceDirs.push(workspaceDir);
+  await withTransaction(pool, (client) => provisionWorkspace(client, room.id, workspaceDir));
   const owner = await issueTokens(pool, participant.id);
 
   const invite = await dispatcher.dispatch(
@@ -104,6 +115,7 @@ async function setup(tools?: Parameters<typeof registerMcp>[1]["tools"]) {
     url: `${url}/mcp`,
     room: room.id,
     owner,
+    ownerId: participant.id,
     agent: joined.one_time as TokenPair,
     agentId: (joined.response as { participant_id: string }).participant_id,
   };
@@ -136,8 +148,161 @@ describe("MCP server (T707)", () => {
     const s = await setup();
     const client = await connect(s.url, s.agent.access_token);
     const { tools } = await client.listTools();
-    expect(tools.map((t) => t.name).sort()).toEqual(BASE_TOOLS.map((t) => t.name).sort());
+    expect(tools.map((t) => t.name).sort()).toEqual(MCP_TOOLS.map((t) => t.name).sort());
     for (const tool of tools) expect(tool.description).toBeTruthy();
+  });
+
+  it("exposes canonical workspace tools through the authenticated dispatcher", async () => {
+    const s = await setup();
+    const client = await connect(s.url, s.agent.access_token);
+    const applied = await client.callTool({
+      name: "apply_changeset",
+      arguments: {
+        source: "API",
+        message: "Create MCP file",
+        base_workspace_revision: 0,
+        operations: [{ type: "create", path: "docs/readme.md", content: "Crossover MCP" }],
+      },
+    });
+    expect(applied.isError).toBeFalsy();
+    expect(JSON.parse((applied.content as { text: string }[])[0]!.text)).toMatchObject({
+      status: "APPLIED",
+      applied_revision: 1,
+    });
+
+    const read = await client.callTool({
+      name: "read_file",
+      arguments: { path: "docs/readme.md" },
+    });
+    expect(JSON.parse((read.content as { text: string }[])[0]!.text)).toMatchObject({
+      content: "Crossover MCP",
+      encoding: "utf8",
+    });
+    const list = await client.callTool({ name: "list_dir", arguments: { path: "docs" } });
+    expect(JSON.parse((list.content as { text: string }[])[0]!.text)).toMatchObject({
+      entries: [{ path: "docs/readme.md" }],
+    });
+    const grep = await client.callTool({ name: "grep", arguments: { query: "Crossover MCP" } });
+    expect(JSON.parse((grep.content as { text: string }[])[0]!.text)).toMatchObject({
+      matches: [expect.objectContaining({ path: "docs/readme.md" })],
+    });
+    const diff = await client.callTool({
+      name: "diff",
+      arguments: { from_revision: 0, to_revision: 1 },
+    });
+    expect(JSON.parse((diff.content as { text: string }[])[0]!.text).diff).toContain(
+      "Crossover MCP",
+    );
+  });
+
+  it("rejects traversal and .git paths at the MCP boundary", async () => {
+    const s = await setup();
+    const client = await connect(s.url, s.agent.access_token);
+    for (const path of ["../secret", ".git/config"]) {
+      const result = await client
+        .callTool({ name: "read_file", arguments: { path } })
+        .catch((error: unknown) => error);
+      if (result instanceof Error) {
+        expect(result.message).toMatch(/MCP error|VALIDATION/);
+        continue; // SDK surfaced the tool validation failure.
+      }
+      const toolResult = result as { isError?: boolean; content?: { text: string }[] };
+      expect(toolResult.isError).toBe(true);
+      expect(toolResult.content![0]!.text).toMatch(/MCP error|VALIDATION/);
+    }
+  });
+
+  it("scoped DENY hides names and search content and returns FORBIDDEN as isError", async () => {
+    const s = await setup();
+    const owner = await connect(s.url, s.owner.access_token);
+    const agent = await connect(s.url, s.agent.access_token);
+    const seeded = await owner.callTool({
+      name: "apply_changeset",
+      arguments: {
+        source: "API",
+        message: "Seed scoped files",
+        base_workspace_revision: 0,
+        operations: [
+          { type: "create", path: "secrets/TOPSECRET", content: "needle private value" },
+          { type: "create", path: "public/readme", content: "public value" },
+        ],
+      },
+    });
+    expect(seeded.isError).toBeFalsy();
+    await pool.query(
+      `INSERT INTO capability_grants
+       (id, room_id, participant_id, effect, capability, created_by)
+       VALUES ($1, $2, $3, 'DENY', 'workspace.read:secrets/**', $4)`,
+      [newId("grant"), s.room, s.agentId, s.ownerId],
+    );
+
+    const list = await agent.callTool({ name: "list_dir", arguments: {} });
+    expect(list.isError).toBeFalsy();
+    const entries = JSON.parse((list.content as { text: string }[])[0]!.text).entries;
+    expect(entries.map((entry: { path: string }) => entry.path)).toContain("public");
+    expect(entries.map((entry: { path: string }) => entry.path)).not.toContain("secrets");
+
+    const grep = await agent.callTool({
+      name: "grep",
+      arguments: { query: "needle private value" },
+    });
+    expect(grep.isError).toBeFalsy();
+    expect(JSON.parse((grep.content as { text: string }[])[0]!.text).matches).toEqual([]);
+
+    const read = await agent.callTool({
+      name: "read_file",
+      arguments: { path: "secrets/TOPSECRET" },
+    });
+    expect(read.isError).toBe(true);
+    expect(JSON.parse((read.content as { text: string }[])[0]!.text)).toMatchObject({
+      error: { code: "FORBIDDEN" },
+    });
+  });
+
+  it("retries apply_changeset idempotently with the same result", async () => {
+    const s = await setup();
+    const owner = await connect(s.url, s.owner.access_token);
+    const args = {
+      source: "API" as const,
+      message: "Idempotent MCP apply",
+      base_workspace_revision: 0,
+      operations: [{ type: "create" as const, path: "docs/retry.md", content: "once" }],
+      idempotency_key: "mcp-retry-key",
+    };
+    const first = await owner.callTool({ name: "apply_changeset", arguments: args });
+    const retry = await owner.callTool({ name: "apply_changeset", arguments: args });
+    expect(first.isError).toBeFalsy();
+    expect(retry.isError).toBeFalsy();
+    const firstBody = JSON.parse((first.content as { text: string }[])[0]!.text);
+    const retryBody = JSON.parse((retry.content as { text: string }[])[0]!.text);
+    expect(retryBody).toEqual(firstBody);
+    expect(
+      await pool.query("SELECT id FROM changesets WHERE room_id = $1", [s.room]),
+    ).toMatchObject({ rowCount: 1 });
+  });
+
+  it("returns workspace conflicts as normal MCP tool results", async () => {
+    const s = await setup();
+    const owner = await connect(s.url, s.owner.access_token);
+    const agent = await connect(s.url, s.agent.access_token);
+    const apply = (client: Client, message: string, base: number, content: string) =>
+      client.callTool({
+        name: "apply_changeset",
+        arguments: {
+          source: "API",
+          message,
+          base_workspace_revision: base,
+          operations: [{ type: base === 0 ? "create" : "modify", path: "docs/shared.md", content }],
+        },
+      });
+    expect((await apply(owner, "Create shared file", 0, "base\n")).isError).toBeFalsy();
+    expect((await apply(owner, "Advance shared file", 1, "head\n")).isError).toBeFalsy();
+    const conflict = await apply(agent, "Submit stale edit", 1, "agent\n");
+    expect(conflict.isError).toBeFalsy();
+    expect(JSON.parse((conflict.content as { text: string }[])[0]!.text)).toMatchObject({
+      status: "CONFLICT",
+      conflicts: [expect.objectContaining({ path: "docs/shared.md" })],
+    });
   });
 
   it.each([

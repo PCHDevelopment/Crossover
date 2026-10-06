@@ -5,6 +5,16 @@ import { git, GitError } from "./git.js";
 import { pathSchema, snapshot } from "./reads.js";
 
 const revision = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
+export const workspaceDiffParamsSchema = z.strictObject({
+  from_revision: revision,
+  to_revision: revision,
+  paths: z.array(pathSchema()).max(500).optional(),
+});
+const workspaceHistoryParamsSchema = z.strictObject({
+  path: pathSchema().optional(),
+  limit: z.number().int().min(1).max(200).default(50),
+  before: revision.optional(),
+});
 const DIFF_LIMIT = 5 * 1024 * 1024;
 function tooLarge(): never {
   throw new CrossoverError("VALIDATION", "Workspace diff too large; narrow paths", {
@@ -42,11 +52,7 @@ export function registerWorkspaceHistory(dispatcher: Dispatcher): void {
     action: "workspace.read",
     perPathAuthorize: true,
     mutating: false,
-    params: z.strictObject({
-      from_revision: revision,
-      to_revision: revision,
-      paths: z.array(pathSchema()).max(500).optional(),
-    }),
+    params: workspaceDiffParamsSchema,
     execute: async (ctx, params) => {
       if (params.from_revision > params.to_revision)
         throw new CrossoverError("VALIDATION", "Revision range is reversed");
@@ -123,11 +129,7 @@ export function registerWorkspaceHistory(dispatcher: Dispatcher): void {
     action: "workspace.read",
     perPathAuthorize: true,
     mutating: false,
-    params: z.strictObject({
-      path: pathSchema().optional(),
-      limit: z.number().int().min(1).max(200).default(50),
-      before: revision.optional(),
-    }),
+    params: workspaceHistoryParamsSchema,
     execute: async (ctx, params) => {
       if (params.path !== undefined) await ctx.authorize("workspace.read", { path: params.path });
       const ws = await snapshot(ctx);

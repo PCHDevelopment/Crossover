@@ -108,6 +108,9 @@ importers:
       '@crossover/protocol':
         specifier: workspace:*
         version: link:../protocol
+      '@crossover/workspace':
+        specifier: workspace:*
+        version: link:../workspace
       '@modelcontextprotocol/sdk':
         specifier: ^1.32.1
         version: 1.32.1(zod@4.6.5)
