@@ -81,6 +81,29 @@ export interface RoomlessCommandDefinition<S extends z.ZodType, R> {
   execute(ctx: RoomlessContext, params: z.infer<S>): Promise<CommandResult<R>>;
 }
 
+/** What an anonymous command gets: the credential it carries is its only authority. */
+export interface AnonymousContext {
+  client: PoolClient;
+  room_id: string;
+  /** A fresh id for this call; it becomes the events' `causation_id`. */
+  command_id: string;
+  afterCommit(callback: () => void | Promise<void>): void;
+}
+
+export interface AnonymousCommandDefinition<S extends z.ZodType, R> {
+  /** Free-form name (these commands are not in the §16.1 catalog and take no envelope). */
+  method: string;
+  params: S;
+  /**
+   * Find the room this call is for, from its params (typically by looking up a token).
+   * Return `undefined` if there is none; the dispatcher then answers `UNAUTHENTICATED`
+   * with a generic message, so callers can't tell a bad credential from a missing room.
+   */
+  resolveRoom(pool: Pool, params: z.infer<S>): Promise<string | undefined>;
+  /** Runs in the room's transaction. Events need an explicit `actor_id`. */
+  execute(ctx: AnonymousContext, params: z.infer<S>): Promise<CommandResult<R>>;
+}
+
 export interface CommandResult<R> {
   /** Returned to the caller; stored with the idempotency key, so it must be plain JSON data. */
   response: R;
@@ -184,6 +207,10 @@ export class Dispatcher {
   private readonly roomlessCommands = new Map<
     string,
     RoomlessCommandDefinition<z.ZodType, unknown>
+  >();
+  private readonly anonymousCommands = new Map<
+    string,
+    AnonymousCommandDefinition<z.ZodType, unknown>
   >();
   private readonly pool: Pool;
   private readonly authorize: Authorizer;
@@ -382,13 +409,98 @@ export class Dispatcher {
   }
 
   /**
+   * Register a command whose caller proves itself with a credential in the params rather than
+   * as a participant (joining a room with an invite token). Called through
+   * {@link dispatchAnonymous}.
+   */
+  registerAnonymousCommand<S extends z.ZodType, R>(def: AnonymousCommandDefinition<S, R>): void {
+    if (
+      this.commands.has(def.method) ||
+      this.roomlessCommands.has(def.method) ||
+      this.anonymousCommands.has(def.method)
+    ) {
+      throw new Error(`registerAnonymousCommand: ${def.method} is already registered`);
+    }
+    this.anonymousCommands.set(
+      def.method,
+      def as unknown as AnonymousCommandDefinition<z.ZodType, unknown>,
+    );
+  }
+
+  /**
+   * Run an anonymous command: validate the params, find the room, then (on that room's actor,
+   * holding its lease) one transaction with `execute` and the events it returns, appended with
+   * the fencing token. There is no authorizer and no idempotency key: the credential the
+   * command consumes is single use, so a retry is refused by the command itself.
+   *
+   * Params are validated before anything is consumed, so a validation error never burns a
+   * credential. `UNAUTHENTICATED` when the command can't resolve a room.
+   */
+  async dispatchAnonymous(method: string, input: unknown): Promise<DispatchResult> {
+    const def = this.anonymousCommands.get(method);
+    if (!def) {
+      throw new CrossoverError("NOT_FOUND", `Unknown method ${method}`, { details: { method } });
+    }
+    const parsed = def.params.safeParse(input);
+    if (!parsed.success) throw validation(`Invalid params for ${method}`, parsed.error.issues);
+    const params: unknown = parsed.data;
+
+    const room_id = await def.resolveRoom(this.pool, params);
+    if (room_id === undefined) {
+      throw new CrossoverError("UNAUTHENTICATED", "Invalid or expired token");
+    }
+    const command_id = newId("cmd");
+    const envelope = { method, id: command_id };
+
+    return this.actors.get(room_id).submit(async () => {
+      const token = await this.leases.ensure(room_id);
+      const afterCommit: (() => void | Promise<void>)[] = [];
+      let oneTime: unknown;
+      let result: DispatchResult;
+      try {
+        result = await withTransaction(this.pool, async (client): Promise<DispatchResult> => {
+          const ctx: AnonymousContext = {
+            client,
+            room_id,
+            command_id,
+            afterCommit: (callback) => void afterCommit.push(callback),
+          };
+          const out = await def.execute(ctx, params);
+          if (out.afterCommit) afterCommit.push(out.afterCommit);
+          oneTime = out.oneTime;
+          const emitted: NewEvent[] = (out.events ?? []).map((e) => {
+            if (e.actor_id === undefined) {
+              throw new Error(`${method}: events of an anonymous command need an actor_id`);
+            }
+            return {
+              type: e.type,
+              actor_id: e.actor_id,
+              causation_id: command_id,
+              ...(e.payload !== undefined ? { payload: e.payload } : {}),
+              ...(e.schema_version !== undefined ? { schema_version: e.schema_version } : {}),
+            };
+          });
+          const events = await appendEvents(client, room_id, emitted, token);
+          return { response: out.response, events, replayed: false };
+        });
+      } catch (err) {
+        if (err instanceof CrossoverError && err.code === "STALE_FENCE")
+          this.leases.forget(room_id);
+        throw err;
+      }
+      await this.afterCommitWork(room_id, envelope, afterCommit, result);
+      return oneTime === undefined ? result : { ...result, one_time: oneTime };
+    });
+  }
+
+  /**
    * After a commit: run the command's `afterCommit` callbacks on the actor, so no other
    * command for the room can slip in between the commit and (say) the Git ref update (a
    * replay registers none), then publish the events (never for a replay).
    */
   private async afterCommitWork(
     room_id: string,
-    envelope: CommandEnvelope,
+    envelope: { method: string; id: string },
     callbacks: readonly (() => void | Promise<void>)[],
     result: DispatchResult,
   ): Promise<void> {
@@ -411,7 +523,7 @@ export class Dispatcher {
   private async publish(
     publisher: EventPublisher,
     room_id: string,
-    envelope: CommandEnvelope,
+    envelope: { method: string; id: string },
     events: RoomEvent[],
   ): Promise<void> {
     const info = { method: envelope.method, command_id: envelope.id, room_id };
