@@ -16,7 +16,8 @@
     "zod": "^4.6.5"
   },
   "scripts": {
-    "build": "tsc -b"
+    "build": "tsc -b",
+    "bench": "vitest run --config ../../vitest.bench.config.ts"
   },
   "devDependencies": {
     "@crossover/policy": "workspace:*"
