@@ -15,13 +15,13 @@
     "@crossover/kernel": "workspace:*",
     "@crossover/protocol": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.32.1",
-    "fastify": "^5.12.5"
+    "fastify": "^5.12.5",
+    "zod": "^4.6.5"
   },
   "scripts": {
     "build": "tsc -b"
   },
   "devDependencies": {
-    "@crossover/policy": "workspace:*",
-    "zod": "^4.6.5"
+    "@crossover/policy": "workspace:*"
   }
 }
