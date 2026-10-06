@@ -1,6 +1,22 @@
 {
   "extends": "../../tsconfig.base.json",
-  "compilerOptions": { "rootDir": "src", "outDir": "dist" },
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist"
+  },
   "include": ["src/**/*.ts"],
-  "references": [{ "path": "../protocol" }, { "path": "../db" }, { "path": "../ledger" }]
+  "references": [
+    {
+      "path": "../protocol"
+    },
+    {
+      "path": "../db"
+    },
+    {
+      "path": "../ledger"
+    },
+    {
+      "path": "../policy"
+    }
+  ]
 }

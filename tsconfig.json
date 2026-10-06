@@ -5,6 +5,7 @@
     { "path": "packages/db" },
     { "path": "packages/kernel" },
     { "path": "packages/ledger" },
+    { "path": "packages/policy" },
     { "path": "packages/workspace" }
   ]
 }
