@@ -76,6 +76,8 @@ export function registerWorkspaceHistory(dispatcher: Dispatcher): void {
         }
         paths.splice(0, paths.length, ...visible);
       }
+      if (paths.length === 0)
+        return { response: { from_revision: from.revision, to_revision: to.revision, diff: "" } };
       let patch: string;
       try {
         patch = (
@@ -129,7 +131,7 @@ export function registerWorkspaceHistory(dispatcher: Dispatcher): void {
     execute: async (ctx, params) => {
       if (params.path !== undefined) await ctx.authorize("workspace.read", { path: params.path });
       const ws = await snapshot(ctx);
-      const { rows } = await ctx.client.query<{
+      type HistoryRow = {
         workspace_revision: string;
         changeset_id: string | null;
         actor_id: string | null;
@@ -138,44 +140,72 @@ export function registerWorkspaceHistory(dispatcher: Dispatcher): void {
         file_revision: string | null;
         deleted: boolean | null;
         file_path: string | null;
-      }>(
-        `SELECT wr.revision AS workspace_revision, wr.changeset_id, cs.actor_id, cs.message,
-          wr.created_at, fr.revision AS file_revision, fr.blob_sha IS NULL AS deleted,
-          fr.path AS file_path
-         FROM workspace_revisions wr
-         LEFT JOIN changesets cs ON cs.id = wr.changeset_id AND cs.room_id = wr.room_id
-           AND cs.workspace_id = wr.workspace_id
-         LEFT JOIN file_revisions fr ON fr.workspace_id = wr.workspace_id AND fr.room_id = wr.room_id
-           AND fr.workspace_revision = wr.revision AND ($3::text IS NULL OR fr.path = $3)
-         WHERE wr.room_id = $1 AND wr.workspace_id = $2 AND wr.revision <= $5
-           AND ($3::text IS NULL OR fr.path = $3)
-           AND ($4::bigint IS NULL OR wr.revision < $4)
-         ORDER BY wr.revision DESC`,
-        [ctx.room_id, ws.id, params.path ?? null, params.before ?? null, ws.revision],
-      );
-      const byRevision = new Map<string, typeof rows>();
-      for (const row of rows) {
-        const items = byRevision.get(row.workspace_revision) ?? [];
-        items.push(row);
-        byRevision.set(row.workspace_revision, items);
-      }
-      const visibleRows = [];
-      for (const revisionRows of byRevision.values()) {
-        const row = revisionRows[0]!;
-        if (params.path === undefined && revisionRows.some((item) => item.file_path !== null)) {
-          let readable = true;
-          for (const path of new Set(revisionRows.flatMap((item) => item.file_path ?? []))) {
-            try {
-              await ctx.authorize("workspace.read", { path });
-            } catch (error) {
-              if (!(error instanceof CrossoverError) || error.code !== "FORBIDDEN") throw error;
-              readable = false;
-              break;
-            }
-          }
-          if (!readable) continue;
+      };
+      const visibleRows: HistoryRow[] = [];
+      const authorization = new Map<string, boolean>();
+      let before: number | string | null = params.before ?? null;
+      let exhausted = false;
+      while (visibleRows.length <= params.limit && !exhausted) {
+        const pageResult = await ctx.client.query<HistoryRow>(
+          `WITH page AS (
+             SELECT wr.workspace_id, wr.room_id, wr.revision, wr.changeset_id, wr.created_at
+             FROM workspace_revisions wr
+             WHERE wr.room_id = $1 AND wr.workspace_id = $2 AND wr.revision <= $5
+               AND ($3::text IS NULL OR EXISTS (
+                 SELECT 1 FROM file_revisions path_fr
+                 WHERE path_fr.room_id = wr.room_id AND path_fr.workspace_id = wr.workspace_id
+                   AND path_fr.workspace_revision = wr.revision AND path_fr.path = $3
+               ))
+               AND ($4::bigint IS NULL OR wr.revision < $4)
+             ORDER BY wr.revision DESC LIMIT $6
+           )
+           SELECT wr.revision AS workspace_revision, wr.changeset_id, cs.actor_id, cs.message,
+             wr.created_at, fr.revision AS file_revision, fr.blob_sha IS NULL AS deleted,
+             fr.path AS file_path
+           FROM page wr
+           LEFT JOIN changesets cs ON cs.id = wr.changeset_id AND cs.room_id = wr.room_id
+             AND cs.workspace_id = wr.workspace_id
+           LEFT JOIN file_revisions fr ON fr.workspace_id = wr.workspace_id AND fr.room_id = wr.room_id
+             AND fr.workspace_revision = wr.revision AND ($3::text IS NULL OR fr.path = $3)
+           ORDER BY wr.revision DESC`,
+          [ctx.room_id, ws.id, params.path ?? null, before, ws.revision, 100],
+        );
+        const rows: HistoryRow[] = pageResult.rows;
+        if (rows.length === 0) break;
+        const byRevision = new Map<string, HistoryRow[]>();
+        for (const row of rows) {
+          const items = byRevision.get(row.workspace_revision) ?? [];
+          items.push(row);
+          byRevision.set(row.workspace_revision, items);
         }
-        visibleRows.push(row);
+        for (const revisionRows of byRevision.values()) {
+          const row = revisionRows[0]!;
+          if (params.path === undefined && revisionRows.some((item) => item.file_path !== null)) {
+            let readable = true;
+            for (const path of new Set(revisionRows.flatMap((item) => item.file_path ?? []))) {
+              let allowed = authorization.get(path);
+              if (allowed === undefined) {
+                try {
+                  await ctx.authorize("workspace.read", { path });
+                  allowed = true;
+                } catch (error) {
+                  if (!(error instanceof CrossoverError) || error.code !== "FORBIDDEN") throw error;
+                  allowed = false;
+                }
+                authorization.set(path, allowed);
+              }
+              if (!allowed) {
+                readable = false;
+                break;
+              }
+            }
+            if (!readable) continue;
+          }
+          visibleRows.push(row);
+          if (visibleRows.length > params.limit) break;
+        }
+        before = rows.at(-1)!.workspace_revision;
+        if (rows.length < 100 || visibleRows.length > params.limit) exhausted = true;
       }
       const entries = visibleRows.slice(0, params.limit).map((row) => ({
         workspace_revision: Number(row.workspace_revision),

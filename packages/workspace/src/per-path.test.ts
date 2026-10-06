@@ -56,9 +56,11 @@ async function fixture(deps: WorkspaceCommandDeps = {}) {
   await withTransaction(db.pool, (client) => provisionWorkspace(client, room, root));
 
   const gates: { method: string; perPath: boolean | undefined }[] = [];
+  const pathChecks: string[] = [];
   const recording: Authorizer = async (principal, action, resource, context) => {
     if (resource.path === undefined)
       gates.push({ method: context.method, perPath: context.perPath });
+    else pathChecks.push(String(resource.path));
     return authorize(principal, action, resource, context);
   };
   const dispatcher = new Dispatcher({ pool: db.pool, authorize: recording, nodeId: room });
@@ -94,7 +96,7 @@ async function fixture(deps: WorkspaceCommandDeps = {}) {
         )
       ).rows[0].revision,
     );
-  return { dispatcher, owner, reviewer, apply, revision, gates };
+  return { room, dispatcher, owner, reviewer, apply, revision, gates, pathChecks };
 }
 
 it("a reviewer with workspace.write:docs/** applies a ChangeSet touching docs/ only", async () => {
@@ -189,7 +191,29 @@ it("hides denied paths from listings, diff, and unfiltered history under real po
   expect(JSON.stringify(diff.response)).toContain("readable.txt");
   expect(JSON.stringify(diff.response)).not.toContain("secrets");
   expect(JSON.stringify(diff.response)).not.toContain("hidden");
+  const explicitlyReadable = await f.dispatcher.dispatch(f.reviewer, {
+    id: newId("cmd"),
+    method: "workspace.diff",
+    params: { from_revision: 0, to_revision: 1, paths: ["docs/readable.txt"] },
+  });
+  expect(JSON.stringify(explicitlyReadable.response)).toContain("readable.txt");
+  expect(JSON.stringify(explicitlyReadable.response)).not.toContain("TOPSECRET");
+  await f.apply(f.owner, [{ type: "create", path: "secrets/TOPSECRET", content: "TOPSECRET" }], 1);
+  const fullyDenied = await f.dispatcher.dispatch(f.reviewer, {
+    id: newId("cmd"),
+    method: "workspace.diff",
+    params: { from_revision: 1, to_revision: 2 },
+  });
+  expect(fullyDenied.response).toMatchObject({ diff: "" });
+  const fullyDeniedEmptyList = await f.dispatcher.dispatch(f.reviewer, {
+    id: newId("cmd"),
+    method: "workspace.diff",
+    params: { from_revision: 1, to_revision: 2, paths: [] },
+  });
+  expect(fullyDeniedEmptyList.response).toMatchObject({ diff: "" });
+  expect(JSON.stringify(fullyDenied.response)).not.toContain("TOPSECRET");
 
+  f.pathChecks.length = 0;
   const history = await f.dispatcher.dispatch(f.reviewer, {
     id: newId("cmd"),
     method: "workspace.history",
@@ -197,6 +221,7 @@ it("hides denied paths from listings, diff, and unfiltered history under real po
   });
   expect(history.response).toMatchObject({ entries: [{ workspace_revision: 0 }] });
   expect(JSON.stringify(history.response)).not.toContain("hidden");
+  expect(new Set(f.pathChecks).size).toBe(f.pathChecks.length);
 });
 
 it("redacts unauthorized conflict paths and content", async () => {
@@ -208,12 +233,12 @@ it("redacts unauthorized conflict paths and content", async () => {
         clean: false,
         tree: "",
         conflicts: {
-          files: [{ path: "secrets/file.txt", stages: [] }],
+          files: [{ path: "docs/file.txt", stages: [] }],
           messages: [
             {
-              paths: ["secrets/file.txt"],
-              type: "CONFLICT (directory rename)",
-              message: "private conflicting content",
+              paths: ["docs/file.txt", "secrets/file.txt"],
+              type: "DETAIL",
+              message: "details mention secrets/file.txt and private conflicting content",
             },
           ],
         },
@@ -232,4 +257,11 @@ it("redacts unauthorized conflict paths and content", async () => {
   expect(conflict.response).toMatchObject({
     conflicts: [{ path: null, reason: "unauthorized" }],
   });
+  expect(JSON.stringify(conflict.events)).not.toContain("secrets/file.txt");
+  expect(JSON.stringify(conflict.events)).not.toContain("private conflicting content");
+  const stored = await db.pool.query<{ conflicts: unknown }>(
+    "SELECT payload->'conflicts' AS conflicts FROM changesets WHERE room_id = $1 AND status = 'CONFLICT'",
+    [f.room],
+  );
+  expect(JSON.stringify(stored.rows[0]?.conflicts)).not.toContain("secrets/file.txt");
 });

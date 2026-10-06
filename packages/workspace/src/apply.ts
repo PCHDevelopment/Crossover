@@ -124,11 +124,27 @@ async function apply(
     const classified = await classifyConflicts(ws.repo_path, result);
     const conflicts: ConflictResponse[] = [];
     for (const conflict of classified) {
+      let authorized = true;
       try {
         await ctx.authorize("workspace.write", { path: conflict.path });
-        conflicts.push(conflict);
       } catch (error) {
         if (!(error instanceof CrossoverError) || error.code !== "FORBIDDEN") throw error;
+        authorized = false;
+      }
+      if (authorized) {
+        for (const path of new Set(conflict.messages.flatMap((message) => message.paths))) {
+          try {
+            await ctx.authorize("workspace.write", { path });
+          } catch (error) {
+            if (!(error instanceof CrossoverError) || error.code !== "FORBIDDEN") throw error;
+            authorized = false;
+            break;
+          }
+        }
+      }
+      if (authorized) {
+        conflicts.push(conflict);
+      } else {
         conflicts.push({ path: null, kind: conflict.kind, reason: "unauthorized" });
       }
     }

@@ -55,6 +55,27 @@ export async function entries(repo: string, tree: string, path?: string): Promis
       };
     });
 }
+async function hasReadableDescendant(
+  ctx: CommandContext,
+  repo: string,
+  tree: string,
+  prefix = "",
+): Promise<boolean> {
+  for (const entry of await entries(repo, tree)) {
+    const path = prefix ? `${prefix}/${entry.path}` : entry.path;
+    if (entry.type === "directory") {
+      if (await hasReadableDescendant(ctx, repo, entry.oid, path)) return true;
+    } else {
+      try {
+        await ctx.authorize("workspace.read", { path });
+        return true;
+      } catch (error) {
+        if (!(error instanceof CrossoverError) || error.code !== "FORBIDDEN") throw error;
+      }
+    }
+  }
+  return false;
+}
 async function visibleEntries(
   ctx: CommandContext,
   repo: string,
@@ -65,15 +86,14 @@ async function visibleEntries(
   for (const entry of await entries(repo, tree)) {
     const path = prefix ? `${prefix}/${entry.path}` : entry.path;
     if (entry.type === "directory") {
-      const descendants = await visibleEntries(ctx, repo, entry.oid, path);
-      if (descendants.length) visible.push({ ...entry, path });
-      continue;
-    }
-    try {
-      await ctx.authorize("workspace.read", { path });
-      visible.push({ ...entry, path });
-    } catch (error) {
-      if (!(error instanceof CrossoverError) || error.code !== "FORBIDDEN") throw error;
+      if (await hasReadableDescendant(ctx, repo, entry.oid, path)) visible.push({ ...entry, path });
+    } else {
+      try {
+        await ctx.authorize("workspace.read", { path });
+        visible.push({ ...entry, path });
+      } catch (error) {
+        if (!(error instanceof CrossoverError) || error.code !== "FORBIDDEN") throw error;
+      }
     }
   }
   return visible;
