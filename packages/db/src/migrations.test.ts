@@ -355,3 +355,153 @@ describe("0005_participants", () => {
     });
   });
 });
+
+describe("0009_tasks", () => {
+  let n = 0;
+  const room = async () => {
+    const id = `room_t${++n}`;
+    await db.pool.query(
+      `INSERT INTO rooms (id, slug, name, objective, owner_id) VALUES ($1, $1, 'n', 'o', 'x')`,
+      [id],
+    );
+    return id;
+  };
+  const participant = async (roomId: string) => {
+    const id = `part_t${++n}`;
+    await db.pool.query(
+      `INSERT INTO participants (id, room_id, kind, display_name, role, status)
+       VALUES ($1, $2, 'AGENT', 'a', 'DEVELOPER', 'ACTIVE')`,
+      [id, roomId],
+    );
+    return id;
+  };
+  const task = (roomId: string, by: string, extra: Record<string, unknown> = {}) => {
+    const cols: Record<string, unknown> = {
+      id: `task_${++n}`,
+      room_id: roomId,
+      title: "Do it",
+      created_by: by,
+      ...extra,
+    };
+    const keys = Object.keys(cols);
+    return db.pool.query(
+      `INSERT INTO tasks (${keys.join(", ")}) VALUES (${keys.map((_, i) => `$${i + 1}`).join(", ")}) RETURNING *`,
+      Object.values(cols),
+    );
+  };
+
+  it("is recorded as applied", async () => {
+    const { rows } = await db.pool.query("SELECT name FROM schema_migrations WHERE version = 9");
+    expect(rows).toEqual([{ name: "tasks" }]);
+  });
+
+  it("defaults to an OPEN, unowned P2 task at version 1 that needs review", async () => {
+    const r = await room();
+    const { rows } = await task(r, await participant(r));
+    expect(rows[0]).toMatchObject({
+      status: "OPEN",
+      owner_id: null,
+      priority: 2,
+      version: 1,
+      review_required: true,
+      override_dependencies: false,
+      dependencies: [],
+      requirements: [],
+      artifacts: [],
+      blocked_reason: null,
+      lease_expires_at: null,
+    });
+    expect(rows[0].created_at).toBeInstanceOf(Date);
+  });
+
+  it("limits status to the §8.2 states and priority to 0–3", async () => {
+    const r = await room();
+    const p = await participant(r);
+    for (const status of ["OPEN", "CANCELLED"]) await task(r, p, { status });
+    for (const status of ["CLAIMED", "IN_PROGRESS", "BLOCKED", "REVIEW", "DONE"]) {
+      await task(r, p, { status, owner_id: p, blocked_reason: "waiting" });
+    }
+    await expect(task(r, p, { status: "open" })).rejects.toMatchObject({ code: "23514" });
+    await expect(task(r, p, { status: "STARTED" })).rejects.toMatchObject({ code: "23514" });
+    for (const priority of [0, 1, 2, 3]) await task(r, p, { priority });
+    for (const priority of [-1, 4]) {
+      await expect(task(r, p, { priority })).rejects.toMatchObject({ code: "23514" });
+    }
+  });
+
+  it("requires a blocked_reason while BLOCKED", async () => {
+    const r = await room();
+    const p = await participant(r);
+    for (const reason of [null, ""]) {
+      await expect(
+        task(r, p, { status: "BLOCKED", owner_id: p, blocked_reason: reason }),
+      ).rejects.toMatchObject({ code: "23514" });
+    }
+    await task(r, p, { status: "BLOCKED", owner_id: p, blocked_reason: "needs the API key" });
+    // And it can't be cleared while the task stays blocked.
+    const t = (await task(r, p, { status: "BLOCKED", owner_id: p, blocked_reason: "x" })).rows[0];
+    await expect(
+      db.pool.query("UPDATE tasks SET blocked_reason = NULL WHERE id = $1", [t.id]),
+    ).rejects.toMatchObject({ code: "23514" });
+  });
+
+  it("keeps ownership consistent with status", async () => {
+    const r = await room();
+    const p = await participant(r);
+    await expect(task(r, p, { status: "OPEN", owner_id: p })).rejects.toMatchObject({
+      code: "23514",
+    });
+    for (const status of ["CLAIMED", "IN_PROGRESS", "REVIEW"]) {
+      await expect(task(r, p, { status })).rejects.toMatchObject({ code: "23514" });
+    }
+  });
+
+  it("only refers to participants of the same room", async () => {
+    const [a, b] = [await room(), await room()];
+    const inA = await participant(a);
+    const inB = await participant(b);
+    await expect(task(a, inB)).rejects.toMatchObject({ code: "23503" }); // creator elsewhere
+    await expect(task(a, inA, { reviewer_id: inB })).rejects.toMatchObject({ code: "23503" });
+    await expect(task(a, inA, { status: "CLAIMED", owner_id: inB })).rejects.toMatchObject({
+      code: "23503",
+    });
+    await expect(task("room_missing", inA)).rejects.toMatchObject({ code: "23503" });
+  });
+
+  it("requires JSON arrays for requirements and artifacts, and a non-empty title", async () => {
+    const r = await room();
+    const p = await participant(r);
+    await task(r, p, { requirements: JSON.stringify(["a", "b"]), artifacts: JSON.stringify([]) });
+    for (const extra of [
+      { requirements: JSON.stringify({ a: 1 }) },
+      { artifacts: JSON.stringify("x") },
+      { title: "" },
+    ]) {
+      await expect(task(r, p, extra)).rejects.toMatchObject({ code: "23514" });
+    }
+  });
+
+  it("stores reviews against a task of the same room, with verdicts limited to APPROVE and REQUEST_CHANGES", async () => {
+    const [a, b] = [await room(), await room()];
+    const pa = await participant(a);
+    const pb = await participant(b);
+    const t = (await task(a, pa)).rows[0];
+    const review = (roomId: string, taskId: string, reviewer: string, verdict: string) =>
+      db.pool.query(
+        `INSERT INTO task_reviews (id, room_id, task_id, reviewer_id, verdict, revision)
+         VALUES ($1, $2, $3, $4, $5, 3)`,
+        [`rev_${++n}`, roomId, taskId, reviewer, verdict],
+      );
+    await review(a, t.id, pa, "APPROVE");
+    await review(a, t.id, pa, "REQUEST_CHANGES");
+    await expect(review(a, t.id, pa, "approve")).rejects.toMatchObject({ code: "23514" });
+    await expect(review(b, t.id, pb, "APPROVE")).rejects.toMatchObject({ code: "23503" });
+    await expect(review(a, t.id, pb, "APPROVE")).rejects.toMatchObject({ code: "23503" });
+    const { rows } = await db.pool.query(
+      "SELECT comments, created_at FROM task_reviews WHERE task_id = $1",
+      [t.id],
+    );
+    expect(rows).toHaveLength(2);
+    expect(rows[0].comments).toBe("");
+  });
+});
