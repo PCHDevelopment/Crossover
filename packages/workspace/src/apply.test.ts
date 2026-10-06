@@ -170,6 +170,25 @@ describe("workspace.apply_changeset", () => {
     expect(await f.head()).toBe(head);
   });
 
+  it("returns VALIDATION for either ChangeSet limit before persisting state or events", async () => {
+    const f = await fixture();
+    const head = await f.head();
+    for (const operations of [
+      Array.from({ length: 501 }, (_, index) => ({
+        type: "create" as const,
+        path: `file${index}`,
+        content: "x",
+      })),
+      [{ type: "create" as const, path: "large", content: "x".repeat(25 * 1024 * 1024 + 1) }],
+    ])
+      await expect(f.apply(operations)).rejects.toMatchObject({ code: "VALIDATION" });
+    expect(await f.rowsFor("changesets")).toEqual([]);
+    expect(await f.rowsFor("file_revisions")).toEqual([]);
+    expect(await f.rowsFor("events")).toEqual([]);
+    expect(await f.rowsFor("workspace_revisions")).toHaveLength(1);
+    expect(await f.head()).toBe(head);
+  });
+
   it("authorizes an implicit destination when Git carries a stale edit through a head rename", async () => {
     let deny = false;
     const f = await fixture(async (_principal, _action, resource) => {
