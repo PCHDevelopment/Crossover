@@ -259,6 +259,26 @@ describe("withIdempotency", () => {
   });
 });
 
+describe("withIdempotency error handling", () => {
+  it("rethrows fn's original error even if rolling back to the savepoint fails", async () => {
+    const original = new Error("fn failed");
+    const calls: string[] = [];
+    // A client whose connection dies as soon as we try to roll back.
+    const broken = {
+      query: async (sql: string) => {
+        calls.push(sql.split(/\s+/)[0] ?? "");
+        if (sql.startsWith("ROLLBACK")) throw new Error("connection lost");
+        return { rowCount: 1, rows: [] };
+      },
+    } as unknown as PoolClient;
+    const err = await withIdempotency(broken, "p1", "k", "h", async () => {
+      throw original;
+    }).catch((e: unknown) => e);
+    expect(err).toBe(original);
+    expect(calls).toContain("ROLLBACK");
+  });
+});
+
 describe("purgeIdempotencyKeys", () => {
   it("removes rows older than 24 h and keeps newer ones, returning the count", async () => {
     const [oldA, oldB, fresh] = [uniq("purge-old"), uniq("purge-old"), uniq("purge-new")];
