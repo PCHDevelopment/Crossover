@@ -90,3 +90,81 @@ describe("0001_rooms", () => {
     }
   });
 });
+
+describe("0002_events", () => {
+  const ROOM = "room_ev";
+
+  beforeAll(async () => {
+    await db.pool.query(
+      `INSERT INTO rooms (id, slug, name, objective, owner_id)
+       VALUES ($1, 'ev', 'n', 'o', 'part_1'), ('room_ev2', 'ev2', 'n', 'o', 'part_1')`,
+      [ROOM],
+    );
+  });
+
+  const insert = (room: string, seq: number, extra: Record<string, unknown> = {}) => {
+    const cols = {
+      room_id: room,
+      sequence: seq,
+      actor_id: "part_1",
+      type: "room.created",
+      payload_hash: "sha256:abc",
+      ...extra,
+    };
+    const keys = Object.keys(cols);
+    return db.pool.query(
+      `INSERT INTO events (${keys.join(", ")}) VALUES (${keys.map((_, i) => `$${i + 1}`).join(", ")}) RETURNING *`,
+      Object.values(cols),
+    );
+  };
+
+  it("is recorded as applied", async () => {
+    const { rows } = await db.pool.query("SELECT name FROM schema_migrations WHERE version = 2");
+    expect(rows).toEqual([{ name: "events" }]);
+  });
+
+  it("applies defaults for schema_version, timestamp, payload and redacted", async () => {
+    const { rows } = await insert(ROOM, 1);
+    expect(rows[0]).toMatchObject({
+      schema_version: 1,
+      payload: {},
+      redacted: false,
+      causation_id: null,
+      sequence: "1",
+    });
+    expect(rows[0].timestamp).toBeInstanceOf(Date);
+  });
+
+  it("rejects a duplicate (room_id, sequence)", async () => {
+    await insert(ROOM, 2);
+    await expect(insert(ROOM, 2)).rejects.toMatchObject({ code: "23505" });
+  });
+
+  it("allows the same sequence in different rooms", async () => {
+    await insert("room_ev2", 1);
+    await insert("room_ev2", 2);
+  });
+
+  it("rejects an event for a room that doesn't exist", async () => {
+    await expect(insert("room_missing", 1)).rejects.toMatchObject({ code: "23503" });
+  });
+
+  it("rejects sequences below 1", async () => {
+    await expect(insert(ROOM, 0)).rejects.toMatchObject({ code: "23514" });
+    await expect(insert(ROOM, -1)).rejects.toMatchObject({ code: "23514" });
+  });
+
+  it("stores payloads and causation ids", async () => {
+    const { rows } = await insert(ROOM, 3, {
+      causation_id: "cmd_01J",
+      payload: JSON.stringify({ a: [1, 2] }),
+    });
+    expect(rows[0]).toMatchObject({ causation_id: "cmd_01J", payload: { a: [1, 2] } });
+  });
+
+  it("requires actor_id, type and payload_hash", async () => {
+    for (const col of ["actor_id", "type", "payload_hash"]) {
+      await expect(insert(ROOM, 100, { [col]: null })).rejects.toMatchObject({ code: "23502" });
+    }
+  });
+});
