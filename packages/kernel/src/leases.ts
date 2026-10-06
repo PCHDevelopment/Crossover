@@ -7,21 +7,38 @@ import { CrossoverError } from "@crossover/protocol";
  * before every write and passes the returned fencing token to `appendEvents`.
  *
  * `ensure` renews a held lease or acquires a free one; if another node owns the room it
- * throws `STALE_FENCE` (the gateway should have routed the command to the owner). There is
- * no background renewal: a lease is extended by each command, and an idle room's lease
- * simply expires and is re-acquired (with a new token) on the next command.
+ * throws `STALE_FENCE` (the gateway should have routed the command to the owner). A lease is
+ * extended by each command; {@link LeaseRenewer} (T713) also renews idle rooms in the
+ * background, and a lease that lapses anyway is re-acquired (with a new token) on the next
+ * command.
  *
- * Not safe for concurrent calls for the *same room*; the room actor serializes them.
+ * Not safe for concurrent calls for the *same room*; the room actor serializes them (the
+ * renewer submits its work through the actor too).
  */
+export interface RoomLeasesOptions {
+  /**
+   * Runs after this node acquires a room's lease (first use, failover, or re-acquiring a
+   * lapsed one), before the lease is remembered and so before the room's first command
+   * (ENGINEERING: reconcile the Git ref, §19.4). If it throws, the lease is released, the
+   * room is not activated and the error reaches the caller; the next command tries again.
+   * Not called for rooms being created ({@link RoomLeases.acquireFor}), which have no
+   * history to recover.
+   */
+  onAcquire?: (roomId: string) => void | Promise<void>;
+}
+
 export class RoomLeases {
   private readonly held = new Map<string, number>();
+  private readonly onAcquire: ((roomId: string) => void | Promise<void>) | undefined;
 
   constructor(
     private readonly pool: Pool,
     readonly nodeId: string,
-    private readonly ttlMs: number = DEFAULT_LEASE_TTL_MS,
+    readonly ttlMs: number = DEFAULT_LEASE_TTL_MS,
+    options: RoomLeasesOptions = {},
   ) {
     if (nodeId === "") throw new TypeError("RoomLeases: nodeId must not be empty");
+    this.onAcquire = options.onAcquire;
   }
 
   /** The fencing token to write with, extending or acquiring the room's lease. */
@@ -41,8 +58,39 @@ export class RoomLeases {
         details: { room_id: roomId, node_id: this.nodeId },
       });
     }
+    if (this.onAcquire) {
+      try {
+        await this.onAcquire(roomId);
+      } catch (err) {
+        // Don't sit on a room we couldn't activate: let another node (or a retry) have it.
+        await releaseLease(this.pool, roomId, this.nodeId, lease.fencing_token).catch(() => false);
+        throw err;
+      }
+    }
     this.held.set(roomId, lease.fencing_token);
     return lease.fencing_token;
+  }
+
+  /**
+   * Renew a held lease without writing (background renewal, T713). Returns `false`, and
+   * forgets the room, if the lease was lost (expired and taken over, or re-acquired by
+   * another node); other errors (say, the database being down) propagate and leave the room
+   * held, so the next attempt can still succeed. A room that isn't held is left alone.
+   */
+  async renew(roomId: string): Promise<boolean> {
+    const token = this.held.get(roomId);
+    if (token === undefined) return false;
+    try {
+      await renewLease(this.pool, roomId, this.nodeId, token, this.ttlMs);
+      return true;
+    } catch (err) {
+      if (err instanceof CrossoverError && err.code === "STALE_FENCE") {
+        // Only forget the token we tried: a command may have re-acquired in the meantime.
+        if (this.held.get(roomId) === token) this.held.delete(roomId);
+        return false;
+      }
+      throw err;
+    }
   }
 
   /**

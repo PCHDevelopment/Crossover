@@ -66,6 +66,18 @@ export class RoomActorRegistry {
     return actor;
   }
 
+  /**
+   * Let a room's queued jobs finish, then drop its actor if it is still idle (a later `get`
+   * makes a fresh one). Used when this node loses the room's lease (T713): the jobs already
+   * queued run, find the lease gone and fail with `STALE_FENCE`, and nothing lingers.
+   */
+  async drain(roomId: string): Promise<void> {
+    const actor = this.actors.get(roomId);
+    if (!actor) return;
+    await actor.idle();
+    if (this.actors.get(roomId) === actor && actor.pending === 0) this.actors.delete(roomId);
+  }
+
   has(roomId: string): boolean {
     return this.actors.has(roomId);
   }

@@ -12,7 +12,7 @@ import {
 } from "@crossover/protocol";
 import type { z } from "zod";
 import { RoomActorRegistry } from "./actor.js";
-import { RoomLeases } from "./leases.js";
+import { RoomLeases, type RoomLeasesOptions } from "./leases.js";
 import type { Principal } from "./principal.js";
 import type { EventPublisher } from "./publisher.js";
 
@@ -168,6 +168,8 @@ export interface DispatcherOptions {
   actors?: RoomActorRegistry;
   leases?: RoomLeases;
   leaseTtlMs?: number;
+  /** Runs when this node acquires a room's lease, before its first command. See {@link RoomLeasesOptions}. */
+  onLeaseAcquire?: RoomLeasesOptions["onAcquire"];
   /**
    * Publishes the events of each committed command (after its `afterCommit` callbacks),
    * never for a rollback, a replay or a read. A failure is reported and never fails the
@@ -235,7 +237,10 @@ export class Dispatcher {
         console.error(`afterCommit callback failed for ${info.method}`, info, error));
     this.actors = options.actors ?? new RoomActorRegistry();
     this.leases =
-      options.leases ?? new RoomLeases(options.pool, options.nodeId, options.leaseTtlMs);
+      options.leases ??
+      new RoomLeases(options.pool, options.nodeId, options.leaseTtlMs, {
+        ...(options.onLeaseAcquire ? { onAcquire: options.onLeaseAcquire } : {}),
+      });
   }
 
   registerCommand<S extends z.ZodType, R>(def: CommandDefinition<S, R>): void {

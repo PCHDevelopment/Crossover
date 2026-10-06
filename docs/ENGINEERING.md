@@ -40,7 +40,7 @@ These implement ARCHITECTURE §28. Lead decisions that refine it:
 | Policy        | `authorize()` interface (T208) with a TypeScript rule set first; OPA-WASM (D9) replaces the implementation behind the same interface in a later milestone  |
 | Git           | Git CLI ≥ 2.40 (refines ARCHITECTURE D1's 2.38: merge-tree --merge-base), via `execFile` (never a shell string)                                            |
 | Pause         | `participants.pause` keeps tokens; every command returns `PARTICIPANT_PAUSED` and sockets close. Only `participants.remove` revokes tokens (refines §15.3) |
-| Leases        | Renewed on each command; idle rooms re-acquire with a new token. A background renewal loop arrives with the gateway (T713)                                 |
+| Leases        | Renewed on each command and, for idle rooms, by `LeaseRenewer` every TTL/3 (T713); `onAcquire` runs on every acquisition before the first command          |
 
 New runtime dependencies need a one-line justification in the PR.
 
