@@ -603,6 +603,35 @@ describe("dispatch: authorization", () => {
   });
 });
 
+describe("dispatch: ctx.idempotency_key", () => {
+  it("gives mutating commands the envelope's key, and reads undefined", async () => {
+    const room = await newRoom();
+    const d = dispatcher();
+    const seen: (string | undefined)[] = [];
+    d.registerCommand({
+      method: "messages.send",
+      params: z.object({}),
+      mutating: true,
+      execute: async (ctx) => {
+        seen.push(ctx.idempotency_key);
+        return { response: null };
+      },
+    });
+    d.registerCommand({
+      method: "room.get_state",
+      params: z.object({}),
+      mutating: false,
+      execute: async (ctx) => {
+        seen.push(ctx.idempotency_key);
+        return { response: null };
+      },
+    });
+    await d.dispatch(principal(room), envelope("messages.send", {}, "my-key-1"));
+    await d.dispatch(principal(room), envelope("room.get_state"));
+    expect(seen).toEqual(["my-key-1", undefined]);
+  });
+});
+
 describe("dispatch: ctx.authorize (finer-grained checks)", () => {
   it("re-runs the policy for a resource, with room_id filled in and the same transaction", async () => {
     const room = await newRoom();
