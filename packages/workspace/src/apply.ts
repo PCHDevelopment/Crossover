@@ -9,6 +9,7 @@ import type { Operation } from "./operations.js";
 import { treeChanges } from "./tree-changes.js";
 import { updateCanonicalRef } from "./reconcile.js";
 import { registerWorkspaceReads } from "./reads.js";
+import { registerWorkspaceHistory } from "./history.js";
 
 export interface WorkspaceCommandDeps {
   /** Failure is reported after commit; startup reconcileRef restores the DB-authoritative head. */
@@ -32,6 +33,7 @@ export function registerWorkspaceCommands(
     execute: (ctx, params) => apply(ctx, params, deps),
   });
   registerWorkspaceReads(dispatcher);
+  registerWorkspaceHistory(dispatcher);
 }
 
 async function apply(
