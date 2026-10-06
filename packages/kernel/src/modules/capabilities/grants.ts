@@ -196,8 +196,8 @@ export function registerCapabilityCommands(dispatcher: Dispatcher): void {
       if (covered.length > 0) {
         await ctx.client.query(
           `UPDATE capability_grants SET ended_at = clock_timestamp(), ended_by = $2
-           WHERE id = ANY($1::text[])`,
-          [covered.map((g) => g.id), me],
+           WHERE room_id = $3 AND id = ANY($1::text[])`,
+          [covered.map((g) => g.id), me, ctx.room_id],
         );
       }
       const grantsEnded = covered.length;

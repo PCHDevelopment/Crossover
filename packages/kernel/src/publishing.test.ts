@@ -145,7 +145,8 @@ describe("Dispatcher publishing", () => {
     await expect(
       denied.d.dispatch(principal(await newRoom()), envelope("messages.send")),
     ).rejects.toMatchObject({ code: "FORBIDDEN" });
-    expect(rec.calls).toEqual([]);
+    // Only the denial itself is published (T215), not anything the command would have done.
+    expect(rec.calls.flatMap((c) => c.events.map((e) => e.type))).toEqual(["capability.denied"]);
   });
 
   it("doesn't publish again for an idempotent replay", async () => {

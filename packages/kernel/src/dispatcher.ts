@@ -202,6 +202,14 @@ export interface DispatcherOptions {
     error: unknown,
     info: { method: string; command_id: string; room_id: string },
   ) => void;
+  /**
+   * Called when a `capability.denied` event (T215) could not be appended. The command's
+   * `FORBIDDEN` is returned regardless. Defaults to `console.error`.
+   */
+  onDenialRecordError?: (
+    error: unknown,
+    info: { method: string; command_id: string; room_id: string; action: string },
+  ) => void;
   /** Called when an `afterCommit` callback throws. Defaults to `console.error`. */
   onAfterCommitError?: (
     error: unknown,
@@ -234,7 +242,10 @@ export class Dispatcher {
     AnonymousCommandDefinition<z.ZodType, unknown>
   >();
   private readonly pool: Pool;
-  private readonly authorize: Authorizer;
+  private readonly authorizer: Authorizer;
+  /** Authorization denials that have not been recorded yet, keyed by the error thrown for them. */
+  private readonly denials = new WeakMap<object, DenialInfo>();
+  private readonly onDenialRecordError: NonNullable<DispatcherOptions["onDenialRecordError"]>;
   private readonly onAfterCommitError: NonNullable<DispatcherOptions["onAfterCommitError"]>;
   private readonly onPublishError: NonNullable<DispatcherOptions["onPublishError"]>;
   private readonly publisher: EventPublisher | undefined;
@@ -244,7 +255,10 @@ export class Dispatcher {
 
   constructor(options: DispatcherOptions) {
     this.pool = options.pool;
-    this.authorize = options.authorize;
+    this.authorizer = options.authorize;
+    this.onDenialRecordError =
+      options.onDenialRecordError ??
+      ((error, info) => console.error(`recording a denied ${info.action} failed`, info, error));
     this.publisher = options.publisher;
     this.publishTimeoutMs = options.publishTimeoutMs ?? 1_000;
     this.onPublishError =
@@ -262,6 +276,13 @@ export class Dispatcher {
       });
   }
 
+  /** A denial for someone else's `authorizeAs` check says so, so it isn't read as the caller's own. */
+  private onBehalfOf(error: unknown, participantId: string): never {
+    const info = typeof error === "object" && error !== null ? this.denials.get(error) : undefined;
+    if (info) info.on_behalf_of = participantId;
+    throw error;
+  }
+
   /** A participant's current principal, for {@link CommandContext.authorizeAs}. */
   private async principalOf(
     client: PoolClient,
@@ -276,6 +297,22 @@ export class Dispatcher {
     if (!row) throw new CrossoverError("NOT_FOUND", `Participant ${participantId} not found`);
     return { participant_id: participantId, room_id: roomId, ...row };
   }
+
+  /**
+   * The configured authorizer, remembering why a `FORBIDDEN` was thrown so that a command
+   * which fails because of it leaves a `capability.denied` event (T215). A denial a command
+   * catches and carries on from (a search skipping unreadable paths) is not recorded.
+   */
+  private authorize: Authorizer = async (principal, action, resource, context) => {
+    try {
+      await this.authorizer(principal, action, resource, context);
+    } catch (error) {
+      if (error instanceof CrossoverError && error.code === "FORBIDDEN") {
+        this.denials.set(error, denialOf(action, resource, error));
+      }
+      throw error;
+    }
+  };
 
   registerCommand<S extends z.ZodType, R>(def: CommandDefinition<S, R>): void {
     if (!isMethodName(def.method)) {
@@ -594,6 +631,56 @@ export class Dispatcher {
     }
   }
 
+  /**
+   * Append `capability.denied` for a command that failed on a denial, in a transaction of its
+   * own: the command's has rolled back, so this is the only trace it leaves (T215). Never
+   * throws; `token` is the room lease's fencing token held by the caller.
+   */
+  private async recordDenial(
+    principal: Principal,
+    envelope: { method: string; id: string },
+    error: unknown,
+    token: number,
+  ): Promise<void> {
+    const info = typeof error === "object" && error !== null ? this.denials.get(error) : undefined;
+    if (!info) return;
+    const room_id = principal.room_id;
+    try {
+      const events = await withTransaction(this.pool, (client) =>
+        appendEvents(
+          client,
+          room_id,
+          [
+            {
+              type: "capability.denied",
+              actor_id: principal.participant_id,
+              causation_id: envelope.id,
+              payload: { ...info, method: envelope.method },
+            },
+          ],
+          token,
+        ),
+      );
+      await this.afterCommitWork(room_id, envelope, [], {
+        response: undefined,
+        events,
+        replayed: false,
+      });
+    } catch (err) {
+      if (err instanceof CrossoverError && err.code === "STALE_FENCE") this.leases.forget(room_id);
+      try {
+        this.onDenialRecordError(err, {
+          method: envelope.method,
+          command_id: envelope.id,
+          room_id,
+          action: info.action,
+        });
+      } catch {
+        // A broken error handler must not change the command's outcome.
+      }
+    }
+  }
+
   private async runRead(
     principal: Principal,
     envelope: CommandEnvelope,
@@ -634,7 +721,7 @@ export class Dispatcher {
             a,
             { ...resource, room_id },
             { method: envelope.method, params, client },
-          ),
+          ).catch((error: unknown) => this.onBehalfOf(error, participantId)),
         afterCommit: () => {
           throw new Error(`${envelope.method} is read-only: afterCommit needs a transaction`);
         },
@@ -644,6 +731,22 @@ export class Dispatcher {
         throw new Error(`${envelope.method} is read-only but emitted events`);
       }
       return { response: out.response, events: [], replayed: false };
+    } catch (error) {
+      if (typeof error === "object" && error !== null && this.denials.has(error)) {
+        // Writing the event takes the room's turn and lease; the read itself didn't.
+        await this.actors
+          .get(principal.room_id)
+          .submit(async () =>
+            this.recordDenial(
+              principal,
+              envelope,
+              error,
+              await this.leases.ensure(principal.room_id),
+            ),
+          )
+          .catch(() => undefined);
+      }
+      throw error;
     } finally {
       client.release();
     }
@@ -718,7 +821,7 @@ export class Dispatcher {
                     a,
                     { ...resource, room_id },
                     { method: envelope.method, params, client },
-                  ),
+                  ).catch((error: unknown) => this.onBehalfOf(error, participantId)),
                 afterCommit: (callback) => void afterCommit.push(callback),
               };
               const out = await def.execute(ctx, params);
@@ -741,6 +844,7 @@ export class Dispatcher {
         // Our token is no good any more (takeover or expiry): re-acquire on the next command.
         if (err instanceof CrossoverError && err.code === "STALE_FENCE")
           this.leases.forget(room_id);
+        await this.recordDenial(principal, envelope, err, token);
         throw err;
       }
 
@@ -753,4 +857,37 @@ export class Dispatcher {
 
 function validation(message: string, issues: unknown): CrossoverError {
   return new CrossoverError("VALIDATION", message, { details: { issues } });
+}
+
+/** What a `capability.denied` event says about a refused authorization (T215). */
+interface DenialInfo {
+  action: string;
+  resource: Record<string, string | number | boolean>;
+  missing_capability: string;
+  reason?: string;
+  /** Set when the check was for another participant (`ctx.authorizeAs`). */
+  on_behalf_of?: string;
+}
+
+/** Keep the event small and free of anything a command put in the resource but the policy didn't need. */
+function denialOf(
+  action: string,
+  resource: { room_id: string; [key: string]: unknown },
+  error: CrossoverError,
+): DenialInfo {
+  const kept: DenialInfo["resource"] = {};
+  for (const [key, value] of Object.entries(resource).slice(0, 12)) {
+    if (key === "room_id") continue;
+    if (typeof value === "string") kept[key] = value.slice(0, 256);
+    else if (typeof value === "number" || typeof value === "boolean") kept[key] = value;
+  }
+  const details = error.details ?? {};
+  const missing =
+    typeof details.missing_capability === "string" ? details.missing_capability : action;
+  return {
+    action: action.slice(0, 512),
+    resource: kept,
+    missing_capability: missing.slice(0, 512),
+    ...(typeof details.reason === "string" ? { reason: details.reason } : {}),
+  };
 }

@@ -154,7 +154,11 @@ describe("workspace.apply_changeset", () => {
     ).rejects.toMatchObject({ code: "FORBIDDEN" });
     expect(paths).toEqual(["old", "old", "denied"]);
     expect(await f.rowsFor("changesets")).toHaveLength(1);
-    expect(await f.rowsFor("events")).toHaveLength(1);
+    // The first apply's event, plus the denial (T215), but nothing from the denied apply.
+    expect((await f.rowsFor("events")).map((e) => e.type)).toEqual([
+      "workspace.changeset.applied",
+      "capability.denied",
+    ]);
     expect(await f.head()).toBe(head);
   });
 
