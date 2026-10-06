@@ -17,6 +17,8 @@ export function registerWorkspaceSearch(dispatcher: Dispatcher): void {
   dispatcher.registerCommand({
     method: "workspace.search",
     action: "workspace.read",
+    // Each match is authorized by its path before it is returned.
+    perPathAuthorize: true,
     mutating: false,
     params: z.strictObject({
       query: input,

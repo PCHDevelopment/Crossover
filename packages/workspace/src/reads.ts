@@ -98,6 +98,7 @@ export function registerWorkspaceReads(dispatcher: Dispatcher): void {
   dispatcher.registerCommand({
     method: "workspace.read",
     action: "workspace.read",
+    perPathAuthorize: true,
     mutating: false,
     params: z.strictObject({ path: pathSchema(), revision }),
     execute: async (ctx, params) => {

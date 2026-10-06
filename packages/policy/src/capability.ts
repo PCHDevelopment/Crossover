@@ -119,11 +119,12 @@ export function isSafeRequestPath(path: string): boolean {
 /**
  * Does the grant `granted` cover `base` (`<resource>.<action>`) applied to the workspace path
  * `path`? Like {@link capabilityMatches} with a request of `base:path`, but the path is taken
- * as is, so file names with spaces work. Fails closed (`false`) for a malformed grant or an
+ * as is, so file names with spaces work (`""` is the workspace root). Fails closed (`false`) for a malformed grant or an
  * unsafe path; it never throws.
  */
 export function capabilityMatchesPath(granted: string, base: string, path: string): boolean {
-  if (!isSafeRequestPath(path)) return false;
+  // "" is the workspace root: only an unscoped grant covers it; no scope is "the root".
+  if (path !== "" && !isSafeRequestPath(path)) return false;
   let g: ParsedCapability;
   try {
     g = parseCapability(granted);
@@ -132,5 +133,5 @@ export function capabilityMatchesPath(granted: string, base: string, path: strin
   }
   if (g.base !== base) return false;
   if (g.scope === undefined) return true;
-  return PATH_SCOPED_RESOURCES.has(g.resource) && pathGlobMatch(g.scope, path);
+  return path !== "" && PATH_SCOPED_RESOURCES.has(g.resource) && pathGlobMatch(g.scope, path);
 }

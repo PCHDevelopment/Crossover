@@ -132,6 +132,14 @@ export interface CommandDefinition<S extends z.ZodType, R> {
   mutating: boolean;
   /** The capability the policy checks (T208); defaults to the method name. */
   action?: string;
+  /**
+   * Opt in (T218) only if `execute` calls `ctx.authorize(action, { path })` for **every** path
+   * it reads, writes or reveals. The command-level gate then also lets in a participant who
+   * holds only scoped grants of the capability (`workspace.write:docs/**`); without the flag a
+   * scoped grant never opens the gate, because it doesn't cover the unscoped capability.
+   * Declaring it on a command that doesn't check each path hands scoped holders everything.
+   */
+  perPathAuthorize?: boolean;
   execute(ctx: CommandContext, params: z.infer<S>): Promise<CommandResult<R>>;
 }
 
@@ -143,7 +151,7 @@ export type Authorizer = (
   principal: Principal,
   action: string,
   resource: { room_id: string; [key: string]: unknown },
-  context: { method: string; params: unknown; client: PoolClient },
+  context: { method: string; params: unknown; client: PoolClient; perPath?: boolean },
 ) => Promise<void>;
 
 /** Allows everything. For tests only; production wiring must pass the real policy. */
@@ -574,7 +582,12 @@ export class Dispatcher {
         principal,
         action,
         { room_id },
-        { method: envelope.method, params, client },
+        {
+          method: envelope.method,
+          params,
+          client,
+          ...(def.perPathAuthorize ? { perPath: true } : {}),
+        },
       );
       const ctx: CommandContext = {
         client,
@@ -637,7 +650,12 @@ export class Dispatcher {
             principal,
             action,
             { room_id },
-            { method: envelope.method, params, client },
+            {
+              method: envelope.method,
+              params,
+              client,
+              ...(def.perPathAuthorize ? { perPath: true } : {}),
+            },
           );
 
           let ran = false;

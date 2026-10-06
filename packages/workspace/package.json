@@ -10,12 +10,15 @@
     }
   },
   "dependencies": {
-    "@crossover/protocol": "workspace:*",
     "@crossover/db": "workspace:*",
     "@crossover/kernel": "workspace:*",
+    "@crossover/protocol": "workspace:*",
     "zod": "^4.6.5"
   },
   "scripts": {
     "build": "tsc -b"
+  },
+  "devDependencies": {
+    "@crossover/policy": "workspace:*"
   }
 }

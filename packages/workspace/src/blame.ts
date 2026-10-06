@@ -18,6 +18,7 @@ export function registerWorkspaceBlame(dispatcher: Dispatcher): void {
   dispatcher.registerCommand({
     method: "workspace.blame",
     action: "workspace.read",
+    perPathAuthorize: true,
     mutating: false,
     params: z.strictObject({
       path: pathSchema(),
