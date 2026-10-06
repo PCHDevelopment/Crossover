@@ -40,6 +40,17 @@ export interface CommandContext {
    */
   authorize(action: string, resource?: Record<string, unknown>): Promise<void>;
   /**
+   * Like {@link authorize}, but asks whether *another participant of this room* could do
+   * `action` (say, whether someone offered the lead can accept it). It goes through the same
+   * configured authorizer, in the same transaction, with the participant's current kind,
+   * authority and role. `NOT_FOUND` if they aren't in this room.
+   */
+  authorizeAs(
+    participantId: string,
+    action: string,
+    resource?: Record<string, unknown>,
+  ): Promise<void>;
+  /**
    * Run `callback` once this command's transaction has committed, still on the room's actor
    * (so nothing else for the room runs in between). Not run if the command fails or rolls
    * back, nor when an idempotent duplicate is replayed. A callback that throws can't undo
@@ -249,6 +260,21 @@ export class Dispatcher {
       new RoomLeases(options.pool, options.nodeId, options.leaseTtlMs, {
         ...(options.onLeaseAcquire ? { onAcquire: options.onLeaseAcquire } : {}),
       });
+  }
+
+  /** A participant's current principal, for {@link CommandContext.authorizeAs}. */
+  private async principalOf(
+    client: PoolClient,
+    roomId: string,
+    participantId: string,
+  ): Promise<Principal> {
+    const { rows } = await client.query<Omit<Principal, "participant_id" | "room_id">>(
+      "SELECT kind, authority, role FROM participants WHERE id = $1 AND room_id = $2",
+      [participantId, roomId],
+    );
+    const row = rows[0];
+    if (!row) throw new CrossoverError("NOT_FOUND", `Participant ${participantId} not found`);
+    return { participant_id: participantId, room_id: roomId, ...row };
   }
 
   registerCommand<S extends z.ZodType, R>(def: CommandDefinition<S, R>): void {
@@ -602,6 +628,13 @@ export class Dispatcher {
             { ...resource, room_id },
             { method: envelope.method, params, client },
           ),
+        authorizeAs: async (participantId, a, resource) =>
+          this.authorize(
+            await this.principalOf(client, room_id, participantId),
+            a,
+            { ...resource, room_id },
+            { method: envelope.method, params, client },
+          ),
         afterCommit: () => {
           throw new Error(`${envelope.method} is read-only: afterCommit needs a transaction`);
         },
@@ -675,6 +708,13 @@ export class Dispatcher {
                 authorize: (a, resource) =>
                   this.authorize(
                     principal,
+                    a,
+                    { ...resource, room_id },
+                    { method: envelope.method, params, client },
+                  ),
+                authorizeAs: async (participantId, a, resource) =>
+                  this.authorize(
+                    await this.principalOf(client, room_id, participantId),
                     a,
                     { ...resource, room_id },
                     { method: envelope.method, params, client },
