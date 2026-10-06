@@ -378,6 +378,45 @@ describe("capabilities.revoke", () => {
     expect(await can(r, r.dev, "sandbox.exec")).toBe(true);
   });
 
+  it("revoking a capability also ends the narrower scoped grants of it, so none is left shadowed", async () => {
+    const r = await setup();
+    await grant(r, r.owner, r.dev, "workspace.write:docs/**");
+    await grant(r, r.owner, r.dev, "workspace.write:src/**");
+    await grant(r, r.owner, r.dev, "browser.navigate");
+    const out = await revoke(r, r.owner, r.dev, "workspace.write");
+    expect(out.response).toMatchObject({ grants_ended: 2, denied: true });
+    const listed = await run(r, r.owner, "capabilities.list", {
+      participant_id: r.dev.participant_id,
+    });
+    expect(listed.response).toMatchObject({
+      grants: [{ capability: "browser.navigate" }],
+      revocations: [{ capability: "workspace.write" }],
+    });
+    expect(await can(r, r.dev, "workspace.write")).toBe(false);
+    expect(await can(r, r.dev, "workspace.write:src/a.ts")).toBe(false);
+  });
+
+  it("a scoped revoke ends only the grants within that scope, and keeps broader and unrelated ones", async () => {
+    const r = await setup();
+    await grant(r, r.owner, r.reviewer, "workspace.write:docs/**");
+    await grant(r, r.owner, r.reviewer, "workspace.write:docs/api/**");
+    await grant(r, r.owner, r.reviewer, "workspace.write:src/**");
+    const out = await revoke(r, r.owner, r.reviewer, "workspace.write:docs/api/**");
+    expect(out.response).toMatchObject({ grants_ended: 1, denied: true }); // docs/** still covers it
+    const listed = await run(r, r.owner, "capabilities.list", {
+      participant_id: r.reviewer.participant_id,
+    });
+    expect(
+      (listed.response as { grants: { capability: string }[] }).grants.map((g) => g.capability),
+    ).toEqual(["workspace.write:docs/**", "workspace.write:src/**"]);
+  });
+
+  it("revoking a capability nobody holds as a grant, with nothing covering it, is still NOT_FOUND", async () => {
+    const r = await setup();
+    await grant(r, r.owner, r.reviewer, "workspace.write:docs/**");
+    await rejects(revoke(r, r.owner, r.reviewer, "workspace.write:src/**"), "NOT_FOUND");
+  });
+
   it("an admin can revoke a Tier 3 grant the owner made", async () => {
     const r = await setup();
     await grant(r, r.owner, r.dev, "aws.deploy_lambda:function/prod-*", { expires_at: inHours(1) });
