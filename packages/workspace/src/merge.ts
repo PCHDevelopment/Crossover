@@ -1,4 +1,5 @@
 import { git, GitError } from "./git.js";
+import { concurrentBinaryFiles, enforceBinaryConflicts } from "./binary.js";
 
 export interface MergeStage {
   mode: string;
@@ -86,6 +87,7 @@ export async function merge(
       tree: (await git(["rev-parse", `${candidateOid}^{tree}`], options)).stdout.trim(),
     };
   }
+  const binaryFiles = await concurrentBinaryFiles(repo, [baseOid!, headOid!, candidateOid!]);
   try {
     const result = await git(
       [
@@ -110,7 +112,7 @@ export async function merge(
         undefined,
         result.stdout,
       );
-    return { clean: true, tree };
+    return enforceBinaryConflicts({ clean: true, tree }, binaryFiles);
   } catch (error) {
     if (
       !(error instanceof GitError) ||
@@ -119,8 +121,11 @@ export async function merge(
       error.signal !== null
     )
       throw error;
-    return parseConflict(
-      typeof error.stdout === "string" ? error.stdout : error.stdout.toString("utf8"),
+    return enforceBinaryConflicts(
+      parseConflict(
+        typeof error.stdout === "string" ? error.stdout : error.stdout.toString("utf8"),
+      ),
+      binaryFiles,
     );
   }
 }

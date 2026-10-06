@@ -1,4 +1,4 @@
-import { git } from "./git.js";
+import { readMergeBlob } from "./binary.js";
 import { extractHunks } from "./hunks.js";
 import type { ConflictHunk } from "./hunks.js";
 import type { MergeMessage, MergeResult } from "./merge.js";
@@ -33,12 +33,7 @@ export async function classifyConflicts(
           file.stages
             .filter((entry) => entry.mode !== "160000")
             .map(async (entry) => {
-              const { stdout } = await git(["cat-file", "blob", entry.oid], {
-                gitDir: repo,
-                timeoutMs: 10_000,
-                encoding: "buffer",
-              });
-              return [entry.stage, stdout] as const;
+              return [entry.stage, await readMergeBlob(repo, entry.oid)] as const;
             }),
         ),
       );
@@ -46,7 +41,7 @@ export async function classifyConflicts(
       let kind: ConflictKind;
       if (
         types.some((type) => type.includes("binary")) ||
-        [...blobs.values()].some((blob) => blob.subarray(0, 8192).includes(0))
+        [...blobs.values()].some((blob) => blob.binary)
       )
         kind = "BINARY";
       else if (types.some((type) => type.includes("rename"))) kind = "RENAME";
@@ -58,9 +53,9 @@ export async function classifyConflicts(
       const hunks =
         kind === "CONTENT" && blobs.size === 3
           ? await extractHunks(
-              blobs.get(1)!.toString("utf8"),
-              blobs.get(3)!.toString("utf8"),
-              blobs.get(2)!.toString("utf8"),
+              blobs.get(1)!.content!.toString("utf8"),
+              blobs.get(3)!.content!.toString("utf8"),
+              blobs.get(2)!.content!.toString("utf8"),
             )
           : [];
       return { path: file.path, kind, hunks, messages };
