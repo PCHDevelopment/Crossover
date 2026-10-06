@@ -6,6 +6,7 @@ import { git, GitError } from "./git.js";
 import type { Operation } from "./operations.js";
 import { normalizePath } from "./path.js";
 import { patchFailure, validatePatch } from "./patch.js";
+import { validateIntroducedPaths } from "./ignore.js";
 
 type Entry = { mode: string; sha: string };
 type Reason = "exists" | "missing" | "rename_target_exists" | "not_a_file" | "patch_path_mismatch";
@@ -51,6 +52,17 @@ export async function materialize(
       const [mode, , sha] = record.slice(0, tab).split(" ");
       entries.set(record.slice(tab + 1), { mode: mode!, sha: sha! });
     }
+    await validateIntroducedPaths(
+      repo,
+      entries,
+      normalized.flatMap((operation) =>
+        operation.type === "create"
+          ? [operation.path]
+          : operation.type === "rename"
+            ? [operation.to]
+            : [],
+      ),
+    );
     const directories = new Map<string, number>();
     const countParents = (path: string, delta: number): void => {
       for (const parent of parents(path)) {
