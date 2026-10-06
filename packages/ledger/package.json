@@ -1,0 +1,20 @@
+{
+  "name": "@crossover/ledger",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@crossover/db": "workspace:*",
+    "@crossover/protocol": "workspace:*",
+    "zod": "^4.6.5"
+  },
+  "scripts": {
+    "build": "tsc -b"
+  }
+}
