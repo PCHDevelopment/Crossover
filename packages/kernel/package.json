@@ -11,5 +11,11 @@
   },
   "scripts": {
     "build": "tsc -b"
+  },
+  "dependencies": {
+    "@crossover/db": "workspace:*",
+    "@crossover/ledger": "workspace:*",
+    "@crossover/protocol": "workspace:*",
+    "zod": "^4.6.5"
   }
 }
