@@ -24,6 +24,11 @@ const apps: FastifyInstance[] = [];
 beforeAll(async () => {
   db = await createTestDatabase();
   pool = db.pool;
+  // Participants reference users (T216), so the fixed ids the tests use must exist.
+  await pool.query(
+    `INSERT INTO users (id, display_name, provider, provider_subject)
+     SELECT 'user_' || g, 'Peter', 'test', 'user_' || g FROM generate_series(1, 3000) g`,
+  );
 });
 
 afterAll(async () => {
@@ -50,7 +55,7 @@ const manifest = (extra: Record<string, unknown> = {}) => ({
   ...extra,
 });
 
-async function setup(onInternalError?: (e: unknown) => void) {
+async function setup(onInternalError?: (e: unknown) => void, devLogin = false) {
   const dispatcher = new Dispatcher({ pool, authorize, nodeId: `node-${++n}` });
   registerRoomCommands(dispatcher);
   registerInviteCommands(dispatcher);
@@ -76,6 +81,7 @@ async function setup(onInternalError?: (e: unknown) => void) {
   const app = buildGateway({
     dispatcher,
     pool,
+    devLogin,
     ...(onInternalError ? { onInternalError } : {}),
   });
   apps.push(app);
@@ -341,5 +347,92 @@ describe("error mapping", () => {
       status: 429,
       body: { error: { retryable: true, details: { retry_after: 30 } } },
     });
+  });
+});
+
+describe("platform users (T216)", () => {
+  const login = (s: Setup, subject: string, display_name = "Peter") =>
+    post(s, "/v1/auth/dev-login", { subject, display_name });
+  const subject = () => `dev-${++n}-${Date.now().toString(36)}`;
+
+  it("dev login doesn't exist unless explicitly enabled", async () => {
+    const s = await setup();
+    const sub = subject();
+    const res = await login(s, sub);
+    errorShape(res.json(), "NOT_FOUND", 404, res);
+    const { rows } = await pool.query("SELECT 1 FROM users WHERE provider_subject = $1", [sub]);
+    expect(rows).toHaveLength(0);
+  });
+
+  it("signs a user in with a session token, and the same subject is the same user", async () => {
+    const s = await setup(undefined, true);
+    const sub = subject();
+    const a = await login(s, sub, "Peter");
+    expect(a.statusCode).toBe(200);
+    expect(a.headers["cache-control"]).toBe("no-store");
+    expect(a.json().session_token).toMatch(/^us_/);
+    const b = await login(s, sub, "Someone else");
+    expect(b.json().user.id).toBe(a.json().user.id);
+    expect(b.json().user.display_name).toBe("Peter"); // not renamed
+    expect(b.json().session_token).not.toBe(a.json().session_token);
+    const { rows } = await pool.query("SELECT provider FROM users WHERE provider_subject = $1", [
+      sub,
+    ]);
+    expect(rows).toEqual([{ provider: "dev" }]);
+  });
+
+  it.each([
+    ["missing subject", { display_name: "P" }],
+    ["empty name", { subject: "x", display_name: " " }],
+    ["unknown field", { subject: "x", display_name: "P", provider: "github" }],
+    ["not an object", [1]],
+  ])("rejects a malformed login (%s)", async (_n, body) => {
+    const s = await setup(undefined, true);
+    const res = await post(s, "/v1/auth/dev-login", body);
+    errorShape(res.json(), "VALIDATION", 400, res);
+  });
+
+  it("creates a room through the gateway and records the user as the owner's user_id", async () => {
+    const s = await setup(undefined, true);
+    const session = (await login(s, subject())).json();
+    const res = await post(
+      s,
+      "/v1/commands",
+      envelope("room.create", {
+        slug: `gwr-${++n}-${Date.now().toString(36)}`,
+        name: "n",
+        objective: "o",
+      }),
+      { authorization: `Bearer ${session.session_token}` },
+    );
+    expect(res.statusCode).toBe(200);
+    const { participant } = res.json().response as { participant: { id: string } };
+    const { rows } = await pool.query(
+      "SELECT user_id, authority, kind FROM participants WHERE id = $1",
+      [participant.id],
+    );
+    expect(rows[0]).toEqual({ user_id: session.user.id, authority: "OWNER", kind: "HUMAN" });
+  });
+
+  it("only accepts a user session on the roomless route, and only a room token on room routes", async () => {
+    const s = await setup(undefined, true);
+    const session = (await login(s, subject())).json();
+    const roomRoute = await command(s, envelope("room.get_state"), session.session_token);
+    errorShape(roomRoute.json(), "UNAUTHENTICATED", 401, roomRoute);
+    const rootRoute = await post(s, "/v1/commands", envelope("room.create", {}), {
+      authorization: `Bearer ${s.owner.access_token}`,
+    });
+    errorShape(rootRoute.json(), "UNAUTHENTICATED", 401, rootRoute);
+    const none = await post(s, "/v1/commands", envelope("room.create", {}));
+    errorShape(none.json(), "UNAUTHENTICATED", 401, none);
+  });
+
+  it("a room-bound method on the roomless route is NOT_FOUND", async () => {
+    const s = await setup(undefined, true);
+    const session = (await login(s, subject())).json();
+    const res = await post(s, "/v1/commands", envelope("room.get_state"), {
+      authorization: `Bearer ${session.session_token}`,
+    });
+    errorShape(res.json(), "NOT_FOUND", 404, res);
   });
 });

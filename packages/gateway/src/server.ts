@@ -1,6 +1,13 @@
 import type { Pool } from "@crossover/db";
-import { authenticate, type Dispatcher } from "@crossover/kernel";
+import {
+  authenticate,
+  authenticateUser,
+  createUserSession,
+  findOrCreateUser,
+  type Dispatcher,
+} from "@crossover/kernel";
 import { CrossoverError } from "@crossover/protocol";
+import { z } from "zod";
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import { toHttpError } from "./errors.js";
 
@@ -11,7 +18,19 @@ export interface GatewayOptions {
   onInternalError?: (error: unknown, request: FastifyRequest) => void;
   /** Maximum request body, in bytes. Default 1 MiB. */
   bodyLimit?: number;
+  /**
+   * Serve `POST /v1/auth/dev-login`, which signs anyone in as any name with no credentials.
+   * Off unless set: when off the route does not exist (404). For development only; OAuth
+   * logins (later) plug into the same `users` table.
+   */
+  devLogin?: boolean;
 }
+
+const devLoginBody = z.strictObject({
+  /** Stable per-person key; the same subject always signs in as the same user. */
+  subject: z.string().trim().min(1).max(200),
+  display_name: z.string().trim().min(1).max(100),
+});
 
 const BEARER = /^Bearer ([^\s]+)$/i;
 
@@ -38,6 +57,11 @@ function expectObject(body: unknown): Record<string, unknown> {
  * - `POST /v1/rooms/:roomId/commands`: body is the command envelope; bearer token required.
  * - `POST /v1/rooms/:roomId/join`: body `{ token, manifest }`; the invite token is the
  *   credential, so there is no bearer header.
+ *
+ * - `POST /v1/commands`: a roomless command (`room.create`); bearer is a user session token
+ *   (`us_…`), not a room token. The creating user becomes the new room's owner.
+ * - `POST /v1/auth/dev-login`: only when `devLogin` is on. Body `{ subject, display_name }`;
+ *   returns a user session.
  *
  * Responses carrying secrets (`one_time`, the join tokens) are `Cache-Control: no-store`.
  */
@@ -80,6 +104,40 @@ export function buildGateway(options: GatewayOptions): FastifyInstance {
     void reply.status(201).header("Cache-Control", "no-store");
     return { ...(result.response as object), tokens: result.one_time };
   });
+
+  app.post("/v1/commands", async (request, reply) => {
+    const user = await authenticateUser(pool, bearerToken(request));
+    const result = await dispatcher.dispatchRoomless(user, expectObject(request.body));
+    void reply.header("Cache-Control", "no-store");
+    return {
+      response: result.response,
+      events: result.events,
+      replayed: result.replayed,
+    };
+  });
+
+  if (options.devLogin === true) {
+    app.post("/v1/auth/dev-login", async (request, reply) => {
+      const parsed = devLoginBody.safeParse(expectObject(request.body));
+      if (!parsed.success) {
+        throw new CrossoverError("VALIDATION", "Invalid dev login", {
+          details: { issues: parsed.error.issues },
+        });
+      }
+      const user = await findOrCreateUser(pool, {
+        provider: "dev",
+        subject: parsed.data.subject,
+        display_name: parsed.data.display_name,
+      });
+      const session = await createUserSession(pool, user.id);
+      void reply.header("Cache-Control", "no-store");
+      return {
+        user: { id: user.id, display_name: user.display_name },
+        session_token: session.session_token,
+        expires_at: session.expires_at.toISOString(),
+      };
+    });
+  }
 
   return app;
 }
