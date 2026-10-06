@@ -7,6 +7,7 @@ import type { Operation } from "./operations.js";
 import { normalizePath } from "./path.js";
 import { patchFailure, validatePatch } from "./patch.js";
 import { validateIntroducedPaths } from "./ignore.js";
+import { validateFileSize } from "./binary.js";
 
 type Entry = { mode: string; sha: string };
 type Reason = "exists" | "missing" | "rename_target_exists" | "not_a_file" | "patch_path_mismatch";
@@ -34,6 +35,13 @@ export async function materialize(
       ? { ...operation, from: normalizePath(operation.from), to: normalizePath(operation.to) }
       : { ...operation, path: normalizePath(operation.path) },
   );
+  for (const operation of normalized) {
+    if ("content" in operation && operation.content !== undefined)
+      validateFileSize(
+        operation.type === "rename" ? operation.to : operation.path,
+        Buffer.byteLength(operation.content),
+      );
+  }
   const dir = await mkdtemp(join(tmpdir(), "crossover-index-"));
   const options = {
     gitDir: repo,
@@ -185,6 +193,20 @@ export async function materialize(
           });
           break;
         }
+      }
+    }
+    const touched = new Set(
+      normalized.flatMap((operation) =>
+        operation.type === "delete"
+          ? []
+          : [operation.type === "rename" ? operation.to : operation.path],
+      ),
+    );
+    for (const path of touched) {
+      const entry = entries.get(path);
+      if (entry && entry.mode !== "160000") {
+        const size = Number((await git(["cat-file", "-s", entry.sha], options)).stdout.trim());
+        validateFileSize(path, size);
       }
     }
     await stageEntries();
