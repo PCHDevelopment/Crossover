@@ -6,3 +6,6 @@ export { materialize } from "./materialize.js";
 export type { Operation } from "./operations.js";
 export { merge } from "./merge.js";
 export type { MergeResult, MergeFile, MergeStage, MergeMessage } from "./merge.js";
+export { classifyConflicts } from "./conflicts.js";
+export type { ConflictKind, ClassifiedConflict } from "./conflicts.js";
+export type { ConflictHunk, LineRange } from "./hunks.js";
