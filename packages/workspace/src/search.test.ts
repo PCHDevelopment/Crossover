@@ -165,7 +165,7 @@ it("caps match counts and Unicode line previews without splitting characters", a
   const f = await fixture();
   await f.apply([{ type: "create", path: "file", content: "needle\n".repeat(201) }]);
   const result = (await f.dispatch("workspace.search", { query: "needle" })).response as {
-    matches: { text: string }[];
+    matches: { text: string; text_truncated?: true }[];
     truncated: boolean;
   };
   expect(result.matches).toHaveLength(200);
@@ -174,7 +174,18 @@ it("caps match counts and Unicode line previews without splitting characters", a
   const preview = (await f.dispatch("workspace.search", { query: "needle" }))
     .response as typeof result;
   expect(preview.matches[0]!.text).toBe("needle" + "😀".repeat(494));
-  expect(preview.truncated).toBe(true);
+  expect(preview.matches[0]!.text_truncated).toBe(true);
+  expect(preview.truncated).toBe(false);
+  await f.apply([{ type: "modify", path: "file", content: "needle" + "😀".repeat(494) }], 2);
+  const exactPreview = (await f.dispatch("workspace.search", { query: "needle" }))
+    .response as typeof result;
+  expect(exactPreview.matches[0]).not.toHaveProperty("text_truncated");
+  expect(exactPreview.truncated).toBe(false);
+  await f.apply([{ type: "modify", path: "file", content: "needle\n".repeat(200) }], 3);
+  const exactMatches = (await f.dispatch("workspace.search", { query: "needle" }))
+    .response as typeof result;
+  expect(exactMatches.matches).toHaveLength(200);
+  expect(exactMatches.truncated).toBe(false);
 });
 
 it("caps the complete UTF-8 response at one MiB even with long paths and Unicode previews", async () => {

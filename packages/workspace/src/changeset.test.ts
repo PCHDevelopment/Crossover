@@ -38,3 +38,45 @@ it("enforces the aggregate UTF-8 text limit", () => {
     }).success,
   ).toBe(false);
 });
+
+it("accepts exactly 500 operations and rejects the 501st", () => {
+  const operations = Array.from({ length: 500 }, (_, index) => ({
+    type: "delete",
+    path: `file${index}`,
+  }));
+  expect(changesetParamsSchema.safeParse({ ...params, operations }).success).toBe(true);
+  expect(
+    changesetParamsSchema.safeParse({
+      ...params,
+      operations: [...operations, { type: "delete", path: "overflow" }],
+    }).success,
+  ).toBe(false);
+});
+
+it("accepts exactly 25 MiB across UTF-8 contents, patches and rename replacements, then rejects one extra byte", () => {
+  const operations = [
+    { type: "create", path: "one", content: "é".repeat(4 * 1024 * 1024) },
+    { type: "modify", path: "two", patch: "p".repeat(7 * 1024 * 1024) },
+    { type: "rename", from: "old", to: "new", content: "r".repeat(10 * 1024 * 1024) },
+  ];
+  expect(changesetParamsSchema.safeParse({ ...params, operations }).success).toBe(true);
+  expect(
+    changesetParamsSchema.safeParse({
+      ...params,
+      operations: [...operations, { type: "create", path: "overflow", content: "x" }],
+    }).success,
+  ).toBe(false);
+});
+
+it("counts base64 decoded bytes at exactly 25 MiB rather than its larger wire representation", () => {
+  const content = Buffer.alloc(25 * 1024 * 1024, 120).toString("base64");
+  const operations = [{ type: "create", path: "binary", content, encoding: "base64" }];
+  expect(content.length).toBeGreaterThan(25 * 1024 * 1024);
+  expect(changesetParamsSchema.safeParse({ ...params, operations }).success).toBe(true);
+  expect(
+    changesetParamsSchema.safeParse({
+      ...params,
+      operations: [...operations, { type: "create", path: "overflow", content: "x" }],
+    }).success,
+  ).toBe(false);
+});
