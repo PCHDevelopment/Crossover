@@ -4,6 +4,7 @@ import { acquireLease, getLease } from "@crossover/ledger";
 import { CrossoverError, newId } from "@crossover/protocol";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
+import type { Principal } from "./principal.js";
 import {
   allowAll,
   Dispatcher,
@@ -11,7 +12,6 @@ import {
   type DispatcherOptions,
   type CommandResult,
   type EmittedEvent,
-  type Principal,
 } from "./dispatcher.js";
 
 let db: TestDatabase;
@@ -42,6 +42,9 @@ async function newRoom(): Promise<string> {
 const principal = (room_id: string, participant_id = "part_1"): Principal => ({
   participant_id,
   room_id,
+  kind: "HUMAN",
+  authority: "MEMBER",
+  role: "DEVELOPER",
 });
 
 const envelope = (method: string, params: Record<string, unknown> = {}, key?: string) => ({
@@ -528,7 +531,13 @@ describe("dispatch: authorization", () => {
     );
     expect(calls).toEqual([
       [
-        { participant_id: "part_9", room_id: room },
+        {
+          participant_id: "part_9",
+          room_id: room,
+          kind: "HUMAN",
+          authority: "MEMBER",
+          role: "DEVELOPER",
+        },
         "messages.send",
         { room_id: room },
         "messages.send",

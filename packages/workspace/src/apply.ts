@@ -7,10 +7,14 @@ import { materialize } from "./materialize.js";
 import { merge } from "./merge.js";
 import type { Operation } from "./operations.js";
 import { treeChanges } from "./tree-changes.js";
+import { updateCanonicalRef } from "./reconcile.js";
+import { registerWorkspaceReads } from "./reads.js";
+import { registerWorkspaceHistory } from "./history.js";
+import { registerWorkspaceBlame } from "./blame.js";
 
 export interface WorkspaceCommandDeps {
-  /** T513 adds reconciliation when this best-effort post-commit cache update fails. */
-  updateCanonicalRef?: (repo: string, commit: string) => Promise<void>;
+  /** Failure is reported after commit; startup reconcileRef restores the DB-authoritative head. */
+  updateCanonicalRef?: (repo: string, commit: string, expected: string) => Promise<void>;
 }
 
 export type ApplyResponse =
@@ -29,6 +33,9 @@ export function registerWorkspaceCommands(
     params: changesetParamsSchema,
     execute: (ctx, params) => apply(ctx, params, deps),
   });
+  registerWorkspaceReads(dispatcher);
+  registerWorkspaceHistory(dispatcher);
+  registerWorkspaceBlame(dispatcher);
 }
 
 async function apply(
@@ -44,6 +51,7 @@ async function apply(
           from: op.from,
           to: op.to,
           ...(op.content === undefined ? {} : { content: op.content }),
+          ...(op.encoding === undefined ? {} : { encoding: op.encoding }),
         }
       : op,
   );
@@ -148,8 +156,7 @@ async function apply(
     [room_id, id, revision],
   );
   ctx.afterCommit(async () => {
-    if (deps.updateCanonicalRef) await deps.updateCanonicalRef(ws.repo_path, commit);
-    else await git(["update-ref", "refs/room/canonical", commit], options);
+    await (deps.updateCanonicalRef ?? updateCanonicalRef)(ws.repo_path, commit, head.commit_sha);
   });
   return {
     response: { status: "APPLIED" as const, changeset_id: id, applied_revision: revision },
