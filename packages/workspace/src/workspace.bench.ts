@@ -13,6 +13,7 @@ import * as merger from "./merge.js";
 import * as binary from "./binary.js";
 import * as treeChanges from "./tree-changes.js";
 import * as classifier from "./conflicts.js";
+import * as gitModule from "./git.js";
 import { git } from "./git.js";
 import { provisionWorkspace } from "./provision.js";
 import { updateCanonicalRef } from "./reconcile.js";
@@ -20,17 +21,36 @@ import { withSearchTree } from "./search-tree.js";
 import type { Operation } from "./operations.js";
 
 type Sample = Record<string, number>;
-let active: Sample | undefined;
+type ActiveSample = {
+  timings: Sample;
+  gitInvocations: Record<string, number>;
+  currentStage?: string;
+};
+let active: ActiveSample | undefined;
 async function timed<T>(stage: string, work: () => Promise<T>): Promise<T> {
   const sample = active;
+  const previous = sample?.currentStage;
+  if (sample) sample.currentStage = stage;
   const start = performance.now();
   try {
     return await work();
   } finally {
-    if (sample) sample[stage] = (sample[stage] ?? 0) + performance.now() - start;
+    if (sample) {
+      sample.timings[stage] = (sample.timings[stage] ?? 0) + performance.now() - start;
+      if (previous === undefined) delete sample.currentStage;
+      else sample.currentStage = previous;
+    }
   }
 }
 function instrument() {
+  const runGit = gitModule.git;
+  vi.spyOn(gitModule, "git").mockImplementation((...args) => {
+    if (active?.currentStage) {
+      const key = `${active.currentStage}_git_invocations`;
+      active.gitInvocations[key] = (active.gitInvocations[key] ?? 0) + 1;
+    }
+    return runGit(...args);
+  });
   const materialize = materializer.materialize;
   vi.spyOn(materializer, "materialize").mockImplementation((...args) =>
     timed("materialize", () => materialize(...args)),
@@ -92,8 +112,9 @@ it("profiles 200 clean stale-base applies of 20 files at two repository sizes", 
         await db.pool.query("SELECT repo_path FROM workspaces WHERE room_id = $1", [room])
       ).rows[0].repo_path as string;
       const options = { gitDir: repo, timeoutMs: 10_000 };
-      const content = (head: number, candidate: number) =>
+      const content = (head: number, candidate: number, path = "") =>
         `head: ${head}\n` +
+        `file: ${path}\n` +
         Array.from({ length: 20 }, (_, index) => `unchanged line ${index}\n`).join("") +
         `candidate: ${candidate}\n`;
       const paths = Array.from(
@@ -103,10 +124,28 @@ it("profiles 200 clean stale-base applies of 20 files at two repository sizes", 
       const blob = (
         await git(["hash-object", "-w", "--stdin"], { ...options, input: content(-1, -1) })
       ).stdout.trim();
+      const editableBlobs = new Map(
+        await Promise.all(
+          paths.slice(0, 20).map(
+            async (path) =>
+              [
+                path,
+                (
+                  await git(["hash-object", "-w", "--stdin"], {
+                    ...options,
+                    input: content(-1, -1, path),
+                  })
+                ).stdout.trim(),
+              ] as const,
+          ),
+        ),
+      );
       const tree = (
         await git(["mktree", "-z"], {
           ...options,
-          input: paths.map((path) => `100644 blob ${blob}\t${path}\0`).join(""),
+          input: paths
+            .map((path) => `100644 blob ${editableBlobs.get(path) ?? blob}\t${path}\0`)
+            .join(""),
         })
       ).stdout.trim();
       const initial = (await git(["rev-parse", "refs/room/canonical"], options)).stdout.trim();
@@ -160,24 +199,27 @@ it("profiles 200 clean stale-base applies of 20 files at two repository sizes", 
             operations: paths.slice(0, 20).map((path): Operation => ({
               type: "modify",
               path,
-              content: content(head, candidate),
+              content: content(head, candidate, path),
             })),
           },
         });
-      const samples: Sample[] = [];
+      const samples: { timings: Sample; gitInvocations: Record<string, number> }[] = [];
       for (let index = 0; index < iterations; index++) {
         expect((await apply(index * 2, index, index - 1)).response).toMatchObject({
           status: "APPLIED",
           applied_revision: index * 2 + 1,
         });
         active = {
-          total_apply: 0,
-          materialize: 0,
-          merge: 0,
-          binary_check: 0,
-          classify_tree_changes: 0,
-          db_transaction_inclusive: 0,
-          after_commit: 0,
+          timings: {
+            total_apply: 0,
+            materialize: 0,
+            merge: 0,
+            binary_check: 0,
+            classify_tree_changes: 0,
+            db_transaction_inclusive: 0,
+            after_commit: 0,
+          },
+          gitInvocations: {},
         };
         const result = await timed("total_apply", () => apply(index * 2, index - 1, index));
         expect(result.response).toMatchObject({
@@ -185,15 +227,16 @@ it("profiles 200 clean stale-base applies of 20 files at two repository sizes", 
           applied_revision: index * 2 + 2,
         });
         expect(failures).toEqual([]);
-        for (const stage of Object.keys(active)) expect(active[stage]).toBeGreaterThan(0);
-        active["db_transaction_other"] = Math.max(
+        for (const stage of Object.keys(active.timings))
+          expect(active.timings[stage]).toBeGreaterThan(0);
+        active.timings["db_transaction_other"] = Math.max(
           0,
-          active["db_transaction_inclusive"]! -
-            active["materialize"]! -
-            active["merge"]! -
-            active["classify_tree_changes"]!,
+          active.timings["db_transaction_inclusive"]! -
+            active.timings["materialize"]! -
+            active.timings["merge"]! -
+            active.timings["classify_tree_changes"]!,
         );
-        samples.push(active);
+        samples.push({ timings: active.timings, gitInvocations: active.gitInvocations });
         active = undefined;
         if ((index + 1) % 20 === 0)
           process.stdout.write(`Benchmark ${files} files: ${index + 1}/${iterations}\n`);
@@ -204,17 +247,38 @@ it("profiles 200 clean stale-base applies of 20 files at two repository sizes", 
           method: "workspace.read",
           params: { path },
         });
-        expect(read.response).toMatchObject({ content: content(iterations - 1, iterations - 1) });
+        expect(read.response).toMatchObject({
+          content: content(iterations - 1, iterations - 1, path),
+        });
         expect(await readFile(join(`${repo}.search`, "tree", path), "utf8")).toBe(
-          content(iterations - 1, iterations - 1),
+          content(iterations - 1, iterations - 1, path),
         );
       }
-      const stages = summary(samples);
+      const stages = summary(samples.map((sample) => sample.timings));
+      const git_invocations = Object.fromEntries(
+        Object.keys(samples[0]!.gitInvocations)
+          .sort()
+          .map((stage) => {
+            const values = samples
+              .map((sample) => sample.gitInvocations[stage]!)
+              .sort((a, b) => a - b);
+            return [
+              stage.replace(/_git_invocations$/, ""),
+              {
+                per_apply: values[0],
+                mean_calls: Number(
+                  (values.reduce((sum, value) => sum + value, 0) / values.length).toFixed(2),
+                ),
+              },
+            ];
+          }),
+      );
       reports.push({
         files,
         iterations,
         edited_files: 20,
         stages,
+        git_invocations,
         targets: {
           merge_p95_ms: 50,
           total_apply_p95_ms: 500,
