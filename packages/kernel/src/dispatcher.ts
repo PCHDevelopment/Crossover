@@ -12,6 +12,7 @@ import {
 import type { z } from "zod";
 import { RoomActorRegistry } from "./actor.js";
 import { RoomLeases } from "./leases.js";
+import type { EventPublisher } from "./publisher.js";
 
 /** Who is issuing a command. T201/T208 extend this with kind, authority and role. */
 export interface Principal {
@@ -109,6 +110,19 @@ export interface DispatcherOptions {
   actors?: RoomActorRegistry;
   leases?: RoomLeases;
   leaseTtlMs?: number;
+  /**
+   * Publishes the events of each committed command (after its `afterCommit` callbacks),
+   * never for a rollback, a replay or a read. A failure is reported and never fails the
+   * command: the events table is the outbox (§19.2).
+   */
+  publisher?: EventPublisher;
+  /** Give up on a publish after this long, so a hung Redis can't stall the room. Default 1000 ms. */
+  publishTimeoutMs?: number;
+  /** Called when publishing fails or times out. Defaults to `console.error`. */
+  onPublishError?: (
+    error: unknown,
+    info: { method: string; command_id: string; room_id: string },
+  ) => void;
   /** Called when an `afterCommit` callback throws. Defaults to `console.error`. */
   onAfterCommitError?: (
     error: unknown,
@@ -135,12 +149,20 @@ export class Dispatcher {
   private readonly pool: Pool;
   private readonly authorize: Authorizer;
   private readonly onAfterCommitError: NonNullable<DispatcherOptions["onAfterCommitError"]>;
+  private readonly onPublishError: NonNullable<DispatcherOptions["onPublishError"]>;
+  private readonly publisher: EventPublisher | undefined;
+  private readonly publishTimeoutMs: number;
   readonly actors: RoomActorRegistry;
   readonly leases: RoomLeases;
 
   constructor(options: DispatcherOptions) {
     this.pool = options.pool;
     this.authorize = options.authorize;
+    this.publisher = options.publisher;
+    this.publishTimeoutMs = options.publishTimeoutMs ?? 1_000;
+    this.onPublishError =
+      options.onPublishError ??
+      ((error, info) => console.error(`publishing events failed for ${info.method}`, info, error));
     this.onAfterCommitError =
       options.onAfterCommitError ??
       ((error, info) =>
@@ -192,6 +214,35 @@ export class Dispatcher {
     return def.mutating
       ? this.runMutating(principal, envelope, def, action, params)
       : this.runRead(principal, envelope, def, action, params);
+  }
+
+  private async publish(
+    publisher: EventPublisher,
+    room_id: string,
+    envelope: CommandEnvelope,
+    events: RoomEvent[],
+  ): Promise<void> {
+    const info = { method: envelope.method, command_id: envelope.id, room_id };
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        publisher.publish(room_id, events),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(`publish timed out after ${this.publishTimeoutMs} ms`)),
+            this.publishTimeoutMs,
+          );
+        }),
+      ]);
+    } catch (error) {
+      try {
+        this.onPublishError(error, info);
+      } catch {
+        // A broken error handler must not fail a committed command either.
+      }
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   private async runRead(
@@ -330,6 +381,10 @@ export class Dispatcher {
             room_id,
           });
         }
+      }
+
+      if (this.publisher && !result.replayed && result.events.length > 0) {
+        await this.publish(this.publisher, room_id, envelope, result.events);
       }
       return result;
     });
