@@ -50,21 +50,26 @@ export async function createTestDatabase(
   pool.on("error", () => {});
 
   let dropped = false;
+  let closing: Promise<void> | undefined;
   const drop = async (): Promise<void> => {
     if (dropped) return;
-    dropped = true;
     // pool.end() waits for checked-out clients, so a test that leaks one would hang here.
     // Drop first (FORCE kills every connection), then close the pool without waiting
-    // for clients that are still checked out.
-    const dropper = createPool(base);
-    dropper.on("error", () => {});
+    // for clients that are still checked out. The pool is closed even if the DROP fails;
+    // `dropped` is only set on success, so a failed drop can be retried.
     try {
-      await dropper.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
+      const dropper = createPool(base);
+      dropper.on("error", () => {});
+      try {
+        await dropper.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
+      } finally {
+        await dropper.end();
+      }
+      dropped = true;
     } finally {
-      await dropper.end();
+      closing ??= pool.end().catch(() => {});
+      if (pool.totalCount === pool.idleCount) await closing;
     }
-    const closing = pool.end().catch(() => {});
-    if (pool.totalCount === pool.idleCount) await closing;
   };
 
   try {

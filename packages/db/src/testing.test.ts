@@ -24,6 +24,12 @@ async function create(migrations: Record<string, string> = {}): Promise<TestData
   return db;
 }
 
+async function emptyDir(): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), "t103-"));
+  dirs.push(dir);
+  return dir;
+}
+
 async function exists(name: string): Promise<boolean> {
   const admin = createPool(URL);
   try {
@@ -84,6 +90,34 @@ describe("createTestDatabase", () => {
     const next = await create({ "0001_t.sql": "CREATE TABLE t (id int)" });
     expect(next.name).not.toBe(leaked.name);
     expect(await exists(leaked.name)).toBe(true);
+  });
+
+  it("closes the pool when the DROP fails, and a retry can still drop the database", async () => {
+    // A role that owns the test database can drop it; once ownership moves away it can't.
+    const role = `t103_role_${process.pid}`;
+    const admin = createPool(URL);
+    const limited = new globalThis.URL(URL);
+    limited.username = role;
+    limited.password = "pw";
+    let db: TestDatabase | undefined;
+    try {
+      await admin.query(`CREATE ROLE ${role} LOGIN CREATEDB PASSWORD 'pw'`);
+      db = await createTestDatabase({ url: limited.toString(), migrationsDir: await emptyDir() });
+      const { current_user: owner } = (await admin.query("SELECT current_user")).rows[0];
+      await admin.query(`ALTER DATABASE ${db.name} OWNER TO ${owner}`);
+
+      await expect(db.drop()).rejects.toThrow(/must be owner/);
+      expect(db.pool.ended).toBe(true); // closed despite the failure
+      expect(await exists(db.name)).toBe(true);
+
+      await admin.query(`ALTER DATABASE ${db.name} OWNER TO ${role}`);
+      await db.drop(); // not a no-op: the first attempt didn't count
+      expect(await exists(db.name)).toBe(false);
+    } finally {
+      if (db) await admin.query(`DROP DATABASE IF EXISTS ${db.name} WITH (FORCE)`);
+      await admin.query(`DROP ROLE IF EXISTS ${role}`);
+      await admin.end();
+    }
   });
 
   it("drops the database and rethrows when a migration fails", async () => {
