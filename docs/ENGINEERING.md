@@ -26,19 +26,21 @@ How we build Crossover. `docs/ARCHITECTURE.md` (v0.2) is the source of truth for
 
 These implement ARCHITECTURE §28. Lead decisions that refine it:
 
-| Area          | Choice                                                                                                                                                    |
-| ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Runtime       | Node 22 (≥ 22.18), TypeScript 6 strict, ESM only                                                                                                          |
-| Monorepo      | pnpm workspaces: `packages/*` (libraries), `apps/*` (deployables)                                                                                         |
-| Tests         | Vitest; files next to source as `*.test.ts`                                                                                                               |
-| Lint / format | ESLint (typescript-eslint) + Prettier, enforced in CI                                                                                                     |
-| Validation    | `zod` for every external input (commands, events, manifests)                                                                                              |
-| Database      | PostgreSQL 16 via `pg`; plain SQL migrations (T102); no ORM                                                                                               |
-| HTTP / WS     | Fastify + `@fastify/websocket`                                                                                                                            |
-| Redis         | `ioredis`                                                                                                                                                 |
-| IDs           | Prefixed ULIDs, e.g. `room_01J…` (T105)                                                                                                                   |
-| Policy        | `authorize()` interface (T208) with a TypeScript rule set first; OPA-WASM (D9) replaces the implementation behind the same interface in a later milestone |
-| Git           | Git CLI ≥ 2.40 (refines ARCHITECTURE D1's 2.38: merge-tree --merge-base), via `execFile` (never a shell string)                                           |
+| Area          | Choice                                                                                                                                                     |
+| ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Runtime       | Node 22 (≥ 22.18), TypeScript 6 strict, ESM only                                                                                                           |
+| Monorepo      | pnpm workspaces: `packages/*` (libraries), `apps/*` (deployables)                                                                                          |
+| Tests         | Vitest; files next to source as `*.test.ts`                                                                                                                |
+| Lint / format | ESLint (typescript-eslint) + Prettier, enforced in CI                                                                                                      |
+| Validation    | `zod` for every external input (commands, events, manifests)                                                                                               |
+| Database      | PostgreSQL 16 via `pg`; plain SQL migrations (T102); no ORM                                                                                                |
+| HTTP / WS     | Fastify + `@fastify/websocket`                                                                                                                             |
+| Redis         | `ioredis`                                                                                                                                                  |
+| IDs           | Prefixed ULIDs, e.g. `room_01J…` (T105)                                                                                                                    |
+| Policy        | `authorize()` interface (T208) with a TypeScript rule set first; OPA-WASM (D9) replaces the implementation behind the same interface in a later milestone  |
+| Git           | Git CLI ≥ 2.40 (refines ARCHITECTURE D1's 2.38: merge-tree --merge-base), via `execFile` (never a shell string)                                            |
+| Pause         | `participants.pause` keeps tokens; every command returns `PARTICIPANT_PAUSED` and sockets close. Only `participants.remove` revokes tokens (refines §15.3) |
+| Leases        | Renewed on each command; idle rooms re-acquire with a new token. A background renewal loop arrives with the gateway (T713)                                 |
 
 New runtime dependencies need a one-line justification in the PR.
 

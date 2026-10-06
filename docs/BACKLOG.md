@@ -19,7 +19,7 @@ Conventions are in `docs/ENGINEERING.md`. Section references (§) point to `docs
 | M4 Messages, inbox, decisions, memory | T401–T412 | S1 (T401–T403, T410), S2 (T404–T409, T411–T412) |
 | M5 Workspace engine                   | T501–T520 | S2                                              |
 | M6 Conflicts and health               | T601–T610 | S2                                              |
-| M7 Gateway, MCP, end-to-end           | T701–T712 | S1 (T701–T706), S2 (T707–T711), O1 (T712)       |
+| M7 Gateway, MCP, end-to-end           | T701–T713 | S1 (T701–T706, T713), S2 (T707–T711), O1 (T712) |
 
 **Start here:** S1 → T101, T105, T114 (independent). S2 → T501, T505 (only need the scaffold).
 
@@ -882,3 +882,13 @@ Deps: T702–T711 · Migration: —
 `apps/server` wiring all modules; e2e test: create room → invite → agent joins via MCP → lead creates task → agent claims, applies a ChangeSet, submits → lead approves.
 
 - Runs in CI against docker services.
+
+### T713 · Background lease renewal — S1
+
+Deps: T117, T701 · Migration: —
+
+A per-node loop that renews every lease in `RoomLeases.heldRooms()` at a third of the TTL, so a room with open WebSocket subscribers but no recent commands keeps its owner. On `STALE_FENCE` the room is forgotten and its actor drained; on shutdown `releaseAll()` runs.
+
+- With a fake clock, an idle held room is renewed before expiry and keeps its fencing token.
+- A room taken over by another node is dropped from `heldRooms()` on the next tick.
+- Shutdown releases all leases; another node acquires immediately.
