@@ -140,6 +140,14 @@ describe("METHODS", () => {
     expect(Object.keys(METHODS).length - readOnly.length).toBe(49);
   });
 
+  it("isMutatingMethod takes any string and is false for unknown methods", () => {
+    expect(isMutatingMethod("tasks.claim")).toBe(true);
+    expect(isMutatingMethod("tasks.list")).toBe(false);
+    for (const unknown of ["tasks.exploded", "toString", "__proto__", ""]) {
+      expect(isMutatingMethod(unknown), unknown).toBe(false);
+    }
+  });
+
   it("isMethodName only accepts own, known methods", () => {
     expect(isMethodName("tasks.claim")).toBe(true);
     expect(isMethodName("tasks.exploded")).toBe(false);
@@ -204,7 +212,7 @@ describe("commandEnvelopeSchema", () => {
     }
   });
 
-  it("requires method to look like resource.action and to be known", () => {
+  it("requires method to look like resource.action", () => {
     for (const bad of [
       "tasks",
       "Tasks.claim",
@@ -220,9 +228,14 @@ describe("commandEnvelopeSchema", () => {
         false,
       );
     }
-    const unknown = commandEnvelopeSchema.safeParse(valid({ method: "tasks.exploded" }));
-    expect(unknown.success).toBe(false);
-    expect(unknown.error?.issues[0]?.message).toBe("unknown method");
+  });
+
+  it("parses an unknown method: the dispatcher answers NOT_FOUND, not the schema", () => {
+    for (const method of ["tasks.exploded", "constructor.x", "a.b.c.d"]) {
+      expect(commandEnvelopeSchema.safeParse(valid({ method })).success, method).toBe(true);
+      // ...with or without a key: an unregistered method isn't "mutating"
+      expect(commandEnvelopeSchema.safeParse(withoutKey({ method })).success, method).toBe(true);
+    }
   });
 
   it("requires params to be an object", () => {

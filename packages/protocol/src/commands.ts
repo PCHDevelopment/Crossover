@@ -119,35 +119,32 @@ export function isMethodName(method: string): method is MethodName {
   return Object.hasOwn(METHODS, method);
 }
 
-/** Whether `method` mutates state and so requires an idempotency key. */
-export function isMutatingMethod(method: MethodName): boolean {
-  return METHODS[method].mutating;
+/**
+ * Whether `method` mutates state and so requires an idempotency key. False for a method
+ * that isn't in the catalog: the dispatcher answers those with `NOT_FOUND`.
+ */
+export function isMutatingMethod(method: string): boolean {
+  return isMethodName(method) && METHODS[method].mutating;
 }
 
 export const IDEMPOTENCY_KEY_MAX_LENGTH = 128;
 
 /**
- * The command envelope (ARCHITECTURE §16.2). Unknown fields are rejected, and so are
- * unknown methods. `idempotency_key` is required when the method is mutating (§16.2) and
- * optional (but still validated) otherwise.
+ * The command envelope (ARCHITECTURE §16.2). Unknown fields are rejected. `method` only has
+ * to look like `resource.action`: whether it exists is the dispatcher's call (`NOT_FOUND`,
+ * T117). `idempotency_key` is required when the method is mutating (§16.2), optional (but
+ * still validated) otherwise, and not required for a method nobody has registered.
  */
 export const commandEnvelopeSchema = z
   .object({
     id: z.custom<Id<"cmd">>((v) => isId(v, "cmd"), "expected a cmd_ ID"),
-    method: z
-      .string()
-      .regex(METHOD_PATTERN, "expected resource.action")
-      .refine(isMethodName, "unknown method"),
+    method: z.string().regex(METHOD_PATTERN, "expected resource.action"),
     params: z.record(z.string(), z.unknown()),
     idempotency_key: z.string().min(1).max(IDEMPOTENCY_KEY_MAX_LENGTH).optional(),
   })
   .strict()
   .superRefine((envelope, ctx) => {
-    if (
-      envelope.idempotency_key === undefined &&
-      isMethodName(envelope.method) &&
-      isMutatingMethod(envelope.method)
-    ) {
+    if (envelope.idempotency_key === undefined && isMutatingMethod(envelope.method)) {
       ctx.addIssue({
         code: "custom",
         path: ["idempotency_key"],
