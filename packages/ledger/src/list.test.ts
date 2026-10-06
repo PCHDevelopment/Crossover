@@ -3,6 +3,7 @@ import { withTransaction } from "@crossover/db";
 import { createTestDatabase, type TestDatabase } from "@crossover/db/testing";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { appendEvents, type NewEvent } from "./append.js";
+import { acquireLease } from "./lease.js";
 import { listEvents, MAX_LIST_LIMIT } from "./list.js";
 
 let db: TestDatabase;
@@ -18,12 +19,16 @@ afterAll(async () => {
   await db.drop();
 });
 
+const tokens = new Map<string, number>();
+
+/** A new room whose lease (1 hour) is held by this test; seed() uses its fencing token. */
 async function newRoom(): Promise<string> {
   const id = `room_${++counter}`;
   await pool.query(
     `INSERT INTO rooms (id, slug, name, objective, owner_id) VALUES ($1, $1, 'n', 'o', 'part_1')`,
     [id],
   );
+  tokens.set(id, (await acquireLease(pool, id, "node-test", 3_600_000))!.fencing_token);
   return id;
 }
 
@@ -39,6 +44,7 @@ async function seed(room: string, types: NewEvent["type"][]): Promise<void> {
       c,
       room,
       types.map((t, i) => ev(t, i)),
+      tokens.get(room)!,
     ),
   );
 }
