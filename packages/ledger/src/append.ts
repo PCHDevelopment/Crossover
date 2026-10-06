@@ -49,6 +49,13 @@ interface EventRow {
  * gap-free; a rollback undoes the events and the counter together. Appends to different
  * rooms don't contend.
  *
+ * Fencing (§4.2): `fencingToken` is the token from the caller's {@link acquireLease}. In
+ * the same transaction, after locking the room, the room's lease row is read `FOR SHARE`
+ * and the write is rejected with `STALE_FENCE` (nothing written) unless that lease is
+ * unexpired and holds exactly this token. The share lock stays until the caller commits, so
+ * a takeover can't commit between the check and this write: it waits for us, and any later
+ * write with the old token is rejected. A zombie owner therefore can't corrupt the ledger.
+ *
  * `payload_hash` is `sha256:` + hex SHA-256 of the canonical JSON of the payload.
  * Returns the stored events, validated against `roomEventSchema`.
  */
@@ -56,7 +63,13 @@ export async function appendEvents(
   client: PoolClient,
   roomId: string,
   events: readonly NewEvent[],
+  fencingToken: number,
 ): Promise<RoomEvent[]> {
+  if (!Number.isSafeInteger(fencingToken) || fencingToken < 1) {
+    throw new CrossoverError("VALIDATION", "fencingToken must be a positive integer", {
+      details: { fencingToken },
+    });
+  }
   const parsed = events.map((event, i) => {
     const result = newEventSchema.safeParse(event);
     if (!result.success) {
@@ -81,6 +94,24 @@ export async function appendEvents(
       details: { room_id: roomId },
     });
   }
+
+  const lease = await client.query<{ fencing_token: string; live: boolean }>(
+    `SELECT fencing_token, expires_at > clock_timestamp() AS live
+       FROM room_leases WHERE room_id = $1 FOR SHARE`,
+    [roomId],
+  );
+  const held = lease.rows[0];
+  if (!held || !held.live || Number(held.fencing_token) !== fencingToken) {
+    throw new CrossoverError("STALE_FENCE", `Stale fencing token for room ${roomId}`, {
+      details: {
+        room_id: roomId,
+        fencing_token: fencingToken,
+        current_token: held ? Number(held.fencing_token) : null,
+        lease_live: held?.live ?? false,
+      },
+    });
+  }
+
   const first = BigInt(current.last_sequence) + 1n;
 
   const stored: RoomEvent[] = [];
