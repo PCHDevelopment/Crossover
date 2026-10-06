@@ -16,7 +16,17 @@ async function commitFixture(
   add: { path: string; mode: string; content: string }[],
 ): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "crossover-search-commit-"));
-  const options = { gitDir: repo, timeoutMs: 10_000, env: { GIT_INDEX_FILE: join(dir, "index") } };
+  const options = {
+    gitDir: repo,
+    timeoutMs: 10_000,
+    env: {
+      GIT_INDEX_FILE: join(dir, "index"),
+      GIT_AUTHOR_NAME: "Test",
+      GIT_AUTHOR_EMAIL: "test@example.invalid",
+      GIT_COMMITTER_NAME: "Test",
+      GIT_COMMITTER_EMAIL: "test@example.invalid",
+    },
+  };
   try {
     await git(["read-tree", parent], options);
     for (const path of remove) {
