@@ -7,12 +7,12 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
-import { BASE_TOOLS, type McpToolDefinition } from "./tools.js";
+import { MCP_TOOLS, type McpToolDefinition } from "./tools.js";
 
 export interface McpOptions {
   dispatcher: Dispatcher;
   pool: Pool;
-  /** Tools to offer; default {@link BASE_TOOLS}. */
+  /** Tools to offer; default {@link MCP_TOOLS}. */
   tools?: readonly McpToolDefinition[];
   /** Route path; default `/mcp`. */
   path?: string;
@@ -76,7 +76,7 @@ export function buildMcpServer(
  * the §16.3 error body before any MCP handling happens.
  */
 export function registerMcp(app: FastifyInstance, options: McpOptions): void {
-  const tools = options.tools ?? BASE_TOOLS;
+  const tools = options.tools ?? MCP_TOOLS;
   const path = options.path ?? "/mcp";
 
   app.post(path, async (request, reply) => {

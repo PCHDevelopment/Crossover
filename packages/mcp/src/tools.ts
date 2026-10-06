@@ -1,4 +1,11 @@
 import type { MethodName } from "@crossover/protocol";
+import {
+  changesetInputSchema,
+  workspaceDiffParamsSchema,
+  workspaceListParamsSchema,
+  workspaceReadParamsSchema,
+  workspaceSearchParamsSchema,
+} from "@crossover/workspace";
 import { z } from "zod";
 
 /**
@@ -38,3 +45,44 @@ export const BASE_TOOLS: readonly McpToolDefinition[] = [
     mutating: false,
   },
 ];
+
+/** Canonical workspace tools (T710); every call is dispatched under the authenticated agent. */
+export const WORKSPACE_TOOLS: readonly McpToolDefinition[] = [
+  {
+    name: "read_file",
+    description: "Read a file from the canonical workspace at its current revision.",
+    method: "workspace.read",
+    input: workspaceReadParamsSchema.shape,
+    mutating: false,
+  },
+  {
+    name: "list_dir",
+    description: "List readable direct children of a directory in the canonical workspace.",
+    method: "workspace.list",
+    input: workspaceListParamsSchema.shape,
+    mutating: false,
+  },
+  {
+    name: "grep",
+    description: "Search readable files in the canonical workspace.",
+    method: "workspace.search",
+    input: workspaceSearchParamsSchema.shape,
+    mutating: false,
+  },
+  {
+    name: "diff",
+    description: "Show changes between committed canonical workspace revisions.",
+    method: "workspace.diff",
+    input: workspaceDiffParamsSchema.shape,
+    mutating: false,
+  },
+  {
+    name: "apply_changeset",
+    description: "Apply a validated ChangeSet to the canonical workspace.",
+    method: "workspace.apply_changeset",
+    input: changesetInputSchema.shape,
+    mutating: true,
+  },
+];
+
+export const MCP_TOOLS: readonly McpToolDefinition[] = [...BASE_TOOLS, ...WORKSPACE_TOOLS];

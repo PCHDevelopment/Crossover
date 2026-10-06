@@ -35,30 +35,30 @@ const operation = z
   });
 
 /** Client-owned §10.1 fields; room, actor, key and ChangeSet id come from the dispatcher. */
-export const changesetParamsSchema = z
-  .strictObject({
-    source: z.enum(["EDITOR", "SANDBOX", "API", "UPSTREAM", "RESOLUTION"]),
-    message: text,
-    base_workspace_revision: revision,
-    base_file_revisions: z.record(path, revision).default({}),
-    operations: z.array(operation).max(500),
-    task_id: text.min(1).optional(),
-    conflict_id: text.min(1).optional(),
-  })
-  .refine(
-    (value) =>
-      value.operations.reduce(
-        (total, op) =>
-          total +
-          ("content" in op && op.content !== undefined
-            ? contentSize(op.content, op.encoding)
-            : "patch" in op
-              ? Buffer.byteLength(op.patch)
-              : 0),
-        0,
-      ) <=
-      25 * 1024 * 1024,
-    "ChangeSet text exceeds 25 MiB",
-  );
+export const changesetInputSchema = z.strictObject({
+  source: z.enum(["EDITOR", "SANDBOX", "API", "UPSTREAM", "RESOLUTION"]),
+  message: text,
+  base_workspace_revision: revision,
+  base_file_revisions: z.record(path, revision).default({}),
+  operations: z.array(operation).max(500),
+  task_id: text.min(1).optional(),
+  conflict_id: text.min(1).optional(),
+});
+
+export const changesetParamsSchema = changesetInputSchema.refine(
+  (value) =>
+    value.operations.reduce(
+      (total, op) =>
+        total +
+        ("content" in op && op.content !== undefined
+          ? contentSize(op.content, op.encoding)
+          : "patch" in op
+            ? Buffer.byteLength(op.patch)
+            : 0),
+      0,
+    ) <=
+    25 * 1024 * 1024,
+  "ChangeSet text exceeds 25 MiB",
+);
 
 export type ChangesetParams = z.infer<typeof changesetParamsSchema>;

@@ -1,5 +1,6 @@
 import type { Pool } from "@crossover/db";
 import { createTestDatabase, type TestDatabase } from "@crossover/db/testing";
+import { withTransaction } from "@crossover/db";
 import {
   Dispatcher,
   findOrCreateUser,
@@ -16,16 +17,21 @@ import { newId } from "@crossover/protocol";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { z } from "zod";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import Fastify, { type FastifyInstance } from "fastify";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { registerMcp } from "./server.js";
-import { BASE_TOOLS } from "./tools.js";
+import { BASE_TOOLS, MCP_TOOLS } from "./tools.js";
+import { provisionWorkspace, registerWorkspaceCommands } from "@crossover/workspace";
 
 let db: TestDatabase;
 let pool: Pool;
 let n = 0;
 const apps: FastifyInstance[] = [];
 const clients: Client[] = [];
+const workspaceDirs: string[] = [];
 
 beforeAll(async () => {
   db = await createTestDatabase();
@@ -36,6 +42,7 @@ afterAll(async () => {
   await Promise.all(clients.map((c) => c.close().catch(() => undefined)));
   await Promise.all(apps.map((a) => a.close()));
   await db.drop();
+  await Promise.all(workspaceDirs.map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
 const manifest = {
@@ -54,6 +61,7 @@ async function setup(tools?: Parameters<typeof registerMcp>[1]["tools"]) {
   registerInviteCommands(dispatcher);
   registerJoinCommand(dispatcher);
   registerCapabilityCommands(dispatcher);
+  registerWorkspaceCommands(dispatcher);
   const app = Fastify();
   registerMcp(app, { dispatcher, pool, ...(tools ? { tools } : {}) });
   apps.push(app);
@@ -77,6 +85,9 @@ async function setup(tools?: Parameters<typeof registerMcp>[1]["tools"]) {
     room: { id: string };
     participant: { id: string };
   };
+  const workspaceDir = await mkdtemp(join(tmpdir(), "crossover-mcp-workspace-"));
+  workspaceDirs.push(workspaceDir);
+  await withTransaction(pool, (client) => provisionWorkspace(client, room.id, workspaceDir));
   const owner = await issueTokens(pool, participant.id);
 
   const invite = await dispatcher.dispatch(
@@ -136,8 +147,51 @@ describe("MCP server (T707)", () => {
     const s = await setup();
     const client = await connect(s.url, s.agent.access_token);
     const { tools } = await client.listTools();
-    expect(tools.map((t) => t.name).sort()).toEqual(BASE_TOOLS.map((t) => t.name).sort());
+    expect(tools.map((t) => t.name).sort()).toEqual(MCP_TOOLS.map((t) => t.name).sort());
     for (const tool of tools) expect(tool.description).toBeTruthy();
+  });
+
+  it("exposes canonical workspace tools through the authenticated dispatcher", async () => {
+    const s = await setup();
+    const client = await connect(s.url, s.agent.access_token);
+    const applied = await client.callTool({
+      name: "apply_changeset",
+      arguments: {
+        source: "API",
+        message: "Create MCP file",
+        base_workspace_revision: 0,
+        operations: [{ type: "create", path: "docs/readme.md", content: "Crossover MCP" }],
+      },
+    });
+    expect(applied.isError).toBeFalsy();
+    expect(JSON.parse((applied.content as { text: string }[])[0]!.text)).toMatchObject({
+      status: "APPLIED",
+      applied_revision: 1,
+    });
+
+    const read = await client.callTool({
+      name: "read_file",
+      arguments: { path: "docs/readme.md" },
+    });
+    expect(JSON.parse((read.content as { text: string }[])[0]!.text)).toMatchObject({
+      content: "Crossover MCP",
+      encoding: "utf8",
+    });
+    const list = await client.callTool({ name: "list_dir", arguments: { path: "docs" } });
+    expect(JSON.parse((list.content as { text: string }[])[0]!.text)).toMatchObject({
+      entries: [{ path: "docs/readme.md" }],
+    });
+    const grep = await client.callTool({ name: "grep", arguments: { query: "Crossover MCP" } });
+    expect(JSON.parse((grep.content as { text: string }[])[0]!.text)).toMatchObject({
+      matches: [expect.objectContaining({ path: "docs/readme.md" })],
+    });
+    const diff = await client.callTool({
+      name: "diff",
+      arguments: { from_revision: 0, to_revision: 1 },
+    });
+    expect(JSON.parse((diff.content as { text: string }[])[0]!.text).diff).toContain(
+      "Crossover MCP",
+    );
   });
 
   it.each([

@@ -11,6 +11,13 @@ const input = z
   .min(1)
   .max(4096)
   .refine((value) => !value.includes("\0"));
+export const workspaceSearchParamsSchema = z.strictObject({
+  query: input,
+  regex: z.boolean().default(false),
+  case_sensitive: z.boolean().default(true),
+  glob: input.optional(),
+  revision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
+});
 
 /** Search the committed head (§9.5); forbidden paths never enter the public response. */
 export function registerWorkspaceSearch(dispatcher: Dispatcher): void {
@@ -20,13 +27,7 @@ export function registerWorkspaceSearch(dispatcher: Dispatcher): void {
     // Each match is authorized by its path before it is returned.
     perPathAuthorize: true,
     mutating: false,
-    params: z.strictObject({
-      query: input,
-      regex: z.boolean().default(false),
-      case_sensitive: z.boolean().default(true),
-      glob: input.optional(),
-      revision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
-    }),
+    params: workspaceSearchParamsSchema,
     execute: async (ctx, params) => {
       const ws = await snapshot(ctx);
       if (params.revision !== undefined && params.revision !== ws.revision)
