@@ -23,11 +23,17 @@ afterAll(async () => {
 
 async function fixture(authorize: Authorizer = allowAll) {
   const room = newId("room");
+  const actor = newId("part");
   const root = await mkdtemp(join(tmpdir(), "crossover-apply-test-"));
   dirs.push(root);
   await db.pool.query(
-    "INSERT INTO rooms (id, slug, name, objective, owner_id) VALUES ($1, $1, 'Room', 'Ship', 'actor')",
-    [room],
+    "INSERT INTO rooms (id, slug, name, objective, owner_id) VALUES ($1, $1, 'Room', 'Ship', $2)",
+    [room, actor],
+  );
+  await db.pool.query(
+    `INSERT INTO participants (id, room_id, kind, display_name, authority, role, status)
+     VALUES ($2, $1, 'HUMAN', 'Actor', 'MEMBER', 'DEVELOPER', 'ACTIVE')`,
+    [room, actor],
   );
   const workspace = await withTransaction(db.pool, (client) =>
     provisionWorkspace(client, room, root),
@@ -50,7 +56,7 @@ async function fixture(authorize: Authorizer = allowAll) {
     dispatcher.dispatch(
       {
         room_id: room,
-        participant_id: "actor",
+        participant_id: actor,
         kind: "HUMAN",
         authority: "MEMBER",
         role: "DEVELOPER",
@@ -59,9 +65,9 @@ async function fixture(authorize: Authorizer = allowAll) {
     );
   const apply = (operations: Operation[], base = 0) => dispatch(request(operations, base));
   const rowsFor = async (
-    table: "changesets" | "workspace_revisions" | "file_revisions" | "events",
+    table: "changesets" | "workspace_revisions" | "file_revisions" | "events" | "conflicts",
   ) => (await db.pool.query(`SELECT * FROM ${table} WHERE room_id = $1`, [room])).rows;
-  return { room, workspace, repo, options, head, request, dispatch, apply, rowsFor };
+  return { room, actor, workspace, repo, options, head, request, dispatch, apply, rowsFor };
 }
 
 describe("workspace.apply_changeset", () => {
@@ -75,7 +81,7 @@ describe("workspace.apply_changeset", () => {
     ]);
     expect((await f.rowsFor("changesets"))[0]).toMatchObject({
       status: "APPLIED",
-      actor_id: "actor",
+      actor_id: f.actor,
       idempotency_key: input.idempotency_key,
       applied_revision: "1",
     });
@@ -83,7 +89,7 @@ describe("workspace.apply_changeset", () => {
     expect(revisions).toHaveLength(2);
     expect(await f.head()).toBe(revisions.find((r) => r.revision === "1")!.commit_sha);
     expect(await f.rowsFor("file_revisions")).toMatchObject([
-      { path: "file", revision: "1", workspace_revision: "1", actor_id: "actor" },
+      { path: "file", revision: "1", workspace_revision: "1", actor_id: f.actor },
     ]);
     expect(await f.dispatch({ ...input, id: newId("cmd") })).toEqual({ ...result, replayed: true });
     expect(await f.rowsFor("changesets")).toHaveLength(1);
@@ -93,7 +99,8 @@ describe("workspace.apply_changeset", () => {
   it("persists conflict data and its event while applying none of the operations", async () => {
     const f = await fixture();
     await f.apply([{ type: "create", path: "file", content: "old\n" }]);
-    await f.apply([{ type: "modify", path: "file", content: "head\n" }], 1);
+    const headApply = await f.apply([{ type: "modify", path: "file", content: "head\n" }], 1);
+    const headChangesetId = (headApply.response as { changeset_id: string }).changeset_id;
     const head = await f.head();
     const input = f.request(
       [
@@ -105,14 +112,39 @@ describe("workspace.apply_changeset", () => {
     const result = await f.dispatch(input);
     expect(result.response).toMatchObject({
       status: "CONFLICT",
+      conflict_id: expect.stringMatching(/^conf_/),
       conflicts: [{ path: "file", kind: "CONTENT" }],
+      counterparty_changesets: [headChangesetId],
     });
     expect(result.events).toMatchObject([
-      { type: "workspace.conflict.created", payload: { files: [{ path: "file" }] } },
+      {
+        type: "workspace.conflict.created",
+        payload: {
+          conflict_id: (result.response as { conflict_id: string }).conflict_id,
+          changeset_id: (result.response as { changeset_id: string }).changeset_id,
+          submitter_id: f.actor,
+          file_count: 1,
+          kinds: ["CONTENT"],
+          counterparty_count: 1,
+        },
+      },
     ]);
-    expect(
-      (await f.rowsFor("changesets")).find((row) => row.status === "CONFLICT")?.payload.conflicts,
-    ).toMatchObject([{ path: "file", kind: "CONTENT" }]);
+    const conflictPayload = (await f.rowsFor("changesets")).find(
+      (row) => row.status === "CONFLICT",
+    )?.payload;
+    expect(conflictPayload?.conflicts).toMatchObject([{ path: "file", kind: "CONTENT" }]);
+    expect(conflictPayload?.counterparty_changesets).toEqual([headChangesetId]);
+    expect(await f.rowsFor("conflicts")).toMatchObject([
+      {
+        id: (result.response as { conflict_id: string }).conflict_id,
+        changeset_id: (result.response as { changeset_id: string }).changeset_id,
+        status: "OPEN",
+        base_revision: "1",
+        head_revision_at_detection: "2",
+        files: [{ path: "file", kind: "CONTENT" }],
+        counterparty_changesets: [headChangesetId],
+      },
+    ]);
     expect(await f.rowsFor("workspace_revisions")).toHaveLength(3);
     expect((await f.rowsFor("file_revisions")).some((row) => row.path === "otherwise-clean")).toBe(
       false,
@@ -120,6 +152,26 @@ describe("workspace.apply_changeset", () => {
     expect(await f.head()).toBe(head);
     expect(await f.dispatch({ ...input, id: newId("cmd") })).toEqual({ ...result, replayed: true });
     expect(await f.rowsFor("events")).toHaveLength(3);
+  });
+
+  it("records only applied changesets between base and head that touched conflict paths", async () => {
+    const f = await fixture();
+    await f.apply([{ type: "create", path: "file", content: "base\n" }]);
+    const unrelated = await f.apply([{ type: "create", path: "other", content: "unrelated" }], 1);
+    const counterparty = await f.apply([{ type: "modify", path: "file", content: "head\n" }], 2);
+    const unrelatedId = (unrelated.response as { changeset_id: string }).changeset_id;
+    const counterpartyId = (counterparty.response as { changeset_id: string }).changeset_id;
+    const result = await f.apply([{ type: "modify", path: "file", content: "candidate\n" }], 1);
+    expect(result.response).toMatchObject({
+      status: "CONFLICT",
+      counterparty_changesets: [counterpartyId],
+    });
+    const row = (await f.rowsFor("conflicts"))[0];
+    expect(row).toMatchObject({
+      counterparty_changesets: [counterpartyId],
+      head_revision_at_detection: "3",
+    });
+    expect(row.counterparty_changesets).not.toContain(unrelatedId);
   });
 
   it("records rename/deletion history and per-path revisions", async () => {

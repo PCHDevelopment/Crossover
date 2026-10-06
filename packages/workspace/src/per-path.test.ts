@@ -245,23 +245,60 @@ it("redacts unauthorized conflict paths and content", async () => {
       };
     },
   });
-  await f.apply(f.owner, [{ type: "create", path: "docs/file.txt", content: "base" }], 0);
+  const seeded = await f.apply(
+    f.owner,
+    [
+      { type: "create", path: "docs/file.txt", content: "base" },
+      { type: "create", path: "secrets/file.txt", content: "TOPSECRET" },
+    ],
+    0,
+  );
+  const seededChangesetId = (seeded.response as { changeset_id: string }).changeset_id;
   const conflict = await f.apply(
     f.reviewer,
-    [{ type: "modify", path: "docs/file.txt", content: "private conflicting content" }],
-    1,
+    [{ type: "create", path: "docs/file.txt", content: "private conflicting content" }],
+    0,
   );
   expect(conflict.response).toMatchObject({ status: "CONFLICT" });
   expect(JSON.stringify(conflict.response)).not.toContain("secrets/file.txt");
   expect(JSON.stringify(conflict.response)).not.toContain("private conflicting content");
   expect(conflict.response).toMatchObject({
     conflicts: [{ path: null, reason: "unauthorized" }],
+    counterparty_changesets: [],
   });
   expect(JSON.stringify(conflict.events)).not.toContain("secrets/file.txt");
+  expect(JSON.stringify(conflict.events)).not.toContain("docs/file.txt");
   expect(JSON.stringify(conflict.events)).not.toContain("private conflicting content");
+  expect(conflict.events).toMatchObject([
+    {
+      type: "workspace.conflict.created",
+      payload: {
+        submitter_id: f.reviewer.participant_id,
+        file_count: 1,
+        kinds: ["MODIFY_DELETE"],
+        counterparty_count: 1,
+      },
+    },
+  ]);
   const stored = await db.pool.query<{ conflicts: unknown }>(
-    "SELECT payload->'conflicts' AS conflicts FROM changesets WHERE room_id = $1 AND status = 'CONFLICT'",
+    `SELECT payload AS conflicts FROM changesets WHERE room_id = $1 AND status = 'CONFLICT'`,
     [f.room],
   );
-  expect(JSON.stringify(stored.rows[0]?.conflicts)).not.toContain("secrets/file.txt");
+  expect(JSON.stringify(stored.rows[0]?.conflicts)).toContain("secrets/file.txt");
+  expect(JSON.stringify(stored.rows[0]?.conflicts)).toContain("private conflicting content");
+  expect(stored.rows[0]?.conflicts).toMatchObject({
+    conflicts: [{ path: "docs/file.txt" }],
+    counterparty_changesets: [seededChangesetId],
+  });
+  const durable = await db.pool.query<{ files: unknown; counterparty_changesets: unknown }>(
+    "SELECT files, counterparty_changesets FROM conflicts WHERE room_id = $1",
+    [f.room],
+  );
+  expect(JSON.stringify(durable.rows[0]?.files)).toContain("secrets/file.txt");
+  expect(JSON.stringify(durable.rows[0]?.files)).toContain("private conflicting content");
+  expect(durable.rows[0]?.files).toMatchObject([
+    { path: "docs/file.txt", messages: [{ paths: ["docs/file.txt", "secrets/file.txt"] }] },
+  ]);
+  expect(durable.rows[0]?.counterparty_changesets).toEqual([seededChangesetId]);
+  expect(conflict.response).toMatchObject({ counterparty_changesets: [] });
 });
