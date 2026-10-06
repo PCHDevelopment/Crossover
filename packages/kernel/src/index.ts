@@ -8,3 +8,4 @@ export * from "./modules/rooms/index.js";
 export * from "./modules/invites/index.js";
 export * from "./lease-renewer.js";
 export * from "./modules/users/index.js";
+export * from "./modules/capabilities/index.js";

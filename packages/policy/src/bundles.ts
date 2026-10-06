@@ -230,3 +230,12 @@ export const AUTHORITY_POWERS: Readonly<Record<Authority, ReadonlySet<Capability
 export function effectiveCapabilities(role: Role, authority: Authority): ReadonlySet<Capability> {
   return new Set<Capability>([...ROLE_BUNDLES[role], ...AUTHORITY_POWERS[authority]]);
 }
+
+/**
+ * Is `base` (`<resource>.<action>`, no scope) a power that comes with owner or admin
+ * authority (§6.2)? Such capabilities can't be granted, revoked or put in an invite: an agent
+ * must never gain governing powers (D8), and an owner must not be locked out.
+ */
+export function isAuthorityPower(base: string): boolean {
+  return isCapability(base) && AUTHORITY_POWERS.OWNER.has(base);
+}

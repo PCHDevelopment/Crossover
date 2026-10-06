@@ -1,6 +1,7 @@
+import { isAuthorityPower, parseCapability, tierOf } from "@crossover/policy";
 import { CrossoverError, newId } from "@crossover/protocol";
 import { z } from "zod";
-import type { Dispatcher } from "../../dispatcher.js";
+import type { Dispatcher, EmittedEvent } from "../../dispatcher.js";
 import { hashToken, issueTokens, type TokenPair } from "../auth/tokens.js";
 import { INVITE_TOKEN_PREFIX } from "./invite.js";
 
@@ -62,8 +63,8 @@ const invalid = () => new CrossoverError("UNAUTHENTICATED", "Invalid or expired 
  * single-use token is the dedupe, so a retry after success is `UNAUTHENTICATED`. The tokens
  * travel through `oneTime`; the event carries no manifest contents and no secrets.
  *
- * The invite's `capability_grants` stay on the used invite row until the grants table (T210)
- * exists to receive them.
+ * The invite's `capability_grants` become `GRANT` rows (made by the inviter) with a
+ * `capability.granted` event each (T210).
  */
 export function registerJoinCommand(dispatcher: Dispatcher): void {
   dispatcher.registerAnonymousCommand({
@@ -81,8 +82,10 @@ export function registerJoinCommand(dispatcher: Dispatcher): void {
       const { rows } = await ctx.client.query<{
         id: string;
         role: RoomJoinResponse["role"];
+        capability_grants: string[];
+        created_by: string;
       }>(
-        `SELECT id, role FROM invites
+        `SELECT id, role, capability_grants, created_by FROM invites
          WHERE token_hash = $1 AND room_id = $2
            AND used_at IS NULL AND expires_at > clock_timestamp()
          FOR UPDATE`,
@@ -111,6 +114,34 @@ export function registerJoinCommand(dispatcher: Dispatcher): void {
       );
       const tokens = await issueTokens(ctx.client, participantId);
 
+      // The invite's capability grants (T204) become real grants, made by the inviter.
+      const grantEvents: EmittedEvent[] = [];
+      for (const capability of invite.capability_grants) {
+        // Checked when the invite was created; this only guards against a hand-edited row.
+        if (isAuthorityPower(parseCapability(capability).base)) continue;
+        const grantId = newId("grant");
+        await ctx.client.query(
+          `INSERT INTO capability_grants
+             (id, room_id, participant_id, effect, capability, created_by, created_at)
+           VALUES ($1, $2, $3, 'GRANT', $4, $5, clock_timestamp())`,
+          [grantId, ctx.room_id, participantId, capability, invite.created_by],
+        );
+        grantEvents.push({
+          type: "capability.granted",
+          actor_id: participantId,
+          payload: {
+            grant_id: grantId,
+            participant_id: participantId,
+            capability,
+            tier: tierOf(capability),
+            requires_approval: false,
+            expires_at: null,
+            granted_by: invite.created_by,
+            invite_id: invite.id,
+          },
+        });
+      }
+
       const response: RoomJoinResponse = {
         participant_id: participantId,
         room_id: ctx.room_id,
@@ -133,6 +164,7 @@ export function registerJoinCommand(dispatcher: Dispatcher): void {
               invite_id: invite.id,
             },
           },
+          ...grantEvents,
         ],
         oneTime: tokens satisfies RoomJoinSecret,
       };
