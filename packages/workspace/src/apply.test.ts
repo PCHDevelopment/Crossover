@@ -121,14 +121,19 @@ describe("workspace.apply_changeset", () => {
         type: "workspace.conflict.created",
         payload: {
           conflict_id: (result.response as { conflict_id: string }).conflict_id,
-          counterparty_changesets: [headChangesetId],
-          files: [{ path: "file" }],
+          changeset_id: (result.response as { changeset_id: string }).changeset_id,
+          submitter_id: f.actor,
+          file_count: 1,
+          kinds: ["CONTENT"],
+          counterparty_count: 1,
         },
       },
     ]);
-    expect(
-      (await f.rowsFor("changesets")).find((row) => row.status === "CONFLICT")?.payload.conflicts,
-    ).toMatchObject([{ path: "file", kind: "CONTENT" }]);
+    const conflictPayload = (await f.rowsFor("changesets")).find(
+      (row) => row.status === "CONFLICT",
+    )?.payload;
+    expect(conflictPayload?.conflicts).toMatchObject([{ path: "file", kind: "CONTENT" }]);
+    expect(conflictPayload?.counterparty_changesets).toEqual([headChangesetId]);
     expect(await f.rowsFor("conflicts")).toMatchObject([
       {
         id: (result.response as { conflict_id: string }).conflict_id,

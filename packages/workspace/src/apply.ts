@@ -132,21 +132,15 @@ async function apply(
     let allConflictsAuthorized = true;
     for (const conflict of classified) {
       let authorized = true;
-      try {
-        await ctx.authorize("workspace.write", { path: conflict.path });
-      } catch (error) {
-        if (!(error instanceof CrossoverError) || error.code !== "FORBIDDEN") throw error;
-        authorized = false;
-      }
-      if (authorized) {
-        for (const path of new Set(conflict.messages.flatMap((message) => message.paths))) {
-          try {
-            await ctx.authorize("workspace.write", { path });
-          } catch (error) {
-            if (!(error instanceof CrossoverError) || error.code !== "FORBIDDEN") throw error;
-            authorized = false;
-            break;
-          }
+      for (const path of new Set([
+        conflict.path,
+        ...conflict.messages.flatMap((message) => message.paths),
+      ])) {
+        try {
+          await ctx.authorize("workspace.write", { path });
+        } catch (error) {
+          if (!(error instanceof CrossoverError) || error.code !== "FORBIDDEN") throw error;
+          authorized = false;
         }
       }
       if (authorized) {
@@ -157,9 +151,8 @@ async function apply(
       }
     }
     const conflictId = newId("conf");
-    const { rows: counterparties } = allConflictsAuthorized
-      ? await client.query<{ id: string }>(
-          `SELECT cs.id FROM changesets cs
+    const { rows: counterparties } = await client.query<{ id: string }>(
+      `SELECT cs.id FROM changesets cs
        WHERE cs.room_id = $1 AND cs.workspace_id = $2 AND cs.status = 'APPLIED'
          AND cs.applied_revision > $3 AND cs.applied_revision <= $4
          AND EXISTS (
@@ -168,15 +161,21 @@ async function apply(
              AND fr.workspace_revision = cs.applied_revision AND fr.path = ANY($5::text[])
          )
        ORDER BY cs.applied_revision, cs.created_at, cs.id`,
-          [
-            room_id,
-            ws.id,
-            params.base_workspace_revision,
-            Number(head.revision),
-            classified.map(({ path }) => path),
-          ],
-        )
-      : { rows: [] };
+      [
+        room_id,
+        ws.id,
+        params.base_workspace_revision,
+        Number(head.revision),
+        [
+          ...new Set(
+            classified.flatMap((conflict) => [
+              conflict.path,
+              ...conflict.messages.flatMap((message) => message.paths),
+            ]),
+          ),
+        ],
+      ],
+    );
     const counterpartyChangesets = counterparties.map(({ id: counterpartyId }) => counterpartyId);
     await client.query(
       `INSERT INTO conflicts (id, workspace_id, room_id, changeset_id, submitter_id,
@@ -190,15 +189,17 @@ async function apply(
         ctx.principal.participant_id,
         params.base_workspace_revision,
         head.revision,
-        JSON.stringify(conflicts),
+        JSON.stringify(classified),
         JSON.stringify(counterpartyChangesets),
       ],
     );
     await client.query(
       `UPDATE changesets SET status = 'CONFLICT', conflict_id = $3,
-       payload = payload || jsonb_build_object('conflicts', $4::jsonb)
+       payload = payload || jsonb_build_object(
+         'conflicts', $4::jsonb, 'counterparty_changesets', $5::jsonb
+       )
        WHERE room_id = $1 AND id = $2`,
-      [room_id, id, conflictId, JSON.stringify(conflicts)],
+      [room_id, id, conflictId, JSON.stringify(classified), JSON.stringify(counterpartyChangesets)],
     );
     return {
       response: {
@@ -206,7 +207,7 @@ async function apply(
         changeset_id: id,
         conflict_id: conflictId,
         conflicts,
-        counterparty_changesets: counterpartyChangesets,
+        counterparty_changesets: allConflictsAuthorized ? counterpartyChangesets : [],
       },
       events: [
         {
@@ -214,8 +215,10 @@ async function apply(
           payload: {
             conflict_id: conflictId,
             changeset_id: id,
-            files: conflicts,
-            counterparty_changesets: counterpartyChangesets,
+            submitter_id: ctx.principal.participant_id,
+            file_count: classified.length,
+            kinds: classified.map(({ kind }) => kind),
+            counterparty_count: counterpartyChangesets.length,
           },
         },
       ],

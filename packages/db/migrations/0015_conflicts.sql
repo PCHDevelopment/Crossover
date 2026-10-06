@@ -15,7 +15,7 @@ CREATE TABLE conflicts (
   attempts                   integer NOT NULL DEFAULT 0 CHECK (attempts >= 0),
   resolver_id                text,
   resolution_changeset_id    text,
-  created_at                 timestamptz NOT NULL DEFAULT now(),
+  created_at                 timestamptz NOT NULL DEFAULT clock_timestamp(),
   escalated_at               timestamptz,
   resolved_at                timestamptz,
 
