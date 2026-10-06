@@ -1,12 +1,61 @@
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { git } from "./git.js";
+import * as gitModule from "./git.js";
 import { materialize } from "./materialize.js";
 import { initRoomRepo } from "./repo.js";
 import { runSearch, type SearchMatch } from "./search-runner.js";
-import { withSearchTree } from "./search-tree.js";
+import { refreshSearchTree, withSearchTree } from "./search-tree.js";
+
+it("refreshes only changed paths while preserving untouched files", async () => {
+  const root = await mkdtemp(join(tmpdir(), "crossover-search-incremental-"));
+  try {
+    const repo = await initRoomRepo(root, "room_test");
+    const initial = (
+      await git(["rev-parse", "refs/room/canonical"], {
+        gitDir: repo,
+        timeoutMs: 10_000,
+      })
+    ).stdout.trim();
+    await withSearchTree(repo, initial, async () => {});
+    const first = await materialize(repo, initial, [
+      { type: "create", path: "nested/a [1].txt", content: "first" },
+      { type: "create", path: "untouched.txt", content: "preserve" },
+    ]);
+    await refreshSearchTree(repo, first, initial);
+    const second = await materialize(repo, first, [
+      { type: "delete", path: "nested/a [1].txt" },
+      { type: "create", path: "nested/new.txt", content: "second" },
+      { type: "modify", path: "untouched.txt", content: "preserve updated" },
+    ]);
+    const calls: string[][] = [];
+    const runGit = gitModule.git;
+    const spy = vi.spyOn(gitModule, "git").mockImplementation((...args) => {
+      calls.push([...args[0]]);
+      return runGit(...args);
+    });
+    try {
+      await refreshSearchTree(repo, second, first);
+      const batchRead = calls.filter((args) => args[0] === "cat-file");
+      expect(batchRead).toHaveLength(1);
+      expect(batchRead[0]).toContain("--batch");
+      expect(calls.some((args) => args[0] === "checkout-index")).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+    await withSearchTree(repo, second, async (tree) => {
+      await expect(readFile(join(tree, "nested/new.txt"), "utf8")).resolves.toBe("second");
+      await expect(readFile(join(tree, "untouched.txt"), "utf8")).resolves.toBe("preserve updated");
+      await expect(stat(join(tree, "nested/a [1].txt"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 it("serializes cache refreshes with readers, replaces deleted files and repairs missing cache", async () => {
   const root = await mkdtemp(join(tmpdir(), "crossover-search-tree-"));

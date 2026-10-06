@@ -17,7 +17,7 @@ import * as gitModule from "./git.js";
 import { git } from "./git.js";
 import { provisionWorkspace } from "./provision.js";
 import { updateCanonicalRef } from "./reconcile.js";
-import { withSearchTree } from "./search-tree.js";
+import { refreshSearchTree } from "./search-tree.js";
 import type { Operation } from "./operations.js";
 
 type Sample = Record<string, number>;
@@ -177,8 +177,8 @@ it("profiles 200 clean stale-base applies of 20 files at two repository sizes", 
       });
       registerWorkspaceCommands(dispatcher, {
         updateCanonicalRef: (...args) => timed("after_commit", () => updateCanonicalRef(...args)),
-        refreshSearchTree: (repo, commit) =>
-          timed("after_commit", () => withSearchTree(repo, commit, async () => {})),
+        refreshSearchTree: (repo, commit, previousCommit) =>
+          timed("after_commit", () => refreshSearchTree(repo, commit, previousCommit)),
       });
       const principal = {
         room_id: room,
