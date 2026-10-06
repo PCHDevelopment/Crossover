@@ -84,6 +84,9 @@ export async function withIdempotency<T>(
         );
       }
       if (existing.pending) {
+        // A committed row always has a response, and other transactions can't see our
+        // uncommitted claim (their INSERT waits on it instead). So this is only reachable
+        // when this same transaction already claimed the key, i.e. a nested call.
         throw new CrossoverError(
           "VALIDATION",
           "A request with this idempotency key is already in progress",
@@ -105,8 +108,13 @@ export async function withIdempotency<T>(
     await client.query("RELEASE SAVEPOINT idempotency");
     return JSON.parse(response) as T;
   } catch (err) {
-    await client.query("ROLLBACK TO SAVEPOINT idempotency");
-    await client.query("RELEASE SAVEPOINT idempotency");
+    try {
+      await client.query("ROLLBACK TO SAVEPOINT idempotency");
+      await client.query("RELEASE SAVEPOINT idempotency");
+    } catch {
+      // The connection is unusable (withTransaction will discard it); the caller needs the
+      // original error, not this one.
+    }
     throw err;
   }
 }
