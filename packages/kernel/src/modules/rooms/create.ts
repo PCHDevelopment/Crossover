@@ -2,6 +2,7 @@ import type { PoolClient } from "@crossover/db";
 import { CrossoverError, newId } from "@crossover/protocol";
 import { z } from "zod";
 import type { Dispatcher, RoomlessContext } from "../../dispatcher.js";
+import { registerRoomStateCommand, type StateSectionRegistry } from "./state.js";
 
 /** Slugs are lowercase letters, digits and hyphens, 3–48 characters. */
 export const SLUG_PATTERN = /^[a-z0-9-]{3,48}$/;
@@ -46,10 +47,13 @@ export interface RoomCommandDeps {
    * the kernel can't import it. If it throws, the room isn't created.
    */
   provision?: (ctx: { client: PoolClient; room_id: string }) => Promise<void>;
+  /** The sections of `room.get_state`; defaults to `room` and `participants`. */
+  stateSections?: StateSectionRegistry;
 }
 
-/** Register the room commands (`room.create`) on a dispatcher. */
+/** Register the room commands (`room.create`, `room.get_state`) on a dispatcher. */
 export function registerRoomCommands(dispatcher: Dispatcher, deps: RoomCommandDeps = {}): void {
+  registerRoomStateCommand(dispatcher, deps.stateSections);
   dispatcher.registerRoomlessCommand({
     method: "room.create",
     params: roomCreateParams,
