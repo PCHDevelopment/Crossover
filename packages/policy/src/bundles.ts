@@ -36,6 +36,7 @@ export const CAPABILITIES = {
   "messages.send": { mutating: true },
   "messages.edit": { mutating: true },
   "inbox.ack": { mutating: true },
+  "tasks.create": { mutating: true },
   "tasks.claim": { mutating: true },
   "tasks.update": { mutating: true },
   "tasks.start": { mutating: true },
@@ -122,6 +123,7 @@ const DEVELOPER = [
   "messages.send",
   "messages.edit",
   "inbox.ack",
+  "tasks.create",
   "tasks.claim",
   "tasks.update",
   "tasks.start",
@@ -164,10 +166,22 @@ const LEAD = [
   "decisions.decide",
   "checkpoints.create",
   "room.transfer_lead",
+  // The commands (T211, T212) enforce the limits: an agent lead can't touch humans, and only
+  // a human can un-pause what a human paused (§6.3, §22.1).
+  "participants.pause",
+  "participants.resume",
+  "participants.set_role",
 ] as const satisfies readonly Capability[];
 
-/** Read everything except sandbox output; no mutations other than presence (§6.1). */
-const OBSERVER = [...READS, "presence.update"] as const satisfies readonly Capability[];
+/**
+ * Read everything except sandbox output; no mutations to shared project state other than
+ * presence (§6.1). `inbox.ack` only changes the observer's own inbox.
+ */
+const OBSERVER = [
+  ...READS,
+  "presence.update",
+  "inbox.ack",
+] as const satisfies readonly Capability[];
 
 /** Default capabilities by project role (§6.1). */
 export const ROLE_BUNDLES: Readonly<Record<Role, ReadonlySet<Capability>>> = {

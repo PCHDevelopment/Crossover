@@ -86,14 +86,16 @@ describe("authorize: role × capability against the database", () => {
     });
   }
 
-  it("observers cannot mutate anything except presence", async () => {
+  it("observers cannot mutate shared state: only presence and their own inbox", async () => {
     const f = await participant({ role: "OBSERVER" });
     for (const capability of ALL.filter((c) => CAPABILITIES[c].mutating)) {
       const allowed = await check(f, capability).then(
         () => true,
         () => false,
       );
-      expect(allowed, capability).toBe(capability === "presence.update");
+      expect(allowed, capability).toBe(
+        capability === "presence.update" || capability === "inbox.ack",
+      );
     }
   });
 

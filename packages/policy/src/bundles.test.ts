@@ -34,6 +34,7 @@ const DEVELOPER_WORK: Capability[] = [
   "messages.send",
   "messages.edit",
   "inbox.ack",
+  "tasks.create",
   "tasks.claim",
   "tasks.update",
   "tasks.start",
@@ -82,12 +83,20 @@ const EXPECTED: Record<(typeof ROLES)[number], Capability[]> = {
     "decisions.decide",
     "checkpoints.create",
     "room.transfer_lead",
+    // within the §6.3 / §22.1 limits, which the commands enforce
+    "participants.pause",
+    "participants.resume",
+    "participants.set_role",
   ],
-  // "Observer: read everything except sandbox output; no mutations other than presence"
-  OBSERVER: [...READS, "presence.update"],
+  // "Observer: read everything except sandbox output; no mutations other than presence",
+  // where "mutations" means shared project state: acking their own inbox is allowed.
+  OBSERVER: [...READS, "presence.update", "inbox.ack"],
 };
 
 const ALL = Object.keys(CAPABILITIES) as Capability[];
+
+/** The only mutations an observer has: presence, and acknowledging their own inbox. */
+const OBSERVER_OWN_STATE: Capability[] = ["presence.update", "inbox.ack"];
 
 describe("role bundles (§6.1)", () => {
   for (const role of ROLES) {
@@ -109,9 +118,9 @@ describe("role bundles (§6.1)", () => {
     for (const c of ROLE_BUNDLES.DEVELOPER) expect(ROLE_BUNDLES.LEAD.has(c)).toBe(true);
   });
 
-  it("observers hold no mutating capability except presence", () => {
+  it("observers hold no mutating capability except presence and their own inbox", () => {
     for (const c of ALL) {
-      if (CAPABILITIES[c].mutating && c !== "presence.update") {
+      if (CAPABILITIES[c].mutating && !OBSERVER_OWN_STATE.includes(c)) {
         expect(ROLE_BUNDLES.OBSERVER.has(c), c).toBe(false);
       }
     }
@@ -126,10 +135,20 @@ describe("role bundles (§6.1)", () => {
     for (const role of ROLES) expect(ROLE_BUNDLES[role].has("presence.update")).toBe(true);
   });
 
-  it("no role bundle holds an authority power", () => {
+  it("no role bundle holds an authority power, except the lead's participant management", () => {
+    // Leads may pause, resume and set roles (T211/T212 enforce the §6.3 limits). Nobody gets
+    // an owner-only power from a role.
+    const leadOnly = ["participants.pause", "participants.resume", "participants.set_role"];
     const powers = new Set([...AUTHORITY_POWERS.OWNER, ...AUTHORITY_POWERS.ADMIN]);
     for (const role of ROLES) {
-      for (const c of ROLE_BUNDLES[role]) expect(powers.has(c), `${role} ${c}`).toBe(false);
+      for (const c of ROLE_BUNDLES[role]) {
+        const allowed = role === "LEAD" && leadOnly.includes(c);
+        expect(powers.has(c) && !allowed, `${role} ${c}`).toBe(false);
+      }
+    }
+    for (const c of ["room.freeze", "room.archive", "capabilities.grant_tier3", "events.redact"]) {
+      for (const role of ROLES)
+        expect(ROLE_BUNDLES[role].has(c as Capability), `${role} ${c}`).toBe(false);
     }
   });
 });
