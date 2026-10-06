@@ -2,6 +2,7 @@
 export const PROTOCOL_VERSION = 1;
 
 export * from "./canonical.js";
+export * from "./commands.js";
 export * from "./errors.js";
 export * from "./events.js";
 export * from "./ids.js";
