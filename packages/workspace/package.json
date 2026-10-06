@@ -10,7 +10,9 @@
     }
   },
   "dependencies": {
-    "@crossover/protocol": "workspace:*"
+    "@crossover/protocol": "workspace:*",
+    "@crossover/db": "workspace:*",
+    "zod": "^4.6.5"
   },
   "scripts": {
     "build": "tsc -b"
