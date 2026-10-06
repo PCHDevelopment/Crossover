@@ -29,50 +29,123 @@ export async function concurrentBinaryFiles(
   repo: string,
   commits: readonly string[],
 ): Promise<MergeFile[]> {
-  const trees = await Promise.all(
-    commits.map(async (commit) => {
-      const { stdout } = await git(["ls-tree", "-rz", commit], { gitDir: repo, timeoutMs: 10_000 });
-      return new Map(
-        stdout
-          .split("\0")
-          .filter(Boolean)
-          .map((record) => {
-            const tab = record.indexOf("\t");
-            const [mode, , oid] = record.slice(0, tab).split(" ");
-            return [record.slice(tab + 1), { mode: mode!, oid: oid! }];
-          }),
-      );
-    }),
+  const [base, head, candidate] = commits;
+  if (!base || !head || !candidate) throw new Error("Binary classification needs three commits");
+  const options = { gitDir: repo, timeoutMs: 10_000, env: { GIT_LITERAL_PATHSPECS: "1" } };
+  const raw = (stdout: string) => {
+    const changes = new Map<
+      string,
+      { old?: { mode: string; oid: string }; new?: { mode: string; oid: string } }
+    >();
+    const fields = stdout.split("\0");
+    for (let index = 0; index < fields.length - 1;) {
+      const header = fields[index++]!;
+      const path = fields[index++]!;
+      const [oldMode, newMode, oldOid, newOid] = header.slice(1).split(" ");
+      if (!path || !oldMode || !newMode || !oldOid || !newOid)
+        throw new Error("Malformed git diff-tree raw output");
+      const change: { old?: { mode: string; oid: string }; new?: { mode: string; oid: string } } =
+        {};
+      if (!/^0+$/.test(oldOid)) change.old = { mode: oldMode, oid: oldOid };
+      if (!/^0+$/.test(newOid)) change.new = { mode: newMode, oid: newOid };
+      changes.set(path, change);
+    }
+    return changes;
+  };
+  const candidateChanges = raw(
+    (
+      await git(
+        ["diff-tree", "--raw", "-z", "--no-renames", "-r", "--no-commit-id", base, candidate],
+        options,
+      )
+    ).stdout,
   );
-  const [base, head, candidate] = trees;
-  const changed = (a: { oid: string; mode: string } | undefined, b: typeof a) =>
-    a?.oid !== b?.oid || a?.mode !== b?.mode;
-  const paths = [...new Set(trees.flatMap((tree) => [...tree.keys()]))].filter(
-    (path) =>
-      changed(base!.get(path), head!.get(path)) && changed(base!.get(path), candidate!.get(path)),
+  if (!candidateChanges.size) return [];
+  const headChanges = raw(
+    (
+      await git(
+        ["diff-tree", "--raw", "-z", "--no-renames", "-r", "--no-commit-id", base, head],
+        options,
+      )
+    ).stdout,
   );
-  const files: MergeFile[] = [];
-  // Bound Git process fanout when hundreds of paths change concurrently.
-  for (let offset = 0; offset < paths.length; offset += 4) {
-    const chunk = await Promise.all(
-      paths.slice(offset, offset + 4).map(async (path) => {
-        const stages: MergeStage[] = trees.flatMap((tree, index) => {
-          const entry = tree.get(path);
-          return entry ? [{ ...entry, stage: (index + 1) as 1 | 2 | 3 }] : [];
-        });
-        for (const entry of stages) {
-          if (
-            (entry.mode === "100644" || entry.mode === "100755") &&
-            (await readMergeBlob(repo, entry.oid)).binary
-          )
-            return { path, stages };
-        }
-        return undefined;
-      }),
+  const concurrent = [...candidateChanges]
+    .flatMap(([path, candidateChange]) => {
+      const headChange = headChanges.get(path);
+      if (!headChange) return [];
+      const stages: MergeStage[] = [];
+      if (headChange.old) stages.push({ ...headChange.old, stage: 1 });
+      if (headChange.new) stages.push({ ...headChange.new, stage: 2 });
+      if (candidateChange.new) stages.push({ ...candidateChange.new, stage: 3 });
+      return [{ path, stages }];
+    })
+    .filter(({ stages }) =>
+      stages.some((entry) => entry.mode === "100644" || entry.mode === "100755"),
     );
-    files.push(...chunk.filter((file) => file !== undefined));
+  if (!concurrent.length) return [];
+
+  const oids = [
+    ...new Set(
+      concurrent.flatMap(({ stages }) =>
+        stages
+          .filter((entry) => entry.mode === "100644" || entry.mode === "100755")
+          .map((entry) => entry.oid),
+      ),
+    ),
+  ];
+  const sizes = (
+    await git(["cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)"], {
+      ...options,
+      input: `${oids.join("\n")}\n`,
+    })
+  ).stdout
+    .trimEnd()
+    .split("\n")
+    .map((line) => {
+      const [oid, type, size] = line.split(" ");
+      if (type !== "blob" || !oid || !size || !Number.isSafeInteger(Number(size)))
+        throw new Error("Malformed git cat-file batch-check output");
+      return { oid, size: Number(size) };
+    });
+  const binary = new Set(sizes.filter(({ size }) => size > BINARY_SIZE).map(({ oid }) => oid));
+  const small = sizes.filter(({ size }) => size <= BINARY_SIZE);
+  // Keep each buffered batch under Git's 32 MiB default output limit. Ordinary ChangeSets fit
+  // in one invocation; pathological sets are split without loading oversized blobs.
+  for (let offset = 0; offset < small.length;) {
+    let end = offset;
+    let bytes = 0;
+    while (end < small.length && (end === offset || bytes + small[end]!.size <= 24 * 1024 * 1024)) {
+      bytes += small[end]!.size + 128;
+      end++;
+    }
+    const batch = small.slice(offset, end);
+    const { stdout } = await git(["cat-file", "--batch"], {
+      ...options,
+      input: `${batch.map(({ oid }) => oid).join("\n")}\n`,
+      encoding: "buffer",
+      maxBuffer: 32 * 1024 * 1024,
+    });
+    let cursor = 0;
+    for (const expected of batch) {
+      const newline = stdout.indexOf(0x0a, cursor);
+      if (newline < 0) throw new Error("Malformed git cat-file batch output");
+      const header = stdout.subarray(cursor, newline).toString("ascii").split(" ");
+      const [oid, type, sizeText] = header;
+      const size = Number(sizeText);
+      const contentStart = newline + 1;
+      if (oid !== expected.oid || type !== "blob" || size !== expected.size)
+        throw new Error("Unexpected git cat-file batch object");
+      if (stdout.subarray(contentStart, contentStart + Math.min(size, 8192)).includes(0))
+        binary.add(oid);
+      cursor = contentStart + size;
+      if (stdout[cursor] !== 0x0a) throw new Error("Malformed git cat-file batch separator");
+      cursor++;
+    }
+    offset = end;
   }
-  return files;
+  return concurrent
+    .filter(({ stages }) => stages.some((entry) => binary.has(entry.oid)))
+    .map(({ path, stages }) => ({ path, stages }));
 }
 
 export function enforceBinaryConflicts(result: MergeResult, files: MergeFile[]): MergeResult {
