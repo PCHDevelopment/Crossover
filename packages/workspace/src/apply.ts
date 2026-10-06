@@ -19,11 +19,16 @@ export interface WorkspaceCommandDeps {
   updateCanonicalRef?: (repo: string, commit: string, expected: string) => Promise<void>;
   /** A failed checkout refresh is repaired by the next search against the committed DB head. */
   refreshSearchTree?: (repo: string, commit: string) => Promise<void>;
+  /** Merge engine seam for deterministic conflict-policy checks. */
+  merge?: typeof merge;
 }
 
 export type ApplyResponse =
   | { status: "APPLIED"; changeset_id: string; applied_revision: number }
-  | { status: "CONFLICT"; changeset_id: string; conflicts: ClassifiedConflict[] };
+  | { status: "CONFLICT"; changeset_id: string; conflicts: ConflictResponse[] };
+
+export type ConflictResponse =
+  ClassifiedConflict | { path: null; kind: ClassifiedConflict["kind"]; reason: "unauthorized" };
 
 /** Register §10.3 application; all state and events share the dispatcher transaction. */
 export function registerWorkspaceCommands(
@@ -109,9 +114,40 @@ async function apply(
     ],
   );
   const candidate = await materialize(ws.repo_path, base.commit_sha, operations);
-  const result = await merge(ws.repo_path, base.commit_sha, head.commit_sha, candidate);
+  const result = await (deps.merge ?? merge)(
+    ws.repo_path,
+    base.commit_sha,
+    head.commit_sha,
+    candidate,
+  );
   if (!result.clean) {
-    const conflicts = await classifyConflicts(ws.repo_path, result);
+    const classified = await classifyConflicts(ws.repo_path, result);
+    const conflicts: ConflictResponse[] = [];
+    for (const conflict of classified) {
+      let authorized = true;
+      try {
+        await ctx.authorize("workspace.write", { path: conflict.path });
+      } catch (error) {
+        if (!(error instanceof CrossoverError) || error.code !== "FORBIDDEN") throw error;
+        authorized = false;
+      }
+      if (authorized) {
+        for (const path of new Set(conflict.messages.flatMap((message) => message.paths))) {
+          try {
+            await ctx.authorize("workspace.write", { path });
+          } catch (error) {
+            if (!(error instanceof CrossoverError) || error.code !== "FORBIDDEN") throw error;
+            authorized = false;
+            break;
+          }
+        }
+      }
+      if (authorized) {
+        conflicts.push(conflict);
+      } else {
+        conflicts.push({ path: null, kind: conflict.kind, reason: "unauthorized" });
+      }
+    }
     await client.query(
       `UPDATE changesets SET status = 'CONFLICT', payload = payload || jsonb_build_object('conflicts', $3::jsonb)
        WHERE room_id = $1 AND id = $2`,

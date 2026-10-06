@@ -196,6 +196,34 @@ it("returns binary summaries and hides submodule object IDs without corrupting u
   expect(JSON.stringify(onlyModule)).not.toMatch(/\b[0-9a-f]{40}\b/);
 });
 
+it("scopes unfiltered diffs to paths the caller can read", async () => {
+  const f = await fixture(async (_principal, action, resource) => {
+    if (action === "workspace.read" && resource.path === "private.txt")
+      throw new CrossoverError("FORBIDDEN", "Denied");
+  });
+  await f.apply([
+    { type: "create", path: "public.txt", content: "visible" },
+    { type: "create", path: "private.txt", content: "hidden" },
+  ]);
+  const response = (
+    await f.dispatch("workspace.diff", {
+      from_revision: 0,
+      to_revision: 1,
+    })
+  ).response as { diff: string };
+  expect(response.diff).toContain("public.txt");
+  expect(response.diff).not.toContain("private.txt");
+  expect(response.diff).not.toContain("hidden");
+  const emptyPaths = (
+    await f.dispatch("workspace.diff", {
+      from_revision: 0,
+      to_revision: 1,
+      paths: [],
+    })
+  ).response as { diff: string };
+  expect(emptyPaths.diff).toEqual(response.diff);
+});
+
 it("caps diff output and lets paths narrow it", async () => {
   const f = await fixture();
   await f.apply(
