@@ -1,7 +1,14 @@
 import { CrossoverError, newId } from "@crossover/protocol";
 import { z } from "zod";
 import type { CommandContext, Dispatcher } from "../../dispatcher.js";
-import { loadTask, TASK_COLUMNS, taskView, versionConflict, type TaskRow } from "./task.js";
+import {
+  leaseSql,
+  loadTask,
+  TASK_COLUMNS,
+  taskView,
+  versionConflict,
+  type TaskRow,
+} from "./task.js";
 
 export const MAX_REQUIREMENTS = 50;
 export const MAX_DEPENDENCIES = 50;
@@ -245,8 +252,14 @@ export function registerTaskCommands(dispatcher: Dispatcher): void {
       }
       if (p.requirements !== undefined) changes.requirements = p.requirements;
 
+      // The owner working on their own task keeps an agent's claim lease alive (§8.4).
+      const renew =
+        task.owner_id === actor.id &&
+        (task.status === "CLAIMED" || task.status === "IN_PROGRESS" || task.status === "BLOCKED")
+          ? `, lease_expires_at = (SELECT ${leaseSql("p.kind")} FROM participants p WHERE p.id = tasks.owner_id AND p.room_id = tasks.room_id)`
+          : "";
       const { rows } = await ctx.client.query<TaskRow>(
-        `UPDATE tasks SET ${set.join(", ")}, version = version + 1, updated_at = clock_timestamp()
+        `UPDATE tasks SET ${set.join(", ")}${renew}, version = version + 1, updated_at = clock_timestamp()
          WHERE id = $1 AND room_id = $2 AND version = $3
          RETURNING ${TASK_COLUMNS}`,
         values,

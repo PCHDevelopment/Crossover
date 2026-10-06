@@ -576,6 +576,56 @@ export class Dispatcher {
   }
 
   /**
+   * Run work the platform itself does in a room, such as the task lease sweeper (T311): on the
+   * room's actor, holding its lease, in one transaction that also appends the events `execute`
+   * returns (each with an explicit `actor_id`), which are published after the commit. There is
+   * no principal, no authorizer and no idempotency key; `name` is only for logs and errors.
+   */
+  async runSystem<R>(
+    room_id: string,
+    name: string,
+    execute: (ctx: {
+      client: PoolClient;
+      room_id: string;
+      command_id: string;
+    }) => Promise<{ result: R; events: (EmittedEvent & { actor_id: string })[] }>,
+  ): Promise<{ result: R; events: RoomEvent[] }> {
+    const command_id = newId("cmd");
+    return this.actors.get(room_id).submit(async () => {
+      const token = await this.leases.ensure(room_id);
+      let out: { result: R; events: RoomEvent[] };
+      try {
+        out = await withTransaction(this.pool, async (client) => {
+          const done = await execute({ client, room_id, command_id });
+          const events = await appendEvents(
+            client,
+            room_id,
+            done.events.map((e) => ({
+              type: e.type,
+              actor_id: e.actor_id,
+              causation_id: command_id,
+              ...(e.payload !== undefined ? { payload: e.payload } : {}),
+              ...(e.schema_version !== undefined ? { schema_version: e.schema_version } : {}),
+            })),
+            token,
+          );
+          return { result: done.result, events };
+        });
+      } catch (err) {
+        if (err instanceof CrossoverError && err.code === "STALE_FENCE")
+          this.leases.forget(room_id);
+        throw err;
+      }
+      await this.afterCommitWork(room_id, { method: name, id: command_id }, [], {
+        response: undefined,
+        events: out.events,
+        replayed: false,
+      });
+      return out;
+    });
+  }
+
+  /**
    * After a commit: run the command's `afterCommit` callbacks on the actor, so no other
    * command for the room can slip in between the commit and (say) the Git ref update (a
    * replay registers none), then publish the events (never for a replay).
