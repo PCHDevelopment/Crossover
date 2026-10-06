@@ -3,6 +3,7 @@
   "references": [
     { "path": "packages/protocol" },
     { "path": "packages/db" },
+    { "path": "packages/gateway" },
     { "path": "packages/kernel" },
     { "path": "packages/ledger" },
     { "path": "packages/policy" },

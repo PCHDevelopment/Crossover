@@ -434,9 +434,15 @@ export class Dispatcher {
    * command consumes is single use, so a retry is refused by the command itself.
    *
    * Params are validated before anything is consumed, so a validation error never burns a
-   * credential. `UNAUTHENTICATED` when the command can't resolve a room.
+   * credential. `UNAUTHENTICATED` when the command can't resolve a room, or (with
+   * `expectedRoomId`, e.g. from a URL path) resolves a different one: nothing is consumed and
+   * the answer is the same generic one as for an unknown credential.
    */
-  async dispatchAnonymous(method: string, input: unknown): Promise<DispatchResult> {
+  async dispatchAnonymous(
+    method: string,
+    input: unknown,
+    expectedRoomId?: string,
+  ): Promise<DispatchResult> {
     const def = this.anonymousCommands.get(method);
     if (!def) {
       throw new CrossoverError("NOT_FOUND", `Unknown method ${method}`, { details: { method } });
@@ -446,7 +452,7 @@ export class Dispatcher {
     const params: unknown = parsed.data;
 
     const room_id = await def.resolveRoom(this.pool, params);
-    if (room_id === undefined) {
+    if (room_id === undefined || (expectedRoomId !== undefined && room_id !== expectedRoomId)) {
       throw new CrossoverError("UNAUTHENTICATED", "Invalid or expired token");
     }
     const command_id = newId("cmd");
