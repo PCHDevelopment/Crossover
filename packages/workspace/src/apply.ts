@@ -8,6 +8,7 @@ import { merge } from "./merge.js";
 import type { Operation } from "./operations.js";
 import { treeChanges } from "./tree-changes.js";
 import { updateCanonicalRef } from "./reconcile.js";
+import { registerWorkspaceReads } from "./reads.js";
 
 export interface WorkspaceCommandDeps {
   /** Failure is reported after commit; startup reconcileRef restores the DB-authoritative head. */
@@ -30,6 +31,7 @@ export function registerWorkspaceCommands(
     params: changesetParamsSchema,
     execute: (ctx, params) => apply(ctx, params, deps),
   });
+  registerWorkspaceReads(dispatcher);
 }
 
 async function apply(
