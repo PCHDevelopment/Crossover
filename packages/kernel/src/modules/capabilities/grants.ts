@@ -78,9 +78,10 @@ function validation(message: string, details?: Record<string, unknown>): Crossov
  * Register `capabilities.grant`, `capabilities.revoke` and `capabilities.list` (T210).
  *
  * Effective capabilities = role bundle + live grants - live denies (§21.1). `revoke` ends the
- * grants named by its capability string and, if the role bundle or a broader grant still
- * covers the capability, records a DENY (so `sandbox.exec` can be taken from a developer). `grant` of a capability
- * ends the DENY with the same string. `authorize()` reads both on every command, so a change
+ * grants its capability string covers (the exact one and narrower scoped ones) and, if the
+ * role bundle or a broader grant still covers the capability, records a DENY (so
+ * `sandbox.exec` can be taken from a developer). `grant` of a capability ends the DENY with
+ * the same string. `authorize()` reads both on every command, so a change
  * applies to the next command.
  */
 export function registerCapabilityCommands(dispatcher: Dispatcher): void {
@@ -180,13 +181,26 @@ export function registerCapabilityCommands(dispatcher: Dispatcher): void {
       const target = await loadTarget(ctx.client, ctx.room_id, params.participant_id);
       const me = ctx.principal.participant_id;
 
-      const ended = await ctx.client.query(
-        `UPDATE capability_grants SET ended_at = clock_timestamp(), ended_by = $4
-         WHERE room_id = $1 AND participant_id = $2 AND capability = $3
-           AND effect = 'GRANT' AND ended_at IS NULL`,
-        [ctx.room_id, params.participant_id, params.capability, me],
+      // End the grants the revocation covers: the one with this exact string and any narrower
+      // one (revoking `workspace.write` also ends `workspace.write:src/**`), so none is left
+      // shadowed by the DENY below.
+      const { rows: held } = await ctx.client.query<{ id: string; capability: string }>(
+        `SELECT id, capability FROM capability_grants
+         WHERE room_id = $1 AND participant_id = $2 AND effect = 'GRANT' AND ended_at IS NULL`,
+        [ctx.room_id, params.participant_id],
       );
-      const grantsEnded = ended.rowCount ?? 0;
+      const covered = held.filter(
+        (g) =>
+          g.capability === params.capability || capabilityMatches(params.capability, g.capability),
+      );
+      if (covered.length > 0) {
+        await ctx.client.query(
+          `UPDATE capability_grants SET ended_at = clock_timestamp(), ended_by = $2
+           WHERE id = ANY($1::text[])`,
+          [covered.map((g) => g.id), me],
+        );
+      }
+      const grantsEnded = covered.length;
 
       // A capability the role bundle gives, or a broader grant still gives (an unscoped grant
       // and a scoped revoke), can only be taken away with a DENY.
