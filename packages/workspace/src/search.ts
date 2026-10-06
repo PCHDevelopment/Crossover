@@ -32,10 +32,9 @@ export function registerWorkspaceSearch(dispatcher: Dispatcher): void {
           details: { reason: "search_head_only" },
         });
       return withSearchTree(ws.repo_path, ws.commit, async (tree) => {
-        const matches: SearchMatch[] = [];
-        let truncated = false;
+        const matches: (SearchMatch & { text_truncated?: true })[] = [];
         let bytes = Buffer.byteLength(
-          JSON.stringify({ workspace_revision: ws.revision, matches, truncated }),
+          JSON.stringify({ workspace_revision: ws.revision, matches, truncated: false }),
         );
         const allowed = new Map<string, boolean>();
         const result = await runSearch(
@@ -65,8 +64,12 @@ export function registerWorkspaceSearch(dispatcher: Dispatcher): void {
             }
             if (!allowed.get(path)) return true;
             const text = /^.{0,500}/su.exec(match.text)![0];
-            if (text.length !== match.text.length) truncated = true;
-            const entry = { path, line: match.line, text };
+            const entry = {
+              path,
+              line: match.line,
+              text,
+              ...(text.length !== match.text.length ? { text_truncated: true as const } : {}),
+            };
             const size = Buffer.byteLength(JSON.stringify(entry)) + (matches.length ? 1 : 0);
             if (matches.length === 200 || bytes + size > 1024 * 1024) return false;
             matches.push(entry);
@@ -78,7 +81,7 @@ export function registerWorkspaceSearch(dispatcher: Dispatcher): void {
           response: {
             workspace_revision: ws.revision,
             matches,
-            truncated: truncated || result.truncated,
+            truncated: result.truncated,
           },
         };
       });
