@@ -887,8 +887,9 @@ Deps: T702–T711 · Migration: —
 
 Deps: T117, T701 · Migration: —
 
-A per-node loop that renews every lease in `RoomLeases.heldRooms()` at a third of the TTL, so a room with open WebSocket subscribers but no recent commands keeps its owner. On `STALE_FENCE` the room is forgotten and its actor drained; on shutdown `releaseAll()` runs.
+A per-node loop that renews every lease in `RoomLeases.heldRooms()` at a third of the TTL, so a room with open WebSocket subscribers but no recent commands keeps its owner. On `STALE_FENCE` the room is forgotten and its actor drained; on shutdown `releaseAll()` runs. Add an `onAcquire(roomId)` option to `RoomLeases`, run on the room's actor before the first command after any acquisition; T712 wires workspace `reconcileRef` into it (§19.4, §26).
 
 - With a fake clock, an idle held room is renewed before expiry and keeps its fencing token.
 - A room taken over by another node is dropped from `heldRooms()` on the next tick.
 - Shutdown releases all leases; another node acquires immediately.
+- `onAcquire` runs exactly once per acquisition (including re-acquire after expiry), before the first command; a throwing hook fails that command and leaves the room unacquired.
