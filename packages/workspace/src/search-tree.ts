@@ -199,8 +199,9 @@ export async function refreshSearchTree(
         await updateChangedPaths(repo, previousCommit, commit, tree);
         await writeFile(join(cache, "commit"), commit);
         return;
-      } catch {
+      } catch (error) {
         // A cache that no longer matches the expected parent, or a large/unusual diff, is rebuilt.
+        console.warn("Incremental search-tree refresh failed; rebuilding cache", error);
       }
     }
     await replaceTree(repo, commit, cache, tree);
