@@ -1,4 +1,3 @@
-import { authorize } from "@crossover/policy";
 import { CrossoverError } from "@crossover/protocol";
 import { z } from "zod";
 import type { CommandContext, Dispatcher } from "../../dispatcher.js";
@@ -129,12 +128,7 @@ export function registerLeadCommands(dispatcher: Dispatcher): void {
       }
       // An offer nobody can accept is a mistake: check the recipient could (not an observer).
       try {
-        await authorize(
-          { participant_id: to.id, room_id: ctx.room_id },
-          "room.accept_lead",
-          { room_id: ctx.room_id },
-          { method: "room.accept_lead", params: {}, client: ctx.client },
-        );
+        await ctx.authorizeAs(to.id, "room.accept_lead");
       } catch (err) {
         if (err instanceof CrossoverError && err.code === "FORBIDDEN") {
           throw validation(`${to.id} (${to.role}) can't accept the lead`, {

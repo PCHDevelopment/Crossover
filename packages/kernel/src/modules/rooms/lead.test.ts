@@ -3,7 +3,8 @@ import { createTestDatabase, type TestDatabase } from "@crossover/db/testing";
 import { authorize } from "@crossover/policy";
 import { CrossoverError, newId } from "@crossover/protocol";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { Dispatcher } from "../../dispatcher.js";
+import { z } from "zod";
+import { Dispatcher, type Authorizer } from "../../dispatcher.js";
 import type { Principal } from "../../principal.js";
 import { LEAD_OFFER_TTL_SECONDS, registerLeadCommands } from "./lead.js";
 
@@ -54,8 +55,8 @@ async function add(
   return { participant_id: id, room_id: room, kind, authority, role };
 }
 
-async function setup(): Promise<Room> {
-  const d = new Dispatcher({ pool, authorize, nodeId: `node-${++n}` });
+async function setup(authorizer: Authorizer = authorize): Promise<Room> {
+  const d = new Dispatcher({ pool, authorize: authorizer, nodeId: `node-${++n}` });
   registerLeadCommands(d);
   const room = newId("room");
   const ownerId = newId("part");
@@ -372,10 +373,74 @@ describe("room.transfer_lead and room.accept_lead", () => {
     expect(rows).toHaveLength(1);
   });
 
+  it("asks the dispatcher's configured authorizer whether the recipient can accept, as the recipient", async () => {
+    const asked: { who: string; action: string; room: unknown; method: string }[] = [];
+    let deny: string | undefined;
+    const spy: Authorizer = async (principal, action, resource, context) => {
+      if (action === "room.accept_lead") {
+        asked.push({
+          who: principal.participant_id,
+          action,
+          room: resource.room_id,
+          method: context.method,
+        });
+        if (principal.participant_id === deny) {
+          throw new CrossoverError("FORBIDDEN", "stub says no");
+        }
+        return;
+      }
+      return authorize(principal, action, resource, context);
+    };
+    const r = await setup(spy);
+    await setLead(r, r.owner, r.agent);
+    await offer(r, r.agent, r.agent2);
+    expect(asked).toEqual([
+      {
+        who: r.agent2.participant_id,
+        action: "room.accept_lead",
+        room: r.room,
+        method: "room.transfer_lead",
+      },
+    ]);
+    deny = r.human.participant_id;
+    const err = await rejects(offer(r, r.agent, r.human), "VALIDATION");
+    expect(err.message).toMatch(/can't accept/);
+  });
+
   it("the owner as lead can offer too (the lead role carries the capability)", async () => {
     const r = await setup();
     await offer(r, r.owner, r.human);
     await accept(r, r.human);
     await expectOneLead(r, r.human.participant_id);
+  });
+});
+
+describe("ctx.authorizeAs", () => {
+  it("answers NOT_FOUND for someone outside the room, and passes for a participant who may", async () => {
+    const r = await setup();
+    const other = await setup();
+    const results: string[] = [];
+    r.d.registerCommand({
+      method: "tasks.create",
+      mutating: true,
+      params: z.object({
+        who: z.string(),
+        action: z.string(),
+      }),
+      execute: async (ctx, p) => {
+        await ctx.authorizeAs(p.who, p.action).then(
+          () => results.push("allowed"),
+          (e: CrossoverError) => results.push(e.code),
+        );
+        return { response: {} };
+      },
+    });
+    const ask = (who: string, action: string) =>
+      r.d.dispatch(r.owner, cmd("tasks.create", { who, action }));
+    await ask(r.agent.participant_id, "tasks.read"); // may
+    await ask(r.observer.participant_id, "tasks.create"); // may not
+    await ask(other.agent.participant_id, "tasks.read"); // another room
+    await ask("part_nope", "tasks.read");
+    expect(results).toEqual(["allowed", "FORBIDDEN", "NOT_FOUND", "NOT_FOUND"]);
   });
 });
