@@ -12,14 +12,8 @@ import {
 import type { z } from "zod";
 import { RoomActorRegistry } from "./actor.js";
 import { RoomLeases } from "./leases.js";
+import type { Principal } from "./principal.js";
 import type { EventPublisher } from "./publisher.js";
-
-/** Who is issuing a command. T201/T208 extend this with kind, authority and role. */
-export interface Principal {
-  participant_id: string;
-  /** The room the command is for (the gateway checks it against the path and token). */
-  room_id: string;
-}
 
 /** An event emitted by a command; the dispatcher adds the sequence, hash and causation id. */
 export interface EmittedEvent {

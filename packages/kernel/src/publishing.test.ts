@@ -5,6 +5,7 @@ import { Redis } from "ioredis";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 import { allowAll, Dispatcher, type DispatcherOptions } from "./dispatcher.js";
+import type { Principal } from "./principal.js";
 import { RedisEventPublisher, roomChannel, type EventPublisher } from "./publisher.js";
 
 const REDIS_URL = process.env["REDIS_URL"] ?? "redis://localhost:6379";
@@ -33,7 +34,13 @@ async function newRoom(): Promise<string> {
   return id;
 }
 
-const principal = (room_id: string) => ({ participant_id: "part_1", room_id });
+const principal = (room_id: string): Principal => ({
+  participant_id: "part_1",
+  room_id,
+  kind: "HUMAN",
+  authority: "MEMBER",
+  role: "DEVELOPER",
+});
 let keyN = 0;
 const envelope = (method: string, params: Record<string, unknown> = {}) => ({
   id: newId("cmd"),
