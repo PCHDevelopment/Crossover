@@ -8,6 +8,7 @@ import {
   allowAll,
   Dispatcher,
   type Authorizer,
+  type DispatcherOptions,
   type CommandResult,
   type EmittedEvent,
   type Principal,
@@ -53,8 +54,12 @@ const envelope = (method: string, params: Record<string, unknown> = {}, key?: st
 let keyN = 0;
 const nextKey = () => `key-${++keyN}`;
 
-function dispatcher(authorize: Authorizer = allowAll, nodeId = `node-${++counter}`) {
-  return new Dispatcher({ pool, authorize, nodeId });
+function dispatcher(
+  authorize: Authorizer = allowAll,
+  nodeId = `node-${++counter}`,
+  extra: Partial<DispatcherOptions> = {},
+) {
+  return new Dispatcher({ pool, authorize, nodeId, ...extra });
 }
 
 /** A mutating command that writes a side-effect row and emits `n` message.sent events. */
@@ -595,6 +600,261 @@ describe("dispatch: authorization", () => {
       d.dispatch(principal(room), envelope("messages.send", { body: "x" }, nextKey())),
     ).rejects.toMatchObject({ code: "FORBIDDEN" });
     expect(await effects(room)).toEqual([]); // rolled back with the transaction
+  });
+});
+
+describe("dispatch: ctx.authorize (finer-grained checks)", () => {
+  it("re-runs the policy for a resource, with room_id filled in and the same transaction", async () => {
+    const room = await newRoom();
+    const seen: unknown[] = [];
+    const d = dispatcher(async (_p, action, resource) => {
+      seen.push([action, resource]);
+    });
+    d.registerCommand({
+      method: "workspace.apply_changeset",
+      params: z.object({ paths: z.array(z.string()) }),
+      mutating: true,
+      execute: async (ctx, p) => {
+        for (const path of p.paths) await ctx.authorize("workspace.write", { path });
+        return { response: p.paths.length };
+      },
+    });
+    await d.dispatch(
+      principal(room),
+      envelope("workspace.apply_changeset", { paths: ["a.txt", "docs/b.md"] }, nextKey()),
+    );
+    expect(seen).toEqual([
+      ["workspace.apply_changeset", { room_id: room }],
+      ["workspace.write", { path: "a.txt", room_id: room }],
+      ["workspace.write", { path: "docs/b.md", room_id: room }],
+    ]);
+  });
+
+  it("a denied path fails the whole command and rolls everything back", async () => {
+    const room = await newRoom();
+    const d = dispatcher(async (_p, action, resource) => {
+      if (action === "workspace.write" && resource["path"] === "secrets/key") {
+        throw new CrossoverError("FORBIDDEN", "no", { details: { path: resource["path"] } });
+      }
+    });
+    d.registerCommand({
+      method: "workspace.apply_changeset",
+      params: z.object({ paths: z.array(z.string()) }),
+      mutating: true,
+      execute: async (ctx, p) => {
+        for (const path of p.paths) {
+          await ctx.client.query("INSERT INTO side_effects (room_id, tag) VALUES ($1, $2)", [
+            ctx.room_id,
+            path,
+          ]);
+          await ctx.authorize("workspace.write", { path });
+        }
+        return { response: null, events: [{ type: "workspace.changeset.applied" as const }] };
+      },
+    });
+    await expect(
+      d.dispatch(
+        principal(room),
+        envelope("workspace.apply_changeset", { paths: ["ok.txt", "secrets/key"] }, nextKey()),
+      ),
+    ).rejects.toMatchObject({ code: "FORBIDDEN", details: { path: "secrets/key" } });
+    expect(await effects(room)).toEqual([]);
+    expect(await lastSeq(room)).toBe(0);
+  });
+
+  it("is available to reads too", async () => {
+    const room = await newRoom();
+    const actions: string[] = [];
+    const d = dispatcher(async (_p, action) => void actions.push(action));
+    d.registerCommand({
+      method: "workspace.read",
+      params: z.object({}),
+      mutating: false,
+      execute: async (ctx) => {
+        await ctx.authorize("workspace.read.path", { path: "x" });
+        return { response: 1 };
+      },
+    });
+    await d.dispatch(principal(room), envelope("workspace.read"));
+    expect(actions).toEqual(["workspace.read", "workspace.read.path"]);
+  });
+});
+
+describe("dispatch: afterCommit", () => {
+  const register = (
+    d: Dispatcher,
+    execute: Parameters<Dispatcher["registerCommand"]>[0]["execute"],
+  ) =>
+    d.registerCommand({ method: "messages.send", params: z.object({}), mutating: true, execute });
+
+  it("runs after the commit: the data is visible from another connection", async () => {
+    const room = await newRoom();
+    const d = dispatcher();
+    let seenFromOutside: string[] = [];
+    register(d, async (ctx) => {
+      await ctx.client.query("INSERT INTO side_effects (room_id, tag) VALUES ($1, 'row')", [
+        ctx.room_id,
+      ]);
+      ctx.afterCommit(async () => {
+        // A different connection (the pool) only sees committed data.
+        seenFromOutside = await effects(room);
+      });
+      return { response: null, events: [{ type: "message.sent" as const }] };
+    });
+    await d.dispatch(principal(room), envelope("messages.send", {}, nextKey()));
+    expect(seenFromOutside).toEqual(["row"]);
+  });
+
+  it("runs on the room's actor, before the next command for the room starts", async () => {
+    const room = await newRoom();
+    const d = dispatcher();
+    const log: string[] = [];
+    register(d, async (ctx) => {
+      log.push(`execute-${ctx.command_id.slice(-4)}`);
+      ctx.afterCommit(async () => {
+        await sleep(30);
+        log.push("after-commit");
+      });
+      return { response: null };
+    });
+    const [first, second] = [
+      d.dispatch(principal(room), envelope("messages.send", {}, nextKey())),
+      d.dispatch(principal(room), envelope("messages.send", {}, nextKey())),
+    ];
+    await Promise.all([first, second]);
+    expect(log.map((l) => l.replace(/-.*/, ""))).toEqual(["execute", "after", "execute", "after"]);
+  });
+
+  it("also accepts the hook as CommandResult.afterCommit, after ctx-registered callbacks", async () => {
+    const room = await newRoom();
+    const d = dispatcher();
+    const log: string[] = [];
+    register(d, async (ctx) => {
+      ctx.afterCommit(() => void log.push("ctx"));
+      return { response: null, afterCommit: async () => void log.push("result") };
+    });
+    await d.dispatch(principal(room), envelope("messages.send", {}, nextKey()));
+    expect(log).toEqual(["ctx", "result"]);
+  });
+
+  it("runs callbacks in registration order and awaits each", async () => {
+    const room = await newRoom();
+    const d = dispatcher();
+    const log: number[] = [];
+    register(d, async (ctx) => {
+      ctx.afterCommit(async () => {
+        await sleep(20);
+        log.push(1);
+      });
+      ctx.afterCommit(() => void log.push(2));
+      return { response: null };
+    });
+    await d.dispatch(principal(room), envelope("messages.send", {}, nextKey()));
+    expect(log).toEqual([1, 2]);
+  });
+
+  it("doesn't run if the command fails, rolls back, or is denied", async () => {
+    let ran = 0;
+    const tracked = (
+      d: Dispatcher,
+      execute: Parameters<Dispatcher["registerCommand"]>[0]["execute"],
+    ) =>
+      register(d, async (ctx, params) => {
+        ctx.afterCommit(() => void ran++);
+        return execute(ctx, params);
+      });
+
+    // Each case gets its own room: a dispatcher owns the rooms it has written to.
+    const failing = dispatcher();
+    tracked(failing, async () => {
+      throw new Error("boom");
+    });
+    await expect(
+      failing.dispatch(principal(await newRoom()), envelope("messages.send", {}, nextKey())),
+    ).rejects.toThrow("boom");
+
+    const badEvents = dispatcher();
+    tracked(badEvents, async () => ({ response: 1, events: [{ type: "task.exploded" as never }] }));
+    await expect(
+      badEvents.dispatch(principal(await newRoom()), envelope("messages.send", {}, nextKey())),
+    ).rejects.toMatchObject({ code: "VALIDATION" });
+
+    const denying = dispatcher(async (_p, action) => {
+      if (action === "x") throw new CrossoverError("FORBIDDEN", "no");
+    });
+    tracked(denying, async (ctx) => {
+      await ctx.authorize("x");
+      return { response: 1 };
+    });
+    await expect(
+      denying.dispatch(principal(await newRoom()), envelope("messages.send", {}, nextKey())),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+
+    expect(ran).toBe(0);
+  });
+
+  it("doesn't run again when an idempotent duplicate is replayed", async () => {
+    const room = await newRoom();
+    const d = dispatcher();
+    let ran = 0;
+    register(d, async (ctx) => {
+      ctx.afterCommit(() => void ran++);
+      return { response: null };
+    });
+    const env = envelope("messages.send", {}, nextKey());
+    await d.dispatch(principal(room), env);
+    const again = await d.dispatch(principal(room), env);
+    expect(again.replayed).toBe(true);
+    expect(ran).toBe(1);
+  });
+
+  it("a callback that throws is reported but the command still succeeds and stays committed", async () => {
+    const room = await newRoom();
+    const reported: { error: unknown; method: string; command_id: string; room_id: string }[] = [];
+    const d = dispatcher(allowAll, undefined, {
+      onAfterCommitError: (error, info) => void reported.push({ error, ...info }),
+    });
+    const boom = new Error("ref update failed");
+    let secondRan = false;
+    register(d, async (ctx) => {
+      await ctx.client.query("INSERT INTO side_effects (room_id, tag) VALUES ($1, 'kept')", [
+        ctx.room_id,
+      ]);
+      ctx.afterCommit(() => {
+        throw boom;
+      });
+      ctx.afterCommit(() => void (secondRan = true)); // later callbacks still run
+      return { response: "done", events: [{ type: "message.sent" as const }] };
+    });
+    const env = envelope("messages.send", {}, nextKey());
+    const out = await d.dispatch(principal(room), env);
+    expect(out).toMatchObject({ response: "done", replayed: false });
+    expect(reported).toEqual([
+      { error: boom, method: "messages.send", command_id: env.id, room_id: room },
+    ]);
+    expect(secondRan).toBe(true);
+    expect(await effects(room)).toEqual(["kept"]);
+    expect(await lastSeq(room)).toBe(1);
+    // ...and the next command for the room isn't blocked.
+    const next = envelope("messages.send", {}, nextKey());
+    await expect(d.dispatch(principal(room), next)).resolves.toMatchObject({ response: "done" });
+  });
+
+  it("is rejected for read-only commands", async () => {
+    const room = await newRoom();
+    const d = dispatcher();
+    d.registerCommand({
+      method: "room.get_state",
+      params: z.object({}),
+      mutating: false,
+      execute: async (ctx) => {
+        ctx.afterCommit(() => {});
+        return { response: 1 };
+      },
+    });
+    await expect(d.dispatch(principal(room), envelope("room.get_state"))).rejects.toThrow(
+      /afterCommit needs a transaction/,
+    );
   });
 });
 
