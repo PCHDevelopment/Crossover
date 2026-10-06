@@ -55,6 +55,29 @@ export async function entries(repo: string, tree: string, path?: string): Promis
       };
     });
 }
+async function visibleEntries(
+  ctx: CommandContext,
+  repo: string,
+  tree: string,
+  prefix = "",
+): Promise<Entry[]> {
+  const visible: Entry[] = [];
+  for (const entry of await entries(repo, tree)) {
+    const path = prefix ? `${prefix}/${entry.path}` : entry.path;
+    if (entry.type === "directory") {
+      const descendants = await visibleEntries(ctx, repo, entry.oid, path);
+      if (descendants.length) visible.push({ ...entry, path });
+      continue;
+    }
+    try {
+      await ctx.authorize("workspace.read", { path });
+      visible.push({ ...entry, path });
+    } catch (error) {
+      if (!(error instanceof CrossoverError) || error.code !== "FORBIDDEN") throw error;
+    }
+  }
+  return visible;
+}
 export async function snapshot(ctx: CommandContext, selected?: number) {
   const ws = (
     await ctx.client.query<{ id: string; repo_path: string }>(
@@ -134,10 +157,11 @@ export function registerWorkspaceReads(dispatcher: Dispatcher): void {
   dispatcher.registerCommand({
     method: "workspace.list",
     action: "workspace.read",
+    // Every returned file is checked, and directories are shown only when they contain one.
+    perPathAuthorize: true,
     mutating: false,
     params: z.strictObject({ path: pathSchema(true).default(""), revision }),
     execute: async (ctx, params) => {
-      await ctx.authorize("workspace.read", { path: params.path });
       const ws = await snapshot(ctx, params.revision);
       let tree = ws.commit;
       if (params.path) {
@@ -145,13 +169,15 @@ export function registerWorkspaceReads(dispatcher: Dispatcher): void {
           (entry) => entry.path === params.path,
         );
         if (!target) throw new CrossoverError("NOT_FOUND", "Workspace path not found");
-        if (target.type !== "directory") notFile(params.path, "not_a_directory");
+        if (target.type !== "directory") {
+          await ctx.authorize("workspace.read", { path: params.path });
+          notFile(params.path, "not_a_directory");
+        }
         tree = target.oid;
       }
-      const children = (await entries(ws.repo_path, tree)).map((entry) => ({
-        ...entry,
-        path: params.path ? `${params.path}/${entry.path}` : entry.path,
-      }));
+      const children = await visibleEntries(ctx, ws.repo_path, tree, params.path);
+      if (params.path && children.length === 0)
+        throw new CrossoverError("NOT_FOUND", "Workspace path not found");
       const revisions = await fileRevisions(
         ctx,
         ws.id,

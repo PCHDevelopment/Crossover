@@ -40,6 +40,7 @@ export function registerWorkspaceHistory(dispatcher: Dispatcher): void {
   dispatcher.registerCommand({
     method: "workspace.diff",
     action: "workspace.read",
+    perPathAuthorize: true,
     mutating: false,
     params: z.strictObject({
       from_revision: revision,
@@ -49,9 +50,32 @@ export function registerWorkspaceHistory(dispatcher: Dispatcher): void {
     execute: async (ctx, params) => {
       if (params.from_revision > params.to_revision)
         throw new CrossoverError("VALIDATION", "Revision range is reversed");
-      for (const path of params.paths ?? []) await ctx.authorize("workspace.read", { path });
       const from = await snapshot(ctx, params.from_revision);
       const to = await snapshot(ctx, params.to_revision);
+      const paths = params.paths?.length
+        ? params.paths
+        : (
+            await git(["diff", "--name-only", "-z", "--no-renames", from.commit, to.commit], {
+              gitDir: from.repo_path,
+              timeoutMs: 10_000,
+            })
+          ).stdout
+            .split("\0")
+            .filter(Boolean);
+      if (params.paths?.length) {
+        for (const path of paths) await ctx.authorize("workspace.read", { path });
+      } else {
+        const visible: string[] = [];
+        for (const path of paths) {
+          try {
+            await ctx.authorize("workspace.read", { path });
+            visible.push(path);
+          } catch (error) {
+            if (!(error instanceof CrossoverError) || error.code !== "FORBIDDEN") throw error;
+          }
+        }
+        paths.splice(0, paths.length, ...visible);
+      }
       let patch: string;
       try {
         patch = (
@@ -69,7 +93,7 @@ export function registerWorkspaceHistory(dispatcher: Dispatcher): void {
               from.commit,
               to.commit,
               "--",
-              ...(params.paths ?? []),
+              ...paths,
             ],
             {
               gitDir: from.repo_path,
@@ -95,6 +119,7 @@ export function registerWorkspaceHistory(dispatcher: Dispatcher): void {
   dispatcher.registerCommand({
     method: "workspace.history",
     action: "workspace.read",
+    perPathAuthorize: true,
     mutating: false,
     params: z.strictObject({
       path: pathSchema().optional(),
@@ -112,28 +137,47 @@ export function registerWorkspaceHistory(dispatcher: Dispatcher): void {
         created_at: Date;
         file_revision: string | null;
         deleted: boolean | null;
+        file_path: string | null;
       }>(
         `SELECT wr.revision AS workspace_revision, wr.changeset_id, cs.actor_id, cs.message,
-          wr.created_at, fr.revision AS file_revision, fr.blob_sha IS NULL AS deleted
+          wr.created_at, fr.revision AS file_revision, fr.blob_sha IS NULL AS deleted,
+          fr.path AS file_path
          FROM workspace_revisions wr
          LEFT JOIN changesets cs ON cs.id = wr.changeset_id AND cs.room_id = wr.room_id
            AND cs.workspace_id = wr.workspace_id
          LEFT JOIN file_revisions fr ON fr.workspace_id = wr.workspace_id AND fr.room_id = wr.room_id
-           AND fr.workspace_revision = wr.revision AND fr.path = $3
-         WHERE wr.room_id = $1 AND wr.workspace_id = $2 AND wr.revision <= $6
-           AND ($3::text IS NULL OR fr.path IS NOT NULL)
+           AND fr.workspace_revision = wr.revision AND ($3::text IS NULL OR fr.path = $3)
+         WHERE wr.room_id = $1 AND wr.workspace_id = $2 AND wr.revision <= $5
+           AND ($3::text IS NULL OR fr.path = $3)
            AND ($4::bigint IS NULL OR wr.revision < $4)
-         ORDER BY wr.revision DESC LIMIT $5`,
-        [
-          ctx.room_id,
-          ws.id,
-          params.path ?? null,
-          params.before ?? null,
-          params.limit + 1,
-          ws.revision,
-        ],
+         ORDER BY wr.revision DESC`,
+        [ctx.room_id, ws.id, params.path ?? null, params.before ?? null, ws.revision],
       );
-      const entries = rows.slice(0, params.limit).map((row) => ({
+      const byRevision = new Map<string, typeof rows>();
+      for (const row of rows) {
+        const items = byRevision.get(row.workspace_revision) ?? [];
+        items.push(row);
+        byRevision.set(row.workspace_revision, items);
+      }
+      const visibleRows = [];
+      for (const revisionRows of byRevision.values()) {
+        const row = revisionRows[0]!;
+        if (params.path === undefined && revisionRows.some((item) => item.file_path !== null)) {
+          let readable = true;
+          for (const path of new Set(revisionRows.flatMap((item) => item.file_path ?? []))) {
+            try {
+              await ctx.authorize("workspace.read", { path });
+            } catch (error) {
+              if (!(error instanceof CrossoverError) || error.code !== "FORBIDDEN") throw error;
+              readable = false;
+              break;
+            }
+          }
+          if (!readable) continue;
+        }
+        visibleRows.push(row);
+      }
+      const entries = visibleRows.slice(0, params.limit).map((row) => ({
         workspace_revision: Number(row.workspace_revision),
         changeset_id: row.changeset_id,
         actor_id: row.actor_id,
@@ -149,7 +193,8 @@ export function registerWorkspaceHistory(dispatcher: Dispatcher): void {
       return {
         response: {
           entries,
-          next_before: rows.length > params.limit ? entries.at(-1)!.workspace_revision : null,
+          next_before:
+            visibleRows.length > params.limit ? entries.at(-1)!.workspace_revision : null,
         },
       };
     },

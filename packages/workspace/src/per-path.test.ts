@@ -7,8 +7,9 @@ import { Dispatcher, type Authorizer } from "@crossover/kernel";
 import { authorize } from "@crossover/policy";
 import { CrossoverError, newId } from "@crossover/protocol";
 import { afterAll, beforeAll, expect, it } from "vitest";
-import { registerWorkspaceCommands } from "./apply.js";
+import { registerWorkspaceCommands, type WorkspaceCommandDeps } from "./apply.js";
 import { provisionWorkspace } from "./provision.js";
+import { merge as mergeWorkspace } from "./merge.js";
 import type { Operation } from "./operations.js";
 
 let db: TestDatabase;
@@ -24,7 +25,7 @@ afterAll(async () => {
 type Who = Parameters<Dispatcher["dispatch"]>[0];
 
 /** A room with a real policy: an owner, plus a reviewer who may only write under docs/. */
-async function fixture() {
+async function fixture(deps: WorkspaceCommandDeps = {}) {
   const room = newId("room");
   const root = await mkdtemp(join(tmpdir(), "crossover-perpath-test-"));
   dirs.push(root);
@@ -45,6 +46,13 @@ async function fixture() {
      VALUES ($1, $2, $3, 'GRANT', 'workspace.write:docs/**', $4, clock_timestamp())`,
     [newId("grant"), room, reviewerId, ownerId],
   );
+  await db.pool.query(
+    `INSERT INTO capability_grants (id, room_id, participant_id, effect, capability, created_by, created_at) VALUES
+       ($1, $2, $3, 'DENY', 'workspace.read:secrets/**', $4, clock_timestamp()),
+       ($5, $2, $3, 'DENY', 'workspace.write:secrets/**', $4, clock_timestamp()),
+       ($6, $2, $3, 'DENY', 'workspace.read:vault/hidden/**', $4, clock_timestamp())`,
+    [newId("grant"), room, reviewerId, ownerId, newId("grant"), newId("grant")],
+  );
   await withTransaction(db.pool, (client) => provisionWorkspace(client, room, root));
 
   const gates: { method: string; perPath: boolean | undefined }[] = [];
@@ -54,7 +62,7 @@ async function fixture() {
     return authorize(principal, action, resource, context);
   };
   const dispatcher = new Dispatcher({ pool: db.pool, authorize: recording, nodeId: room });
-  registerWorkspaceCommands(dispatcher);
+  registerWorkspaceCommands(dispatcher, deps);
 
   const owner: Who = {
     room_id: room,
@@ -128,7 +136,100 @@ it("declares per-path authorization on the commands that authorize every path, a
     { method: "workspace.read", perPath: true },
     { method: "workspace.blame", perPath: true },
     { method: "workspace.search", perPath: true },
-    { method: "workspace.list", perPath: undefined },
-    { method: "workspace.history", perPath: undefined },
+    { method: "workspace.list", perPath: true },
+    { method: "workspace.history", perPath: true },
   ]);
+});
+
+it("hides denied paths from listings, diff, and unfiltered history under real policy", async () => {
+  const f = await fixture();
+  await f.apply(
+    f.owner,
+    [
+      { type: "create", path: "docs/readable.txt", content: "visible" },
+      { type: "create", path: "secrets/hidden.txt", content: "hidden" },
+      { type: "create", path: "vault/open.txt", content: "visible" },
+      { type: "create", path: "vault/hidden/private.txt", content: "hidden" },
+    ],
+    0,
+  );
+  const listing = await f.dispatcher.dispatch(f.reviewer, {
+    id: newId("cmd"),
+    method: "workspace.list",
+    params: {},
+  });
+  expect(listing.response).toMatchObject({
+    entries: [
+      { path: "docs", type: "directory" },
+      { path: "vault", type: "directory" },
+    ],
+  });
+  expect(JSON.stringify(listing.response)).not.toContain("secrets");
+  expect(JSON.stringify(listing.response)).toContain("vault");
+  const vault = await f.dispatcher.dispatch(f.reviewer, {
+    id: newId("cmd"),
+    method: "workspace.list",
+    params: { path: "vault" },
+  });
+  expect(vault.response).toMatchObject({ entries: [{ path: "vault/open.txt" }] });
+  expect(JSON.stringify(vault.response)).not.toContain("private.txt");
+  await expect(
+    f.dispatcher.dispatch(f.reviewer, {
+      id: newId("cmd"),
+      method: "workspace.list",
+      params: { path: "secrets" },
+    }),
+  ).rejects.toMatchObject({ code: "NOT_FOUND" });
+
+  const diff = await f.dispatcher.dispatch(f.reviewer, {
+    id: newId("cmd"),
+    method: "workspace.diff",
+    params: { from_revision: 0, to_revision: 1 },
+  });
+  expect(JSON.stringify(diff.response)).toContain("readable.txt");
+  expect(JSON.stringify(diff.response)).not.toContain("secrets");
+  expect(JSON.stringify(diff.response)).not.toContain("hidden");
+
+  const history = await f.dispatcher.dispatch(f.reviewer, {
+    id: newId("cmd"),
+    method: "workspace.history",
+    params: {},
+  });
+  expect(history.response).toMatchObject({ entries: [{ workspace_revision: 0 }] });
+  expect(JSON.stringify(history.response)).not.toContain("hidden");
+});
+
+it("redacts unauthorized conflict paths and content", async () => {
+  let mergeCalls = 0;
+  const f = await fixture({
+    merge: async (...args) => {
+      if (mergeCalls++ === 0) return mergeWorkspace(...args);
+      return {
+        clean: false,
+        tree: "",
+        conflicts: {
+          files: [{ path: "secrets/file.txt", stages: [] }],
+          messages: [
+            {
+              paths: ["secrets/file.txt"],
+              type: "CONFLICT (directory rename)",
+              message: "private conflicting content",
+            },
+          ],
+        },
+      };
+    },
+  });
+  await f.apply(f.owner, [{ type: "create", path: "docs/file.txt", content: "base" }], 0);
+  const conflict = await f.apply(
+    f.reviewer,
+    [{ type: "modify", path: "docs/file.txt", content: "private conflicting content" }],
+    1,
+  );
+  expect(conflict.response).toMatchObject({ status: "CONFLICT" });
+  expect(JSON.stringify(conflict.response)).not.toContain("secrets/file.txt");
+  expect(JSON.stringify(conflict.response)).not.toContain("private conflicting content");
+  expect(conflict.response).toMatchObject({
+    conflicts: [{ path: null, reason: "unauthorized" }],
+  });
 });

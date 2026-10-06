@@ -236,3 +236,17 @@ it("returns typed missing-path/revision/invalid-path errors and enforces path au
     code: "FORBIDDEN",
   });
 });
+
+it("omits children denied by path scope from directory listings", async () => {
+  const f = await fixture(async (_principal, action, resource) => {
+    if (action === "workspace.read" && resource.path === "private.txt")
+      throw new CrossoverError("FORBIDDEN", "Denied");
+  });
+  await f.apply([
+    { type: "create", path: "public.txt", content: "visible" },
+    { type: "create", path: "private.txt", content: "hidden" },
+  ]);
+  expect((await f.dispatch("workspace.list", {})).response).toMatchObject({
+    entries: [{ path: "public.txt", type: "file" }],
+  });
+});
