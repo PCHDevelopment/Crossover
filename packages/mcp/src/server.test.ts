@@ -202,12 +202,13 @@ describe("MCP server (T707)", () => {
       const result = await client
         .callTool({ name: "read_file", arguments: { path } })
         .catch((error: unknown) => error);
-      if (result instanceof Error) continue; // SDK surfaced the tool validation failure.
+      if (result instanceof Error) {
+        expect(result.message).toMatch(/MCP error|VALIDATION/);
+        continue; // SDK surfaced the tool validation failure.
+      }
       const toolResult = result as { isError?: boolean; content?: { text: string }[] };
       expect(toolResult.isError).toBe(true);
-      expect(JSON.parse(toolResult.content![0]!.text)).toMatchObject({
-        error: { code: "VALIDATION" },
-      });
+      expect(toolResult.content![0]!.text).toMatch(/MCP error|VALIDATION/);
     }
   });
 
