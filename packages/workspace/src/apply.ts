@@ -45,6 +45,7 @@ async function apply(
           from: op.from,
           to: op.to,
           ...(op.content === undefined ? {} : { content: op.content }),
+          ...(op.encoding === undefined ? {} : { encoding: op.encoding }),
         }
       : op,
   );
