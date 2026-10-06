@@ -436,3 +436,111 @@ describe("platform users (T216)", () => {
     errorShape(res.json(), "NOT_FOUND", 404, res);
   });
 });
+
+describe("POST /v1/rooms/:roomId/session (T217)", () => {
+  const login = (s: Setup, subject: string) =>
+    post(s, "/v1/auth/dev-login", { subject, display_name: "Peter" });
+  const sub = () => `sess-${++n}-${Date.now().toString(36)}`;
+  const bearer = (token: string) => ({ authorization: `Bearer ${token}` });
+
+  async function createRoom(s: Setup, sessionToken: string): Promise<string> {
+    const res = await post(
+      s,
+      "/v1/commands",
+      envelope("room.create", {
+        slug: `sr-${++n}-${Date.now().toString(36)}`,
+        name: "n",
+        objective: "o",
+      }),
+      bearer(sessionToken),
+    );
+    expect(res.statusCode).toBe(200);
+    return (res.json().response as { room: { id: string } }).room.id;
+  }
+  const exchange = (s: Setup, roomId: string, token: string) =>
+    post(s, `/v1/rooms/${roomId}/session`, {}, bearer(token));
+
+  it("gives the room's creator working owner tokens: login, create a room, exchange, invite", async () => {
+    const s = await setup(undefined, true);
+    const session = (await login(s, sub())).json().session_token as string;
+    const roomId = await createRoom(s, session);
+    const res = await exchange(s, roomId, session);
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["cache-control"]).toBe("no-store");
+    const body = res.json();
+    expect(body).toMatchObject({ room_id: roomId, role: "LEAD", authority: "OWNER" });
+    const invited = await post(
+      s,
+      `/v1/rooms/${roomId}/commands`,
+      envelope("room.invite", { role: "DEVELOPER" }),
+      bearer(body.tokens.access_token),
+    );
+    expect(invited.statusCode).toBe(200);
+  });
+
+  it("each exchange starts its own token family, and both stay valid", async () => {
+    const s = await setup(undefined, true);
+    const session = (await login(s, sub())).json().session_token as string;
+    const roomId = await createRoom(s, session);
+    const a = (await exchange(s, roomId, session)).json().tokens;
+    const b = (await exchange(s, roomId, session)).json().tokens;
+    expect(a.family_id).not.toBe(b.family_id);
+    for (const t of [a, b]) {
+      const state = await post(
+        s,
+        `/v1/rooms/${roomId}/commands`,
+        envelope("room.get_state"),
+        bearer(t.access_token),
+      );
+      expect(state.statusCode).toBe(200);
+    }
+  });
+
+  it("looks the same for a room that doesn't exist and one the user isn't in", async () => {
+    const s = await setup(undefined, true);
+    const mine = (await login(s, sub())).json().session_token as string;
+    const theirs = (await login(s, sub())).json().session_token as string;
+    const theirRoom = await createRoom(s, theirs);
+    const notMember = await exchange(s, theirRoom, mine);
+    const missing = await exchange(s, "room_does_not_exist", mine);
+    errorShape(notMember.json(), "NOT_FOUND", 404, notMember);
+    expect(notMember.json()).toEqual(missing.json());
+    expect(notMember.statusCode).toBe(missing.statusCode);
+  });
+
+  it("refuses removed and invited members (403) but serves paused ones", async () => {
+    const s = await setup(undefined, true);
+    const session = (await login(s, sub())).json().session_token as string;
+    const roomId = await createRoom(s, session);
+    const setStatus = (status: string) =>
+      pool.query("UPDATE participants SET status = $2 WHERE room_id = $1 AND kind = 'HUMAN'", [
+        roomId,
+        status,
+      ]);
+    for (const status of ["REMOVED", "INVITED"]) {
+      await setStatus(status);
+      const res = await exchange(s, roomId, session);
+      errorShape(res.json(), "FORBIDDEN", 403, res);
+    }
+    await setStatus("PAUSED");
+    const paused = await exchange(s, roomId, session);
+    expect(paused.statusCode).toBe(200);
+    const cmd = await post(
+      s,
+      `/v1/rooms/${roomId}/commands`,
+      envelope("room.get_state"),
+      bearer(paused.json().tokens.access_token),
+    );
+    errorShape(cmd.json(), "PARTICIPANT_PAUSED", 403, cmd);
+  });
+
+  it("only a user session works: no header, a room token or an unknown session is 401", async () => {
+    const s = await setup(undefined, true);
+    const session = (await login(s, sub())).json().session_token as string;
+    const roomId = await createRoom(s, session);
+    for (const headers of [{}, bearer(s.owner.access_token), bearer("us_" + "x".repeat(43))]) {
+      const res = await post(s, `/v1/rooms/${roomId}/session`, {}, headers);
+      errorShape(res.json(), "UNAUTHENTICATED", 401, res);
+    }
+  });
+});

@@ -3,6 +3,7 @@ import {
   authenticate,
   authenticateUser,
   createUserSession,
+  exchangeRoomSession,
   findOrCreateUser,
   type Dispatcher,
 } from "@crossover/kernel";
@@ -60,6 +61,8 @@ function expectObject(body: unknown): Record<string, unknown> {
  *
  * - `POST /v1/commands`: a roomless command (`room.create`); bearer is a user session token
  *   (`us_…`), not a room token. The creating user becomes the new room's owner.
+ * - `POST /v1/rooms/:roomId/session`: a user session (`us_…`) for room tokens, if the user is an
+ *   active human member of the room.
  * - `POST /v1/auth/dev-login`: only when `devLogin` is on. Body `{ subject, display_name }`;
  *   returns a user session.
  *
@@ -103,6 +106,13 @@ export function buildGateway(options: GatewayOptions): FastifyInstance {
     );
     void reply.status(201).header("Cache-Control", "no-store");
     return { ...(result.response as object), tokens: result.one_time };
+  });
+
+  app.post<{ Params: { roomId: string } }>("/v1/rooms/:roomId/session", async (request, reply) => {
+    const user = await authenticateUser(pool, bearerToken(request));
+    const session = await exchangeRoomSession(pool, user, request.params.roomId);
+    void reply.header("Cache-Control", "no-store");
+    return session;
   });
 
   app.post("/v1/commands", async (request, reply) => {
