@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { parseCapability, tierOf } from "@crossover/policy";
+import { isAuthorityPower, parseCapability, tierOf } from "@crossover/policy";
 import { CrossoverError, newId } from "@crossover/protocol";
 import { z } from "zod";
 import type { Dispatcher } from "../../dispatcher.js";
@@ -26,6 +26,12 @@ const grantSchema = z.string().superRefine((value, ctx) => {
   }
   // Tier 3 (production, irreversible) is owner-only and expires within 24 h (§21.2); that is
   // the grant command's job (T210), not something an invite can carry.
+  if (isAuthorityPower(base)) {
+    ctx.addIssue({
+      code: "custom",
+      message: `${base} is an authority power and can't be granted by an invite`,
+    });
+  }
   if (tierOf(base) === 3) {
     ctx.addIssue({
       code: "custom",

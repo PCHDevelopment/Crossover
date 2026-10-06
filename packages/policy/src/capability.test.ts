@@ -1,6 +1,12 @@
 import { CrossoverError } from "@crossover/protocol";
 import { describe, expect, it } from "vitest";
-import { capabilityMatches, parseCapability, tierOf } from "./capability.js";
+import {
+  capabilityMatches,
+  capabilityMatchesPath,
+  isSafeRequestPath,
+  parseCapability,
+  tierOf,
+} from "./capability.js";
 import { CAPABILITIES } from "./bundles.js";
 
 describe("parseCapability", () => {
@@ -490,5 +496,56 @@ describe("tierOf", () => {
       const expected = name === "capabilities.grant_tier3" ? 3 : def.mutating ? 1 : 0;
       expect(tierOf(name), name).toBe(expected);
     }
+  });
+});
+
+describe("isSafeRequestPath / capabilityMatchesPath", () => {
+  it("accepts ordinary paths, including spaces and unicode", () => {
+    for (const path of [
+      "a",
+      "src/a.ts",
+      "docs/My File ü.md",
+      ".github/workflows/ci.yml",
+      "a/.env",
+    ]) {
+      expect(isSafeRequestPath(path)).toBe(true);
+    }
+  });
+
+  it("rejects paths that could leave the workspace or are malformed", () => {
+    for (const path of [
+      "",
+      "/a",
+      "a/",
+      "a//b",
+      ".",
+      "..",
+      "a/../b",
+      "./a",
+      "a\\b",
+      "a\u0000b",
+      "a\nb",
+    ]) {
+      expect(isSafeRequestPath(path)).toBe(false);
+    }
+  });
+
+  it("matches a scoped grant against the path as is", () => {
+    expect(
+      capabilityMatchesPath("workspace.write:docs/**", "workspace.write", "docs/My File.md"),
+    ).toBe(true);
+    expect(capabilityMatchesPath("workspace.write:docs/**", "workspace.write", "src/a.ts")).toBe(
+      false,
+    );
+    expect(capabilityMatchesPath("workspace.write", "workspace.write", "src/a.ts")).toBe(true);
+    expect(capabilityMatchesPath("workspace.read:docs/**", "workspace.write", "docs/a.md")).toBe(
+      false,
+    );
+    expect(capabilityMatchesPath("tasks.create:x/**", "tasks.create", "x/y")).toBe(false); // not path-scoped
+  });
+
+  it("fails closed for an unsafe path or a malformed grant, and never throws", () => {
+    expect(capabilityMatchesPath("workspace.write", "workspace.write", "../a")).toBe(false);
+    expect(capabilityMatchesPath("not a capability", "workspace.write", "a")).toBe(false);
   });
 });

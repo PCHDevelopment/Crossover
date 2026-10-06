@@ -1,6 +1,13 @@
 import type { Pool, PoolClient } from "@crossover/db";
 import { CrossoverError } from "@crossover/protocol";
 import {
+  capabilityMatches,
+  capabilityMatchesPath,
+  isSafeRequestPath,
+  PATH_SCOPED_RESOURCES,
+} from "./capability.js";
+import { loadLiveGrants } from "./grants.js";
+import {
   AUTHORITIES,
   effectiveCapabilities,
   isCapability,
@@ -37,8 +44,10 @@ export interface PolicyContext {
  * The principal is a snapshot from when the token was checked, so the participant's role,
  * authority and status are re-read here, in the command's transaction, and those win.
  * Denials:
- * - `FORBIDDEN` with `details.missing_capability = action` when the participant's role bundle
- *   and authority don't include it, or the capability is unknown (fail closed);
+ * - `FORBIDDEN` with `details.missing_capability = action` when the participant's role bundle,
+ *   authority and live grants don't include it, a live revocation (`DENY`) covers it
+ *   (`reason: "revoked"`), or the capability is unknown and no grant covers it (fail closed);
+ * - `APPROVAL_REQUIRED` when the only grants covering it carry an approval gate (T210, §22.2);
  * - `FORBIDDEN` when the principal isn't an active participant of the resource's room;
  * - `PARTICIPANT_PAUSED` for any action by a paused participant.
  */
@@ -72,12 +81,53 @@ export async function authorize(
   }
 
   const base = typeof action === "string" ? (action.split(":", 1)[0] ?? "") : "";
-  if (!isCapability(base)) {
-    throw forbidden(action, { reason: "unknown_capability" });
+  const inBundle =
+    isCapability(base) && effectiveCapabilities(participant.role, participant.authority).has(base);
+
+  // Effective = role bundle + live grants - live denies (§21.1), read now so a revocation
+  // applies to the very next command.
+  //
+  // Commands that act on a path call `authorize("workspace.write", { path })` with the path in
+  // the resource, not in the action. Scoped grants and denies are matched against that path,
+  // so `workspace.write:secrets/**` applies to it just as to `workspace.write:secrets/k`.
+  const path = pathOf(action, base, resource);
+  if (path !== undefined && !isSafeRequestPath(path)) {
+    throw forbidden(action, { reason: "invalid_path" });
   }
-  if (!effectiveCapabilities(participant.role, participant.authority).has(base)) {
-    throw forbidden(action, { role: participant.role, authority: participant.authority });
+  const covers = (capability: string): boolean =>
+    path === undefined
+      ? capabilityMatches(capability, action)
+      : capabilityMatchesPath(capability, base, path);
+  const { grants, denies } = await loadLiveGrants(
+    context.client,
+    principal.room_id,
+    principal.participant_id,
+  );
+  if (denies.some((d) => covers(d.capability))) {
+    throw forbidden(action, { reason: "revoked" });
   }
+  const covering = grants.filter((g) => covers(g.capability));
+  if (covering.length > 0) {
+    if (covering.some((g) => !g.requires_approval)) return;
+    // An approval gate (§22.2) makes the action wait for a human, even when the role bundle
+    // would allow it. The approval queue arrives with T905; until then the gate fails closed.
+    throw new CrossoverError("APPROVAL_REQUIRED", `Approval required for ${action}`, {
+      details: { capability: action },
+    });
+  }
+  if (inBundle) return;
+  if (!isCapability(base)) throw forbidden(action, { reason: "unknown_capability" });
+  throw forbidden(action, { role: participant.role, authority: participant.authority });
+}
+
+/**
+ * The workspace path a check is about, when it is named in the resource rather than the
+ * action: only for an unscoped action on a path-scoped resource (`workspace.*`).
+ */
+function pathOf(action: string, base: string, resource: PolicyResource): string | undefined {
+  if (action !== base || typeof resource.path !== "string") return undefined;
+  const root = base.split(".", 1)[0] ?? "";
+  return PATH_SCOPED_RESOURCES.has(root) ? resource.path : undefined;
 }
 
 function forbidden(action: string, extra: Record<string, unknown>): CrossoverError {

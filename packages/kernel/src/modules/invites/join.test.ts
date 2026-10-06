@@ -209,6 +209,71 @@ describe("room.join", () => {
     expect(dump).toContain(hashToken(token));
   });
 
+  it("turns the invite's capability grants into live grants made by the inviter, with events", async () => {
+    const s = await setup();
+    const token = await invite(s, {
+      role: "REVIEWER",
+      capability_grants: ["github.create_pull_request", "workspace.write:src/**"],
+    });
+    const out = await join(s.d, token);
+    const r = out.response as RoomJoinResponse;
+    const { rows } = await pool.query(
+      "SELECT capability, created_by, requires_approval, expires_at, effect FROM capability_grants WHERE participant_id = $1 ORDER BY capability",
+      [r.participant_id],
+    );
+    expect(rows).toEqual([
+      {
+        capability: "github.create_pull_request",
+        created_by: s.owner.participant_id,
+        requires_approval: false,
+        expires_at: null,
+        effect: "GRANT",
+      },
+      {
+        capability: "workspace.write:src/**",
+        created_by: s.owner.participant_id,
+        requires_approval: false,
+        expires_at: null,
+        effect: "GRANT",
+      },
+    ]);
+    expect(out.events.map((e) => e.type)).toEqual([
+      "participant.joined",
+      "capability.granted",
+      "capability.granted",
+    ]);
+    expect(out.events[1]!.payload).toMatchObject({
+      participant_id: r.participant_id,
+      capability: "github.create_pull_request",
+      granted_by: s.owner.participant_id,
+    });
+    const principal = await authenticate(pool, (out.one_time as TokenPair).access_token);
+    const allowed = (action: string) =>
+      authorize(
+        principal,
+        action,
+        { room_id: s.room },
+        { method: "x", params: {}, client: pool },
+      ).then(
+        () => true,
+        () => false,
+      );
+    expect(await allowed("github.create_pull_request")).toBe(true);
+    expect(await allowed("workspace.write:src/a.ts")).toBe(true);
+    expect(await allowed("workspace.write:docs/a.md")).toBe(false);
+  });
+
+  it("an invite can't carry an authority power", async () => {
+    const s = await setup();
+    await rejects(
+      s.d.dispatch(
+        s.owner,
+        cmd("room.invite", { role: "DEVELOPER", capability_grants: ["participants.remove"] }),
+      ),
+      "VALIDATION",
+    );
+  });
+
   it("spends the invite: it records who used it and when", async () => {
     const s = await setup();
     const token = await invite(s);

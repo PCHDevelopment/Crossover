@@ -15,6 +15,7 @@ export const ID_PREFIXES = [
   "rev",
   "inv",
   "usr",
+  "grant",
   "cmd",
   "evt",
 ] as const;
