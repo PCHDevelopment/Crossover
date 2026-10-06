@@ -36,6 +36,20 @@ export interface CommandContext {
   room_id: string;
   /** The command envelope's id; it becomes the events' `causation_id`. */
   command_id: string;
+  /**
+   * Run the policy check again for a finer-grained resource (e.g. each path of a ChangeSet).
+   * Same principal, same transaction; `room_id` is filled in. Throws `FORBIDDEN` to deny.
+   */
+  authorize(action: string, resource?: Record<string, unknown>): Promise<void>;
+  /**
+   * Run `callback` once this command's transaction has committed, still on the room's actor
+   * (so nothing else for the room runs in between). Not run if the command fails or rolls
+   * back, nor when an idempotent duplicate is replayed. A callback that throws can't undo
+   * the commit: the error goes to `onAfterCommitError` and the command still succeeds
+   * (PostgreSQL wins, §19.4). Mutating commands only. Use it for the canonical Git ref
+   * update (§19.4 step 3) and for publishing events (T118).
+   */
+  afterCommit(callback: () => void | Promise<void>): void;
 }
 
 export interface CommandResult<R> {
@@ -43,6 +57,11 @@ export interface CommandResult<R> {
   response: R;
   /** Appended to the room's ledger in the same transaction. Not allowed for reads. */
   events?: EmittedEvent[];
+  /**
+   * Same as `ctx.afterCommit(…)`, for a command that only knows what to run once it has
+   * finished executing. Runs after any callbacks registered through `ctx`.
+   */
+  afterCommit?: () => void | Promise<void>;
 }
 
 export interface CommandDefinition<S extends z.ZodType, R> {
@@ -64,7 +83,7 @@ export interface CommandDefinition<S extends z.ZodType, R> {
 export type Authorizer = (
   principal: Principal,
   action: string,
-  resource: { room_id: string },
+  resource: { room_id: string; [key: string]: unknown },
   context: { method: string; params: unknown; client: PoolClient },
 ) => Promise<void>;
 
@@ -88,6 +107,11 @@ export interface DispatcherOptions {
   actors?: RoomActorRegistry;
   leases?: RoomLeases;
   leaseTtlMs?: number;
+  /** Called when an `afterCommit` callback throws. Defaults to `console.error`. */
+  onAfterCommitError?: (
+    error: unknown,
+    info: { method: string; command_id: string; room_id: string },
+  ) => void;
 }
 
 interface Registered {
@@ -108,12 +132,17 @@ export class Dispatcher {
   private readonly commands = new Map<string, Registered>();
   private readonly pool: Pool;
   private readonly authorize: Authorizer;
+  private readonly onAfterCommitError: NonNullable<DispatcherOptions["onAfterCommitError"]>;
   readonly actors: RoomActorRegistry;
   readonly leases: RoomLeases;
 
   constructor(options: DispatcherOptions) {
     this.pool = options.pool;
     this.authorize = options.authorize;
+    this.onAfterCommitError =
+      options.onAfterCommitError ??
+      ((error, info) =>
+        console.error(`afterCommit callback failed for ${info.method}`, info, error));
     this.actors = options.actors ?? new RoomActorRegistry();
     this.leases =
       options.leases ?? new RoomLeases(options.pool, options.nodeId, options.leaseTtlMs);
@@ -179,10 +208,23 @@ export class Dispatcher {
         { room_id },
         { method: envelope.method, params, client },
       );
-      const out = await def.execute(
-        { client, principal, room_id, command_id: envelope.id },
-        params,
-      );
+      const ctx: CommandContext = {
+        client,
+        principal,
+        room_id,
+        command_id: envelope.id,
+        authorize: (a, resource) =>
+          this.authorize(
+            principal,
+            a,
+            { ...resource, room_id },
+            { method: envelope.method, params, client },
+          ),
+        afterCommit: () => {
+          throw new Error(`${envelope.method} is read-only: afterCommit needs a transaction`);
+        },
+      };
+      const out = await def.execute(ctx, params);
       if (out.events && out.events.length > 0) {
         throw new Error(`${envelope.method} is read-only but emitted events`);
       }
@@ -215,8 +257,10 @@ export class Dispatcher {
 
     return this.actors.get(room_id).submit(async () => {
       const token = await this.leases.ensure(room_id);
+      const afterCommit: (() => void | Promise<void>)[] = [];
+      let result: DispatchResult;
       try {
-        return await withTransaction(this.pool, async (client): Promise<DispatchResult> => {
+        result = await withTransaction(this.pool, async (client): Promise<DispatchResult> => {
           // Authorize before the idempotency lookup: a principal who is no longer allowed
           // must not be able to read a stored response, and FORBIDDEN is never cached.
           await this.authorize(
@@ -234,10 +278,22 @@ export class Dispatcher {
             requestHash,
             async () => {
               ran = true;
-              const out = await def.execute(
-                { client, principal, room_id, command_id: envelope.id },
-                params,
-              );
+              const ctx: CommandContext = {
+                client,
+                principal,
+                room_id,
+                command_id: envelope.id,
+                authorize: (a, resource) =>
+                  this.authorize(
+                    principal,
+                    a,
+                    { ...resource, room_id },
+                    { method: envelope.method, params, client },
+                  ),
+                afterCommit: (callback) => void afterCommit.push(callback),
+              };
+              const out = await def.execute(ctx, params);
+              if (out.afterCommit) afterCommit.push(out.afterCommit);
               const emitted: NewEvent[] = (out.events ?? []).map((e) => ({
                 type: e.type,
                 actor_id: e.actor_id ?? principal.participant_id,
@@ -257,6 +313,21 @@ export class Dispatcher {
           this.leases.forget(room_id);
         throw err;
       }
+
+      // Committed. Run the callbacks on the actor, so no other command for this room can
+      // slip in between the commit and (say) the Git ref update. A replay registers none.
+      for (const callback of afterCommit) {
+        try {
+          await callback();
+        } catch (error) {
+          this.onAfterCommitError(error, {
+            method: envelope.method,
+            command_id: envelope.id,
+            room_id,
+          });
+        }
+      }
+      return result;
     });
   }
 }
