@@ -5,6 +5,7 @@ import {
   LeaseRenewer,
   RedisEventPublisher,
   registerCapabilityCommands,
+  registerInboxCommands,
   registerInviteCommands,
   registerJoinCommand,
   registerLeadCommands,
@@ -115,6 +116,7 @@ function registerCommands(dispatcher: Dispatcher, config: ServerConfig): void {
   registerParticipantRoleCommand(dispatcher);
   registerParticipantLifecycleCommands(dispatcher);
   registerLeadCommands(dispatcher);
+  registerInboxCommands(dispatcher);
 
   // apply_changeset plus read, list, diff, history, blame and search.
   registerWorkspaceCommands(dispatcher);
