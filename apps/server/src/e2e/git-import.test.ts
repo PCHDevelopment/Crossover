@@ -17,6 +17,8 @@ let server: CrossoverServer;
 let upstreamDir: string;
 let upstreamSha: string;
 let fetches = 0;
+let remoteDir: string;
+const pushed: string[] = [];
 let serial = 0;
 const identity = {
   GIT_AUTHOR_NAME: "T",
@@ -51,6 +53,9 @@ beforeAll(async () => {
   await run(upstreamDir, ["add", "-A"]);
   await run(upstreamDir, ["commit", "-q", "-m", "Initial"]);
   upstreamSha = (await run(upstreamDir, ["rev-parse", "HEAD"])).stdout.trim();
+  remoteDir = await mkdtemp(join(tmpdir(), "crossover-e2e-remote-"));
+  await run(remoteDir, ["init", "-q", "--bare", "-b", "main", "remote.git"]);
+  remoteDir = join(remoteDir, "remote.git");
   const config: ServerConfig = {
     databaseUrl: "unused: test pool is injected",
     redisUrl: process.env["REDIS_URL"] ?? "redis://localhost:6379",
@@ -65,7 +70,19 @@ beforeAll(async () => {
   server = await composeServer(config, {
     pool: db.pool,
     publisher,
-    upstream: { fetcher, resolve: async () => ["93.184.216.34"] },
+    upstream: {
+      fetcher,
+      resolve: async () => ["93.184.216.34"],
+      pusher: {
+        async push(request) {
+          pushed.push(request.branch);
+          await git(
+            ["push", "--porcelain", remoteDir, `${request.commit}:refs/heads/${request.branch}`],
+            { gitDir: request.repo, timeoutMs: 30_000 },
+          );
+        },
+      },
+    },
   });
 });
 
@@ -254,6 +271,16 @@ describe("checkpoints over HTTP", () => {
     const denied = await r.call(r.dev, "checkpoints.create", { message: "nope" });
     expect(denied.statusCode).toBe(403);
     const made = await ok(await r.call(r.owner, "checkpoints.create", { message: "imported" }));
+    // The checkpoint's own event is state an export is rebuilt from: it can't be redacted.
+    const created = (
+      await ok(await r.call(r.owner, "room.events.list", { limit: 500 }))
+    ).response.events.find((e: { type: string }) => e.type === "checkpoint.created");
+    const refused = await r.call(r.owner, "events.redact", {
+      sequence: created.sequence,
+      reason: "x",
+    });
+    expect(refused.statusCode).toBe(400);
+    expect(refused.json().error.details.reason).toBe("state_event");
     expect(made.response).toMatchObject({ revision: 1, message: "imported", overridden: false });
     const list = await ok(await r.call(r.dev, "checkpoints.list"));
     expect(list.response.checkpoints).toHaveLength(1);
@@ -296,5 +323,40 @@ describe("checkpoints when the owner isn't the lead", () => {
       await r.call(r.owner, "checkpoints.create", { message: "owner override", override: true }),
     );
     expect(made.response).toMatchObject({ health_status: "RED", overridden: true });
+  });
+});
+
+describe("checkpoints.export over HTTP", () => {
+  it("the owner exports a checkpoint to room/<slug>; a developer can't; only room/* branches are accepted", async () => {
+    const r = await newRoom();
+    await ok(
+      await r.call(r.owner, "git.import", {
+        url: "https://github.com/acme/widgets",
+        branch: "main",
+      }),
+    );
+    const made = await ok(await r.call(r.owner, "checkpoints.create", { message: "imported" }));
+
+    const denied = await r.call(r.dev, "checkpoints.export", { checkpoint_id: made.response.id });
+    expect(denied.statusCode).toBe(403);
+    expect(pushed).toEqual([]);
+    const wrong = await r.call(r.owner, "checkpoints.export", { branch: "main" });
+    expect(wrong.statusCode).toBe(400);
+    expect(wrong.json().error.details.reason).toBe("branch_not_allowed");
+    expect(pushed).toEqual([]);
+
+    const out = await ok(await r.call(r.owner, "checkpoints.export", {}));
+    const slug = (await db.pool.query("SELECT slug FROM rooms WHERE id = $1", [r.roomId])).rows[0]
+      .slug as string;
+    expect(out.response).toMatchObject({
+      checkpoint_id: made.response.id,
+      branch: `room/${slug}`,
+      mode: "squashed",
+      commit_count: 1,
+    });
+    expect(pushed).toEqual([`room/${slug}`]);
+    const events = (await ok(await r.call(r.owner, "room.events.list", { limit: 500 }))).response
+      .events as { type: string }[];
+    expect(events.map((e) => e.type)).toContain("checkpoint.exported");
   });
 });

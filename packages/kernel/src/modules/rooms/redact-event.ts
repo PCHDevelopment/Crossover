@@ -19,11 +19,14 @@ export const eventsRedactParams = z.strictObject({
 
 /**
  * Events the platform's own state is rebuilt from (the health gate reads `task.submitted` and
- * applied ChangeSets, a lead transfer reads its offer). They carry no user text, so redacting
+ * applied ChangeSets, a lead transfer reads its offer, an export reads where the last one got to). They carry no user text, so redacting
  * one would only break behaviour.
  */
 const isStateEvent = (type: string): boolean =>
-  type.startsWith("workspace.") || type.startsWith("lead.") || type === "task.submitted";
+  type.startsWith("workspace.") ||
+  type.startsWith("lead.") ||
+  type.startsWith("checkpoint.") ||
+  type === "task.submitted";
 
 const STORED_TOMBSTONE = JSON.stringify({ response: { redacted: true }, events: [] });
 
@@ -128,7 +131,7 @@ async function redactCopies(
  * the payload is gone from all of them at once. It is `NOT_FOUND` for a sequence the room
  * doesn't have, and `VALIDATION` for one already redacted, for an `event.redacted` event (the
  * record of redactions can't be erased), and for the platform's own state-bearing events
- * (`workspace.*`, `lead.*`, `task.submitted`). The owner only (`FORBIDDEN` for anyone else, by
+ * (`workspace.*`, `lead.*`, `checkpoint.*`, `task.submitted`). The owner only (`FORBIDDEN` for anyone else, by
  * the policy).
  */
 export function registerEventsRedactCommand(dispatcher: Dispatcher): void {

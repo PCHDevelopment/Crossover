@@ -15,6 +15,7 @@ import {
   validBranch,
   type GitCredentialProvider,
   type UpstreamFetcher,
+  type UpstreamPusher,
 } from "./upstream.js";
 
 /** The actor of every change that comes from upstream (§24.2). */
@@ -31,6 +32,10 @@ export const gitImportParams = z.strictObject({
 
 export interface UpstreamDeps {
   fetcher?: UpstreamFetcher;
+  /** How `checkpoints.export` pushes (tests push to a local repository). */
+  pusher?: UpstreamPusher;
+  /** The domain of the e-mail addresses given to participants in exported commits. Default `crossover.local`. */
+  platformDomain?: string;
   credentials?: GitCredentialProvider;
   /** Host check for the URL (tests); default: the DNS resolver. */
   resolve?: Parameters<typeof assertPublicHttpsUrl>[1];

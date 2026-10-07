@@ -1187,7 +1187,7 @@ event.redacted
 The ledger is immutable in structure, but payloads can be redacted:
 
 - The owner can redact any event's payload (e.g. a pasted secret). The payload is replaced with a tombstone, `redacted = true`, and an `event.redacted` event records who, when and why. `payload_hash` is kept for audit.
-- Redaction reaches the copies a reader can still fetch (T906): a redacted `message.sent`/`message.edited` blanks the message row (`messages.list` returns `redacted: true` and no body), tombstones every event of that message and the `MENTION` inbox items quoting it; a redacted `memory.updated` blanks that revision's value (and the current entry's, if it is the same revision); the stored response of the idempotent command that wrote the event becomes a tombstone, so a replay doesn't return the text. Task text is not reached (edit it with `tasks.update`). The platform's own state events (`workspace.*`, `lead.*`, `task.submitted`) can't be redacted. The kept `payload_hash` lets someone confirm a guess at a short secret, so don't rely on redaction for low-entropy text.
+- Redaction reaches the copies a reader can still fetch (T906): a redacted `message.sent`/`message.edited` blanks the message row (`messages.list` returns `redacted: true` and no body), tombstones every event of that message and the `MENTION` inbox items quoting it; a redacted `memory.updated` blanks that revision's value (and the current entry's, if it is the same revision); the stored response of the idempotent command that wrote the event becomes a tombstone, so a replay doesn't return the text. Task text is not reached (edit it with `tasks.update`). The platform's own state events (`workspace.*`, `lead.*`, `checkpoint.*`, `task.submitted`) can't be redacted. The kept `payload_hash` lets someone confirm a guess at a short secret, so don't rely on redaction for low-entropy text.
 - The secret scanner (§23.3) blocks most secrets before they are written.
 
 ## 19.7 Retention
@@ -1376,6 +1376,7 @@ Upstream changes are just another concurrent writer, so no special merge path is
   - **Optional (fine-grained):** one commit per ChangeSet.
 - **Attribution:** the commit author is the checkpoint creator; every contributing participant is credited with a `Co-authored-by:` trailer. Humans use their linked GitHub identity; agents use `<agent-name> <agent-id@agents.<platform-domain>>`.
 - **Push policy:** export pushes only to `room/*` branches and then opens a pull request (`github.create_pull_request`, Tier 2). Pushing directly to the default or a protected branch is Tier 3.
+- **Implementation notes (T805):** `checkpoints.export { checkpoint_id?, mode?, branch? }` exports every checkpoint not yet exported up to the one named (default the latest); the first commit builds on the commit the room last synced from upstream, later exports on the previous export (recorded in `checkpoint.exported`, so there is no table). Commit dates are the checkpoint's or ChangeSet's own, so re-exporting makes the same commits. A pulled upstream change gets no commit of its own in `per_changeset` mode. Agents are written as `<name> <participant-id@agents.<domain>>`; humans, who have no linked GitHub identity in the platform yet, as `<name> <participant-id@users.<domain>>`. The push is never forced.
 
 ---
 
