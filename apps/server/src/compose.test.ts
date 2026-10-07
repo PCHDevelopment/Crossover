@@ -348,6 +348,47 @@ describe("composeServer", () => {
     expect(updated.response).toMatchObject({ revision: 2 });
   });
 
+  it("serves memory get, list, history and delete over HTTP", async () => {
+    const { server } = await start();
+    const { owner, agent, cmd } = await walkthrough(server.app);
+    const call = async (token: string, method: string, params: Record<string, unknown>) =>
+      cmd(envelope(method, params), token);
+    await ok(
+      await call(agent.tokens.access_token, "memory.put", {
+        key: "architecture/database",
+        value: "PostgreSQL",
+        expected_revision: 0,
+      }),
+    );
+    const got = await ok(
+      await call(owner.tokens.access_token, "memory.get", { key: "architecture/database" }),
+    );
+    expect(got.response).toMatchObject({ value: "PostgreSQL", revision: 1 });
+    const listed = await ok(
+      await call(owner.tokens.access_token, "memory.list", { prefix: "architecture/" }),
+    );
+    expect(listed.response.entries.map((e: { key: string }) => e.key)).toEqual([
+      "architecture/database",
+    ]);
+    await ok(
+      await call(agent.tokens.access_token, "memory.delete", {
+        key: "architecture/database",
+        expected_revision: 1,
+      }),
+    );
+    expect(
+      (await call(owner.tokens.access_token, "memory.get", { key: "architecture/database" }))
+        .statusCode,
+    ).toBe(404);
+    const history = await ok(
+      await call(owner.tokens.access_token, "memory.history", { key: "architecture/database" }),
+    );
+    expect(history.response.revisions.map((r: { deleted: boolean }) => r.deleted)).toEqual([
+      false,
+      true,
+    ]);
+  });
+
   it("enforces the real policy: an observer can't apply a ChangeSet", async () => {
     const { server } = await start();
     const { owner, cmd, roomId } = await walkthrough(server.app);

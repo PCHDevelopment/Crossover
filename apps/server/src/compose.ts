@@ -13,6 +13,7 @@ import {
   registerInviteCommands,
   registerJoinCommand,
   registerLeadCommands,
+  registerMemoryAccessCommands,
   registerMemoryCommands,
   registerMessageCommands,
   registerParticipantLifecycleCommands,
@@ -187,6 +188,7 @@ function registerCommands(
   registerTaskLifecycleCommands(dispatcher);
   registerMessageCommands(dispatcher);
   registerMemoryCommands(dispatcher);
+  registerMemoryAccessCommands(dispatcher);
   registerDecisionCommands(dispatcher);
 
   // apply_changeset plus reads; schedule health for every committed revision.
