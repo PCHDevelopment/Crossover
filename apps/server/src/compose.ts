@@ -202,6 +202,7 @@ export async function composeServer(
       dispatcher,
       pool,
       devLogin: config.devLogin,
+      ...(config.webRoot ? { staticRoot: config.webRoot } : {}),
       ws: { subscriber },
     });
     registerMcp(app, { dispatcher, pool }); // POST /mcp, the agents' tool surface

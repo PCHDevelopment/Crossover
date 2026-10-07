@@ -23,5 +23,8 @@
     "@crossover/sdk": "workspace:*",
     "@crossover/workspace": "workspace:*",
     "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.63.0"
   }
 }
