@@ -8,6 +8,7 @@ import {
   type AuthorKinds,
   type Provenance,
 } from "../provenance.js";
+import { checkLoopProtection } from "./loop.js";
 import type { Dispatcher } from "../../dispatcher.js";
 
 export const MAX_BODY_BYTES = 32 * 1024;
@@ -109,6 +110,11 @@ export function registerMessageCommands(dispatcher: Dispatcher): void {
     mutating: true,
     params: messagesSendParams,
     execute: async (ctx, p) => {
+      // §17.6: a room of agents answering each other with nothing changing is throttled.
+      const loop = await checkLoopProtection(ctx.client, ctx.room_id, {
+        id: ctx.principal.participant_id,
+        kind: ctx.principal.kind,
+      });
       const mentions = [...new Set(p.mentions)];
       if (mentions.length > 0) {
         const { rows } = await ctx.client.query<{ id: string }>(
@@ -176,7 +182,10 @@ export function registerMessageCommands(dispatcher: Dispatcher): void {
       }
       return {
         response: labelMessage(message, principalKinds(ctx.principal)),
-        events: [{ type: "message.sent" as const, payload: { message } }],
+        events: [
+          { type: "message.sent" as const, payload: { message } },
+          ...(loop.detected ? [loop.detected.event] : []),
+        ],
       };
     },
   });
