@@ -1,5 +1,6 @@
 import { createPool, type Pool } from "@crossover/db";
 import { buildGateway } from "@crossover/gateway";
+import { registerMcp } from "@crossover/mcp";
 import {
   Dispatcher,
   LeaseRenewer,
@@ -117,6 +118,7 @@ export async function composeServer(
       devLogin: config.devLogin,
       ws: { subscriber },
     });
+    registerMcp(app, { dispatcher, pool }); // POST /mcp, the agents' tool surface
 
     let closing: Promise<void> | undefined;
     const close = () =>

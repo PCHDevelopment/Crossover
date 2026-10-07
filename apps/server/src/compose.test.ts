@@ -260,6 +260,33 @@ describe("composeServer", () => {
     sock.close();
   });
 
+  it("serves MCP at /mcp with the task tools, authenticated by the room token", async () => {
+    const { server } = await start();
+    const { agent } = await walkthrough(server.app);
+    const rpc = (token: string | undefined, body: unknown) =>
+      server.app.inject({
+        method: "POST",
+        url: "/mcp",
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+          ...(token ? { authorization: `Bearer ${token}` } : {}),
+        },
+        payload: JSON.stringify(body),
+      });
+    expect((await rpc(undefined, { jsonrpc: "2.0", id: 1, method: "tools/list" })).statusCode).toBe(
+      401,
+    );
+    const res = await rpc(agent.tokens.access_token, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/list",
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain("tasks_create");
+    expect(res.body).toContain("tasks_heartbeat");
+  });
+
   it("enforces the real policy: an observer can't apply a ChangeSet", async () => {
     const { server } = await start();
     const { owner, cmd, roomId } = await walkthrough(server.app);
