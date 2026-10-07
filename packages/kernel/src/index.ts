@@ -17,3 +17,4 @@ export * from "./modules/inbox/index.js";
 export * from "./modules/memory/index.js";
 export * from "./modules/decisions/index.js";
 export * from "./modules/provenance.js";
+export * from "./budgets.js";

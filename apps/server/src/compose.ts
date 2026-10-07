@@ -3,6 +3,8 @@ import { buildGateway } from "@crossover/gateway";
 import { registerMcp } from "@crossover/mcp";
 import {
   Dispatcher,
+  RedisBudgetLimiter,
+  type BudgetLimiter,
   LeaseRenewer,
   LeaseSweeper,
   RedisEventPublisher,
@@ -69,6 +71,8 @@ export interface ComposeOverrides {
   leaseSweepIntervalMs?: number;
   /** Sandbox runtime seam for lifecycle tests; production uses the Docker driver. */
   executionDriver?: ExecutionDriver;
+  /** Use this limiter for agents' budgets (§22.3) instead of Redis at `redisUrl` (tests); not closed by `close()`. */
+  budgets?: BudgetLimiter;
   /** How `git.import` reaches an upstream (fetcher, credentials, host check); production: HTTPS clone, no credentials. */
   upstream?: UpstreamDeps;
 }
@@ -124,10 +128,13 @@ export async function composeServer(
   }
 
   const intentStore = new RedisEditIntentStore(config.redisUrl);
+  const ownBudgets = overrides.budgets ? undefined : new RedisBudgetLimiter(config.redisUrl);
+  const budgets = overrides.budgets ?? ownBudgets!;
 
   try {
     if (redis) await redis.ready();
     await intentStore.ready();
+    await ownBudgets?.ready();
 
     const executionDriver =
       overrides.executionDriver ??
@@ -155,6 +162,7 @@ export async function composeServer(
       authorize: overrides.authorize ?? authorize,
       nodeId: config.nodeId,
       publisher,
+      budgets,
       onLeaseAcquire: (roomId) => reconcileRef(pool, roomId),
       ...(overrides.leaseTtlMs !== undefined ? { leaseTtlMs: overrides.leaseTtlMs } : {}),
     });
@@ -209,6 +217,7 @@ export async function composeServer(
         await redis?.close();
         await redisSubscriber?.close();
         await intentStore.close();
+        await ownBudgets?.close();
         if (!overrides.pool) await pool.end();
       })());
 
@@ -220,6 +229,7 @@ export async function composeServer(
     await redis?.close();
     await redisSubscriber?.close();
     await intentStore.close();
+    await ownBudgets?.close();
     if (!overrides.pool) await pool.end();
     throw err;
   }
