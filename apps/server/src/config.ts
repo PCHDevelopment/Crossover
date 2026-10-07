@@ -37,6 +37,15 @@ const envSchema = z.object({
     .optional(),
   SANDBOX_EGRESS_PROXY_PORT: z.coerce.number().int().min(1).max(65_535).optional(),
   SANDBOX_EGRESS_PROXY_SECRET: z.string().min(32).optional(),
+  GIT_INTERNAL_HOST: z.string().trim().min(1).optional(),
+  GIT_INTERNAL_PORT: z.coerce.number().int().min(1).max(65_535).default(8081),
+  GIT_INTERNAL_CONTAINER: z
+    .string()
+    .trim()
+    .regex(/^[a-z0-9][a-z0-9_.-]*$/)
+    .optional(),
+  GIT_INTERNAL_TOKEN_SECRET: z.string().min(32).optional(),
+  GIT_FETCHER_IMAGE: z.string().trim().min(1).default("crossover-git-fetcher:latest"),
   /** The key agents' wake-up webhooks are signed with (derived per agent, §17.4). Off without it. */
   WAKE_WEBHOOK_KEY: z.string().min(32).optional(),
 });
@@ -63,6 +72,14 @@ export interface ServerConfig {
   sandboxEgressProxyPort?: number;
   /** Shared HMAC secret for sandbox and short-lived health-install proxy credentials. */
   sandboxEgressProxySecret?: string;
+  /** Bind address and private, unpublished port of the internal Git-only listener. */
+  gitInternalHost?: string;
+  gitInternalPort?: number;
+  /** Trusted server container connected to crossover-git for one-shot fetchers. */
+  gitInternalContainer?: string;
+  /** HMAC key accepted only by the internal Git listener. */
+  gitInternalTokenSecret?: string;
+  gitFetcherImage?: string;
   /** Platform key wake-up webhook secrets are derived from; no wake-ups without it. */
   wakeWebhookKey?: string;
 }
@@ -92,6 +109,22 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   if (e.SANDBOX_EGRESS_PROXY_SECRET && !e.SANDBOX_EGRESS_PROXY_CONTAINER)
     throw new Error(
       "Invalid server configuration:\n  SANDBOX_EGRESS_PROXY_SECRET requires SANDBOX_EGRESS_PROXY_CONTAINER",
+    );
+  if (e.GIT_INTERNAL_CONTAINER && !e.GIT_INTERNAL_TOKEN_SECRET)
+    throw new Error(
+      "Invalid server configuration:\n  GIT_INTERNAL_CONTAINER requires GIT_INTERNAL_TOKEN_SECRET",
+    );
+  if (e.GIT_INTERNAL_TOKEN_SECRET && !e.GIT_INTERNAL_CONTAINER)
+    throw new Error(
+      "Invalid server configuration:\n  GIT_INTERNAL_TOKEN_SECRET requires GIT_INTERNAL_CONTAINER",
+    );
+  if (e.GIT_INTERNAL_TOKEN_SECRET && !e.GIT_INTERNAL_HOST)
+    throw new Error(
+      "Invalid server configuration:\n  GIT_INTERNAL_HOST is required when the internal Git listener is enabled",
+    );
+  if (e.GIT_INTERNAL_HOST === "0.0.0.0" || e.GIT_INTERNAL_HOST === "::")
+    throw new Error(
+      "Invalid server configuration:\n  GIT_INTERNAL_HOST must be a specific private-network address, not a wildcard",
     );
   if (
     sandboxDiskEnforcement === "hard" &&
@@ -123,6 +156,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     ...(e.SANDBOX_EGRESS_PROXY_SECRET
       ? { sandboxEgressProxySecret: e.SANDBOX_EGRESS_PROXY_SECRET }
       : {}),
+    ...(e.GIT_INTERNAL_HOST ? { gitInternalHost: e.GIT_INTERNAL_HOST } : {}),
+    gitInternalPort: e.GIT_INTERNAL_PORT,
+    ...(e.GIT_INTERNAL_CONTAINER ? { gitInternalContainer: e.GIT_INTERNAL_CONTAINER } : {}),
+    ...(e.GIT_INTERNAL_TOKEN_SECRET ? { gitInternalTokenSecret: e.GIT_INTERNAL_TOKEN_SECRET } : {}),
+    gitFetcherImage: e.GIT_FETCHER_IMAGE,
     ...(e.WAKE_WEBHOOK_KEY ? { wakeWebhookKey: e.WAKE_WEBHOOK_KEY } : {}),
   };
 }

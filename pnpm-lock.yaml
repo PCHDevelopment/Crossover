@@ -75,6 +75,9 @@ importers:
       '@crossover/workspace':
         specifier: workspace:*
         version: link:../../packages/workspace
+      fastify:
+        specifier: ^5.12.5
+        version: 5.12.5
       zod:
         specifier: ^4.6.5
         version: 4.6.5
