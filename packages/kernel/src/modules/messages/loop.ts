@@ -134,6 +134,7 @@ export async function checkLoopProtection(
         kind: "LOOP_DETECTED",
         ref: { kind: "participant", id: sender.id },
         summary: `${participants.length} agents have exchanged ${run.length + 1} messages with no task, ChangeSet, decision or memory change; their messages are limited to one a minute until something changes.`,
+        author_id: "system",
       });
     }
     return {

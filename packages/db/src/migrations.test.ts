@@ -614,6 +614,7 @@ describe("0011_inbox_items", () => {
       kind: "MENTION",
       ref: JSON.stringify({ kind: "message", id: "msg_1" }),
       summary: "Look at this",
+      author_id: "system",
       ...extra,
     };
     const keys = Object.keys(cols);
@@ -833,5 +834,90 @@ describe("0013_memory", () => {
     await rev(key, 1);
     await expect(rev(key, 1)).rejects.toMatchObject({ code: "23505" });
     await expect(rev("missing", 1)).rejects.toMatchObject({ code: "23503" });
+  });
+});
+
+describe("0024_task_evidence", () => {
+  const room = async () => {
+    const id = `room_ev${Math.random().toString(36).slice(2)}`;
+    await db.pool.query(
+      `INSERT INTO rooms (id, slug, name, objective, owner_id) VALUES ($1, $1, 'n', 'o', 'x')`,
+      [id],
+    );
+    await db.pool.query(
+      `INSERT INTO participants (id, room_id, kind, display_name, role, status)
+       VALUES ($2, $1, 'AGENT', 'a', 'DEVELOPER', 'ACTIVE')`,
+      [id, `${id}_p`],
+    );
+    return { id, who: `${id}_p` };
+  };
+  const task = (r: { id: string; who: string }, evidence?: string) =>
+    db.pool.query(
+      evidence === undefined
+        ? `INSERT INTO tasks (id, room_id, title, requirements, created_by)
+           VALUES ($1, $2, 't', '["r"]'::jsonb, $3) RETURNING evidence`
+        : `INSERT INTO tasks (id, room_id, title, requirements, created_by, evidence)
+           VALUES ($1, $2, 't', '["r"]'::jsonb, $3, $4::jsonb) RETURNING evidence`,
+      [
+        `task_${Math.random().toString(36).slice(2)}`,
+        r.id,
+        r.who,
+        ...(evidence === undefined ? [] : [evidence]),
+      ],
+    );
+
+  it("is recorded as applied", async () => {
+    const { rows } = await db.pool.query("SELECT name FROM schema_migrations WHERE version = 24");
+    expect(rows).toEqual([{ name: "task_evidence" }]);
+  });
+
+  it("a task starts with no evidence, and evidence must be a JSON array", async () => {
+    const r = await room();
+    expect((await task(r)).rows[0].evidence).toEqual([]);
+    await expect(task(r, '{"a":1}')).rejects.toMatchObject({ code: "23514" });
+    await task(r, '[{"requirement":0,"proof":[{"kind":"test","ref":"x"}]}]');
+  });
+
+  it("evidence is capped at 32 KiB", async () => {
+    const r = await room();
+    const big = (n: number) => JSON.stringify([{ note: "x".repeat(n) }]);
+    await task(r, big(32_000));
+    await expect(task(r, big(33_000))).rejects.toMatchObject({ code: "23514" });
+  });
+});
+
+describe("0025_inbox_item_authors", () => {
+  let n = 0;
+  const setup = async () => {
+    const room = `room_ia${++n}`;
+    await db.pool.query(
+      `INSERT INTO rooms (id, slug, name, objective, owner_id) VALUES ($1, $1, 'n', 'o', 'x')`,
+      [room],
+    );
+    const who = `part_ia${++n}`;
+    await db.pool.query(
+      `INSERT INTO participants (id, room_id, kind, display_name, role, status)
+       VALUES ($1, $2, 'AGENT', 'a', 'DEVELOPER', 'ACTIVE')`,
+      [who, room],
+    );
+    return { room, who };
+  };
+  const insert = (room: string, who: string, author?: string) =>
+    db.pool.query(
+      `INSERT INTO inbox_items (id, room_id, participant_id, kind, ref, summary${author === undefined ? "" : ", author_id"})
+       VALUES ($1, $2, $3, 'MENTION', '{}'::jsonb, 's'${author === undefined ? "" : ", $4"}) RETURNING author_id`,
+      [`inbox_ia${++n}`, room, who, ...(author === undefined ? [] : [author])],
+    );
+
+  it("is recorded as applied", async () => {
+    const { rows } = await db.pool.query("SELECT name FROM schema_migrations WHERE version = 25");
+    expect(rows).toEqual([{ name: "inbox_item_authors" }]);
+  });
+
+  it("a new item must say whose words it carries: there is no default", async () => {
+    const { room, who } = await setup();
+    await expect(insert(room, who)).rejects.toMatchObject({ code: "23502" });
+    expect((await insert(room, who, "system")).rows[0].author_id).toBe("system");
+    expect((await insert(room, who, who)).rows[0].author_id).toBe(who);
   });
 });

@@ -2,6 +2,7 @@ import type { PoolClient } from "@crossover/db";
 import { CrossoverError, newId } from "@crossover/protocol";
 import { z } from "zod";
 import type { Dispatcher } from "../../dispatcher.js";
+import { loadAuthorKinds, provenanceOf, type AuthorKinds, type Provenance } from "../provenance.js";
 
 /** What an inbox item asks for (§17.2). */
 export const INBOX_KINDS = [
@@ -31,6 +32,12 @@ export interface InboxItemInput {
   ref: InboxRef;
   /** One line for the recipient, at most 500 characters. */
   summary: string;
+  /**
+   * Whose words the summary quotes: a participant's id (a mention's text, a task title they
+   * wrote, a manifest they declared), or `"system"` when it is the platform's own wording.
+   * Required, so a producer can't quote someone and read as the platform by omission.
+   */
+  author_id: string;
 }
 
 export interface InboxItem {
@@ -38,6 +45,8 @@ export interface InboxItem {
   kind: InboxKind;
   ref: InboxRef;
   summary: string;
+  /** Who wrote the summary, and how far to trust it (§16.5). */
+  provenance: Provenance;
   created_at: string;
   acked_at: string | null;
 }
@@ -56,9 +65,17 @@ export async function deliverInbox(
 ): Promise<string> {
   const id = newId("inbox");
   await client.query(
-    `INSERT INTO inbox_items (id, room_id, participant_id, kind, ref, summary)
-     VALUES ($1, $2, $3, $4, $5::jsonb, $6)`,
-    [id, roomId, participantId, item.kind, JSON.stringify(item.ref), item.summary.slice(0, 500)],
+    `INSERT INTO inbox_items (id, room_id, participant_id, kind, ref, summary, author_id)
+     VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)`,
+    [
+      id,
+      roomId,
+      participantId,
+      item.kind,
+      JSON.stringify(item.ref),
+      item.summary.slice(0, 500),
+      item.author_id,
+    ],
   );
   return id;
 }
@@ -84,15 +101,17 @@ interface Row {
   kind: InboxKind;
   ref: InboxRef;
   summary: string;
+  author_id: string;
   created_at: Date;
   acked_at: Date | null;
 }
 
-const view = (r: Row): InboxItem => ({
+const view = (r: Row, kinds: AuthorKinds): InboxItem => ({
   id: r.id,
   kind: r.kind,
   ref: r.ref,
   summary: r.summary,
+  provenance: provenanceOf(kinds, r.author_id),
   created_at: r.created_at.toISOString(),
   acked_at: r.acked_at ? r.acked_at.toISOString() : null,
 });
@@ -129,12 +148,18 @@ export function registerInboxCommands(dispatcher: Dispatcher): void {
         where += ` AND (created_at, id) > ($4::timestamptz, $5)`;
       }
       const { rows } = await ctx.client.query<Row>(
-        `SELECT id, kind, ref, summary, created_at, acked_at FROM inbox_items
+        `SELECT id, kind, ref, summary, author_id, created_at, acked_at FROM inbox_items
          WHERE ${where} ORDER BY created_at, id LIMIT $3`,
         values,
       );
+      const page = rows.slice(0, p.limit);
+      const kinds = await loadAuthorKinds(
+        ctx.client,
+        ctx.room_id,
+        page.map((r) => r.author_id),
+      );
       return {
-        response: { items: rows.slice(0, p.limit).map(view), has_more: rows.length > p.limit },
+        response: { items: page.map((r) => view(r, kinds)), has_more: rows.length > p.limit },
       };
     },
   });

@@ -1,6 +1,7 @@
 import type { PoolClient } from "@crossover/db";
 import { provenanceOf, type AuthorKinds, type Provenance } from "../provenance.js";
 import { CrossoverError } from "@crossover/protocol";
+import { missingEvidence, type EvidenceItem } from "./evidence.js";
 
 export const TASK_STATUSES = [
   "OPEN",
@@ -30,6 +31,8 @@ export interface TaskRow {
   review_required: boolean;
   override_dependencies: boolean;
   blocked_reason: string | null;
+  /** The latest submission's evidence (§34.3). */
+  evidence: EvidenceItem[];
   lease_expires_at: Date | null;
   version: number;
   created_at: Date;
@@ -38,6 +41,8 @@ export interface TaskRow {
 
 /** What commands return and events carry: plain JSON data. */
 export interface TaskView extends Omit<TaskRow, "lease_expires_at" | "created_at" | "updated_at"> {
+  /** The requirement indices with no proof in `evidence`. */
+  missing_evidence: number[];
   lease_expires_at: string | null;
   created_at: string;
   updated_at: string;
@@ -45,11 +50,12 @@ export interface TaskView extends Omit<TaskRow, "lease_expires_at" | "created_at
 
 export const TASK_COLUMNS = `id, room_id, title, description, requirements, owner_id, created_by, status,
   priority, dependencies, artifacts, reviewer_id, review_required, override_dependencies,
-  blocked_reason, lease_expires_at, version, created_at, updated_at`;
+  blocked_reason, evidence, lease_expires_at, version, created_at, updated_at`;
 
 export function taskView(row: TaskRow): TaskView {
   return {
     ...row,
+    missing_evidence: missingEvidence(row.requirements.length, row.evidence),
     lease_expires_at: row.lease_expires_at ? row.lease_expires_at.toISOString() : null,
     created_at: row.created_at.toISOString(),
     updated_at: row.updated_at.toISOString(),

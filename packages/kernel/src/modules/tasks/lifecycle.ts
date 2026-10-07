@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { CommandContext, Dispatcher } from "../../dispatcher.js";
 import { currentLeadId, deliverInbox } from "../inbox/inbox.js";
 import { loadActor, manages } from "./create-update.js";
+import { evidenceSchema, missingEvidence, validateEvidence } from "./evidence.js";
 import {
   leaseSql,
   loadTask,
@@ -40,6 +41,20 @@ export const tasksAssignParams = taskVersionParams.extend({
 export const tasksBlockParams = taskVersionParams.extend({
   reason: z.string().trim().min(1).max(2000),
 });
+
+export const tasksSubmitParams = taskVersionParams.extend({
+  /** Proof per requirement (§34.3); the latest submission's replaces the last one's. */
+  evidence: evidenceSchema.optional(),
+});
+
+/** The room setting `require_evidence` (default false): a submit must prove every requirement. */
+async function requiresEvidence(ctx: CommandContext): Promise<boolean> {
+  const { rows } = await ctx.client.query<{ on: unknown }>(
+    "SELECT settings -> 'require_evidence' AS on FROM rooms WHERE id = $1",
+    [ctx.room_id],
+  );
+  return rows[0]?.on === true;
+}
 
 export const tasksReviewParams = taskVersionParams.extend({
   verdict: z.enum(["approve", "request_changes"]),
@@ -107,6 +122,7 @@ export function registerTaskLifecycleCommands(
           kind: "ASSIGNMENT",
           ref: { kind: "task", id: task.id },
           summary: `Assigned to you: ${task.title}`,
+          author_id: task.created_by, // the title is the task creator's
         });
       }
       return taken;
@@ -196,7 +212,7 @@ export function registerTaskLifecycleCommands(
   dispatcher.registerCommand({
     method: "tasks.submit",
     mutating: true,
-    params: taskVersionParams,
+    params: tasksSubmitParams,
     execute: async (ctx, p) => {
       const task = await loadTask(ctx.client, ctx.room_id, p.task_id, true);
       const actor = await loadActor(ctx);
@@ -214,12 +230,29 @@ export function registerTaskLifecycleCommands(
       // With review required it waits for a reviewer; otherwise it is done (§8.2). Either way
       // the claim no longer needs a lease: only CLAIMED, IN_PROGRESS and BLOCKED expire.
       const to = task.review_required ? "REVIEW" : "DONE";
-      if (to === "REVIEW") await requestReview(ctx, task, actor.id);
+      // Evidence (§34.3): each submission carries its own, replacing the last one's.
+      const evidence = p.evidence ?? [];
+      validateEvidence(evidence, task.requirements.length);
+      const missing = missingEvidence(task.requirements.length, evidence);
+      if (missing.length > 0 && (await requiresEvidence(ctx))) {
+        throw new CrossoverError(
+          "VALIDATION",
+          `This room requires evidence for every requirement; missing for ${missing.join(", ")}`,
+          { details: { missing_evidence: missing, requirements: task.requirements.length } },
+        );
+      }
+      if (to === "REVIEW") await requestReview(ctx, task, actor.id, missing.length);
       return transition(ctx, task, to, {
         eventType: "task.submitted",
-        set: "lease_expires_at = NULL",
+        set: "lease_expires_at = NULL, evidence = $5::jsonb",
+        values: [JSON.stringify(evidence)],
         renewLease: false,
-        payload: { status: to, review_required: task.review_required },
+        payload: {
+          status: to,
+          review_required: task.review_required,
+          evidence,
+          missing_evidence: missing,
+        },
       });
     },
   });
@@ -494,7 +527,12 @@ export async function takeTask(
  * Tell whoever should review a submitted task (T403): its named reviewer if they are still in
  * the room, otherwise the lead. Nobody is told about their own submission.
  */
-async function requestReview(ctx: CommandContext, task: TaskRow, submitterId: string) {
+async function requestReview(
+  ctx: CommandContext,
+  task: TaskRow,
+  submitterId: string,
+  missingCount: number,
+) {
   let recipient: string | null = null;
   if (task.reviewer_id) {
     const { rows } = await ctx.client.query(
@@ -508,6 +546,10 @@ async function requestReview(ctx: CommandContext, task: TaskRow, submitterId: st
   await deliverInbox(ctx.client, ctx.room_id, recipient, {
     kind: "REVIEW_REQUEST",
     ref: { kind: "task", id: task.id },
-    summary: `Review requested: ${task.title}`,
+    summary:
+      missingCount === 0
+        ? `Review requested: ${task.title}`
+        : `Review requested: ${task.title} (${missingCount} of ${task.requirements.length} requirements have no evidence)`,
+    author_id: task.created_by, // the title is the task creator's
   });
 }

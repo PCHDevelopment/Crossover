@@ -5,6 +5,7 @@ import { CrossoverError, newId } from "@crossover/protocol";
 const SANDBOX_IDLE_MS = 30 * 60 * 1000;
 const SWEEP_INTERVAL_MS = 60 * 1000;
 const SWEEP_BATCH_SIZE = 100;
+const DESTROY_RETRY_MS = 60 * 1000;
 const HIBERNATION_RECOVERY_MS = 60 * 1000;
 const TRANSITION_POLL_MS = 10;
 
@@ -154,6 +155,35 @@ export class ExecutionService {
     return hibernated;
   }
 
+  /** Retry cleanup for interrupted destroys and owners that have left or archived their room. */
+  async sweepCleanup(now = new Date()): Promise<number> {
+    const staleBefore = new Date(now.getTime() - DESTROY_RETRY_MS);
+    const { rows } = await this.pool.query<Pick<SandboxRow, "room_id" | "participant_id">>(
+      `SELECT s.room_id, s.participant_id FROM sandboxes s
+       JOIN rooms r ON r.id = s.room_id
+       LEFT JOIN participants p ON p.id = s.participant_id AND p.room_id = s.room_id
+       WHERE s.status <> 'DESTROYED' AND (
+         (s.status = 'DESTROYING' AND s.updated_at <= $1) OR
+         p.status = 'REMOVED' OR r.status = 'ARCHIVED'
+       )
+       ORDER BY s.updated_at LIMIT $2`,
+      [staleBefore, SWEEP_BATCH_SIZE],
+    );
+    let destroyed = 0;
+    for (const row of rows) {
+      try {
+        if (await this.destroyOne(row.room_id, row.participant_id)) destroyed++;
+      } catch (error) {
+        // Keep processing independent sandboxes; the next sweep retries this DESTROYING row.
+        console.error(
+          `[execution] sandbox cleanup retry failed for ${row.room_id}/${row.participant_id}`,
+          error,
+        );
+      }
+    }
+    return destroyed;
+  }
+
   /** Stop every sandbox in a room, optionally limiting the operation to agents (§5). */
   async hibernateRoom(roomId: string, agentsOnly = false): Promise<void> {
     const { rows } = await this.pool.query<Pick<SandboxRow, "participant_id">>(
@@ -182,6 +212,9 @@ export class ExecutionService {
     this.sweepTimer = setInterval(() => {
       void this.sweepIdle().catch((error: unknown) =>
         console.error("[execution] idle sandbox sweep failed", error),
+      );
+      void this.sweepCleanup().catch((error: unknown) =>
+        console.error("[execution] sandbox cleanup sweep failed", error),
       );
     }, this.sweepIntervalMs);
     this.sweepTimer.unref();
@@ -375,7 +408,7 @@ export class ExecutionService {
     }
   }
 
-  private async destroyOne(roomId: string, participantId: string): Promise<void> {
+  private async destroyOne(roomId: string, participantId: string): Promise<boolean> {
     const sandbox = await withTransaction(this.pool, async (client) => {
       const { rows } = await client.query<SandboxRow>(
         `SELECT id, room_id, participant_id, status, limits, base_revision, volume_ref, container_ref,
@@ -394,7 +427,7 @@ export class ExecutionService {
       );
       return claimed[0] ?? null;
     });
-    if (!sandbox) return;
+    if (!sandbox) return false;
 
     await this.driver.destroy({
       sandbox_id: sandbox.id,
@@ -410,6 +443,7 @@ export class ExecutionService {
         [sandbox.id, roomId],
       ),
     );
+    return true;
   }
 
   private resources(sandbox: SandboxRow): SandboxResources {
