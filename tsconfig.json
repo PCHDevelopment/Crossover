@@ -8,6 +8,7 @@
     { "path": "packages/mcp" },
     { "path": "packages/ledger" },
     { "path": "packages/policy" },
-    { "path": "packages/workspace" }
+    { "path": "packages/workspace" },
+    { "path": "apps/server" }
   ]
 }

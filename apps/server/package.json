@@ -1,0 +1,25 @@
+{
+  "name": "@crossover/server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "start": "node --env-file-if-exists=../../.env dist/main.js"
+  },
+  "dependencies": {
+    "@crossover/db": "workspace:*",
+    "@crossover/gateway": "workspace:*",
+    "@crossover/kernel": "workspace:*",
+    "@crossover/policy": "workspace:*",
+    "@crossover/protocol": "workspace:*",
+    "@crossover/workspace": "workspace:*",
+    "zod": "^4.6.5"
+  }
+}
