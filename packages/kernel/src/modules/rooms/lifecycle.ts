@@ -1,6 +1,7 @@
 import { CrossoverError } from "@crossover/protocol";
 import { z } from "zod";
 import type { Dispatcher } from "../../dispatcher.js";
+import { restartAgentLeases } from "../tasks/task.js";
 
 export type RoomStatus = "ACTIVE" | "PAUSED" | "ARCHIVED" | "DELETED";
 export type LifecycleCommand = "room.freeze" | "room.resume" | "room.archive";
@@ -74,6 +75,8 @@ export function registerRoomLifecycleCommands(
            WHERE id = $1`,
           [ctx.room_id, to],
         );
+        // Claims were frozen with the room: on resume their lease clocks start over (§22.1).
+        if (to === "ACTIVE") await restartAgentLeases(ctx.client, ctx.room_id);
         const changedBy = ctx.principal.participant_id;
         if (options.afterChange) {
           const after = options.afterChange;

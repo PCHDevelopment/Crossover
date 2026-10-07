@@ -80,8 +80,11 @@ export interface SweptTask {
  * per task. **Human claims never expire**, nor do tasks whose lease hasn't lapsed, tasks
  * waiting in `REVIEW` or finished tasks. Each room is swept on its own actor in its own
  * transaction, rechecking every condition under the row lock, so a heartbeat that lands first
- * wins. Only rooms this node owns are swept (`options.rooms` to choose), because only the
- * owner node may write to a room's ledger. The lead gets a `LEASE_EXPIRED` inbox item for each (T403).
+ * wins. A room that is not `ACTIVE` (paused, archived or deleted) is frozen and is not swept,
+ * and neither are the tasks of a paused participant: the platform doesn't change a frozen
+ * room's tasks, or a paused agent's, either. Only rooms this node owns are swept (`options.rooms`
+ * to choose), because only the owner node may write to a room's ledger. The lead gets a
+ * `LEASE_EXPIRED` inbox item for each (T403).
  */
 export async function sweepExpiredLeases(
   dispatcher: Dispatcher,
@@ -101,8 +104,9 @@ export async function sweepExpiredLeases(
   }>(
     `SELECT t.room_id, t.id, t.owner_id, t.title
      FROM tasks t JOIN participants p ON p.id = t.owner_id AND p.room_id = t.room_id
+                  JOIN rooms r ON r.id = t.room_id AND r.status = 'ACTIVE'
      WHERE t.status IN ('CLAIMED', 'IN_PROGRESS', 'BLOCKED')
-       AND p.kind = 'AGENT' AND t.lease_expires_at IS NOT NULL AND t.lease_expires_at <= $1
+       AND p.kind = 'AGENT' AND p.status = 'ACTIVE' AND t.lease_expires_at IS NOT NULL AND t.lease_expires_at <= $1
        AND t.room_id = ANY($2::text[])
      ORDER BY t.room_id, t.id`,
     [now, rooms],
@@ -116,41 +120,109 @@ export async function sweepExpiredLeases(
 
   const swept: SweptTask[] = [];
   for (const [roomId, tasks] of byRoom) {
-    const { result } = await dispatcher.runSystem(roomId, "tasks.sweep_leases", async (ctx) => {
-      const released: SweptTask[] = [];
-      const events = [];
-      const lead = await currentLeadId(ctx.client, roomId);
-      for (const c of tasks) {
-        // Re-check under the lock: the owner may have heartbeated or released it meanwhile.
-        const { rows } = await ctx.client.query<{ version: number }>(
-          `UPDATE tasks SET status = 'OPEN', owner_id = NULL, blocked_reason = NULL,
+    const { result } = await dispatcher.runSystem(
+      roomId,
+      "tasks.sweep_leases",
+      async (ctx) => {
+        const released: SweptTask[] = [];
+        const events = [];
+        const lead = await currentLeadId(ctx.client, roomId);
+        for (const c of tasks) {
+          // Re-check under the lock: the owner may have heartbeated or released it meanwhile.
+          const { rows } = await ctx.client.query<{ version: number }>(
+            `UPDATE tasks SET status = 'OPEN', owner_id = NULL, blocked_reason = NULL,
                             lease_expires_at = NULL, version = version + 1,
                             updated_at = clock_timestamp()
            WHERE id = $1 AND room_id = $2 AND owner_id = $3
              AND status IN ('CLAIMED', 'IN_PROGRESS', 'BLOCKED')
              AND lease_expires_at IS NOT NULL AND lease_expires_at <= $4
+             AND EXISTS (SELECT 1 FROM participants o
+                         WHERE o.id = tasks.owner_id AND o.room_id = tasks.room_id
+                           AND o.status = 'ACTIVE')
            RETURNING version`,
-          [c.id, roomId, c.owner_id, now],
-        );
-        const row = rows[0];
-        if (!row) continue;
-        released.push({ room_id: roomId, task_id: c.id, previous_owner_id: c.owner_id });
-        if (lead !== null) {
-          await deliverInbox(ctx.client, roomId, lead, {
-            kind: "LEASE_EXPIRED",
-            ref: { kind: "task", id: c.id },
-            summary: `${c.owner_id}'s claim expired; the task is open again: ${c.title}`,
+            [c.id, roomId, c.owner_id, now],
+          );
+          const row = rows[0];
+          if (!row) continue;
+          released.push({ room_id: roomId, task_id: c.id, previous_owner_id: c.owner_id });
+          if (lead !== null) {
+            await deliverInbox(ctx.client, roomId, lead, {
+              kind: "LEASE_EXPIRED",
+              ref: { kind: "task", id: c.id },
+              summary: `${c.owner_id}'s claim expired; the task is open again: ${c.title}`,
+            });
+          }
+          events.push({
+            type: "task.lease_expired" as const,
+            actor_id: SYSTEM_ACTOR,
+            payload: { task_id: c.id, previous_owner_id: c.owner_id, version: row.version },
           });
         }
-        events.push({
-          type: "task.lease_expired" as const,
-          actor_id: SYSTEM_ACTOR,
-          payload: { task_id: c.id, previous_owner_id: c.owner_id, version: row.version },
-        });
-      }
-      return { result: released, events };
-    });
+        return { result: released, events };
+      },
+      { whenFrozen: () => [] },
+    );
     swept.push(...result);
   }
   return swept;
+}
+
+export interface LeaseSweeperOptions extends Omit<SweepOptions, "now"> {
+  pool: Pool;
+  dispatcher: Dispatcher;
+  /** How often to sweep. Default 30 s. */
+  intervalMs?: number;
+  /** "Now" for each sweep; injectable for tests. */
+  now?: () => Date;
+  /** A sweep failed (the next one still runs). Default: log it. */
+  onError?: (error: unknown) => void;
+}
+
+export const DEFAULT_LEASE_SWEEP_INTERVAL_MS = 30_000;
+
+/**
+ * Runs {@link sweepExpiredLeases} on a timer (T311). One sweep at a time: a slow one makes the
+ * next tick wait for it instead of overlapping. `stop()` waits for the sweep in progress.
+ */
+export class LeaseSweeper {
+  private readonly intervalMs: number;
+  private readonly onError: (error: unknown) => void;
+  private timer: ReturnType<typeof setInterval> | undefined;
+  private running: Promise<SweptTask[]> | undefined;
+
+  constructor(private readonly options: LeaseSweeperOptions) {
+    this.intervalMs = options.intervalMs ?? DEFAULT_LEASE_SWEEP_INTERVAL_MS;
+    if (!Number.isSafeInteger(this.intervalMs) || this.intervalMs < 1) {
+      throw new RangeError("Lease sweep interval must be a positive safe integer");
+    }
+    this.onError = options.onError ?? ((error) => console.error("lease sweep failed", error));
+  }
+
+  start(): void {
+    if (this.timer) return;
+    this.timer = setInterval(() => {
+      void this.tick().catch((error: unknown) => this.onError(error));
+    }, this.intervalMs);
+    this.timer.unref();
+  }
+
+  /** Sweep now (joins the sweep already in progress, if any). */
+  tick(): Promise<SweptTask[]> {
+    const { pool, dispatcher, now, intervalMs: _i, onError: _e, ...rest } = this.options;
+    void _i;
+    void _e;
+    this.running ??= sweepExpiredLeases(dispatcher, pool, {
+      ...rest,
+      now: now ? now() : new Date(),
+    }).finally(() => {
+      this.running = undefined;
+    });
+    return this.running;
+  }
+
+  async stop(): Promise<void> {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = undefined;
+    await this.running?.catch(() => undefined);
+  }
 }

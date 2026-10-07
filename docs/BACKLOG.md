@@ -25,6 +25,7 @@ Conventions are in `docs/ENGINEERING.md`. Section references (§) point to `docs
 | M10 Execution sandboxes (§14)         | T1001–T1008 | S2                                                      |
 | M11 Clients (§27, §29)                | T1101–T1105 | S1                                                      |
 | M12 Plugins (§21.4–21.5)              | T1201–T1206 | S2                                                      |
+| M13 Lessons from building (§34)       | T1301–T1303 | S1                                                      |
 
 **Start here:** S1 → T101, T105, T114 (independent). S2 → T501, T505 (only need the scaffold).
 
@@ -724,7 +725,8 @@ Deps: T512 · Migration: —
 
 §10.3 step 7 with tree-sitter for TypeScript, JavaScript and Python: merged file fails to parse while neither side did → treat as conflict. `source = EDITOR` drafts that already fail are let through.
 
-- Fixture: two clean-merging edits that produce invalid syntax → conflict.
+- Fixture: two clean-merging edits that produce invalid syntax → conflict; skip a file over 1 MiB
+  and stop after 8 MiB of unique source has been parsed in one apply.
 
 ---
 
@@ -1198,3 +1200,63 @@ Deps: T1202, T1203 · Migration: —
 `aws.read_logs:<arn>` (tier 0) and `aws.deploy_lambda:<function>` (tier 2 for `staging-*`, tier 3 for anything else, owner-granted with ≤ 24 h expiry, §21.2), via STS assume-role with the external ID.
 
 - The demo step 14 path: `aws.deploy_lambda:prod-api` without a tier 3 grant → `FORBIDDEN` and `capability.denied` visible in Activity.
+
+---
+
+## M13 Lessons from building (§34) — S1
+
+Added after Review 4, when Peter selected the first §34 proposals. T1301 comes first, before T709, so the MCP collaboration tools are covered by the conformance test from the start.
+
+### T1301 · Egress visibility conformance test — S1
+
+Deps: T702, T703 · Migration: —
+
+§34.5's rule, enforced. Every read command and stream declares how it applies the participant view. `CommandDefinition` gains `view: "participant" | "own" | "none"`:
+
+- `participant`: the output goes through a kernel participant-view function (`redactEventFor` or a per-record redactor).
+- `own`: the caller's own records only.
+- `none`: no data from other participants. A one-line `view_reason` is required.
+
+The declaration is required for every non-mutating command and checked at `registerCommand`. MCP tools and the WebSocket `subscribe` frame declare the same.
+
+The conformance test composes the real server and seeds a `capability.denied` event with a denied path for participant A. It enumerates every registered read surface: REST commands, WebSocket `subscribe` backfill and live, the digest, and MCP tools. For each surface that returns events or paths, it reads as participant B and asserts the path is absent.
+
+- A read command registered without a `view` declaration fails at startup.
+- The test fails if a new surface returns A's denied path to B. Sabotage check: remove `redactEventFor` from one surface and the test names that surface.
+- New surfaces (T709, T710, M8 exports, T903 webhooks) are picked up automatically, without editing the test.
+
+### T1302 · Evidence on submit — S1
+
+Deps: T308, T309 · Migration: `0024_task_evidence`
+
+§34.3. `tasks.submit` accepts optional `evidence`:
+
+```text
+evidence: [{
+  requirement,               index into the task's requirements
+  proof: [{ kind: test | check | manual, ref, note? }],     1..10
+  sabotage?: [{ broke, failed }]                            0..10
+}]
+```
+
+Each requirement appears at most once, and the total size is capped at 32 KiB. The latest submission's evidence is stored on the task (`tasks.evidence jsonb`) and carried in `task.submitted`. Task views return `evidence` plus `missing_evidence` (the requirement indices without proof). The reviewer's `REVIEW_REQUESTED` inbox summary says how many requirements lack evidence. A room setting `require_evidence` (default false) makes a submit with missing evidence a `VALIDATION` error, naming the indices.
+
+- An out-of-range or duplicate requirement index → `VALIDATION`.
+- A resubmit after `request_changes` replaces the evidence; earlier evidence stays in the `task.submitted` history.
+- `require_evidence` on: a submit missing evidence for one requirement → `VALIDATION` with `details.missing_evidence`. Off: accepted, and flagged in the view.
+
+### T1303 · `participant.manifest_changed` — S1
+
+Deps: T205, T707 · Migration: —
+
+§34.6. An agent's manifest can change after it joins:
+
+- through `participants.update_manifest { manifest }`, which is self-only, agents only, and validated like the join manifest;
+- through the MCP gateway, when `initialize`'s `clientInfo` name or version differs from the stored `client`/`client_version`. The gateway applies that update as `system` via `runSystem`.
+
+When `vendor`, `model`, `client` or `client_version` changes, the platform stores the new manifest. It emits `participant.manifest_changed { participant_id, changes: { field: { before, after } } }` and sends a `MANIFEST_CHANGED` inbox item to the lead and owner. A changed `wake_webhook_url` is reported only as `wake_webhook_url_changed: true`, never the URL. An identical manifest is a no-op with no event.
+
+- Updating another participant's manifest → `FORBIDDEN`; a human participant → `VALIDATION`.
+- An MCP reconnect with a new `clientInfo.version` produces exactly one event and one inbox item each for the lead and owner; reconnecting again with the same version produces none.
+- The event payload never contains the webhook URL (a test scans the payload).
+- `participants.update_manifest` joins the §16.1 catalog (mutating) and `participant.manifest_changed` the §16.2 event types, both documented in the same PR.

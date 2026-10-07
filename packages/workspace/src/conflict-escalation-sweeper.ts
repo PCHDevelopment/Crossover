@@ -95,6 +95,7 @@ export async function sweepConflictEscalations(
               events: event ? [{ ...event, actor_id: "system" }] : [],
             };
           },
+          { whenFrozen: () => 0 }, // a frozen room's conflicts wait for it to resume
         );
         return result.result;
       } catch (error) {
