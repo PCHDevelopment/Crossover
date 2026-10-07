@@ -45,3 +45,15 @@ export { HealthCheckQueue } from "./health-queue.js";
 export type { HealthCheckQueueOptions } from "./health-queue.js";
 export { workspaceHealthGate } from "./health-gate.js";
 export { healthGetParamsSchema, publishHealthResult } from "./health-events.js";
+export { ExecutionService } from "./execution.js";
+export type {
+  DiskEnforcementMode,
+  ExecutionDriver,
+  ExecutionServiceOptions,
+  SandboxLimits,
+  SandboxRecord,
+  SandboxResources,
+  SandboxStatus,
+} from "./execution.js";
+export { DockerExecutionDriver } from "./docker-execution-driver.js";
+export type { DockerExecutionDriverOptions, DockerInvoker } from "./docker-execution-driver.js";

@@ -1,10 +1,12 @@
 import { CrossoverError, newId } from "@crossover/protocol";
 import { z } from "zod";
+import { principalKinds } from "../provenance.js";
 import type { CommandContext, Dispatcher } from "../../dispatcher.js";
 import {
   leaseSql,
   loadTask,
   TASK_COLUMNS,
+  labelTask,
   taskView,
   versionConflict,
   type TaskRow,
@@ -187,7 +189,10 @@ export function registerTaskCommands(dispatcher: Dispatcher): void {
         ],
       );
       const task = taskView(rows[0]!);
-      return { response: task, events: [{ type: "task.created" as const, payload: { task } }] };
+      return {
+        response: labelTask(task, principalKinds(ctx.principal)),
+        events: [{ type: "task.created" as const, payload: { task } }],
+      };
     },
   });
 

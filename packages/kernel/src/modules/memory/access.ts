@@ -1,13 +1,14 @@
 import { CrossoverError } from "@crossover/protocol";
 import { z } from "zod";
+import { loadAuthorKinds, principalKinds, provenanceOf } from "../provenance.js";
 import type { Dispatcher } from "../../dispatcher.js";
 import {
   assertMemoryWritable,
   MEMORY_COLUMNS,
   memoryConflict,
+  labelMemory,
   memoryEntryView,
   memoryKey,
-  type MemoryEntryView,
 } from "./memory.js";
 
 export const DEFAULT_MEMORY_PAGE = 50;
@@ -88,7 +89,8 @@ export function registerMemoryAccessCommands(dispatcher: Dispatcher): void {
           details: { deleted: true, revision: row.revision },
         });
       }
-      return { response: memoryEntryView(row) };
+      const kinds = await loadAuthorKinds(ctx.client, ctx.room_id, [row.author_id]);
+      return { response: labelMemory(memoryEntryView(row), kinds) };
     },
   });
 
@@ -114,6 +116,11 @@ export function registerMemoryAccessCommands(dispatcher: Dispatcher): void {
          LIMIT $5`,
         [ctx.room_id, likePrefix(p.prefix), p.include_deleted, p.after ?? null, p.limit],
       );
+      const kinds = await loadAuthorKinds(
+        ctx.client,
+        ctx.room_id,
+        rows.map((r) => r.author_id),
+      );
       const last = rows[rows.length - 1];
       return {
         response: {
@@ -121,6 +128,7 @@ export function registerMemoryAccessCommands(dispatcher: Dispatcher): void {
             ...r,
             created_at: r.created_at.toISOString(),
             updated_at: r.updated_at.toISOString(),
+            provenance: provenanceOf(kinds, r.author_id),
           })),
           next_after: rows.length === p.limit && last ? last.key : null,
         },
@@ -150,11 +158,20 @@ export function registerMemoryAccessCommands(dispatcher: Dispatcher): void {
          LIMIT $4`,
         [ctx.room_id, p.key, p.after_revision, p.limit],
       );
+      const kinds = await loadAuthorKinds(
+        ctx.client,
+        ctx.room_id,
+        rows.map((r) => r.author_id),
+      );
       const last = rows[rows.length - 1];
       return {
         response: {
           key: p.key,
-          revisions: rows.map((r) => ({ ...r, created_at: r.created_at.toISOString() })),
+          revisions: rows.map((r) => ({
+            ...r,
+            created_at: r.created_at.toISOString(),
+            provenance: provenanceOf(kinds, r.author_id),
+          })),
           next_after: rows.length === p.limit && last ? last.revision : null,
         },
       };
@@ -175,7 +192,8 @@ export function registerMemoryAccessCommands(dispatcher: Dispatcher): void {
       );
       const current = found[0];
       if (!current) throw new CrossoverError("NOT_FOUND", `Memory key ${p.key} not found`);
-      if (current.revision !== p.expected_revision) throw memoryConflict(current, p.key);
+      if (current.revision !== p.expected_revision)
+        throw await memoryConflict(ctx.client, ctx.room_id, current, p.key);
       if (current.deleted) {
         throw new CrossoverError("VALIDATION", `Memory key ${p.key} is already deleted`, {
           details: { revision: current.revision },
@@ -190,7 +208,7 @@ export function registerMemoryAccessCommands(dispatcher: Dispatcher): void {
         [ctx.room_id, p.key, me, p.expected_revision],
       );
       const tombstone = rows[0];
-      if (!tombstone) throw memoryConflict(current, p.key);
+      if (!tombstone) throw await memoryConflict(ctx.client, ctx.room_id, current, p.key);
       await ctx.client.query(
         `INSERT INTO memory_revisions (room_id, key, revision, value, content_type, author_id, source_refs, deleted)
          VALUES ($1, $2, $3, '', $4, $5, $6::jsonb, true)`,
@@ -203,7 +221,7 @@ export function registerMemoryAccessCommands(dispatcher: Dispatcher): void {
           JSON.stringify(tombstone.source_refs),
         ],
       );
-      const entry: MemoryEntryView = memoryEntryView(tombstone);
+      const entry = labelMemory(memoryEntryView(tombstone), principalKinds(ctx.principal));
       return {
         response: entry,
         events: [

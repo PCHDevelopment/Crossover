@@ -1,7 +1,15 @@
 import { CrossoverError } from "@crossover/protocol";
 import { z } from "zod";
 import type { Dispatcher } from "../../dispatcher.js";
-import { loadTask, TASK_COLUMNS, TASK_STATUSES, taskView, type TaskRow } from "./task.js";
+import { loadAuthorKinds, provenanceOf } from "../provenance.js";
+import {
+  labelTask,
+  loadTask,
+  TASK_COLUMNS,
+  TASK_STATUSES,
+  taskView,
+  type TaskRow,
+} from "./task.js";
 
 export const MAX_PAGE = 100;
 export const DEFAULT_PAGE = 50;
@@ -75,9 +83,14 @@ export function registerTaskReadCommands(dispatcher: Dispatcher): void {
       );
       const page = rows.slice(0, p.limit);
       const last = page[page.length - 1];
+      const kinds = await loadAuthorKinds(
+        ctx.client,
+        ctx.room_id,
+        page.map((t) => t.created_by),
+      );
       return {
         response: {
-          tasks: page.map(taskView),
+          tasks: page.map((t) => labelTask(taskView(t), kinds)),
           next_cursor:
             rows.length > p.limit && last ? encodeCursor(last.created_at_text, last.id) : null,
         },
@@ -106,12 +119,17 @@ export function registerTaskReadCommands(dispatcher: Dispatcher): void {
          FROM task_reviews WHERE task_id = $1 AND room_id = $2 ORDER BY created_at, id`,
         [task.id, ctx.room_id],
       );
+      const kinds = await loadAuthorKinds(ctx.client, ctx.room_id, [
+        task.created_by,
+        ...rows.map((r) => r.reviewer_id),
+      ]);
       return {
         response: {
-          ...taskView(task),
+          ...labelTask(taskView(task), kinds),
           reviews: rows.map((r) => ({
             id: r.id,
             reviewer_id: r.reviewer_id,
+            provenance: provenanceOf(kinds, r.reviewer_id),
             verdict: r.verdict,
             comments: r.comments,
             revision: Number(r.revision),
