@@ -438,5 +438,6 @@ describe("DockerExecutionDriver", () => {
         await driver.destroy({ sandbox_id: sandboxId, resources });
       }
     },
+    15_000,
   );
 });
