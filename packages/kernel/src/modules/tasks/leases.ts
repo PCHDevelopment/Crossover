@@ -76,7 +76,7 @@ export interface SweptTask {
  * per task. **Human claims never expire**, nor do tasks whose lease hasn't lapsed, tasks
  * waiting in `REVIEW` or finished tasks. Each room is swept on its own actor in its own
  * transaction, rechecking every condition under the row lock, so a heartbeat that lands first
- * wins. Only rooms this node owns are swept (`options.rooms` to choose), because only the
+ * wins. A room that is paused, archived or deleted is frozen and is not swept: the platform doesn't change a frozen room's tasks either. Only rooms this node owns are swept (`options.rooms` to choose), because only the
  * owner node may write to a room's ledger. (The lead's inbox notification arrives with T403.)
  */
 export async function sweepExpiredLeases(
@@ -92,6 +92,7 @@ export async function sweepExpiredLeases(
   const { rows: candidates } = await pool.query<{ room_id: string; id: string; owner_id: string }>(
     `SELECT t.room_id, t.id, t.owner_id
      FROM tasks t JOIN participants p ON p.id = t.owner_id AND p.room_id = t.room_id
+                  JOIN rooms r ON r.id = t.room_id AND r.status = 'ACTIVE'
      WHERE t.status IN ('CLAIMED', 'IN_PROGRESS', 'BLOCKED')
        AND p.kind = 'AGENT' AND t.lease_expires_at IS NOT NULL AND t.lease_expires_at <= $1
        AND t.room_id = ANY($2::text[])
@@ -136,4 +137,64 @@ export async function sweepExpiredLeases(
     swept.push(...result);
   }
   return swept;
+}
+
+export interface LeaseSweeperOptions extends Omit<SweepOptions, "now"> {
+  pool: Pool;
+  dispatcher: Dispatcher;
+  /** How often to sweep. Default 30 s. */
+  intervalMs?: number;
+  /** "Now" for each sweep; injectable for tests. */
+  now?: () => Date;
+  /** A sweep failed (the next one still runs). Default: log it. */
+  onError?: (error: unknown) => void;
+}
+
+export const DEFAULT_LEASE_SWEEP_INTERVAL_MS = 30_000;
+
+/**
+ * Runs {@link sweepExpiredLeases} on a timer (T311). One sweep at a time: a slow one makes the
+ * next tick wait for it instead of overlapping. `stop()` waits for the sweep in progress.
+ */
+export class LeaseSweeper {
+  private readonly intervalMs: number;
+  private readonly onError: (error: unknown) => void;
+  private timer: ReturnType<typeof setInterval> | undefined;
+  private running: Promise<SweptTask[]> | undefined;
+
+  constructor(private readonly options: LeaseSweeperOptions) {
+    this.intervalMs = options.intervalMs ?? DEFAULT_LEASE_SWEEP_INTERVAL_MS;
+    if (!Number.isSafeInteger(this.intervalMs) || this.intervalMs < 1) {
+      throw new RangeError("Lease sweep interval must be a positive safe integer");
+    }
+    this.onError = options.onError ?? ((error) => console.error("lease sweep failed", error));
+  }
+
+  start(): void {
+    if (this.timer) return;
+    this.timer = setInterval(() => {
+      void this.tick().catch((error: unknown) => this.onError(error));
+    }, this.intervalMs);
+    this.timer.unref();
+  }
+
+  /** Sweep now (joins the sweep already in progress, if any). */
+  tick(): Promise<SweptTask[]> {
+    const { pool, dispatcher, now, intervalMs: _i, onError: _e, ...rest } = this.options;
+    void _i;
+    void _e;
+    this.running ??= sweepExpiredLeases(dispatcher, pool, {
+      ...rest,
+      now: now ? now() : new Date(),
+    }).finally(() => {
+      this.running = undefined;
+    });
+    return this.running;
+  }
+
+  async stop(): Promise<void> {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = undefined;
+    await this.running?.catch(() => undefined);
+  }
 }

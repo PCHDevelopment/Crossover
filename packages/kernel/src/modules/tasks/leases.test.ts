@@ -7,7 +7,7 @@ import { Dispatcher } from "../../dispatcher.js";
 import type { Principal } from "../../principal.js";
 import { registerTaskCommands } from "./create-update.js";
 import { registerTaskLifecycleCommands } from "./lifecycle.js";
-import { registerTaskHeartbeat, sweepExpiredLeases, SYSTEM_ACTOR } from "./leases.js";
+import { LeaseSweeper, registerTaskHeartbeat, sweepExpiredLeases, SYSTEM_ACTOR } from "./leases.js";
 import type { TaskView } from "./task.js";
 
 let db: TestDatabase;
@@ -332,5 +332,56 @@ describe("sweepExpiredLeases", () => {
       t2.id,
     ]);
     expect(await sweepExpiredLeases(s1.d, pool, { now: at(1), rooms: [] })).toEqual([]);
+  });
+});
+
+describe("frozen rooms and the timer", () => {
+  const lapse = (taskId: string) =>
+    pool.query("UPDATE tasks SET lease_expires_at = now() - interval '1 minute' WHERE id = $1", [
+      taskId,
+    ]);
+
+  it("doesn't sweep a paused, archived or deleted room, and does once it is active again", async () => {
+    for (const frozen of ["PAUSED", "ARCHIVED", "DELETED"]) {
+      const s = await setup();
+      const t = await claimed(s, s.agent);
+      await lapse(t.id);
+      await pool.query("UPDATE rooms SET status = $2 WHERE id = $1", [s.room, frozen]);
+      expect(await sweepExpiredLeases(s.d, pool, { rooms: [s.room] }), frozen).toEqual([]);
+      const row = await pool.query("SELECT status FROM tasks WHERE id = $1", [t.id]);
+      expect(row.rows[0].status).toBe("CLAIMED");
+      await pool.query("UPDATE rooms SET status = 'ACTIVE' WHERE id = $1", [s.room]);
+      expect(await sweepExpiredLeases(s.d, pool, { rooms: [s.room] })).toHaveLength(1);
+    }
+  });
+
+  it("LeaseSweeper sweeps on its timer and stops cleanly", async () => {
+    const s = await setup();
+    const t = await claimed(s, s.agent);
+    await lapse(t.id);
+    const errors: unknown[] = [];
+    const sweeper = new LeaseSweeper({
+      pool,
+      dispatcher: s.d,
+      rooms: [s.room],
+      intervalMs: 20,
+      onError: (e) => errors.push(e),
+    });
+    sweeper.start();
+    sweeper.start(); // starting twice doesn't double up
+    let status = "CLAIMED";
+    for (let i = 0; i < 100 && status === "CLAIMED"; i++) {
+      await new Promise((r) => setTimeout(r, 20));
+      status = (await pool.query("SELECT status FROM tasks WHERE id = $1", [t.id])).rows[0].status;
+    }
+    await sweeper.stop();
+    expect(status).toBe("OPEN");
+    expect(errors).toEqual([]);
+  });
+
+  it("rejects a nonsensical interval", () => {
+    expect(() => new LeaseSweeper({ pool, dispatcher: {} as Dispatcher, intervalMs: 0 })).toThrow(
+      RangeError,
+    );
   });
 });

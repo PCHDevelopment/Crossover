@@ -6,7 +6,7 @@ import type { EventPublisher } from "@crossover/kernel";
 import { newId, type RoomEvent } from "@crossover/protocol";
 import { git } from "@crossover/workspace";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { composeServer, type CrossoverServer } from "./compose.js";
+import { composeServer, type ComposeOverrides, type CrossoverServer } from "./compose.js";
 import { loadConfig, type ServerConfig } from "./config.js";
 
 let db: TestDatabase;
@@ -46,8 +46,12 @@ function config(extra: Partial<ServerConfig> = {}): ServerConfig {
   };
 }
 
-async function start(extra: Partial<ServerConfig> = {}, publisher = new RecordingPublisher()) {
-  const server = await composeServer(config(extra), { pool: db.pool, publisher });
+async function start(
+  extra: Partial<ServerConfig> = {},
+  publisher = new RecordingPublisher(),
+  overrides: Partial<ComposeOverrides> = {},
+) {
+  const server = await composeServer(config(extra), { pool: db.pool, publisher, ...overrides });
   servers.push(server);
   return { server, publisher };
 }
@@ -258,6 +262,51 @@ describe("composeServer", () => {
     const seqs = frames.filter((f) => f.type === "event").map((f) => f.event!.sequence);
     expect(seqs).toEqual([...seqs].sort((a, b) => a - b));
     sock.close();
+  });
+
+  it("registers the task lifecycle and heartbeat, and its sweeper returns a lapsed claim to OPEN", async () => {
+    const { server } = await start({}, new RecordingPublisher(), { leaseSweepIntervalMs: 50 });
+    const { roomId, owner, agent, cmd } = await walkthrough(server.app);
+    const created = await ok(
+      await cmd(
+        envelope("tasks.create", { title: "Work", requirements: ["done"] }),
+        owner.tokens.access_token,
+      ),
+    );
+    const claimed = await ok(
+      await cmd(
+        envelope("tasks.claim", {
+          task_id: created.response.id,
+          expected_version: created.response.version,
+        }),
+        agent.tokens.access_token,
+      ),
+    );
+    const beat = await ok(
+      await cmd(
+        envelope("tasks.heartbeat", { task_id: created.response.id }),
+        agent.tokens.access_token,
+      ),
+    );
+    expect(beat.response.lease_expires_at).toEqual(expect.any(String));
+
+    await db.pool.query(
+      "UPDATE tasks SET lease_expires_at = now() - interval '1 minute' WHERE id = $1",
+      [created.response.id],
+    );
+    let status = claimed.response.status as string;
+    for (let i = 0; i < 100 && status !== "OPEN"; i++) {
+      await new Promise((r) => setTimeout(r, 50));
+      const got = await ok(
+        await cmd(
+          envelope("tasks.get", { task_id: created.response.id }),
+          owner.tokens.access_token,
+        ),
+      );
+      status = got.response.task?.status ?? got.response.status;
+    }
+    expect(status).toBe("OPEN");
+    void roomId;
   });
 
   it("enforces the real policy: an observer can't apply a ChangeSet", async () => {
