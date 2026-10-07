@@ -17,6 +17,7 @@ export const METHODS = {
   "room.digest": { mutating: false },
   "room.events.subscribe": { mutating: false },
   "room.events.list": { mutating: false },
+  "events.redact": { mutating: true },
   "room.set_lead": { mutating: true },
   "room.transfer_lead": { mutating: true },
   "room.accept_lead": { mutating: true },

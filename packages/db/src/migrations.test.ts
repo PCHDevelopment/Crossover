@@ -1059,6 +1059,32 @@ describe("0019_checkpoints", () => {
   });
 });
 
+describe("0026_redaction", () => {
+  it("a message may be empty only once it is redacted", async () => {
+    const room = "room_rd1";
+    await db.pool.query(
+      `INSERT INTO rooms (id, slug, name, objective, owner_id) VALUES ($1, $1, 'n', 'o', 'x')`,
+      [room],
+    );
+    await db.pool.query(
+      `INSERT INTO participants (id, room_id, kind, display_name, role, status)
+       VALUES ('part_rd1', $1, 'HUMAN', 'a', 'LEAD', 'ACTIVE')`,
+      [room],
+    );
+    const insert = (id: string, body: string, redacted: boolean) =>
+      db.pool.query(
+        `INSERT INTO messages (id, room_id, author_id, body, redacted) VALUES ($1, $2, 'part_rd1', $3, $4)`,
+        [id, room, body, redacted],
+      );
+    await expect(insert("msg_rd1", "", false)).rejects.toMatchObject({ code: "23514" });
+    await insert("msg_rd2", "", true);
+    await insert("msg_rd3", "text", false);
+    await expect(insert("msg_rd4", "x".repeat(32769), true)).rejects.toMatchObject({
+      code: "23514",
+    });
+  });
+});
+
 describe("0020_approvals", () => {
   let n = 0;
   const setup = async () => {
