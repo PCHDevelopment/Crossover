@@ -34,7 +34,7 @@ export type ConnectPolicy =
       sandboxId: string;
       roomId: string;
       host: string;
-      address: string;
+      addresses: string[];
       port: 443;
     }
   | {
@@ -164,7 +164,7 @@ export async function authorizeConnect(
     sandboxId: identity.sandboxId,
     roomId: sandbox.room_id,
     host: target.host,
-    address: addresses[0]!,
+    addresses,
     port: target.port,
   };
 }
