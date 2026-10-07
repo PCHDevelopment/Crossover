@@ -30,26 +30,29 @@ export async function publishHealthResult(
   const current = rows[0];
   if (!current) return;
 
-  await dispatcher.runSystem(roomId, "workspace.health", async ({ client }) => {
-    const { rows: previousGreen } = await client.query<{ revision: number | string }>(
-      `SELECT revision FROM health_runs
+  await dispatcher.runSystem(
+    roomId,
+    "workspace.health",
+    async ({ client }) => {
+      const { rows: previousGreen } = await client.query<{ revision: number | string }>(
+        `SELECT revision FROM health_runs
        WHERE room_id = $1 AND status = 'GREEN' AND revision <= $2
        ORDER BY revision DESC, created_at DESC LIMIT 1`,
-      [roomId, revision],
-    );
-    const lastGreenRevision = previousGreen[0] ? Number(previousGreen[0].revision) : null;
-    const payload: Record<string, unknown> = {
-      revision,
-      status: result.status,
-      duration: result.durationMs,
-      log_ref: runId,
-    };
-    if (result.status === "RED") payload.last_green_revision = lastGreenRevision;
+        [roomId, revision],
+      );
+      const lastGreenRevision = previousGreen[0] ? Number(previousGreen[0].revision) : null;
+      const payload: Record<string, unknown> = {
+        revision,
+        status: result.status,
+        duration: result.durationMs,
+        log_ref: runId,
+      };
+      if (result.status === "RED") payload.last_green_revision = lastGreenRevision;
 
-    let inboxCount = 0;
-    if (result.status === "RED") {
-      const { rows: suspects } = await client.query<{ author_id: string }>(
-        `SELECT DISTINCT c.actor_id AS author_id
+      let inboxCount = 0;
+      if (result.status === "RED") {
+        const { rows: suspects } = await client.query<{ author_id: string }>(
+          `SELECT DISTINCT c.actor_id AS author_id
          FROM workspace_revisions r
          JOIN changesets c ON c.id = r.changeset_id
                           AND c.workspace_id = r.workspace_id AND c.room_id = r.room_id
@@ -58,23 +61,26 @@ export async function publishHealthResult(
            AND r.revision <= $3 AND ($4::bigint IS NULL OR r.revision > $4)
            AND p.status <> 'REMOVED'
          ORDER BY author_id`,
-        [roomId, current.workspace_id, revision, lastGreenRevision],
-      );
-      for (const { author_id } of suspects) {
-        await deliverInbox(client, roomId, author_id, {
-          kind: "HEALTH_RED",
-          ref: { kind: "health_run", id: runId },
-          summary: `Health check failed at workspace revision ${revision}; your ChangeSet is in the suspect range.`,
-        });
-        inboxCount += 1;
+          [roomId, current.workspace_id, revision, lastGreenRevision],
+        );
+        for (const { author_id } of suspects) {
+          await deliverInbox(client, roomId, author_id, {
+            kind: "HEALTH_RED",
+            ref: { kind: "health_run", id: runId },
+            summary: `Health check failed at workspace revision ${revision}; your ChangeSet is in the suspect range.`,
+          });
+          inboxCount += 1;
+        }
       }
-    }
 
-    return {
-      result: { inboxCount, lastGreenRevision },
-      events: [{ type: "workspace.health", actor_id: "system", payload }],
-    };
-  });
+      return {
+        result: { inboxCount, lastGreenRevision },
+        events: [{ type: "workspace.health", actor_id: "system", payload }],
+      };
+    },
+    // A frozen room records no new health events (the run itself stays in health_runs).
+    { whenFrozen: () => ({ inboxCount: 0, lastGreenRevision: null }) },
+  );
 }
 
 /** Register the scoped-safe health log read (§12.1); scoped readers receive status only. */

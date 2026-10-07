@@ -4,6 +4,7 @@ import { registerMcp } from "@crossover/mcp";
 import {
   Dispatcher,
   LeaseRenewer,
+  LeaseSweeper,
   RedisEventPublisher,
   RedisEventSubscriber,
   registerRoomEventsSubscribeCommand,
@@ -25,6 +26,7 @@ import {
   registerRoomEventsCommand,
   registerRoomLifecycleCommands,
   registerTaskCommands,
+  registerTaskHeartbeat,
   registerTaskLifecycleCommands,
   registerTaskReadCommands,
   type Authorizer,
@@ -58,6 +60,8 @@ export interface ComposeOverrides {
   authorize?: Authorizer;
   /** Lease TTL; the renewal interval is a third of it. Default: the kernel's. */
   leaseTtlMs?: number;
+  /** How often agents' lapsed task claims are swept back to OPEN. Default 30 s. */
+  leaseSweepIntervalMs?: number;
 }
 
 export interface CrossoverServer {
@@ -91,6 +95,7 @@ export async function composeServer(
   let publisher: EventPublisher;
   let redis: RedisEventPublisher | undefined;
   let escalations: ConflictEscalationSweeper | undefined;
+  let leaseSweeper: LeaseSweeper | undefined;
   if (overrides.publisher) {
     publisher = overrides.publisher;
   } else {
@@ -135,6 +140,14 @@ export async function composeServer(
     renewer.start();
     escalations = new ConflictEscalationSweeper({ pool, dispatcher });
     escalations.start();
+    leaseSweeper = new LeaseSweeper({
+      pool,
+      dispatcher,
+      ...(overrides.leaseSweepIntervalMs !== undefined
+        ? { intervalMs: overrides.leaseSweepIntervalMs }
+        : {}),
+    });
+    leaseSweeper.start();
 
     const app = buildGateway({
       dispatcher,
@@ -148,6 +161,7 @@ export async function composeServer(
     const close = () =>
       (closing ??= (async () => {
         await escalations?.stop();
+        await leaseSweeper?.stop();
         await renewer.stop();
         await app.close();
         await healthQueue.close();
@@ -161,6 +175,7 @@ export async function composeServer(
     return { app, dispatcher, pool, renewer, close };
   } catch (err) {
     await escalations?.stop();
+    await leaseSweeper?.stop();
     await redis?.close();
     await redisSubscriber?.close();
     await intentStore.close();
@@ -198,6 +213,7 @@ function registerCommands(
   registerTaskCommands(dispatcher);
   registerTaskReadCommands(dispatcher);
   registerTaskLifecycleCommands(dispatcher, { healthGate: workspaceHealthGate });
+  registerTaskHeartbeat(dispatcher);
   registerMessageCommands(dispatcher);
   registerMemoryCommands(dispatcher);
   registerMemoryAccessCommands(dispatcher);

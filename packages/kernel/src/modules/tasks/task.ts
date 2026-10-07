@@ -85,3 +85,27 @@ export const AGENT_LEASE_MINUTES = 15;
 export const leaseSql = (ownerKindParam: string) =>
   `CASE WHEN ${ownerKindParam} = 'AGENT'
         THEN clock_timestamp() + make_interval(mins => ${AGENT_LEASE_MINUTES}) END`;
+
+/**
+ * Give agents' live claims a fresh lease (§22.1: claims are frozen while a participant or the
+ * room is paused, so on resume the clock starts over instead of leaving them already expired).
+ * `ownerId` limits it to one participant's tasks; without it, every ACTIVE agent's in the room.
+ * Only claims that have a lease (an agent's `CLAIMED`/`IN_PROGRESS`/`BLOCKED` tasks) change, and
+ * neither the task's version nor any event does: it is bookkeeping, not a change to the task.
+ */
+export async function restartAgentLeases(
+  client: PoolClient,
+  roomId: string,
+  ownerId?: string,
+): Promise<number> {
+  const { rowCount } = await client.query(
+    `UPDATE tasks t SET lease_expires_at = ${leaseSql("p.kind")}
+     FROM participants p
+     WHERE t.room_id = $1 AND p.id = t.owner_id AND p.room_id = t.room_id
+       AND p.kind = 'AGENT' AND p.status = 'ACTIVE'
+       AND t.status IN ('CLAIMED', 'IN_PROGRESS', 'BLOCKED') AND t.lease_expires_at IS NOT NULL
+       AND ($2::text IS NULL OR t.owner_id = $2)`,
+    [roomId, ownerId ?? null],
+  );
+  return rowCount ?? 0;
+}

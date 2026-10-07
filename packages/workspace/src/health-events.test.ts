@@ -232,6 +232,29 @@ describe("workspace health events and reads", () => {
     expect(inbox.every((row) => row.kind === "HEALTH_RED")).toBe(true);
   });
 
+  it("records no health event or suspect notification while the room is frozen", async () => {
+    const f = await fixture();
+    await db.pool.query("UPDATE rooms SET status = 'PAUSED' WHERE id = $1", [f.roomId]);
+    const before = (
+      await db.pool.query("SELECT count(*)::int AS n FROM events WHERE room_id = $1", [f.roomId])
+    ).rows[0].n;
+    await expect(
+      publishHealthResult(db.pool, f.dispatcher, f.roomId, 0, newId("health"), {
+        status: "RED",
+        durationMs: 5,
+        log: "boom",
+      }),
+    ).resolves.toBeUndefined();
+    const after = (
+      await db.pool.query("SELECT count(*)::int AS n FROM events WHERE room_id = $1", [f.roomId])
+    ).rows[0].n;
+    expect(after).toBe(before);
+    const { rows: inbox } = await db.pool.query("SELECT id FROM inbox_items WHERE room_id = $1", [
+      f.roomId,
+    ]);
+    expect(inbox).toEqual([]);
+  });
+
   it("emits GREEN and ERROR without suspect notifications or a suspect range", async () => {
     const f = await fixture();
     const greenId = await record(f, 0, { status: "GREEN", durationMs: 10, log: "ok" });
