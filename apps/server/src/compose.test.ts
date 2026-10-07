@@ -151,6 +151,19 @@ describe("composeServer", () => {
     expect(seqs).toEqual([...seqs].sort((a, b) => a - b));
   });
 
+  it("serves the inbox over HTTP: an empty list, and NOT_FOUND for an id that isn't theirs", async () => {
+    const { server } = await start();
+    const { owner, agent, cmd } = await walkthrough(server.app);
+    const listed = await ok(await cmd(envelope("inbox.list"), owner.tokens.access_token));
+    expect(listed.response).toEqual({ items: [], has_more: false });
+    const res = await cmd(
+      envelope("inbox.ack", { ids: ["inbox_not_mine"] }),
+      agent.tokens.access_token,
+    );
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error.code).toBe("NOT_FOUND");
+  });
+
   it("enforces the real policy: an observer can't apply a ChangeSet", async () => {
     const { server } = await start();
     const { owner, cmd, roomId } = await walkthrough(server.app);

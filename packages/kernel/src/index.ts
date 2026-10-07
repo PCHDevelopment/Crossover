@@ -12,3 +12,4 @@ export * from "./modules/capabilities/index.js";
 export * from "./modules/participants/index.js";
 export * from "./modules/tasks/index.js";
 export * from "./modules/messages/index.js";
+export * from "./modules/inbox/index.js";
