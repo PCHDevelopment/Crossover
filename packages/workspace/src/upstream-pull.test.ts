@@ -87,7 +87,7 @@ class FixtureFetcher implements UpstreamFetcher {
 
 const URL_OK = "https://github.com/acme/widgets";
 
-async function setup() {
+async function setup(extra: { pullLimits?: { files?: number; bytes?: number } } = {}) {
   const up = await upstreamRepo();
   const roomId = newId("room");
   const lead = newId("part");
@@ -110,7 +110,7 @@ async function setup() {
   const fetcher = new FixtureFetcher(up.dir);
   const d = new Dispatcher({ pool: db.pool, authorize: allowAll, nodeId: roomId });
   registerWorkspaceCommands(d, {
-    upstream: { fetcher, resolve: async () => ["93.184.216.34"] },
+    upstream: { fetcher, resolve: async () => ["93.184.216.34"], ...extra },
   });
   registerMessageCommands(d);
   const as = (id: string, kind: "HUMAN" | "AGENT", role: "LEAD" | "DEVELOPER") => ({
@@ -363,6 +363,48 @@ describe("git.pull_upstream (§24.2, T803)", () => {
       ).stdout.trim(),
     ).toBe(await s.up.tree());
   }, 60_000);
+
+  it("a file the room and the upstream both added is a conflict to resolve, not a wedged room (add/add)", async () => {
+    const s = await setup();
+    await s.call(s.devP, "workspace.apply_changeset", {
+      source: "EDITOR",
+      message: "add new.ts",
+      base_workspace_revision: Number((await s.head()).revision),
+      operations: [{ type: "create", path: "src/new.ts", content: "export const n = 'room';\n" }],
+    });
+    await s.up.commit(async (dir) => {
+      await writeFile(join(dir, "src/new.ts"), "export const n = 'upstream';\n");
+    });
+    const out = await s.pull();
+    expect(out.response).toMatchObject({ status: "CONFLICT", conflicts: [{ path: "src/new.ts" }] });
+    // Identical content on both sides is no conflict at all.
+    const t = await setup();
+    await t.call(t.devP, "workspace.apply_changeset", {
+      source: "EDITOR",
+      message: "add same.ts",
+      base_workspace_revision: Number((await t.head()).revision),
+      operations: [{ type: "create", path: "src/same.ts", content: "same\n" }],
+    });
+    await t.up.commit(async (dir) => {
+      await writeFile(join(dir, "src/same.ts"), "same\n");
+    });
+    expect((await t.pull()).response).toMatchObject({ status: "UP_TO_DATE" });
+  });
+
+  it("a pull is bounded overall: more files, or more new bytes, than the limit is refused before anything is applied", async () => {
+    const s = await setup({ pullLimits: { files: 3, bytes: 50 } });
+    await s.up.commit(async (dir) => {
+      for (let i = 0; i < 4; i++) await writeFile(join(dir, `f${i}.txt`), `${i}\n`);
+    });
+    await rejects(s.pull(), "too_many_changes");
+    expect(Number((await s.head()).revision)).toBe(1);
+    const t = await setup({ pullLimits: { files: 10, bytes: 50 } });
+    await t.up.commit(async (dir) => {
+      await writeFile(join(dir, "big.txt"), "x".repeat(200));
+    });
+    await rejects(t.pull(), "too_many_changes");
+    expect(Number((await t.head()).revision)).toBe(1);
+  });
 
   it("a conflict in the last part of a split pull: the first part is in, the position waits, resolving it advances", async () => {
     const s = await setup();

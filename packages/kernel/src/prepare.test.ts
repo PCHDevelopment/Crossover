@@ -139,4 +139,49 @@ describe("a command's prepare phase (T807)", () => {
     await running;
     expect(s.log).toEqual(["prepare", "execute", "dispose"]);
   });
+
+  it("a failure to check the principal (not a refusal) is a retryable error, not an internal one", async () => {
+    let down = false;
+    const d = new Dispatcher({
+      pool,
+      nodeId: `node-${++n}`,
+      authorize: async (...args) => {
+        if (down) throw new Error("the database is unreachable");
+        return authorize(...args);
+      },
+    });
+    d.registerCommand({
+      method: "memory.put",
+      action: "memory.write",
+      mutating: true,
+      params: z.strictObject({ key: z.string(), value: z.string(), expected_revision: z.number() }),
+      prepare: async () => "slow",
+      execute: async () => ({ response: {} }),
+    });
+    const room = newId("room");
+    await pool.query(
+      `INSERT INTO rooms (id, slug, name, objective, owner_id) VALUES ($1, $1, 'n', 'o', 'x')`,
+      [room],
+    );
+    const id = newId("part");
+    await pool.query(
+      `INSERT INTO participants (id, room_id, kind, display_name, authority, role, status)
+       VALUES ($1, $2, 'AGENT', $1, 'MEMBER', 'DEVELOPER', 'ACTIVE')`,
+      [id, room],
+    );
+    const dev = {
+      participant_id: id,
+      room_id: room,
+      kind: "AGENT",
+      authority: "MEMBER",
+      role: "DEVELOPER",
+    } as Principal;
+    down = true;
+    const err = await d
+      .dispatch(dev, envelope("memory.put", { key: "a", value: "v", expected_revision: 0 }))
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CrossoverError);
+    expect((err as CrossoverError).retryable).toBe(true);
+    expect((err as CrossoverError).details).toMatchObject({ reason: "prepare_unavailable" });
+  });
 });

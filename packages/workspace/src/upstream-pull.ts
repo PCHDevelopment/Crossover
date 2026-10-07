@@ -11,6 +11,8 @@ import {
   disposeFetched,
   fetchIntoRoomRepo,
   listTree,
+  MAX_IMPORT_BYTES,
+  MAX_IMPORT_FILES,
   refuse,
   UPSTREAM_ACTOR,
   type PreparedFetch,
@@ -167,6 +169,46 @@ async function readBlobs(repo: string, shas: string[]): Promise<Buffer[]> {
   return blobs;
 }
 
+/** Most files, and most bytes of new content, one pull applies (the import's limits by default). */
+async function assertPullSize(
+  repo: string,
+  changes: RawChange[],
+  limits: { files?: number; bytes?: number } = {},
+): Promise<void> {
+  const maxFiles = limits.files ?? MAX_IMPORT_FILES;
+  const maxBytes = limits.bytes ?? MAX_IMPORT_BYTES;
+  if (changes.length > maxFiles) {
+    throw refuse(
+      "too_many_changes",
+      `The upstream changed more than ${maxFiles} files since the last sync`,
+      {
+        changed: changes.length,
+        limit_files: maxFiles,
+      },
+    );
+  }
+  const blobs = changes.flatMap((c) => (c.blob === null ? [] : [c.blob]));
+  if (blobs.length === 0) return;
+  const { stdout } = await git(["cat-file", "--batch-check"], {
+    gitDir: repo,
+    timeoutMs: 60_000,
+    maxBuffer: 256 * 1024 * 1024,
+    input: blobs.map((sha) => `${sha}\n`).join(""),
+  });
+  let bytes = 0;
+  for (const line of stdout.split("\n")) bytes += Number(/ blob (\d+)$/.exec(line)?.[1] ?? 0);
+  if (bytes > maxBytes) {
+    throw refuse(
+      "too_many_changes",
+      "The upstream's new content since the last sync is too large to pull",
+      {
+        bytes,
+        limit_bytes: maxBytes,
+      },
+    );
+  }
+}
+
 /** A ChangeSet holds at most this many operations (§10.1) and a bit under 25 MiB of text. */
 const MAX_PULL_OPERATIONS = 500;
 const MAX_CHUNK_BYTES = 20 * 1024 * 1024;
@@ -242,6 +284,7 @@ export function registerGitPullUpstream(dispatcher: Dispatcher, deps: WorkspaceC
           changes = (
             await rawChanges(ws.repo_path, upstream.last_synced_sha, fetchedInto.sha)
           ).filter((c) => c.blob !== c.oldBlob); // a mode-only change is no edit
+          await assertPullSize(ws.repo_path, changes, deps.upstream?.pullLimits);
         }
         return {
           ...fetchedInto,
@@ -349,7 +392,9 @@ export function registerGitPullUpstream(dispatcher: Dispatcher, deps: WorkspaceC
           const content = contents[next++]!;
           size = content.length;
           op = {
-            type: atHead.get(change.path) === null && change.status === "A" ? "create" : "modify",
+            // Relative to the base the ChangeSet is merged from (the last sync), not to the head:
+            // a file the room also added is an add/add the merge reports as a conflict.
+            type: change.status === "A" ? "create" : "modify",
             path: change.path,
             content: content.toString("base64"),
             encoding: "base64",

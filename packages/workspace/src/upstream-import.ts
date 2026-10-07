@@ -33,6 +33,8 @@ export const gitImportParams = z.strictObject({
 
 export interface UpstreamDeps {
   fetcher?: UpstreamFetcher;
+  /** Most files and bytes of new content one `git.pull_upstream` applies; default the import's limits. */
+  pullLimits?: { files?: number; bytes?: number };
   credentials?: GitCredentialProvider;
   /** Host check for the URL (tests); default: the DNS resolver. */
   resolve?: Parameters<typeof assertPublicHttpsUrl>[1];

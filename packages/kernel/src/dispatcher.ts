@@ -1158,8 +1158,15 @@ export class Dispatcher {
         },
       );
       return true;
-    } catch {
-      return false;
+    } catch (error) {
+      // A refusal is the command's own authorization to report (and record). Anything else (the
+      // database unreachable, say) is not a refusal: say to retry, not "internal error".
+      if (error instanceof CrossoverError) return false;
+      throw new CrossoverError("STALE_FENCE", "Couldn't check the request just now; retry it", {
+        retryable: true,
+        details: { reason: "prepare_unavailable" },
+        cause: error,
+      });
     } finally {
       client.release();
     }
