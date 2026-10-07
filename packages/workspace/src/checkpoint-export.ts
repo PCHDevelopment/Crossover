@@ -23,6 +23,17 @@ interface Contributor {
   display_name: string;
 }
 
+/** A line a Git trailer parser would take for a trailer (`Token: value`). */
+const TRAILER_LINE = /^\s*[A-Za-z0-9][A-Za-z0-9-]*\s*:/;
+
+/** Put a visible marker in front of any trailer-shaped line of user text. */
+export function neutralizeTrailers(text: string): string {
+  return text
+    .split(/\r?\n/)
+    .map((line) => (TRAILER_LINE.test(line) ? `> ${line}` : line))
+    .join("\n");
+}
+
 /** A name that is safe in a Git identity line. */
 const cleanName = (name: string) =>
   name
@@ -42,8 +53,10 @@ export function identityOf(person: Contributor, domain: string): { name: string;
 }
 
 interface Pending {
-  /** What this commit is: its message, its workspace revision, and who else gets credit. */
+  /** What this commit is: its message, its workspace revision, who wrote it and who else gets credit. */
   message: string;
+  /** The commit's author: the checkpoint's creator. */
+  author_id: string;
   revision: number;
   at: Date;
   contributors: string[];
@@ -179,6 +192,7 @@ export function registerCheckpointExport(dispatcher: Dispatcher, deps: UpstreamD
           );
           commits.push({
             message: c.message,
+            author_id: c.created_by,
             revision: Number(c.revision),
             at: c.created_at,
             contributors: rows.map((r) => r.actor_id),
@@ -201,6 +215,7 @@ export function registerCheckpointExport(dispatcher: Dispatcher, deps: UpstreamD
         for (const r of rows) {
           commits.push({
             message: r.message,
+            author_id: target.created_by,
             revision: Number(r.applied_revision),
             at: r.applied_at,
             contributors: [r.actor_id],
@@ -210,6 +225,7 @@ export function registerCheckpointExport(dispatcher: Dispatcher, deps: UpstreamD
         if (commits[commits.length - 1]?.revision !== Number(target.revision)) {
           commits.push({
             message: target.message,
+            author_id: target.created_by,
             revision: Number(target.revision),
             at: target.created_at,
             contributors: [],
@@ -217,12 +233,12 @@ export function registerCheckpointExport(dispatcher: Dispatcher, deps: UpstreamD
         }
       }
 
-      const creator = await person(target.created_by);
-      if (!creator) throw refuse("creator_gone", "The checkpoint's creator isn't in the room");
-      const author = identityOf(creator, domain);
       let parent = parent0;
       const made: string[] = [];
       for (const commit of commits) {
+        const creator = await person(commit.author_id);
+        if (!creator) throw refuse("creator_gone", "A checkpoint's creator isn't in the room");
+        const author = identityOf(creator, domain);
         const { rows: rev } = await client.query<{ commit_sha: string }>(
           "SELECT commit_sha FROM workspace_revisions WHERE room_id = $1 AND revision = $2",
           [room_id, commit.revision],
@@ -240,7 +256,15 @@ export function registerCheckpointExport(dispatcher: Dispatcher, deps: UpstreamD
           const line = `Co-authored-by: ${identity.name} <${identity.email}>`;
           if (!trailers.includes(line)) trailers.push(line);
         }
-        const text = `${commit.message.trim()}\n${trailers.length ? `\n${trailers.join("\n")}\n` : ""}`;
+        // The platform's own trailer block always ends the message, and trailer-shaped lines in
+        // the user's text are defused, so nobody can write a `Co-authored-by:` of their own (a
+        // trailer is only read from the last paragraph).
+        const text = [
+          neutralizeTrailers(commit.message.trim()),
+          "",
+          [`Crossover-Room: ${room_id}`, ...trailers].join("\n"),
+          "",
+        ].join("\n");
         const date = commit.at.toISOString();
         const sha = (
           await git(["commit-tree", tree, "-p", parent], {

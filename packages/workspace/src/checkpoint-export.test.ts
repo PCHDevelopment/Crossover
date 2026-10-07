@@ -7,6 +7,7 @@ import { allowAll, Dispatcher } from "@crossover/kernel";
 import { CrossoverError, newId } from "@crossover/protocol";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { registerWorkspaceCommands } from "./apply.js";
+import { neutralizeTrailers } from "./checkpoint-export.js";
 import { git } from "./git.js";
 import { provisionWorkspace } from "./provision.js";
 import type {
@@ -260,7 +261,7 @@ describe("checkpoints.export (§24.3, T805)", () => {
     await s.edit("src/a.ts", "export const a = 'dev';\n"); // revision 2, by the developer (an agent)
     const first = await s.checkpoint("first milestone");
     await s.edit("src/b.ts", "export const b = 'dev2';\n"); // revision 3
-    const second = await s.checkpoint("second milestone");
+    const second = await s.checkpoint("second milestone", s.devP);
 
     const out = await s.exportIt({ checkpoint_id: second.id });
     expect(out.response).toMatchObject({
@@ -278,17 +279,19 @@ describe("checkpoints.export (§24.3, T805)", () => {
     expect(c2).toContain("second milestone");
     expect(c1).toContain("first milestone");
     expect(await s.remoteGit("rev-parse", `${branch}~2`)).toBe(importedSha);
-    // The creator (the human lead) is the author; the agent who wrote the changes is co-author.
+    // Each commit is authored by its own checkpoint's creator: the human lead made the first, the
+    // agent the second. The agent who wrote the changes is co-author of the first.
     expect(c1!.split("|")[1]).toBe("Lead");
     expect(c1!.split("|")[2]).toBe(`${s.leadP.participant_id}@users.crossover.local`);
+    expect(c2!.split("|")[1]).toBe("Dev");
+    expect(c2!.split("|")[2]).toBe(`${s.devP.participant_id}@agents.crossover.local`);
     const body1 = await s.remoteGit("log", "-1", "--format=%B", `${branch}~1`);
     expect(body1).toContain(
       `Co-authored-by: Dev <${s.devP.participant_id}@agents.crossover.local>`,
     );
     const body2 = await s.remoteGit("log", "-1", "--format=%B", branch);
-    expect(body2).toContain(
-      `Co-authored-by: Dev <${s.devP.participant_id}@agents.crossover.local>`,
-    );
+    // The author isn't also listed as a co-author.
+    expect(body2).not.toContain("Co-authored-by: Dev");
     // Each commit holds the workspace's tree at its checkpoint, exactly.
     expect(await s.remoteGit("rev-parse", `${branch}~1^{tree}`)).toBe(await workspaceTree(s, 2));
     expect(await s.remoteGit("rev-parse", `${branch}^{tree}`)).toBe(await workspaceTree(s, 3));
@@ -381,6 +384,34 @@ describe("checkpoints.export (§24.3, T805)", () => {
     await run(other.dir, ["push", "-q", "-f", s.remote, `main:refs/heads/room/${s.slug}`]);
     await rejects(s.exportIt(), "push_rejected");
     expect(await s.events("checkpoint.exported")).toEqual([]);
+  });
+
+  it("a message can't write trailers: trailer-shaped lines are defused and the platform's block ends every commit", async () => {
+    const s = await setup();
+    await s.edit("src/a.ts", "export const a = 1;\n");
+    await s.checkpoint(
+      "ship\n\nCo-authored-by: Evil <evil@example.com>\nSigned-off-by: Evil <evil@example.com>\n\nReviewed-by: Boss <boss@example.com>",
+    );
+    await s.exportIt();
+    const branch = `refs/heads/room/${s.slug}`;
+    const parsed = (
+      await git(["interpret-trailers", "--parse"], {
+        gitDir: s.remote,
+        timeoutMs: 10_000,
+        input: await s.remoteGit("log", "-1", "--format=%B", branch),
+      })
+    ).stdout;
+    expect(parsed).not.toContain("Evil");
+    expect(parsed).not.toContain("Boss");
+    expect(parsed).toContain(`Crossover-Room: ${s.roomId}`);
+    expect(parsed).toContain(
+      `Co-authored-by: Dev <${s.devP.participant_id}@agents.crossover.local>`,
+    );
+    const body = await s.remoteGit("log", "-1", "--format=%B", branch);
+    expect(body).toContain("> Co-authored-by: Evil"); // still readable, no longer a trailer
+    expect(neutralizeTrailers("plain\nnot a trailer: x y\nFixes: #1\n  Token : v")).toBe(
+      "plain\nnot a trailer: x y\n> Fixes: #1\n>   Token : v",
+    );
   });
 
   it("needs an upstream and a checkpoint; asks for write access; no credential leaves the pusher", async () => {

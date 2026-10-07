@@ -271,6 +271,16 @@ describe("checkpoints over HTTP", () => {
     const denied = await r.call(r.dev, "checkpoints.create", { message: "nope" });
     expect(denied.statusCode).toBe(403);
     const made = await ok(await r.call(r.owner, "checkpoints.create", { message: "imported" }));
+    // The checkpoint's own event is state an export is rebuilt from: it can't be redacted.
+    const created = (
+      await ok(await r.call(r.owner, "room.events.list", { limit: 500 }))
+    ).response.events.find((e: { type: string }) => e.type === "checkpoint.created");
+    const refused = await r.call(r.owner, "events.redact", {
+      sequence: created.sequence,
+      reason: "x",
+    });
+    expect(refused.statusCode).toBe(400);
+    expect(refused.json().error.details.reason).toBe("state_event");
     expect(made.response).toMatchObject({ revision: 1, message: "imported", overridden: false });
     const list = await ok(await r.call(r.dev, "checkpoints.list"));
     expect(list.response.checkpoints).toHaveLength(1);
