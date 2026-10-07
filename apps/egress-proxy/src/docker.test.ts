@@ -174,18 +174,15 @@ describe.skipIf(!dockerImageAvailable)("egress proxy Docker smoke", () => {
       encoding: "utf8",
       timeout: 10_000,
     }).trim();
-    healthCacheVolume = `crossover-health-cache-${createHash("sha256")
-      .update(roomId)
-      .digest("hex")
-      .slice(0, 24)}`;
+    const cacheRoomLabel = createHash("sha256").update(roomId).digest("hex").slice(0, 24);
     const runner = new DockerHealthRunner({
       image: IMAGE,
       allowedImages: [IMAGE],
       egressProxyContainer: proxyName,
       egressProxySecret: SECRET,
     });
-    const installCommand = `node -e 'const p=new URL(process.env.HTTPS_PROXY);const headers={"Proxy-Authorization":"Basic "+Buffer.from(decodeURIComponent(p.username)+":"+decodeURIComponent(p.password)).toString("base64")};const req=require("node:http").request({host:p.hostname,port:Number(p.port),method:"CONNECT",path:"example.com:443",headers});req.once("connect",(response,socket)=>{socket.destroy();process.exit(response.statusCode===403?0:1)});req.once("error",()=>process.exit(2));req.setTimeout(5000,()=>{req.destroy();process.exit(3)});req.end();'`;
-    const healthCommand = `node -e 'const socket=require("node:net").connect({host:"93.184.216.34",port:443});socket.setTimeout(1500);socket.once("connect",()=>process.exit(1));socket.once("error",()=>process.exit(0));socket.once("timeout",()=>process.exit(0));'`;
+    const installCommand = `mkdir -p /health-dependency-cache && printf shared-cache-proof > /health-dependency-cache/proof.txt && node -e 'const p=new URL(process.env.HTTPS_PROXY);const headers={"Proxy-Authorization":"Basic "+Buffer.from(decodeURIComponent(p.username)+":"+decodeURIComponent(p.password)).toString("base64")};const req=require("node:http").request({host:p.hostname,port:Number(p.port),method:"CONNECT",path:"example.com:443",headers});req.once("connect",(response,socket)=>{socket.destroy();process.exit(response.statusCode===403?0:1)});req.once("error",()=>process.exit(2));req.setTimeout(5000,()=>{req.destroy();process.exit(3)});req.end();'`;
+    const healthCommand = `test "$(cat /health-dependency-cache/proof.txt)" = shared-cache-proof && node -e 'const socket=require("node:net").connect({host:"93.184.216.34",port:443});socket.setTimeout(1500);socket.once("connect",()=>process.exit(1));socket.once("error",()=>process.exit(0));socket.once("timeout",()=>process.exit(0));'`;
 
     const result = await runner.run({
       repository: healthRepository,
@@ -198,8 +195,25 @@ describe.skipIf(!dockerImageAvailable)("egress proxy Docker smoke", () => {
         lockfilePaths: ["package-lock.json"],
       },
     });
+    healthCacheVolume = execFileSync(
+      "docker",
+      [
+        "volume",
+        "ls",
+        "--filter",
+        "label=crossover.health.cache=true",
+        "--filter",
+        `label=crossover.health.cache_room=${cacheRoomLabel}`,
+        "--format",
+        "{{.Name}}",
+      ],
+      { encoding: "utf8", timeout: 5_000 },
+    )
+      .trim()
+      .split(/\r?\n/)[0];
 
     expect(result.status).toBe("GREEN");
+    expect(healthCacheVolume).toContain(cacheRoomLabel);
     const logs = execFileSync("docker", ["logs", proxyName], { encoding: "utf8", timeout: 5_000 });
     expect(logs).toContain('"health_install_id":"hinstall_');
     expect(logs).toContain('"host":"example.com"');

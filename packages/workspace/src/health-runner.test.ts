@@ -1,9 +1,11 @@
+import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { createTestDatabase, type TestDatabase } from "@crossover/db/testing";
+import { newId } from "@crossover/protocol";
 import { git } from "./git.js";
 import {
   DEFAULT_HEALTH_IMAGE,
@@ -29,10 +31,18 @@ const dockerImageAvailable = (() => {
   }
 })();
 
-function dockerHealthContainers(): string[] {
+function dockerHealthContainers(command: string): string[] {
+  const commandHash = createHash("sha256").update(command).digest("hex");
   const output = execFileSync(
     "docker",
-    ["ps", "-aq", "--filter", "label=crossover.health.runner=true"],
+    [
+      "ps",
+      "-aq",
+      "--filter",
+      "label=crossover.health.runner=true",
+      "--filter",
+      `label=crossover.health.command=${commandHash}`,
+    ],
     {
       timeout: 1000,
     },
@@ -87,19 +97,50 @@ async function makeRepo(): Promise<{ repository: string; revision: string }> {
   return { repository, revision };
 }
 
-function fakeInstallDocker(installExitCode = 0) {
-  let volumeExists = false;
+function fakeInstallDocker(installExitCode = 0, installOutput?: string) {
+  const volumes = new Map<string, { room: string; key: string }>();
   let installs = 0;
   let healthRuns = 0;
   const calls: string[][] = [];
   const invoke = vi.fn(async (_binary: string, args: readonly string[]) => {
     calls.push([...args]);
+    if (args[0] === "container" && args[1] === "ls")
+      return { code: 0, timedOut: false, output: "" };
     if (args[0] === "network" && args[1] === "ls") return { code: 0, timedOut: false, output: "" };
-    if (args[0] === "volume" && args[1] === "inspect")
-      return { code: volumeExists ? 0 : 1, timedOut: false, output: "" };
+    if (args[0] === "volume" && args[1] === "inspect") {
+      const exists = volumes.has(args[2]!);
+      return {
+        code: exists ? 0 : 1,
+        timedOut: false,
+        output: exists ? "" : `Error response from daemon: get ${args[2]}: no such volume`,
+      };
+    }
     if (args[0] === "volume" && args[1] === "create") {
-      volumeExists = true;
-      return { code: 0, timedOut: false, output: "cache-volume" };
+      const name = args.at(-1)!;
+      const room = args
+        .find((arg) => arg.startsWith("crossover.health.cache_room="))
+        ?.split("=")[1];
+      const key = args.find((arg) => arg.startsWith("crossover.health.cache_key="))?.split("=")[1];
+      volumes.set(name, { room: room!, key: key! });
+      return { code: 0, timedOut: false, output: name };
+    }
+    if (args[0] === "volume" && args[1] === "rm") {
+      const removed = volumes.delete(args[2]!);
+      return {
+        code: removed ? 0 : 1,
+        timedOut: false,
+        output: removed ? args[2]! : `Error response from daemon: get ${args[2]}: no such volume`,
+      };
+    }
+    if (args[0] === "volume" && args[1] === "ls") {
+      const room = args
+        .find((arg) => arg.startsWith("label=crossover.health.cache_room="))
+        ?.split("=")[2];
+      const output = [...volumes]
+        .filter(([, labels]) => labels.room === room)
+        .map(([name, labels]) => `${name}|${labels.key}`)
+        .join("\n");
+      return { code: 0, timedOut: false, output };
     }
     if (args[0] === "run" && args.includes("--user=0:0"))
       return { code: 0, timedOut: false, output: "" };
@@ -110,7 +151,7 @@ function fakeInstallDocker(installExitCode = 0) {
       return {
         code: installExitCode,
         timedOut: false,
-        output: installExitCode === 0 ? "install ok" : "registry refused",
+        output: installOutput ?? (installExitCode === 0 ? "install ok" : "registry refused"),
       };
     }
     if (args[0] === "run" && args.includes("crossover.health.runner=true")) {
@@ -124,6 +165,7 @@ function fakeInstallDocker(installExitCode = 0) {
     calls,
     installCount: () => installs,
     healthCount: () => healthRuns,
+    cacheVolumes: () => [...volumes.keys()],
   };
 }
 
@@ -203,6 +245,24 @@ describe("DockerHealthRunner", () => {
     expect(() => new DockerHealthRunner({ allowedImages: [] })).toThrow(/allowlist/);
     expect(() => new DockerHealthRunner({ timeoutMs: 0 })).toThrow(/timeout/);
     expect(() => new DockerHealthRunner({ egressProxyContainer: "proxy" })).toThrow(/SECRET/);
+    expect(() => new DockerHealthRunner({ runtime: " " })).toThrow(/SANDBOX_RUNTIME/);
+  });
+
+  it("passes the configured runtime to health containers", async () => {
+    const { repository, revision } = await makeRepo();
+    const invoke = vi.fn(async (_binary: string, _args: readonly string[]) => ({
+      code: 0,
+      timedOut: false,
+      output: "ok",
+    }));
+    const result = await new DockerHealthRunner({ runtime: "runsc" }, invoke).run({
+      repository,
+      revision,
+      command: "true",
+    });
+    expect(result.status).toBe("GREEN");
+    expect(invoke.mock.calls[0]?.[1]).toContain("--runtime");
+    expect(invoke.mock.calls[0]?.[1]).toContain("runsc");
   });
 
   it("refuses room-selected images outside the operator allowlist", async () => {
@@ -246,6 +306,7 @@ describe("DockerHealthRunner", () => {
     const docker = fakeInstallDocker();
     const runner = new DockerHealthRunner(
       {
+        runtime: "runsc",
         egressProxyContainer: "egress-proxy",
         egressProxySecret: "0123456789abcdef0123456789abcdef",
       },
@@ -272,17 +333,38 @@ describe("DockerHealthRunner", () => {
     await writeFile(join(repository, "package-lock.json"), '{"lock":2}\n');
     const changedLocksRevision = await commit("update package lock");
     const third = await run(changedLocksRevision);
+    await writeFile(join(repository, "package-lock.json"), '{"lock":3}\n');
+    const newestLocksRevision = await commit("update lockfile again");
+    const fourth = await run(newestLocksRevision);
 
-    expect([first.status, second.status, third.status]).toEqual(["GREEN", "GREEN", "GREEN"]);
-    expect(docker.installCount()).toBe(2);
-    expect(docker.healthCount()).toBe(3);
+    expect([first.status, second.status, third.status, fourth.status]).toEqual([
+      "GREEN",
+      "GREEN",
+      "GREEN",
+      "GREEN",
+    ]);
+    expect(docker.installCount()).toBe(3);
+    expect(docker.healthCount()).toBe(4);
     expect(
       docker.calls.filter((args) => args[0] === "network" && args[1] === "create"),
-    ).toHaveLength(2);
+    ).toHaveLength(3);
     expect(docker.calls.filter((args) => args[0] === "network" && args[1] === "rm")).toHaveLength(
-      2,
+      3,
     );
+    expect(docker.calls.filter((args) => args.includes("--runtime")).length).toBeGreaterThan(0);
+    const cacheUid = process.getuid?.() === 0 ? 1000 : (process.getuid?.() ?? 1000);
+    const cacheGid = process.getgid?.() === 0 ? 1000 : (process.getgid?.() ?? 1000);
+    expect(
+      docker.calls.some((args) =>
+        args.some((arg) => arg.includes(`chown ${cacheUid}:${cacheGid} /health-dependency-cache`)),
+      ),
+    ).toBe(true);
+    expect(docker.cacheVolumes()).toHaveLength(2);
     const healthArgs = docker.calls.find((args) => args.includes("crossover.health.runner=true"))!;
+    const installArgs = docker.calls.find(
+      (args) => args[0] === "run" && args.includes("crossover.health.install=true"),
+    )!;
+    expect(installArgs[installArgs.indexOf("--runtime") + 1]).toBe("runsc");
     expect(healthArgs).toContain("--network=none");
     expect(healthArgs.some((arg) => arg.includes("target=/workspace/node_modules,readonly"))).toBe(
       true,
@@ -291,7 +373,7 @@ describe("DockerHealthRunner", () => {
       "SELECT status FROM health_install_runs WHERE room_id = $1 ORDER BY started_at",
       ["room_health"],
     );
-    expect(rows.map((row) => row.status)).toEqual(["SUCCEEDED", "SUCCEEDED"]);
+    expect(rows.map((row) => row.status)).toEqual(["SUCCEEDED", "SUCCEEDED", "SUCCEEDED"]);
   });
 
   it("records install failure as ERROR and skips the health command", async () => {
@@ -315,7 +397,11 @@ describe("DockerHealthRunner", () => {
     const revision = (
       await git(["rev-parse", "HEAD"], { cwd: repository, timeoutMs: 10_000 })
     ).stdout.trim();
-    const docker = fakeInstallDocker(1);
+    const exposedCredential = "a".repeat(43);
+    const docker = fakeInstallDocker(
+      1,
+      `registry refused after proxy http://hinstall_example:${exposedCredential}@egress-proxy:3128`,
+    );
     const result = await new DockerHealthRunner(
       {
         egressProxyContainer: "egress-proxy",
@@ -337,13 +423,87 @@ describe("DockerHealthRunner", () => {
     expect(result.status).toBe("ERROR");
     expect(result.log).toContain("registry refused");
     expect(result.log).toContain("installation failed");
+    expect(result.log).not.toContain(exposedCredential);
+    expect(result.log).toContain("[REDACTED]");
     expect(docker.installCount()).toBe(1);
     expect(docker.healthCount()).toBe(0);
+    expect(docker.cacheVolumes()).toHaveLength(0);
     const { rows } = await db.pool.query(
       "SELECT status FROM health_install_runs WHERE room_id = $1",
       ["room_health"],
     );
     expect(rows).toEqual([{ status: "FAILED" }]);
+  });
+
+  it("fails a crashed setup run that has no container or network", async () => {
+    await db.pool.query("DELETE FROM health_install_runs WHERE room_id = $1", ["room_health"]);
+    const installId = newId("hinstall");
+    await db.pool.query(
+      `INSERT INTO health_install_runs (id, room_id, cache_key, status, started_at, expires_at)
+       VALUES ($1, 'room_health', $2, 'RUNNING', clock_timestamp() - interval '3 minutes',
+               clock_timestamp() + interval '8 minutes')`,
+      [installId, "c".repeat(64)],
+    );
+    const invoke = vi.fn(async () => ({ code: 0, timedOut: false, output: "" }));
+    const runner = new DockerHealthRunner(
+      {
+        egressProxyContainer: "egress-proxy",
+        egressProxySecret: "0123456789abcdef0123456789abcdef",
+      },
+      invoke,
+    );
+
+    await runner.sweepExpiredInstallRuns(db.pool);
+
+    const { rows } = await db.pool.query("SELECT status FROM health_install_runs WHERE id = $1", [
+      installId,
+    ]);
+    expect(rows).toEqual([{ status: "FAILED" }]);
+  });
+
+  it("removes an expired install container before its network", async () => {
+    await db.pool.query("DELETE FROM health_install_runs WHERE room_id = $1", ["room_health"]);
+    const installId = newId("hinstall");
+    await db.pool.query(
+      `INSERT INTO health_install_runs (id, room_id, cache_key, status, started_at, expires_at)
+       VALUES ($1, 'room_health', $2, 'RUNNING', clock_timestamp() - interval '3 minutes',
+               clock_timestamp() - interval '1 second')`,
+      [installId, "d".repeat(64)],
+    );
+    const suffix = installId.slice("hinstall_".length).toLowerCase();
+    const calls: string[][] = [];
+    const invoke = vi.fn(async (_binary: string, args: readonly string[]) => {
+      calls.push([...args]);
+      if (args[0] === "container" && args[1] === "ls")
+        return {
+          code: 0,
+          timedOut: false,
+          output: `health-install-${suffix}|${installId}`,
+        };
+      if (args[0] === "network" && args[1] === "ls")
+        return {
+          code: 0,
+          timedOut: false,
+          output: `crossover-health-install-${suffix}|${installId}`,
+        };
+      return { code: 0, timedOut: false, output: "" };
+    });
+    const runner = new DockerHealthRunner(
+      {
+        egressProxyContainer: "egress-proxy",
+        egressProxySecret: "0123456789abcdef0123456789abcdef",
+      },
+      invoke,
+    );
+
+    await runner.sweepExpiredInstallRuns(db.pool);
+
+    const containerRemoval = calls.findIndex(
+      (args) => args[0] === "container" && args[1] === "rm" && args[2] === "--force",
+    );
+    const networkRemoval = calls.findIndex((args) => args[0] === "network" && args[1] === "rm");
+    expect(containerRemoval).toBeGreaterThanOrEqual(0);
+    expect(networkRemoval).toBeGreaterThan(containerRemoval);
   });
 
   it.skipIf(!dockerImageAvailable)(
@@ -384,31 +544,34 @@ describe("DockerHealthRunner", () => {
   });
 
   it.skipIf(!dockerImageAvailable)("kills and removes a container on timeout", async () => {
-    const before = dockerHealthContainers();
+    const command = "sleep 30";
+    const before = dockerHealthContainers(command);
     const { repository, revision } = await makeRepo();
     const result = await new DockerHealthRunner({
       allowedImages: [DEFAULT_HEALTH_IMAGE],
       timeoutMs: 1000,
-    }).run({ repository, revision, command: "sleep 30" });
+    }).run({ repository, revision, command });
     expect(result.status).toBe("ERROR");
-    expect(dockerHealthContainers()).toEqual(before);
+    expect(dockerHealthContainers(command)).toEqual(before);
   });
 
   it.skipIf(!dockerImageAvailable)("kills and removes a container when aborted", async () => {
-    const before = dockerHealthContainers();
+    const command = "sleep 30";
+    const before = dockerHealthContainers(command);
     const { repository, revision } = await makeRepo();
     const controller = new AbortController();
     const running = new DockerHealthRunner({
       allowedImages: [DEFAULT_HEALTH_IMAGE],
       timeoutMs: 30_000,
-    }).run({ repository, revision, command: "sleep 30", signal: controller.signal });
-    await vi.waitFor(() => expect(dockerHealthContainers().length).toBeGreaterThan(before.length), {
-      timeout: 5_000,
-    });
+    }).run({ repository, revision, command, signal: controller.signal });
+    await vi.waitFor(
+      () => expect(dockerHealthContainers(command).length).toBeGreaterThan(before.length),
+      { timeout: 5_000 },
+    );
 
     controller.abort();
     await expect(running).resolves.toMatchObject({ status: "ERROR" });
-    expect(dockerHealthContainers()).toEqual(before);
+    expect(dockerHealthContainers(command)).toEqual(before);
   });
 
   it("persists results against the exact room-scoped workspace revision", async () => {
