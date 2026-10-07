@@ -23,7 +23,7 @@ Conventions are in `docs/ENGINEERING.md`. Section references (§) point to `docs
 | M8 Git interoperability (§24)         | T801–T807   | S1 (moved from S2 in Review 4)                          |
 | M9 Safety controls (§22–23)           | T901–T906   | S1 (T902, T904–T906), S2 (T901, T903)                   |
 | M10 Execution sandboxes (§14)         | T1001–T1008 | S2 (T1007 split into T1007 + T1007b in Review 5)        |
-| M11 Clients (§27, §29)                | T1101–T1105 | S1                                                      |
+| M11 Clients (§27, §29)                | T1101–T1106 | S1                                                      |
 | M12 Plugins (§21.4–21.5)              | T1201–T1206 | S1 (T1201, moved in Review 5), S2 (T1202–T1206)         |
 | M13 Lessons from building (§34)       | T1301–T1303 | S1                                                      |
 
@@ -1148,6 +1148,15 @@ Deps: T1101 · Migration: —
 The same surface as T1101, typed from the same catalog.
 
 - Shares T1101's contract test fixtures.
+
+### T1106 · Token refresh over REST and in the SDK — S1
+
+Deps: T206, T1101 · Migration: —
+
+Added after Review 5. `refresh()` (T206) exists in the kernel but no route exposes it, so an SDK client can't refresh, and every subscription is closed with 4401 when its 1-hour access token expires. Add `POST /v1/auth/refresh { refresh_token }`: it rotates the refresh token, reuse revokes the whole family (§15.3), and it is rate-limited per IP. In the SDK, add a token source (`getToken`, or automatic refresh with a stored refresh token) that the REST transport uses on `UNAUTHENTICATED` and the subscription uses before reconnecting.
+
+- A subscription outlives the access token (fake clock): it reconnects with a fresh token, with no gap and no duplicate.
+- Reusing a rotated refresh token revokes the family, and the SDK surfaces `UNAUTHENTICATED` once instead of looping.
 
 ### T1104 · Web app shell — S1
 

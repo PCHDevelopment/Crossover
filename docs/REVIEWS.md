@@ -27,7 +27,7 @@ Periodic big-picture reviews by O1: is the merged code building the product in A
 3. **New tasks:** **T1007b** (the egress proxy, split out of T1007, in review) and **T807** (a dispatcher prepare phase, so slow I/O such as upstream fetches doesn't hold the room lease; it also splits pulls larger than 500 files). T803's spec now names the caller as submitter of record.
 4. **Stacking:** S2 split T1007b into five stacked PRs. Each is reviewable, but squash-merging bottom-up forces a rebase of every later part. The rule stands: open the next part after the previous one merges, unless the lead agrees to a stack up front.
 5. **Order.**
-   - **S1:** #131 T804, #132 T906, #134 T904 (fix) → T805 → T806 → T807 → T1201 → T1101 (TS SDK) → T1104 → T1105 → T905 → T902 → T704–T706.
+   - **S1:** #131 T804, #132 T906, #134 T904 (fix) → T805 → T806 → T807 → T1201 → T1101 (TS SDK) → T1106 (token refresh) → T1104 → T1105 → T905 → T902 → T704–T706.
    - **S2:** T1007b stack → T611 → T1002 → T1003 → T1005 → T1006 → T1004 → T1008 → T711 → T901 → T903 → T1202–T1206.
 
 **Tech-debt register.**
