@@ -164,3 +164,15 @@ export function registerInboxCommands(dispatcher: Dispatcher): void {
     },
   });
 }
+
+/**
+ * The room's current lead, if there is one who hasn't been removed (T403). Looked up in the
+ * caller's transaction so a transfer that commits first is respected.
+ */
+export async function currentLeadId(client: PoolClient, roomId: string): Promise<string | null> {
+  const { rows } = await client.query<{ id: string }>(
+    "SELECT id FROM participants WHERE room_id = $1 AND role = 'LEAD' AND status <> 'REMOVED' LIMIT 1",
+    [roomId],
+  );
+  return rows[0]?.id ?? null;
+}
