@@ -601,7 +601,6 @@ describe("MCP task tools (T708)", () => {
     });
     expect(stale.isError).toBe(true);
     expect(stale.body.error.code).toBe("CONFLICT_VERSION");
-    expect(stale.body.error.details.current.provenance.author_id).toBe(s.agentId);
     expect(stale.body.error.details.current.id).toBe(created.body.id);
   });
 
@@ -718,6 +717,7 @@ describe("MCP collaboration tools (T709)", () => {
     });
     expect(stale.isError).toBe(true);
     expect(stale.body.error.code).toBe("CONFLICT_VERSION");
+    expect(stale.body.error.details.current.provenance.author_id).toBe(s.agentId);
     expect((await call(owner, "memory_get", { key: "architecture/database" })).body.value).toBe(
       "PostgreSQL",
     );
