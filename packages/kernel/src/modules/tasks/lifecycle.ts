@@ -1,7 +1,7 @@
 import { CrossoverError } from "@crossover/protocol";
 import { z } from "zod";
 import type { CommandContext, Dispatcher } from "../../dispatcher.js";
-import { loadActor } from "./create-update.js";
+import { loadActor, manages } from "./create-update.js";
 import { loadTask, TASK_COLUMNS, taskView, versionConflict, type TaskRow } from "./task.js";
 
 /** An agent's claim lasts this long unless renewed (§8.4). */
@@ -109,27 +109,87 @@ export function registerTaskLifecycleCommands(dispatcher: Dispatcher): void {
       return ownerTransition(ctx, task, "IN_PROGRESS", "task.started");
     },
   });
+
+  dispatcher.registerCommand({
+    method: "tasks.block",
+    mutating: true,
+    params: taskVersionParams.extend({ reason: z.string().trim().min(1).max(2000) }),
+    execute: async (ctx, p) => {
+      const { task, actor } = await ownerOrLead(ctx, p);
+      if (task.status !== "IN_PROGRESS") {
+        throw new CrossoverError("VALIDATION", `Can't block a task that is ${task.status}`, {
+          details: { status: task.status },
+        });
+      }
+      return transition(ctx, task, "BLOCKED", {
+        eventType: "task.blocked",
+        set: "blocked_reason = $5",
+        values: [p.reason],
+        renewLease: task.owner_id === actor.id,
+        payload: { reason: p.reason },
+      });
+    },
+  });
+
+  dispatcher.registerCommand({
+    method: "tasks.unblock",
+    mutating: true,
+    params: taskVersionParams,
+    execute: async (ctx, p) => {
+      const { task, actor } = await ownerOrLead(ctx, p);
+      if (task.status !== "BLOCKED") {
+        throw new CrossoverError("VALIDATION", `Can't unblock a task that is ${task.status}`, {
+          details: { status: task.status },
+        });
+      }
+      return transition(ctx, task, "IN_PROGRESS", {
+        eventType: "task.unblocked",
+        set: "blocked_reason = NULL",
+        renewLease: task.owner_id === actor.id,
+      });
+    },
+  });
 }
 
-/** Move a task the caller owns from `from` to `to`, renewing an agent owner's lease (§8.4). */
-async function ownerTransition(
+/** Lock the task, require the caller to be its owner or the lead (owner/admin too), check the version. */
+async function ownerOrLead(ctx: CommandContext, p: { task_id: string; expected_version: number }) {
+  const task = await loadTask(ctx.client, ctx.room_id, p.task_id, true);
+  const actor = await loadActor(ctx);
+  if (task.owner_id !== actor.id && !manages(actor)) {
+    throw new CrossoverError("FORBIDDEN", "Only the task's owner or the lead can do that", {
+      details: { reason: "not_task_owner" },
+    });
+  }
+  if (task.version !== p.expected_version) throw versionConflict(task);
+  return { task, actor };
+}
+
+interface TransitionOptions {
+  eventType: "task.started" | "task.blocked" | "task.unblocked";
+  /** Extra `SET` assignments; their values are `$5, $6, …` in `values`. */
+  set?: string;
+  values?: unknown[];
+  /** Renew an agent owner's lease (§8.4): when the owner is the one acting. */
+  renewLease: boolean;
+  payload?: Record<string, unknown>;
+}
+
+/** Move `task` to `to` (version + 1) under the version the caller saw; `CONFLICT_VERSION` if it moved. */
+async function transition(
   ctx: CommandContext,
   task: TaskRow,
   to: TaskRow["status"],
-  eventType: "task.started",
-  extraSet = "",
-  extraPayload: Record<string, unknown> = {},
+  o: TransitionOptions,
 ) {
   const { rows } = await ctx.client.query<TaskRow>(
-    `UPDATE tasks t SET status = $4, version = t.version + 1, updated_at = clock_timestamp(),
-            lease_expires_at = (SELECT ${leaseSql("p.kind")} FROM participants p
-                                WHERE p.id = t.owner_id AND p.room_id = t.room_id)
-            ${extraSet}
+    `UPDATE tasks t SET status = $4, version = t.version + 1, updated_at = clock_timestamp()
+            ${o.renewLease ? `, lease_expires_at = (SELECT ${leaseSql("p.kind")} FROM participants p WHERE p.id = t.owner_id AND p.room_id = t.room_id)` : ""}
+            ${o.set ? `, ${o.set}` : ""}
      WHERE t.id = $1 AND t.room_id = $2 AND t.version = $3
      RETURNING ${TASK_COLUMNS.split(",")
        .map((c) => `t.${c.trim()}`)
        .join(", ")}`,
-    [task.id, ctx.room_id, task.version, to],
+    [task.id, ctx.room_id, task.version, to, ...(o.values ?? [])],
   );
   const updated = rows[0];
   if (!updated) throw versionConflict(await loadTask(ctx.client, ctx.room_id, task.id));
@@ -137,17 +197,25 @@ async function ownerTransition(
     response: taskView(updated),
     events: [
       {
-        type: eventType,
+        type: o.eventType,
         payload: {
           task_id: task.id,
           from_version: task.version,
           version: updated.version,
-          ...extraPayload,
+          ...o.payload,
         },
       },
     ],
   };
 }
+
+/** Start: the owner moves `CLAIMED → IN_PROGRESS`, which renews their lease. */
+const ownerTransition = (
+  ctx: CommandContext,
+  task: TaskRow,
+  to: TaskRow["status"],
+  eventType: "task.started",
+) => transition(ctx, task, to, { eventType, renewLease: true });
 
 /** Mark `task` as owned by `ownerId` (claim or assign): `OPEN → CLAIMED`, version + 1, lease for agents. */
 export async function takeTask(
