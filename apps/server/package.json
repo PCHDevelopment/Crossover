@@ -21,6 +21,7 @@
     "@crossover/policy": "workspace:*",
     "@crossover/protocol": "workspace:*",
     "@crossover/security": "workspace:*",
+    "@crossover/sdk": "workspace:*",
     "@crossover/workspace": "workspace:*",
     "zod": "^4.6.5"
   }

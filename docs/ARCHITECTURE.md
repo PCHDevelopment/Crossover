@@ -822,7 +822,7 @@ Vendor and model are self-declared and displayed as such; they are not trusted f
 
 ## 15.3 Credentials
 
-- **Opaque access tokens** (1 h) validated server-side on every command against Redis, plus refresh tokens (30 days, rotated on use). Opaque tokens make revocation immediate, which JWTs would not.
+- **Opaque access tokens** (1 h) validated server-side on every command against Redis, plus refresh tokens (30 days, rotated on use). Opaque tokens make revocation immediate, which JWTs would not. `POST /v1/auth/refresh { refresh_token }` (no bearer header: the refresh token is the credential) spends a refresh token and returns a new access and refresh pair, the same shape as the join's `tokens`; presenting a spent one revokes the family.
 - Removing or pausing a participant revokes its tokens and closes its WebSocket connections.
 - Humans authenticate to the platform with GitHub or Google OAuth; room access comes from membership.
 
@@ -1369,6 +1369,8 @@ Git is a compatibility and export layer. It is not the realtime synchronization 
 4. Conflicts go through the normal conflict flow with the lead as submitter-of-record.
 
 Upstream changes are just another concurrent writer, so no special merge path is needed.
+
+**Fetching doesn't hold the room (T807).** The network fetch of `git.import` and `git.pull_upstream` is the command's `prepare` phase: it runs before the command's transaction, off the room's actor and with no locks, so other commands for the room carry on while a slow upstream answers (a command's `prepare` is skipped for someone who may not run it and for a replay). `execute` then locks the room and re-checks what `prepare` assumed: the upstream's URL, branch and last synced commit, and that no upstream conflict has opened (for an import, that the room is still empty). If it moved, the command is `CONFLICT_VERSION` and the user pulls again. A pull of more than 500 changed files (or about 20 MiB) is applied as ordered ChangeSets (`part i/n`), each based on the last synced revision; the first to conflict stops the pull there, and `last_synced_*` advance only when the whole pull has applied (resolving the conflict in the last part does that; after an earlier part's, pull again: what is already in, and what was resolved, is skipped).
 
 ## 24.3 Checkpoints and export
 

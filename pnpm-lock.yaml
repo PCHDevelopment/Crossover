@@ -66,6 +66,9 @@ importers:
       '@crossover/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
+      '@crossover/sdk':
+        specifier: workspace:*
+        version: link:../../packages/sdk
       '@crossover/security':
         specifier: workspace:*
         version: link:../../packages/security
@@ -195,6 +198,12 @@ importers:
       zod:
         specifier: ^4.6.5
         version: 4.6.5
+
+  packages/sdk:
+    dependencies:
+      '@crossover/protocol':
+        specifier: workspace:*
+        version: link:../protocol
 
   packages/security: {}
 
