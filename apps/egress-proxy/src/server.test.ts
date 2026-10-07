@@ -174,7 +174,7 @@ describe("egress proxy transport", () => {
   });
 
   it("limits active tunnels per sandbox and releases a slot after close", async () => {
-    await withProxy({ maxTunnelsPerSandbox: 2, idleTimeoutMs: 5_000 }, async (port) => {
+    await withProxy({ maxTunnelsPerSandbox: 2, idleTimeoutMs: 60_000 }, async (port) => {
       const first = await requestConnectAt(port, "registry.npmjs.org:443");
       const second = await requestConnectAt(port, "registry.npmjs.org:443");
       expect(first.status).toBe(200);
@@ -192,10 +192,22 @@ describe("egress proxy transport", () => {
       const firstClosed = once(first.socket, "close");
       first.socket.destroy();
       await firstClosed;
-      const afterRelease = await requestConnectAt(port, "registry.npmjs.org:443");
-      expect(afterRelease.status).toBe(200);
+      // The client-side close can arrive before the proxy observes the TCP close
+      // and releases its reservation. Retry briefly to avoid asserting across
+      // that network scheduling boundary.
+      let afterRelease: Awaited<ReturnType<typeof requestConnectAt>> | undefined;
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        const candidate = await requestConnectAt(port, "registry.npmjs.org:443");
+        if (candidate.status === 200) {
+          afterRelease = candidate;
+          break;
+        }
+        candidate.socket.destroy();
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      expect(afterRelease?.status).toBe(200);
       second.socket.destroy();
-      afterRelease.socket.destroy();
+      afterRelease?.socket.destroy();
     });
   });
 
