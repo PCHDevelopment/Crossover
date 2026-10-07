@@ -86,3 +86,71 @@ export class RedisEventPublisher implements EventPublisher {
     if (this.ownsClient) this.redis.disconnect();
   }
 }
+
+/** Receives the events published for a room (§20). */
+export interface EventSubscriber {
+  /**
+   * Call `handler` for every event published on `roomId` from now on. Resolves once the
+   * subscription is live, with a function that ends it. Messages can be missed (Redis
+   * pub/sub is best effort), so a consumer that needs every event backfills from the ledger.
+   */
+  subscribe(roomId: string, handler: (event: RoomEvent) => void): Promise<() => Promise<void>>;
+}
+
+/**
+ * One Redis connection in subscriber mode for the whole node, fanning each room channel out
+ * to its local listeners. Messages that don't parse are dropped.
+ */
+export class RedisEventSubscriber implements EventSubscriber {
+  private readonly redis: Redis;
+  private readonly handlers = new Map<string, Set<(event: RoomEvent) => void>>();
+
+  constructor(url: string, options: RedisOptions = {}) {
+    this.redis = new Redis(url, {
+      retryStrategy: (n: number) => Math.min(n * 200, 2_000),
+      ...options,
+    } as never);
+    this.redis.on("error", () => {});
+    this.redis.on("message", (channel: string, message: string) => {
+      const set = this.handlers.get(channel);
+      if (!set) return;
+      let event: RoomEvent;
+      try {
+        event = JSON.parse(message) as RoomEvent;
+      } catch {
+        return;
+      }
+      for (const handler of [...set]) {
+        try {
+          handler(event);
+        } catch {
+          // One listener's failure must not stop the others.
+        }
+      }
+    });
+  }
+
+  async subscribe(roomId: string, handler: (event: RoomEvent) => void) {
+    const channel = roomChannel(roomId);
+    let set = this.handlers.get(channel);
+    if (!set) {
+      set = new Set();
+      this.handlers.set(channel, set);
+      await this.redis.subscribe(channel);
+    }
+    set.add(handler);
+    return async () => {
+      const current = this.handlers.get(channel);
+      if (!current) return;
+      current.delete(handler);
+      if (current.size === 0) {
+        this.handlers.delete(channel);
+        await this.redis.unsubscribe(channel).catch(() => undefined);
+      }
+    };
+  }
+
+  async close(): Promise<void> {
+    this.redis.disconnect();
+  }
+}

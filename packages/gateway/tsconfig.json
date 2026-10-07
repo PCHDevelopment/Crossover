@@ -6,6 +6,7 @@
     { "path": "../protocol" },
     { "path": "../db" },
     { "path": "../kernel" },
+    { "path": "../ledger" },
     { "path": "../policy" }
   ]
 }
