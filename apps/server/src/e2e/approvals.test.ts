@@ -208,9 +208,11 @@ describe("approval gates over HTTP", () => {
     expect(again.statusCode).toBe(400);
     expect(again.json().error.details.reason).toBe("already_decided");
     const retry = await post(`/v1/rooms/${r.roomId}/commands`, request, r.dev.token);
-    expect(retry.statusCode).toBe(400);
-    expect(retry.json().error.details.reason).toBe("already_approved");
+    // The key now stands for the approved run: the retry gets its result, and nothing runs twice.
+    expect(retry.statusCode).toBe(200);
+    expect(retry.json().response).toMatchObject({ body: "ship it", author_id: r.dev.id });
     expect(await r.messages()).toHaveLength(1);
+    expect(await r.events("message.sent")).toHaveLength(1);
   });
 
   it("rejecting never runs it", async () => {

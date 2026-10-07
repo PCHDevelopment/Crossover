@@ -1104,9 +1104,9 @@ describe("0020_approvals", () => {
   const insert = (c: { room: string; who: string }, over: Record<string, unknown> = {}) => {
     const v = { hash: "h1", status: "PENDING", decided: false, ...over };
     return db.pool.query(
-      `INSERT INTO approvals (id, room_id, requester_id, method, params, idempotency_key, request_hash,
+      `INSERT INTO approvals (id, room_id, requester_id, method, params, idempotency_key, idempotency_hash, request_hash,
                               capability, status, expires_at, decided_by, decided_at)
-       VALUES ($1, $2, $3, 'messages.send', '{}'::jsonb, 'k', $4, 'messages.send', $5,
+       VALUES ($1, $2, $3, 'messages.send', '{}'::jsonb, 'k', 'ih', $4, 'messages.send', $5,
                clock_timestamp() + interval '24 hours', $6, $7)`,
       [
         `appr_${++n}`,

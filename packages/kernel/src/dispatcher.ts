@@ -167,6 +167,11 @@ export interface CommandDefinition<S extends z.ZodType, R> {
    */
   perPathAuthorize?: boolean;
   /**
+   * The command hands back a one-time secret (`oneTime`). It can't be kept for approval (T905):
+   * the secret would go to the approver, not the requester.
+   */
+  returnsOneTime?: boolean;
+  /**
    * How a **read** command keeps one participant from seeing what another may not (§34.5,
    * T1301). Required for every non-mutating command; checked at registration.
    * - `participant`: what it returns can differ by reader (events, paths, denials) and goes
@@ -862,11 +867,41 @@ export class Dispatcher {
   private async queueForApproval(
     principal: Principal,
     envelope: { method: string; id: string },
+    def: CommandDefinition<z.ZodType, unknown>,
     params: unknown,
-    idempotencyKey: string,
+    idempotency: { key: string; hash: string },
     error: CrossoverError,
     token: number,
-  ): Promise<CrossoverError> {
+  ): Promise<
+    { error: CrossoverError; replay?: undefined } | { replay: DispatchResult; error?: undefined }
+  > {
+    if (def.returnsOneTime) {
+      return {
+        error: new CrossoverError("VALIDATION", `${envelope.method} can't wait for approval`, {
+          details: { reason: "not_approvable", method: envelope.method },
+        }),
+      };
+    }
+    // The authorization came first, ahead of the idempotency lookup, so a request that already ran
+    // (approved earlier, the gate still on) would be queued again: replay its stored result.
+    const { rows: stored } = await this.pool.query<{
+      response: { response: unknown; events: RoomEvent[] };
+    }>(
+      `SELECT response FROM idempotency_keys
+       WHERE participant_id = $1 AND idempotency_key = $2 AND request_hash = $3
+         AND response IS NOT NULL
+         AND created_at >= clock_timestamp() - make_interval(hours => $4)`,
+      [principal.participant_id, idempotency.key, idempotency.hash, IDEMPOTENCY_TTL_HOURS],
+    );
+    if (stored[0]) {
+      return {
+        replay: {
+          response: stored[0].response.response,
+          events: stored[0].response.events ?? [],
+          replayed: true,
+        },
+      };
+    }
     const capability =
       typeof error.details?.["capability"] === "string"
         ? error.details["capability"]
@@ -876,7 +911,8 @@ export class Dispatcher {
         const { approval, created } = await queueApproval(client, principal, {
           method: envelope.method,
           params,
-          idempotency_key: idempotencyKey,
+          idempotency_key: idempotency.key,
+          idempotency_hash: idempotency.hash,
           capability,
         });
         const events = created
@@ -906,23 +942,31 @@ export class Dispatcher {
         events: queued.events,
         replayed: false,
       });
-      return new CrossoverError("APPROVAL_REQUIRED", error.message, {
-        details: {
-          ...error.details,
-          approval_id: queued.approval.id,
-          expires_at: queued.approval.expires_at,
-        },
-      });
+      return {
+        error: new CrossoverError("APPROVAL_REQUIRED", error.message, {
+          details: {
+            ...error.details,
+            approval_id: queued.approval.id,
+            expires_at: queued.approval.expires_at,
+          },
+        }),
+      };
     } catch (queueError) {
-      if (queueError instanceof CrossoverError && queueError.code === "VALIDATION")
-        return queueError;
+      if (queueError instanceof CrossoverError && queueError.code === "VALIDATION") {
+        return { error: queueError };
+      }
+      // Without an approval there is nothing to wait for: say so, don't answer "queued".
       this.onDenialRecordError(queueError, {
         method: envelope.method,
         command_id: envelope.id,
         room_id: principal.room_id,
         action: "approval.requested",
       });
-      return error;
+      return {
+        error: new CrossoverError("STALE_FENCE", "The request couldn't be queued; retry it", {
+          retryable: true,
+        }),
+      };
     }
   }
 
@@ -946,6 +990,8 @@ export class Dispatcher {
     const params: unknown = parsed.data;
     const { client, room_id } = outer;
     const requester = await this.principalOf(client, room_id, approval.requester_id);
+    // A refusal while running the approved command is the requester's, so it names them; the
+    // approver, whose transaction this is, is who the denial is recorded against.
     const check = (
       principal: Principal,
       a: string,
@@ -957,7 +1003,7 @@ export class Dispatcher {
         a,
         { ...resource, room_id },
         { method: approval.method, params, client, approved: true, ...extra },
-      );
+      ).catch((error: unknown) => this.onBehalfOf(error, principal.participant_id));
     await check(requester, action, {}, def.perPathAuthorize ? { perPath: true } : {});
     const ctx: CommandContext = {
       client,
@@ -1308,7 +1354,17 @@ export class Dispatcher {
           err.code === "APPROVAL_REQUIRED" &&
           err.details?.["approval_id"] === undefined
         ) {
-          throw await this.queueForApproval(principal, envelope, params, key, err, token);
+          const queued = await this.queueForApproval(
+            principal,
+            envelope,
+            def,
+            params,
+            { key, hash: requestHash },
+            err,
+            token,
+          );
+          if (queued.replay) return queued.replay;
+          throw queued.error;
         }
         throw err;
       }

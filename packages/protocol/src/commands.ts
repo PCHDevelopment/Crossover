@@ -43,6 +43,7 @@ export const METHODS = {
   "capabilities.revoke": { mutating: true },
   "approvals.list": { mutating: false },
   "approvals.decide": { mutating: true },
+  "approvals.withdraw": { mutating: true },
 
   "messages.list": { mutating: false },
   "messages.send": { mutating: true },
