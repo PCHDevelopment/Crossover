@@ -223,6 +223,23 @@ describe("DockerHealthRunner", () => {
     expect(dockerHealthContainers()).toEqual(before);
   });
 
+  it.skipIf(!dockerImageAvailable)("kills and removes a container when aborted", async () => {
+    const before = dockerHealthContainers();
+    const { repository, revision } = await makeRepo();
+    const controller = new AbortController();
+    const running = new DockerHealthRunner({
+      allowedImages: [DEFAULT_HEALTH_IMAGE],
+      timeoutMs: 30_000,
+    }).run({ repository, revision, command: "sleep 30", signal: controller.signal });
+    await vi.waitFor(() => expect(dockerHealthContainers().length).toBeGreaterThan(before.length), {
+      timeout: 5_000,
+    });
+
+    controller.abort();
+    await expect(running).resolves.toMatchObject({ status: "ERROR" });
+    expect(dockerHealthContainers()).toEqual(before);
+  });
+
   it("persists results against the exact room-scoped workspace revision", async () => {
     const id = await storeHealthRun(db.pool, {
       workspaceId: "ws_health",
@@ -273,5 +290,42 @@ describe("DockerHealthRunner", () => {
       [completed?.id],
     );
     expect(rows[0]).toMatchObject({ revision: "0", status: "RED", log: "failed" });
+  });
+
+  it("does not persist a health result when its run is aborted", async () => {
+    await db.pool.query("UPDATE rooms SET settings = $2 WHERE id = $1", [
+      "room_health",
+      JSON.stringify({ health_command: "pnpm test" }),
+    ]);
+    const { rows: before } = await db.pool.query(
+      "SELECT count(*)::int AS count FROM health_runs WHERE room_id = $1",
+      ["room_health"],
+    );
+    const controller = new AbortController();
+    let started!: () => void;
+    const runStarted = new Promise<void>((resolve) => (started = resolve));
+    const runner = {
+      run: vi.fn(
+        (input: { signal?: AbortSignal }) =>
+          new Promise<{ status: "ERROR"; durationMs: number; log: string }>((resolve) => {
+            input.signal?.addEventListener(
+              "abort",
+              () => resolve({ status: "ERROR", durationMs: 1, log: "aborted" }),
+              { once: true },
+            );
+            started();
+          }),
+      ),
+    };
+
+    const check = runHealthCheck(db.pool, runner, "room_health", 0, controller.signal);
+    await runStarted;
+    controller.abort();
+    await expect(check).resolves.toBeNull();
+    const { rows: after } = await db.pool.query(
+      "SELECT count(*)::int AS count FROM health_runs WHERE room_id = $1",
+      ["room_health"],
+    );
+    expect(after[0]?.count).toBe(before[0]?.count);
   });
 });

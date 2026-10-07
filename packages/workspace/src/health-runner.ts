@@ -24,6 +24,7 @@ export interface HealthRunner {
     revision: string;
     command: string;
     image?: string;
+    signal?: AbortSignal;
   }): Promise<HealthRunResult>;
 }
 
@@ -39,6 +40,7 @@ export interface DockerHealthRunnerOptions {
 interface ProcessResult {
   code: number | null;
   timedOut: boolean;
+  aborted?: boolean;
   output: string;
 }
 
@@ -50,8 +52,12 @@ function runProcess(
     timeoutMs: number;
     maxBuffer: number;
     onTimeout?: () => Promise<void>;
+    signal?: AbortSignal;
+    onAbort?: () => Promise<void>;
   },
 ): Promise<ProcessResult> {
+  if (options.signal?.aborted)
+    return Promise.resolve({ code: null, timedOut: false, aborted: true, output: "" });
   return new Promise((resolveProcess) => {
     const child = spawn(binary, [...args], {
       ...(options.cwd ? { cwd: options.cwd } : {}),
@@ -60,6 +66,7 @@ function runProcess(
     const chunks: Buffer[] = [];
     let buffered = 0;
     let timedOut = false;
+    let aborted = false;
     let exitCode: number | null = null;
     let spawnError: Error | undefined;
     let timeoutWork: Promise<void> | undefined;
@@ -92,11 +99,11 @@ function runProcess(
     child.on("exit", (code) => {
       exitCode = code;
     });
-    const timer = setTimeout(() => {
-      timedOut = true;
+    const stop = (cleanup?: () => Promise<void>): void => {
+      if (timeoutWork) return;
       timeoutWork = (async () => {
         try {
-          await options.onTimeout?.();
+          await cleanup?.();
         } finally {
           child.kill("SIGTERM");
           const forceKill = setTimeout(() => {
@@ -105,15 +112,26 @@ function runProcess(
           forceKill.unref();
         }
       })();
+    };
+    const onAbort = (): void => {
+      aborted = true;
+      stop(options.onAbort);
+    };
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      stop(options.onTimeout);
     }, options.timeoutMs);
     child.on("close", async () => {
       closed = true;
       clearTimeout(timer);
+      options.signal?.removeEventListener("abort", onAbort);
       await timeoutWork?.catch(() => {});
       const output = Buffer.concat(chunks, buffered).toString("utf8");
       resolveProcess({
         code: spawnError ? null : exitCode,
         timedOut,
+        aborted,
         output: spawnError ? `${output}\n${spawnError.message}`.trim() : output.trim(),
       });
     });
@@ -178,6 +196,7 @@ export class DockerHealthRunner implements HealthRunner {
     revision: string;
     command: string;
     image?: string;
+    signal?: AbortSignal;
   }): Promise<HealthRunResult> {
     const started = Date.now();
     let checkout: string | undefined;
@@ -188,10 +207,12 @@ export class DockerHealthRunner implements HealthRunner {
       await git(["clone", "--quiet", "--shared", "--no-checkout", "--", repository, checkout], {
         timeoutMs: 30_000,
       });
+      if (input.signal?.aborted) throw new Error("Health check aborted");
       await git(["checkout", "--quiet", "--detach", "--force", `${input.revision}^{commit}`], {
         cwd: checkout,
         timeoutMs: 30_000,
       });
+      if (input.signal?.aborted) throw new Error("Health check aborted");
       const user = await prepareHealthCheckout(checkout);
       const image = input.image ?? this.image;
       if (!this.allowedImages.has(image))
@@ -233,7 +254,14 @@ export class DockerHealthRunner implements HealthRunner {
           {
             timeoutMs: this.timeoutMs,
             maxBuffer: MAX_LOG_BYTES,
+            ...(input.signal ? { signal: input.signal } : {}),
             onTimeout: async () => {
+              await this.processRunner(this.dockerBinary, ["kill", containerName], {
+                timeoutMs: 5_000,
+                maxBuffer: 8192,
+              });
+            },
+            onAbort: async () => {
               await this.processRunner(this.dockerBinary, ["kill", containerName], {
                 timeoutMs: 5_000,
                 maxBuffer: 8192,
@@ -248,12 +276,24 @@ export class DockerHealthRunner implements HealthRunner {
         }).catch(() => ({ code: null, timedOut: false, output: "" }));
       }
       const status: HealthStatus =
-        result.timedOut || result.code === null ? "ERROR" : result.code === 0 ? "GREEN" : "RED";
+        result.aborted || result.timedOut || result.code === null
+          ? "ERROR"
+          : result.code === 0
+            ? "GREEN"
+            : "RED";
       const log = result.timedOut
         ? `${result.output}\nHealth check timed out after ${this.timeoutMs}ms.`
-        : result.output;
+        : result.aborted
+          ? `${result.output}\nHealth check aborted.`
+          : result.output;
       return { status, durationMs: Date.now() - started, log: clipLog(log) };
     } catch (error) {
+      if (input.signal?.aborted)
+        return {
+          status: "ERROR",
+          durationMs: Date.now() - started,
+          log: "Health check aborted.",
+        };
       return {
         status: "ERROR",
         durationMs: Date.now() - started,
@@ -298,6 +338,7 @@ export async function runHealthCheck(
   runner: HealthRunner,
   roomId: string,
   revision: number,
+  signal?: AbortSignal,
 ): Promise<{ id: string; result: HealthRunResult } | null> {
   if (!Number.isSafeInteger(revision) || revision < 0)
     throw new CrossoverError("VALIDATION", "Workspace revision must be a nonnegative integer");
@@ -319,13 +360,16 @@ export async function runHealthCheck(
   );
   const target = rows[0];
   if (!target) throw new CrossoverError("NOT_FOUND", "Workspace revision not found");
+  if (signal?.aborted) return null;
   if (!target.health_command?.trim()) return null;
   const result = await runner.run({
     repository: target.repo_path,
     revision: target.commit_sha,
     command: target.health_command,
     ...(target.health_image ? { image: target.health_image } : {}),
+    ...(signal ? { signal } : {}),
   });
+  if (signal?.aborted) return null;
   const id = await storeHealthRun(pool, {
     workspaceId: target.workspace_id,
     roomId,

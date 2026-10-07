@@ -1,13 +1,13 @@
 export interface HealthCheckQueueOptions {
-  /** Runs the persisted health check for one room revision. */
-  run: (roomId: string, revision: number) => Promise<unknown>;
+  /** Runs one health check; its signal cancels execution without persisting a result. */
+  run: (roomId: string, revision: number, signal: AbortSignal) => Promise<unknown>;
   onError?: (error: unknown, roomId: string, revision: number) => void;
 }
 
 interface RoomQueue {
-  lastRequestedRevision: number;
   activeRevision: number;
   queuedRevision: number | undefined;
+  activeController: AbortController | undefined;
   worker: Promise<void>;
 }
 
@@ -16,6 +16,7 @@ export class HealthCheckQueue {
   private readonly runCheck: HealthCheckQueueOptions["run"];
   private readonly onError: NonNullable<HealthCheckQueueOptions["onError"]>;
   private readonly rooms = new Map<string, RoomQueue>();
+  private readonly lastRequestedRevision = new Map<string, number>();
   private closing = false;
 
   constructor(options: HealthCheckQueueOptions) {
@@ -33,42 +34,53 @@ export class HealthCheckQueue {
     if (!Number.isSafeInteger(revision) || revision < 0)
       throw new RangeError("Health check revision must be a nonnegative safe integer");
 
+    const previousRevision = this.lastRequestedRevision.get(roomId);
+    if (previousRevision !== undefined && revision <= previousRevision) return;
+    this.lastRequestedRevision.set(roomId, revision);
+
     const current = this.rooms.get(roomId);
     if (current) {
-      if (revision <= current.lastRequestedRevision) return;
-      current.lastRequestedRevision = revision;
       current.queuedRevision = revision;
       return;
     }
 
     const state = {
-      lastRequestedRevision: revision,
       activeRevision: revision,
       queuedRevision: undefined,
+      activeController: undefined,
       worker: Promise.resolve(),
     } satisfies RoomQueue;
     this.rooms.set(roomId, state);
     state.worker = this.drain(roomId, state);
   }
 
-  /** Stop accepting work, discard queued revisions, and wait for active checks to finish. */
+  /** Stop accepting work, abort active checks, discard pending runs, and await cleanup. */
   async close(): Promise<void> {
     this.closing = true;
-    for (const state of this.rooms.values()) state.queuedRevision = undefined;
+    for (const state of this.rooms.values()) {
+      state.queuedRevision = undefined;
+      state.activeController?.abort();
+    }
     await Promise.all([...this.rooms.values()].map(({ worker }) => worker));
   }
 
   private async drain(roomId: string, state: RoomQueue): Promise<void> {
     while (true) {
       const revision = state.activeRevision;
+      const controller = new AbortController();
+      state.activeController = controller;
       try {
-        await this.runCheck(roomId, revision);
+        await this.runCheck(roomId, revision, controller.signal);
       } catch (error) {
-        try {
-          this.onError(error, roomId, revision);
-        } catch (reportError) {
-          console.error("reporting health check failure failed", reportError);
+        if (!controller.signal.aborted) {
+          try {
+            this.onError(error, roomId, revision);
+          } catch (reportError) {
+            console.error("reporting health check failure failed", reportError);
+          }
         }
+      } finally {
+        if (state.activeController === controller) state.activeController = undefined;
       }
       if (this.closing || state.queuedRevision === undefined) break;
       state.activeRevision = state.queuedRevision;

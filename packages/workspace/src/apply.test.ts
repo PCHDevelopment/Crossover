@@ -168,6 +168,26 @@ describe("workspace.apply_changeset", () => {
     await queue.close();
   });
 
+  it("does not schedule health checks for conflicted or rejected ChangeSets", async () => {
+    const scheduled: number[] = [];
+    const f = await fixture(allowAll, {
+      scheduleHealthCheck: (_roomId, revision) => scheduled.push(revision),
+    });
+
+    await f.apply([{ type: "create", path: "file.txt", content: "base\n" }]);
+    await f.apply([{ type: "modify", path: "file.txt", content: "head\n" }], 1);
+    const conflict = await f.apply(
+      [{ type: "modify", path: "file.txt", content: "conflicting\n" }],
+      1,
+    );
+    expect(conflict.response).toMatchObject({ status: "CONFLICT" });
+    await expect(
+      f.apply([{ type: "create", path: "rejected.txt", content: "x" }], 99),
+    ).rejects.toMatchObject({ code: "VALIDATION" });
+
+    expect(scheduled).toEqual([1, 2]);
+  });
+
   it("requires RESOLUTION and conflict_id together", async () => {
     const f = await fixture();
     const base = f.request([{ type: "create", path: "file", content: "x" }]);

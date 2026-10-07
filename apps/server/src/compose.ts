@@ -112,7 +112,8 @@ export async function composeServer(
     });
     const healthRunner = new DockerHealthRunner({ allowedImages: config.healthImages });
     const healthQueue = new HealthCheckQueue({
-      run: (roomId, revision) => runHealthCheck(pool, healthRunner, roomId, revision),
+      run: (roomId, revision, signal) =>
+        runHealthCheck(pool, healthRunner, roomId, revision, signal),
     });
     registerCommands(dispatcher, config, healthQueue);
 
