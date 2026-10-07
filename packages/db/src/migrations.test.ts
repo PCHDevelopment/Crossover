@@ -1004,3 +1004,57 @@ describe("0018_upstream", () => {
     await expect(upstream(c, { imported_by: other.who })).rejects.toMatchObject({ code: "23503" });
   });
 });
+
+describe("0019_checkpoints", () => {
+  let n = 0;
+  const setup = async () => {
+    const room = `room_ck${++n}`;
+    await db.pool.query(
+      `INSERT INTO rooms (id, slug, name, objective, owner_id) VALUES ($1, $1, 'n', 'o', 'x')`,
+      [room],
+    );
+    const who = `part_ck${n}`;
+    await db.pool.query(
+      `INSERT INTO participants (id, room_id, kind, display_name, role, status)
+       VALUES ($1, $2, 'HUMAN', 'a', 'LEAD', 'ACTIVE')`,
+      [who, room],
+    );
+    await db.pool.query(
+      `INSERT INTO workspaces (id, room_id, repo_path) VALUES ($1, $2, '/tmp/x')`,
+      [`ws_ck${n}`, room],
+    );
+    await db.pool.query(
+      `INSERT INTO workspace_revisions (workspace_id, room_id, revision, commit_sha)
+       VALUES ($1, $2, 1, $3)`,
+      [`ws_ck${n}`, room, "a".repeat(40)],
+    );
+    return { room, who, ws: `ws_ck${n}` };
+  };
+  const insert = (
+    c: { room: string; who: string; ws: string },
+    over: Record<string, unknown> = {},
+  ) => {
+    const v = { revision: 1, message: "m", health_status: "GREEN", overridden: false, ...over };
+    return db.pool.query(
+      `INSERT INTO checkpoints (id, room_id, workspace_id, revision, message, created_by, health_status, overridden)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [`ckpt_${++n}`, c.room, c.ws, v.revision, v.message, c.who, v.health_status, v.overridden],
+    );
+  };
+
+  it("a checkpoint marks an existing revision of the room, once", async () => {
+    const c = await setup();
+    await insert(c);
+    await expect(insert(c)).rejects.toMatchObject({ code: "23505" });
+    await expect(insert(c, { revision: 7 })).rejects.toMatchObject({ code: "23503" });
+  });
+
+  it("a non-green health is only stored as an override, and the message is 1-500 characters", async () => {
+    const c = await setup();
+    await expect(insert(c, { health_status: "RED" })).rejects.toMatchObject({ code: "23514" });
+    await insert(c, { health_status: "RED", overridden: true });
+    const d = await setup();
+    await expect(insert(d, { message: "" })).rejects.toMatchObject({ code: "23514" });
+    await expect(insert(d, { message: "x".repeat(501) })).rejects.toMatchObject({ code: "23514" });
+  });
+});

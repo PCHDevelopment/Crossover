@@ -207,3 +207,25 @@ describe("git.import over HTTP", () => {
     expect(local.json().error.details.reason).toBe("url_host");
   });
 });
+
+describe("checkpoints over HTTP", () => {
+  it("the owner marks the head; a developer can't, but can list; an override is the owner's alone", async () => {
+    const r = await newRoom();
+    const empty = await r.call(r.owner, "checkpoints.create", { message: "too early" });
+    expect(empty.statusCode).toBe(400);
+    expect(empty.json().error.details.reason).toBe("empty_workspace");
+    await ok(
+      await r.call(r.owner, "git.import", {
+        url: "https://github.com/acme/widgets",
+        branch: "main",
+      }),
+    );
+    const denied = await r.call(r.dev, "checkpoints.create", { message: "nope" });
+    expect(denied.statusCode).toBe(403);
+    const made = await ok(await r.call(r.owner, "checkpoints.create", { message: "imported" }));
+    expect(made.response).toMatchObject({ revision: 1, message: "imported", overridden: false });
+    const list = await ok(await r.call(r.dev, "checkpoints.list"));
+    expect(list.response.checkpoints).toHaveLength(1);
+    expect(list.response.checkpoints[0].provenance.author_kind).toBe("HUMAN");
+  });
+});
