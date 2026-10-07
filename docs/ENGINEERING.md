@@ -80,5 +80,6 @@ pnpm install
 docker compose up -d   # PostgreSQL 16 + Redis 7
 cp .env.example .env
 pnpm check             # format, lint, typecheck, test
-pnpm build && DEV_LOGIN=true pnpm --filter @crossover/server start   # migrate and serve on :8080
+pnpm build && DEV_LOGIN=true WEB_ROOT=apps/web/dist/app pnpm --filter @crossover/server start   # migrate, serve the API and the web app on :8080
+pnpm --filter @crossover/web dev   # the web app with hot reload on :5173, proxying /v1 to :8080
 ```
