@@ -127,7 +127,7 @@ describe("decisions.veto (§7.1 step 4)", () => {
       outcome_option_id: "opt_1",
     });
     expect((out.response as DecisionView).vetoed_at).toEqual(expect.any(String));
-    expect(out.events.map((e) => e.type)).toEqual(["decision.vetoed"]);
+    expect(out.events.map((e) => e.type)).toEqual(["decision.vetoed", "memory.updated"]);
     expect(out.events[0]!.payload).toMatchObject({
       decision_id: d.id,
       previous_status: "ACCEPTED",
@@ -223,8 +223,13 @@ describe("supersedes (§7.1 step 5)", () => {
     ).toBe("ACCEPTED");
 
     const out = await decide(s, next);
-    expect(out.events.map((e) => e.type)).toEqual(["decision.decided", "decision.superseded"]);
-    expect(out.events[1]!.payload).toMatchObject({
+    expect(out.events.map((e) => e.type)).toEqual([
+      "decision.decided",
+      "memory.updated",
+      "decision.superseded",
+      "memory.updated",
+    ]);
+    expect(out.events[2]!.payload).toMatchObject({
       decision_id: old.id,
       superseded_by: next.id,
       version: 3,
@@ -263,7 +268,7 @@ describe("supersedes (§7.1 step 5)", () => {
     const next = await propose(s, { supersedes: old.id });
     await veto(s, s.owner, old);
     const out = await decide(s, next);
-    expect(out.events.map((e) => e.type)).toEqual(["decision.decided"]);
+    expect(out.events.map((e) => e.type)).toEqual(["decision.decided", "memory.updated"]);
     expect(
       (await pool.query("SELECT status FROM decisions WHERE id = $1", [old.id])).rows[0].status,
     ).toBe("VETOED");
@@ -276,5 +281,61 @@ describe("supersedes (§7.1 step 5)", () => {
     const current = (await pool.query("SELECT id, version FROM decisions WHERE id = $1", [old.id]))
       .rows[0];
     await rejects(veto(s, s.owner, current), "VALIDATION");
+  });
+});
+
+describe("the memory mirror follows veto and supersede (T407)", () => {
+  const mirrored = async (id: string) =>
+    (
+      await pool.query("SELECT value, revision FROM memory_entries WHERE key = $1", [
+        `decisions/${id}`,
+      ])
+    ).rows[0] as { value: string; revision: number } | undefined;
+
+  it("a veto moves the accepted decision's entry to VETOED, with the owner's rationale", async () => {
+    const s = await setup();
+    const d = await accepted(s);
+    expect(JSON.parse((await mirrored(d.id))!.value).status).toBe("ACCEPTED");
+    const out = await veto(s, s.owner, d, "Too risky");
+    const e = (await mirrored(d.id))!;
+    expect(e.revision).toBe(2);
+    expect(JSON.parse(e.value)).toMatchObject({
+      status: "VETOED",
+      vetoed_by: s.owner.participant_id,
+      veto_rationale: "Too risky",
+    });
+    expect(out.events.map((ev) => [ev.type, ev.actor_id])).toEqual([
+      ["decision.vetoed", s.owner.participant_id],
+      ["memory.updated", "system"],
+    ]);
+  });
+
+  it("vetoing a rejected decision writes no entry", async () => {
+    const s = await setup();
+    const d = await propose(s);
+    const rejected = (await decide(s, d, { outcome_option_id: undefined, reject: true }))
+      .response as DecisionView;
+    const out = await veto(s, s.owner, rejected);
+    expect(await mirrored(rejected.id)).toBeUndefined();
+    expect(out.events.map((ev) => ev.type)).toEqual(["decision.vetoed"]);
+  });
+
+  it("superseding moves the old entry to SUPERSEDED and creates the new one", async () => {
+    const s = await setup();
+    const old = await accepted(s);
+    const next = await propose(s, { supersedes: old.id });
+    const out = await decide(s, next);
+    expect(JSON.parse((await mirrored(old.id))!.value).status).toBe("SUPERSEDED");
+    expect((await mirrored(old.id))!.revision).toBe(2);
+    expect(JSON.parse((await mirrored(next.id))!.value)).toMatchObject({
+      status: "ACCEPTED",
+      supersedes: old.id,
+    });
+    expect(out.events.map((ev) => ev.type)).toEqual([
+      "decision.decided",
+      "memory.updated",
+      "decision.superseded",
+      "memory.updated",
+    ]);
   });
 });
