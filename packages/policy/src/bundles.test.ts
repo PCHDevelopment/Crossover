@@ -87,6 +87,7 @@ const EXPECTED: Record<(typeof ROLES)[number], Capability[]> = {
     "conflicts.resolve",
     "decisions.decide",
     "checkpoints.create",
+    "checkpoints.export",
     "git.import",
     "git.pull_upstream",
     "room.transfer_lead",
@@ -205,7 +206,12 @@ describe("authority powers (§6.2)", () => {
 
   it("owners can import, pull and checkpoint whatever their role (§24); admins and members only through the lead role", () => {
     for (const role of ROLES) {
-      for (const c of ["git.import", "git.pull_upstream", "checkpoints.create"] as const) {
+      for (const c of [
+        "git.import",
+        "git.pull_upstream",
+        "checkpoints.create",
+        "checkpoints.export",
+      ] as const) {
         expect(effectiveCapabilities(role, "OWNER").has(c), `OWNER/${role} ${c}`).toBe(true);
         expect(effectiveCapabilities(role, "ADMIN").has(c), `ADMIN/${role} ${c}`).toBe(
           role === "LEAD",

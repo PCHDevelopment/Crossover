@@ -62,3 +62,4 @@ export * from "./upstream-import.js";
 export * from "./health-suggestion.js";
 export * from "./checkpoints.js";
 export * from "./upstream-pull.js";
+export * from "./checkpoint-export.js";

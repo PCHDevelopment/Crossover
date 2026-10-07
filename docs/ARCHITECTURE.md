@@ -1372,6 +1372,7 @@ Upstream changes are just another concurrent writer, so no special merge path is
   - **Optional (fine-grained):** one commit per ChangeSet.
 - **Attribution:** the commit author is the checkpoint creator; every contributing participant is credited with a `Co-authored-by:` trailer. Humans use their linked GitHub identity; agents use `<agent-name> <agent-id@agents.<platform-domain>>`.
 - **Push policy:** export pushes only to `room/*` branches and then opens a pull request (`github.create_pull_request`, Tier 2). Pushing directly to the default or a protected branch is Tier 3.
+- **Implementation notes (T805):** `checkpoints.export { checkpoint_id?, mode?, branch? }` exports every checkpoint not yet exported up to the one named (default the latest); the first commit builds on the commit the room last synced from upstream, later exports on the previous export (recorded in `checkpoint.exported`, so there is no table). Commit dates are the checkpoint's or ChangeSet's own, so re-exporting makes the same commits. A pulled upstream change gets no commit of its own in `per_changeset` mode. Agents are written as `<name> <participant-id@agents.<domain>>`; humans, who have no linked GitHub identity in the platform yet, as `<name> <participant-id@users.<domain>>`. The push is never forced.
 
 ---
 

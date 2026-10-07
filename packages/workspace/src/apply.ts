@@ -17,6 +17,7 @@ import { registerWorkspaceConflictReads } from "./conflict-reads.js";
 import { escalateOpenConflict, registerWorkspaceConflictActions } from "./conflict-actions.js";
 import { registerWorkspaceHealthReads } from "./health-events.js";
 import { parseConflicts } from "./parse-check.js";
+import { registerCheckpointExport } from "./checkpoint-export.js";
 import { registerCheckpointCommands } from "./checkpoints.js";
 import { registerGitImport, type UpstreamDeps } from "./upstream-import.js";
 import {
@@ -75,6 +76,7 @@ export function registerWorkspaceCommands(
   registerWorkspaceConflictActions(dispatcher);
   registerWorkspaceHealthReads(dispatcher);
   registerCheckpointCommands(dispatcher);
+  registerCheckpointExport(dispatcher, deps.upstream);
   registerGitPullUpstream(dispatcher, deps);
   registerGitImport(dispatcher, deps.upstream, {
     ...(deps.updateCanonicalRef ? { updateCanonicalRef: deps.updateCanonicalRef } : {}),

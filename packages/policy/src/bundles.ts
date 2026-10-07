@@ -65,6 +65,7 @@ export const CAPABILITIES = {
   "conflicts.resolve": { mutating: true },
   "decisions.decide": { mutating: true },
   "checkpoints.create": { mutating: true },
+  "checkpoints.export": { mutating: true },
   "git.import": { mutating: true },
   "git.pull_upstream": { mutating: true },
   "room.transfer_lead": { mutating: true },
@@ -173,6 +174,7 @@ const LEAD = [
   "conflicts.resolve",
   "decisions.decide",
   "checkpoints.create",
+  "checkpoints.export",
   "git.import",
   "git.pull_upstream",
   "room.transfer_lead",
@@ -258,6 +260,7 @@ const OWNER_GIT_CAPABILITIES = [
   "git.import",
   "git.pull_upstream",
   "checkpoints.create",
+  "checkpoints.export",
 ] as const satisfies readonly Capability[];
 
 /** Role bundle plus authority powers (and, for owners and admins, task management). */
