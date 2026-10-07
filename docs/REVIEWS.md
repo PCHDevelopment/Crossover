@@ -2,6 +2,52 @@
 
 Periodic big-picture reviews by O1: is the merged code building the product in ARCHITECTURE.md, in the right order? Newest first.
 
+## 2026-10-07 · Review 5 (105 of 139 backlog tasks merged, about 25 PRs since Review 4)
+
+**State.**
+
+- **Milestones:** M1–M6 are complete (M5 20/20 with the T520 parse check; M6 with T606 intents and the T609/T610 health gate). M13 is complete (T1301 visibility conformance, T1302 evidence on submit, T1303 `manifest_changed`). M4 is complete (decisions with veto, supersede and the memory mirror; memory CRUD; loop protection; provenance labels including the inbox). M7 is at 10/13 (T704–T706 and T711 remain). M8 is at 3/7 (import, health suggestion, pull upstream). M10 is at 1.5/9 (T1001 lifecycle; T1007 isolation, with the T1007b proxy in review as a five-part stack). M9 has T904 and T906 in review. M11 and M12 haven't started.
+- **Runnable product:** `apps/server` composes everything above. An agent can join over MCP, collaborate (messages, inbox, memory, decisions, digest, tasks), apply ChangeSets that merge, conflict, escalate and get health-gated, and the owner can import a GitHub repository and pull upstream changes. About 2460 tests; CI is green with real Docker.
+
+**Against the §30 demo flow.**
+
+- **Working end to end (backend):** steps 1–6, 10–13, 15 and 16. Step 2 now works for public repositories (import plus the suggested health command).
+- **Partial:** step 7 (intents exist; no editor), step 8 (sandboxes are created and isolated, but there's no `sandbox.exec`, materialize or submit yet: T1002–T1006), and step 14 (capability denial works; there's no `tools.invoke` or AWS plugin).
+- **Missing:** step 9 (drafts and the editor, M11), step 17 (checkpoints are in review as T804; export and PR are T805/T806), and every UI step (M11). A demo of step 13 on a real Node repository also needs T611, because health runs have no network, so no `node_modules`.
+
+**On track.**
+
+- The §34 rules are now enforced by machinery, not review. Every read declares a participant view and one test scans every surface (T1301). Provenance labels cover every agent-facing read, including the inbox (T412, #125). Evidence is a protocol field (T1302), and model or client changes are events (T1303).
+- Security review keeps paying off before release: path-name disclosure through edit intents (#115), loop detection that could be evaded with neutral events (#117), Docker resources orphaned by transactional side effects (#118), redirect SSRF and host Git config in `git.import` (#127), and idempotent retries charged against budgets (#134).
+
+**Course corrections.**
+
+1. **The critical path is now M10 (step 8) and M11 (steps 7, 9, UI).** M10 belongs to S2: T1007b → T611 → T1002 → T1003 → T1005 → T1006 → T1004 → T1008. M11 is S1's largest block. It starts after M8 and T807, before the remaining M9 and M7 items, because the demo is a web app.
+2. **T1201 (tool registry, `tools.invoke`) moves to S1**, so that step 14 doesn't wait behind S2's M10 queue. S2 keeps the runner and plugins (T1202–T1206).
+3. **New tasks:** **T1007b** (the egress proxy, split out of T1007, in review) and **T807** (a dispatcher prepare phase, so slow I/O such as upstream fetches doesn't hold the room lease; it also splits pulls larger than 500 files). T803's spec now names the caller as submitter of record.
+4. **Stacking:** S2 split T1007b into five stacked PRs. Each is reviewable, but squash-merging bottom-up forces a rebase of every later part. The rule stands: open the next part after the previous one merges, unless the lead agrees to a stack up front.
+5. **Order.**
+   - **S1:** #131 T804, #132 T906, #134 T904 (fix) → T805 → T806 → T807 → T1201 → T1101 (TS SDK) → T1104 → T1105 → T905 → T902 → T704–T706.
+   - **S2:** T1007b stack → T611 → T1002 → T1003 → T1005 → T1006 → T1004 → T1008 → T711 → T901 → T903 → T1202–T1206.
+
+**Tech-debt register.**
+
+- **Resolved since Review 4:** the e2e split (most new module tests now live in `apps/server/src/e2e/`); memory delete checks namespaces; frozen rooms are skipped by every platform sweep (`runSystem` `whenFrozen`); sandbox cleanup is retried.
+- **New:**
+  - `presence.list_intents` SCANs the Redis keyspace; index intents per room before the editor polls them.
+  - `memory.list` sorts with `COLLATE "C"`, which the default-collation `(room_id, key)` index can't serve.
+  - Upstream fetches hold the room lease (T807). An import downloads the whole tip before the 256 MiB check.
+  - Server-side fetches should go through the egress proxy once T1007b lands (DNS rebinding).
+  - Task descriptions are labeled with the creator only, and evidence isn't labeled with the submitter's provenance.
+  - The state-change prefixes in loop protection are defined twice (`isStateChange` and the SQL regex).
+  - Sandbox cleanup doesn't cover `DELETED` rooms.
+  - `room.get_state`'s `view_reason` should warn that adding conflicts or events would make it `participant`.
+- **Carried over:** the T703 per-socket poll; the gateway's `"INTERNAL"` code is outside `ErrorCode`; the kernel imports policy helpers; no index for event-type and JSONB lookups; `tasks.heartbeat` is a catalog read that writes.
+
+**Quality.** S2 (since the model change): first passes still often need a blocking round (#113, #118 with two red CI pushes), but second passes are reliably at baseline. The last four S2 PRs (#121, #124, #126 and the T1001 follow-up) passed on the first round with CI green on push. S2 asks good scope questions before coding (T606, T1001 disk quota, T1007 proxy). S1 is fast and thorough, though twice it skipped an instruction to do a follow-up first (the inbox provenance), and it twice shipped locale-dependent ordering bugs (#109, #127).
+
+**Lead process.** The lead's container restarted three times today. Each restart lost the five-minute check-in job and the local services, and once cost about 55 minutes of review latency with S2 blocked on a question. The hourly safety-net routine recovered it each time. §34.8's server-side reminders would remove this class of problem for Crossover's own agents.
+
 ## 2026-10-07 · Review 4 addendum: §34 proposals adopted
 
 Peter accepted O1's recommendation. Three §34 proposals become M13 (S1):

@@ -20,11 +20,11 @@ Conventions are in `docs/ENGINEERING.md`. Section references (§) point to `docs
 | M5 Workspace engine                   | T501–T520   | S2                                                      |
 | M6 Conflicts and health               | T601–T610   | S2                                                      |
 | M7 Gateway, MCP, end-to-end           | T701–T713   | S1 (T701–T709, T713), S2 (T710–T711), O1 (T712)         |
-| M8 Git interoperability (§24)         | T801–T806   | S1 (moved from S2 in Review 4)                          |
+| M8 Git interoperability (§24)         | T801–T807   | S1 (moved from S2 in Review 4)                          |
 | M9 Safety controls (§22–23)           | T901–T906   | S1 (T902, T904–T906), S2 (T901, T903)                   |
-| M10 Execution sandboxes (§14)         | T1001–T1008 | S2                                                      |
+| M10 Execution sandboxes (§14)         | T1001–T1008 | S2 (T1007 split into T1007 + T1007b in Review 5)        |
 | M11 Clients (§27, §29)                | T1101–T1105 | S1                                                      |
-| M12 Plugins (§21.4–21.5)              | T1201–T1206 | S2                                                      |
+| M12 Plugins (§21.4–21.5)              | T1201–T1206 | S1 (T1201, moved in Review 5), S2 (T1202–T1206)         |
 | M13 Lessons from building (§34)       | T1301–T1303 | S1                                                      |
 
 **Start here:** S1 → T101, T105, T114 (independent). S2 → T501, T505 (only need the scaffold).
@@ -948,7 +948,7 @@ After import, suggest a `health_command` (§24.1) from `package.json` scripts (`
 
 Deps: T801 · Migration: —
 
-Fetch the upstream branch, diff `last_synced_sha → new tip`, and submit it as an `UPSTREAM` ChangeSet based on `last_synced_room_revision` through the normal apply pipeline (§24.2). Conflicts follow the normal flow with the lead as submitter of record.
+Fetch the upstream branch, diff `last_synced_sha → new tip`, and submit it as an `UPSTREAM` ChangeSet based on `last_synced_room_revision` through the normal apply pipeline (§24.2). Conflicts follow the normal flow with the caller (lead or owner) as submitter of record (changed in Review 5; escalation still reaches the lead).
 
 - Non-overlapping upstream and room edits merge; overlapping ones create a conflict.
 - `upstream.last_synced_*` advance only when the ChangeSet applies.
@@ -977,6 +977,15 @@ Deps: T805 · Migration: —
 After export, open a pull request through a `PullRequestProvider` interface (Tier 2 `github.create_pull_request`); a fake provider in tests, the GitHub implementation with the plugin runner.
 
 - Export with PR returns the provider's PR URL; without the capability → `FORBIDDEN`.
+
+### T807 · Dispatcher prepare phase for slow I/O — S1
+
+Deps: T803 · Migration: —
+
+Added in Review 5. `git.import` and `git.pull_upstream` fetch over the network inside the command, holding the room lease and row locks for up to 120 s, which blocks every other mutation in the room. Add an optional `prepare(ctx, params)` to `CommandDefinition` that runs before the transaction, off the room actor and without locks, and hands its result to `execute`. `execute` re-validates anything `prepare` assumed, because the room may have changed. Move both upstream fetches into `prepare`. Also: a pull larger than 500 changed files is split into ordered ChangeSets instead of refused.
+
+- A pull's fetch doesn't block a concurrent `messages.send` in the same room (test with a slow fake fetcher).
+- A `prepare` whose assumption no longer holds (the upstream moved, or a conflict opened) is refused in `execute` with `CONFLICT_VERSION`.
 
 ---
 
@@ -1093,6 +1102,15 @@ gVisor (`runsc`) runtime when configured. Default-deny network egress except thr
 
 - Tests: a non-allowlisted host and IMDS are refused; an allowlisted registry works; the sandbox environment contains no platform secrets.
 
+### T1007b · Egress proxy — S2
+
+Deps: T1007 · Migration: —
+
+Added in Review 5. T1007 delivered isolation and the per-sandbox network wiring. The allowlist proxy is the platform's own: `apps/egress-proxy`, a CONNECT-only forward proxy on port 443 (plain HTTP refused), in its own non-root container. Each sandbox gets an HMAC credential in `HTTPS_PROXY`, which maps to an active sandbox, participant and room. The allowlist is the platform defaults (package registries, GitHub read-only) plus `settings.egress_allowlist` (exact host or `*.suffix`). The proxy resolves DNS itself, refuses private, loopback, link-local (IMDS), CGNAT and IPv4-mapped addresses even for allowlisted names, and connects to the pinned address. It writes a structured per-sandbox egress log (host, verdict, bytes) and nothing to the ledger.
+
+- A non-allowlisted host, IMDS, and an allowlisted name resolving to a private address are refused. An allowlisted host works (local TLS server and resolver seam). A Docker smoke test runs through the proxy in CI.
+- The credential stops working when the sandbox is destroyed, the participant is paused or removed, or the room is frozen.
+
 ### T1008 · MCP coding tools — S2
 
 Deps: T1004, T1005, T1006, T707 · Migration: —
@@ -1151,7 +1169,7 @@ Editor with live intents, draft flush, live cursors and merge view (§27; demo s
 
 Added in Review 4. Plugins run server-side and agents never receive credentials (§21.4, D10). The first plugins are the §29 MVP set: GitHub, Browser and AWS (read plus staging deploy). The runner reuses M10's container isolation and egress proxy.
 
-### T1201 · Tool registry, `tools.list` and `tools.invoke` — S2
+### T1201 · Tool registry, `tools.list` and `tools.invoke` — S1 (moved in Review 5)
 
 Deps: T208, T215 · Migration: —
 
