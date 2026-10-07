@@ -156,6 +156,7 @@ export function registerCheckpointCommands(dispatcher: Dispatcher): void {
             payload: {
               checkpoint_id: id,
               revision,
+              message: p.message,
               created_by: checkpoint.created_by,
               health_status: health,
               overridden,
@@ -184,7 +185,7 @@ export function registerCheckpointCommands(dispatcher: Dispatcher): void {
         );
         if (!rows[0]) throw new CrossoverError("NOT_FOUND", `Checkpoint ${p.after} not found`);
         values.push(rows[0].ts, p.after);
-        where += ` AND (created_at, id) > ($3::timestamptz, $4)`;
+        where += ` AND (created_at, id COLLATE "C") > ($3::timestamptz, $4)`;
       }
       const { rows } = await ctx.client.query<Row>(
         `SELECT ${COLUMNS} FROM checkpoints WHERE ${where}
