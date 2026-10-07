@@ -8,6 +8,8 @@ CREATE TABLE tool_invocations (
   tool            text NOT NULL,
   claimed_at      timestamptz NOT NULL DEFAULT clock_timestamp(),
   outcome         jsonb,
+  -- Whether the run's events (`tool.completed` / `tool.failed`) are in the ledger.
+  events_logged   boolean NOT NULL DEFAULT false,
   PRIMARY KEY (participant_id, idempotency_key)
 );
 CREATE INDEX tool_invocations_claimed_at ON tool_invocations (claimed_at);

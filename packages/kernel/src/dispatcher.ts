@@ -60,7 +60,7 @@ export interface CommandContext {
   authorize(
     action: string,
     resource?: Record<string, unknown>,
-    options?: { anyScope?: boolean },
+    options?: AuthorizeOptions,
   ): Promise<void>;
   /**
    * Like {@link authorize}, but asks whether *another participant of this room* could do
@@ -219,6 +219,15 @@ export interface CommandDefinition<S extends z.ZodType, R> {
   execute(ctx: CommandContext, params: z.infer<S>): Promise<CommandResult<R>>;
 }
 
+export interface AuthorizeOptions {
+  anyScope?: boolean;
+  /**
+   * On a refusal, throw the error this returns instead of the authorizer's, and record the denial
+   * (`capability.denied`) all the same: for an answer that must not say what the authorizer knew.
+   */
+  refuseAs?: (refusal: CrossoverError) => CrossoverError;
+}
+
 /** What {@link CommandDefinition.prepare} gets: no transaction, no lease, just the pool. */
 export interface PrepareContext {
   pool: Pool;
@@ -226,6 +235,8 @@ export interface PrepareContext {
   room_id: string;
   command_id: string;
   idempotency_key: string;
+  /** The hash the dispatcher keeps the envelope's idempotency key under (room, method, raw params). */
+  request_hash: string;
   /**
    * Whether the principal may do `action` on `resource` right now, for a check `prepare` needs
    * before something slow or external. A refusal is just `false`: nothing is recorded, and
@@ -402,6 +413,21 @@ export class Dispatcher {
       new RoomLeases(options.pool, options.nodeId, options.leaseTtlMs, {
         ...(options.onLeaseAcquire ? { onAcquire: options.onLeaseAcquire } : {}),
       });
+  }
+
+  /** Run an authorization; a refusal may be answered with another error that still records the denial. */
+  private async disguised(run: () => Promise<void>, options?: AuthorizeOptions): Promise<void> {
+    try {
+      await run();
+    } catch (error) {
+      if (options?.refuseAs && error instanceof CrossoverError && error.code === "FORBIDDEN") {
+        const replacement = options.refuseAs(error);
+        const info = this.denials.get(error);
+        if (info) this.denials.set(replacement, info);
+        throw replacement;
+      }
+      throw error;
+    }
   }
 
   /** A denial for someone else's `authorizeAs` check says so, so it isn't read as the caller's own. */
@@ -1177,6 +1203,17 @@ export class Dispatcher {
     );
   }
 
+  private requestHashOf(
+    principal: Principal,
+    envelope: { method: string; params?: unknown },
+  ): string {
+    return hashRequest({
+      room_id: principal.room_id,
+      method: envelope.method,
+      params: envelope.params,
+    });
+  }
+
   /** Whether this exact request (same participant, key and content) already ran and has a stored result. */
   private async isReplay(
     principal: Principal,
@@ -1272,16 +1309,20 @@ export class Dispatcher {
         command_id: envelope.id,
         idempotency_key: envelope.idempotency_key,
         authorize: (a, resource, options) =>
-          this.authorize(
-            principal,
-            a,
-            { ...resource, room_id },
-            {
-              method: envelope.method,
-              params,
-              client,
-              ...(options?.anyScope ? { perPath: true } : {}),
-            },
+          this.disguised(
+            () =>
+              this.authorize(
+                principal,
+                a,
+                { ...resource, room_id },
+                {
+                  method: envelope.method,
+                  params,
+                  client,
+                  ...(options?.anyScope ? { perPath: true } : {}),
+                },
+              ),
+            options,
           ),
         authorizeAs: async (participantId, a, resource) =>
           this.authorize(
@@ -1346,6 +1387,7 @@ export class Dispatcher {
             room_id: principal.room_id,
             command_id: envelope.id,
             idempotency_key: key,
+            request_hash: this.requestHashOf(principal, envelope),
             isAllowed: (a, resource, options) =>
               this.isAllowed(
                 principal,
@@ -1542,17 +1584,21 @@ export class Dispatcher {
                 idempotency_key: key,
                 ...(prepared === undefined ? {} : { prepared }),
                 authorize: (a, resource, options) =>
-                  this.authorize(
-                    principal,
-                    a,
-                    { ...resource, room_id },
-                    {
-                      method: envelope.method,
-                      params,
-                      client,
-                      ...(options?.anyScope ? { perPath: true } : {}),
-                      ...(lifted ? { approved: true } : {}),
-                    },
+                  this.disguised(
+                    () =>
+                      this.authorize(
+                        principal,
+                        a,
+                        { ...resource, room_id },
+                        {
+                          method: envelope.method,
+                          params,
+                          client,
+                          ...(options?.anyScope ? { perPath: true } : {}),
+                          ...(lifted ? { approved: true } : {}),
+                        },
+                      ),
+                    options,
                   ),
                 authorizeAs: async (participantId, a, resource) =>
                   this.authorize(

@@ -61,6 +61,7 @@ describe("canonicalScope", () => {
       "a#x",
       "a\\b",
       "a\u0000b",
+      "a\u0085b", // a C1 control
       "a b",
       "a/*",
       "a/[x]",

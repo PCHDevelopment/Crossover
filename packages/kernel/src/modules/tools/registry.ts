@@ -120,7 +120,7 @@ export function canonicalScope(raw: string, normalize?: (scope: string) => strin
       value === "" ||
       value.length > MAX_SCOPE_LENGTH ||
       // eslint-disable-next-line no-control-regex
-      /[\s\u0000-\u001f\u007f%?#*[\]{}\\]/.test(value)
+      /[\s\u0000-\u001f\u007f-\u009f%?#*[\]{}\\]/.test(value)
     )
       throw bad();
     if (value.split("/").some((segment) => segment === "" || segment === "." || segment === ".."))

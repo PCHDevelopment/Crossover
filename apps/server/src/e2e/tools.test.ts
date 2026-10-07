@@ -205,15 +205,17 @@ describe("tools over HTTP", () => {
     expect(listed[0]!.input_schema.type).toBe("object");
   });
 
-  it("a tool whose capability isn't held is FORBIDDEN naming it, recorded as capability.denied, and nothing runs", async () => {
+  it("a tool whose capability isn't held is FORBIDDEN, the same answer an unknown tool gets, recorded as capability.denied, and nothing runs", async () => {
     const r = await newRoom();
     const before = invoked.length;
     const res = await r.invoke("github.create_pull_request", { repo: "acme/widgets", title: "x" });
     expect(res.statusCode).toBe(403);
-    expect(JSON.stringify(res.json().error.details)).toContain("github.create_pull_request");
+    const unknown = await r.invoke("nope.nothing", { repo: "acme/widgets", title: "x" });
+    expect(unknown.json()).toEqual(res.json()); // same code, message and details: no oracle for which tools exist
+    expect(JSON.stringify(res.json())).not.toContain("github.create_pull_request");
     expect(invoked.length).toBe(before);
     const denied = await r.events("capability.denied");
-    expect(denied.length).toBeGreaterThanOrEqual(1);
+    expect(denied.length).toBe(1); // the held-by-nobody tool is recorded, the unknown one isn't
     expect(JSON.stringify(denied[0]!.payload)).toContain("github.create_pull_request");
   });
 
@@ -344,7 +346,7 @@ describe("tools over HTTP", () => {
     const unheld = await r.invoke("browser.navigate", { nonsense: true });
     expect(unheld.statusCode).toBe(403);
     expect(unheld.body).not.toContain("issues");
-    expect(JSON.stringify(unheld.json().error.details)).toContain("browser.navigate");
+    expect(unheld.json()).toEqual(unknown.json());
   });
 });
 
@@ -532,5 +534,94 @@ describe("tools run exactly once", () => {
       scope: "acme/widgets",
       capability: "github.create_pull_request:acme/widgets",
     });
+  });
+});
+
+/** The review's second round (O1): probes that each reproduced a lost or repeated side effect. */
+describe("tools: keys, freezes and stale claims", () => {
+  const send = (r: Awaited<ReturnType<typeof newRoom>>, request: unknown) =>
+    post(`/v1/rooms/${r.roomId}/commands`, request, r.dev);
+  const pr = (title: string) =>
+    envelope("tools.invoke", {
+      tool: "github.create_pull_request",
+      args: { repo: "acme/widgets", title },
+    });
+
+  it("a key already used by another command doesn't run the tool and then complain", async () => {
+    const r = await newRoom();
+    await ok(await r.grant("github.create_pull_request:acme/widgets"));
+    const key = "shared-key";
+    await ok(await send(r, { ...envelope("messages.send", { body: "hi" }), idempotency_key: key }));
+    const before = invoked.length;
+    const clash = await send(r, { ...pr("clash"), idempotency_key: key });
+    expect(clash.statusCode).toBe(400);
+    expect(invoked.length).toBe(before); // nothing was created
+  });
+
+  it("a room frozen while the tool runs: the run is recorded, and after the resume the key holder gets it, even if the grant was revoked meanwhile", async () => {
+    const r = await newRoom();
+    await ok(await r.grant("github.create_pull_request:acme/widgets"));
+    let release!: () => void;
+    gate = new Promise<void>((resolve) => (release = resolve));
+    const before = invoked.length;
+    const request = pr("slow");
+    const running = send(r, request);
+    for (let i = 0; i < 100 && invoked.length === before; i++)
+      await new Promise((res) => setTimeout(res, 20));
+    await ok(await r.call(r.owner, "room.freeze", {}));
+    release();
+    const first = await running;
+    expect(first.statusCode).not.toBe(200); // the frozen room can't take the answer…
+    expect(invoked.length).toBe(before + 1); // …but the tool ran once
+    await ok(await r.call(r.owner, "room.resume", {}));
+    await ok(
+      await r.call(r.owner, "capabilities.revoke", {
+        participant_id: r.devId,
+        capability: "github.create_pull_request:acme/widgets",
+      }),
+    );
+    const retry = await ok(await send(r, request)); // the requester gets what happened
+    expect(retry.response.result).toMatchObject({ ok: true });
+    expect(invoked.length).toBe(before + 1);
+    expect((await r.events("tool.completed")).length).toBe(1); // logged once, whichever attempt got to
+    expect((await ok(await send(r, request))).replayed).toBe(true);
+  });
+
+  it("a claim left behind by a lost process: an idempotent tool is taken over, any other reads as 'outcome unknown' and logs tool.failed", async () => {
+    const r = await newRoom();
+    await ok(await r.grant("browser.navigate"));
+    await ok(await r.grant("github.create_pull_request:acme/widgets"));
+    const age = async () => {
+      await db.pool.query(
+        `UPDATE tool_invocations SET outcome = NULL, events_logged = false,
+           claimed_at = clock_timestamp() - interval '10 minutes'
+         WHERE room_id = $1`,
+        [r.roomId],
+      );
+      await db.pool.query("DELETE FROM idempotency_keys WHERE participant_id = $1", [r.devId]);
+    };
+    const page = envelope("tools.invoke", {
+      tool: "browser.navigate",
+      args: { url: "https://example.com" },
+    });
+    await ok(await send(r, page));
+    const before = invoked.length;
+    await age();
+    const again = await ok(await send(r, page));
+    expect(again.response.result).toMatchObject({ ok: true });
+    expect(invoked.length).toBe(before + 1); // taken over and run again: it is safe to
+
+    const request = pr("lost");
+    await ok(await send(r, request));
+    const ran = invoked.length;
+    await age();
+    const unknown = await send(r, request);
+    expect(unknown.statusCode).toBe(503);
+    expect(unknown.json().error).toMatchObject({
+      retryable: false,
+      details: { outcome: "unknown" },
+    });
+    expect(invoked.length).toBe(ran); // not run again
+    expect((await r.events("tool.failed")).length).toBeGreaterThanOrEqual(1);
   });
 });

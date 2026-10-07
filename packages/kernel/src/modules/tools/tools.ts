@@ -1,5 +1,5 @@
 import type { Pool, PoolClient } from "@crossover/db";
-import { hashRequest, IDEMPOTENCY_TTL_HOURS } from "@crossover/ledger";
+import { IDEMPOTENCY_TTL_HOURS } from "@crossover/ledger";
 import { loadLiveGrants } from "@crossover/policy";
 import { CrossoverError, type ErrorCode } from "@crossover/protocol";
 import { z } from "zod";
@@ -83,13 +83,59 @@ interface Claimant {
   tool: string;
 }
 
-type Claim = { claimed: true } | { claimed: false; outcome: Outcome };
+/** A run that already has an outcome under the key, and whether its events are in the ledger. */
+interface Recorded {
+  outcome: Outcome;
+  logged: boolean;
+}
+
+const keyReuse = (key: string) =>
+  new CrossoverError("VALIDATION", "Idempotency key was already used with a different request", {
+    details: { idempotency_key: key },
+  });
+
+/**
+ * Refuse a key that another command (or another `tools.invoke`) already used: the dispatcher's own
+ * record says which request it stands for, and a different one must not run the tool before the
+ * dispatcher finds out afterwards.
+ */
+async function refuseKeyReuse(pool: Pool, who: Claimant): Promise<void> {
+  const { rows } = await pool.query<{ request_hash: string }>(
+    `SELECT request_hash FROM idempotency_keys
+     WHERE participant_id = $1 AND idempotency_key = $2
+       AND created_at >= clock_timestamp() - make_interval(hours => $3)`,
+    [who.participant_id, who.key, IDEMPOTENCY_TTL_HOURS],
+  );
+  if (rows[0] && rows[0].request_hash !== who.hash) throw keyReuse(who.key);
+}
+
+/** The outcome kept under this key by an earlier attempt, if there is one. */
+async function findRecorded(pool: Pool, who: Claimant): Promise<Recorded | undefined> {
+  const { rows } = await pool.query<{
+    request_hash: string;
+    outcome: Outcome | null;
+    events_logged: boolean;
+  }>(
+    `SELECT request_hash, outcome, events_logged FROM tool_invocations
+     WHERE participant_id = $1 AND idempotency_key = $2
+       AND claimed_at >= clock_timestamp() - make_interval(hours => $3)`,
+    [who.participant_id, who.key, IDEMPOTENCY_TTL_HOURS],
+  );
+  const row = rows[0];
+  if (!row) return undefined;
+  if (row.request_hash !== who.hash) throw keyReuse(who.key);
+  return row.outcome ? { outcome: row.outcome, logged: row.events_logged } : undefined;
+}
+
+type Claim =
+  | { claimed: true }
+  /** The claim's process was lost and the tool isn't safe to repeat: what a retry is told. */
+  | { claimed: false; resolved: Outcome };
 
 /**
  * Take the idempotency key for a tool run BEFORE its side effect, in a short transaction of its
- * own (`tool_invocations`): a second request with the same key while the first runs is `in
- * progress` (retryable), with another request's hash it is the key-reuse error, and once the run
- * has an outcome that outcome is replayed without running the tool.
+ * own (`tool_invocations`): a second request with the same key while it runs is `in progress`
+ * (retryable). Whether a claim is stale is decided in SQL, from the database's clock.
  */
 async function claimRun(
   pool: Pool,
@@ -102,59 +148,64 @@ async function claimRun(
      VALUES ($1, $2, $3, $4, $5)
      ON CONFLICT (participant_id, idempotency_key) DO UPDATE
        SET request_hash = EXCLUDED.request_hash, room_id = EXCLUDED.room_id, tool = EXCLUDED.tool,
-           claimed_at = clock_timestamp(), outcome = NULL
+           claimed_at = clock_timestamp(), outcome = NULL, events_logged = false
        WHERE tool_invocations.claimed_at < clock_timestamp() - make_interval(hours => $6)`,
     [who.participant_id, who.key, who.hash, who.room_id, who.tool, IDEMPOTENCY_TTL_HOURS],
   );
   if ((rowCount ?? 0) > 0) return { claimed: true };
-  const { rows } = await pool.query<{
-    request_hash: string;
-    outcome: Outcome | null;
-    age_ms: number;
-    claimed_at: Date;
-  }>(
-    `SELECT request_hash, outcome, claimed_at,
-            extract(epoch FROM clock_timestamp() - claimed_at) * 1000 AS age_ms
-     FROM tool_invocations WHERE participant_id = $1 AND idempotency_key = $2`,
-    [who.participant_id, who.key],
-  );
-  const row = rows[0];
-  if (!row) throw new CrossoverError("CONFLICT_VERSION", "Try again", { retryable: true });
-  if (row.request_hash !== who.hash) {
-    throw new CrossoverError(
-      "VALIDATION",
-      "Idempotency key was already used with a different request",
-      { details: { idempotency_key: who.key } },
+  const staleSeconds = (timeoutMs + STALE_AFTER_MS) / 1000;
+  // The process that claimed it is gone. A tool that is safe to repeat is taken over; for any
+  // other, whether it happened is unknown, and that is what a retry is told.
+  if (def.idempotent) {
+    const { rowCount: took } = await pool.query(
+      `UPDATE tool_invocations SET claimed_at = clock_timestamp()
+       WHERE participant_id = $1 AND idempotency_key = $2 AND request_hash = $3
+         AND outcome IS NULL
+         AND claimed_at < clock_timestamp() - make_interval(secs => $4)`,
+      [who.participant_id, who.key, who.hash, staleSeconds],
     );
+    if ((took ?? 0) > 0) return { claimed: true };
+  } else {
+    const resolved = unknownOutcome(def, "The tool's process was lost while it ran");
+    const { rowCount: done } = await pool.query(
+      `UPDATE tool_invocations SET outcome = $4::jsonb
+       WHERE participant_id = $1 AND idempotency_key = $2 AND request_hash = $3
+         AND outcome IS NULL
+         AND claimed_at < clock_timestamp() - make_interval(secs => $5)`,
+      [who.participant_id, who.key, who.hash, JSON.stringify(resolved), staleSeconds],
+    );
+    if ((done ?? 0) > 0) return { claimed: false, resolved };
   }
-  if (row.outcome) return { claimed: false, outcome: row.outcome };
-  if (row.age_ms > timeoutMs + STALE_AFTER_MS) {
-    // The process that claimed it is gone. A tool that is safe to repeat is taken over; for any
-    // other, whether it happened is unknown, and that is what a retry is told.
-    if (def.idempotent) {
-      const { rowCount: took } = await pool.query(
-        `UPDATE tool_invocations SET claimed_at = clock_timestamp()
-         WHERE participant_id = $1 AND idempotency_key = $2 AND outcome IS NULL AND claimed_at = $3`,
-        [who.participant_id, who.key, row.claimed_at],
-      );
-      if ((took ?? 0) > 0) return { claimed: true };
-    } else {
-      const outcome = unknownOutcome(def, "The tool's process was lost while it ran");
-      await recordOutcome(pool, who, outcome);
-      return { claimed: false, outcome };
-    }
-  }
+  const recorded = await findRecorded(pool, who); // someone finished it meanwhile, or another request holds the key
+  if (recorded) return { claimed: false, resolved: recorded.outcome };
   throw new CrossoverError("CONFLICT_VERSION", "That invocation is still running", {
     retryable: true,
     details: { reason: "in_progress", retry_after: 5 },
   });
 }
 
-const recordOutcome = (pool: Pool, who: Claimant, outcome: Outcome) =>
-  pool.query(
+/** Keep the outcome. False when the claim was taken over and another outcome stands. */
+const recordOutcome = async (pool: Pool, who: Claimant, outcome: Outcome): Promise<boolean> => {
+  const { rowCount } = await pool.query(
     `UPDATE tool_invocations SET outcome = $3::jsonb
      WHERE participant_id = $1 AND idempotency_key = $2 AND outcome IS NULL`,
     [who.participant_id, who.key, JSON.stringify(outcome)],
+  );
+  return (rowCount ?? 0) > 0;
+};
+
+/** The run starts now: the staleness clock counts from here, not from the claim. */
+const markStarted = (pool: Pool, who: Claimant) =>
+  pool.query(
+    `UPDATE tool_invocations SET claimed_at = clock_timestamp()
+     WHERE participant_id = $1 AND idempotency_key = $2 AND outcome IS NULL`,
+    [who.participant_id, who.key],
+  );
+
+const markLogged = (pool: Pool, who: Claimant) =>
+  pool.query(
+    "UPDATE tool_invocations SET events_logged = true WHERE participant_id = $1 AND idempotency_key = $2",
+    [who.participant_id, who.key],
   );
 
 const releaseClaim = (pool: Pool, who: Claimant) =>
@@ -343,6 +394,77 @@ export function registerToolCommands(dispatcher: Dispatcher, options: ToolComman
     prepare: async (ctx, p): Promise<Prepared | undefined> => {
       const def = registry.get(p.tool);
       if (!def) return undefined; // `execute` says FORBIDDEN
+      const who: Claimant = {
+        participant_id: ctx.principal.participant_id,
+        key: ctx.idempotency_key,
+        hash: ctx.request_hash,
+        room_id: ctx.room_id,
+        tool: def.name,
+      };
+      await refuseKeyReuse(ctx.pool, who);
+
+      /** An event about this run, in the ledger; false when the room is frozen (the platform appends nothing). */
+      const note = async (
+        type: "tool.invoked" | "tool.completed" | "tool.failed",
+        capability: string,
+        extra: Record<string, unknown> = {},
+      ): Promise<boolean> => {
+        const out = await dispatcher.runSystem(
+          ctx.room_id,
+          type,
+          async () => ({
+            result: true,
+            events: [
+              {
+                type,
+                actor_id: ctx.principal.participant_id,
+                payload: {
+                  tool: def.name,
+                  invocation_id: ctx.command_id,
+                  capability,
+                  tier: def.tier,
+                  ...extra,
+                },
+              } satisfies EmittedEvent & { actor_id: string },
+            ],
+          }),
+          // A frozen room takes no event. For `tool.invoked` of a tier 3 tool that means the tool
+          // doesn't run (it throws); anything else is kept in the outcome and logged on a retry.
+          def.tier >= 3 && type === "tool.invoked" ? {} : { whenFrozen: () => false },
+        );
+        return out.result;
+      };
+      const logOutcome = async (outcome: Outcome, capability: string): Promise<void> => {
+        if (def.tier < 2) return;
+        const logged = outcome.ok
+          ? await note("tool.completed", capability, {
+              duration_ms: outcome.duration_ms,
+              trust: "external",
+            })
+          : await note("tool.failed", capability, {
+              reason: outcome.error.code,
+              retryable: outcome.error.retryable,
+            });
+        if (logged) await markLogged(ctx.pool, who);
+      };
+
+      // A run that already has an outcome under this key belongs to its requester: they get what
+      // happened, whatever has changed since (a revoked grant, a room that was frozen meanwhile).
+      const recorded = await findRecorded(ctx.pool, who);
+      if (recorded) {
+        let capability = def.capability;
+        let scope: string | undefined;
+        try {
+          const args = parseArgs(def, p.args);
+          scope = scopeOf(def, args);
+          capability = capabilityFor(def, args);
+        } catch {
+          // the outcome stands whatever the arguments look like now
+        }
+        if (!recorded.logged) await logOutcome(recorded.outcome, capability).catch(() => undefined);
+        return { outcome: recorded.outcome, capability, scope };
+      }
+
       // Who may use the tool at all, before anything about its arguments is said.
       const holds =
         (await ctx.isAllowed(def.capability, {}, { anyScope: true })) ||
@@ -362,48 +484,15 @@ export function registerToolCommands(dispatcher: Dispatcher, options: ToolComman
           retryable: false,
         });
       }
-      let hash: string;
-      try {
-        hash = hashRequest({ room_id: ctx.room_id, method: "tools.invoke", params: p });
-      } catch {
-        throw new CrossoverError("VALIDATION", "params must be plain JSON data");
-      }
-      const who: Claimant = {
-        participant_id: ctx.principal.participant_id,
-        key: ctx.idempotency_key,
-        hash,
-        room_id: ctx.room_id,
-        tool: def.name,
-      };
       const claim = await claimRun(ctx.pool, who, def, timeoutMs);
-      if (!claim.claimed) return { outcome: claim.outcome, capability, scope };
+      if (!claim.claimed) {
+        await logOutcome(claim.resolved, capability).catch(() => undefined);
+        return { outcome: claim.resolved, capability, scope };
+      }
 
-      const note = (type: "tool.invoked" | "tool.failed", extra: Record<string, unknown> = {}) =>
-        dispatcher.runSystem(
-          ctx.room_id,
-          type,
-          async () => ({
-            result: null,
-            events: [
-              {
-                type,
-                actor_id: ctx.principal.participant_id,
-                payload: {
-                  tool: def.name,
-                  invocation_id: ctx.command_id,
-                  capability,
-                  tier: def.tier,
-                  ...extra,
-                },
-              } satisfies EmittedEvent & { actor_id: string },
-            ],
-          }),
-          // A frozen room takes no event; for tier 3 that means the tool doesn't run.
-          def.tier >= 3 ? {} : { whenFrozen: () => null },
-        );
       if (def.tier >= 2) {
         try {
-          await note("tool.invoked");
+          await note("tool.invoked", capability);
         } catch (error) {
           if (def.tier >= 3) {
             // Fail closed: no record that it started, no run.
@@ -416,15 +505,24 @@ export function registerToolCommands(dispatcher: Dispatcher, options: ToolComman
           }
         }
       }
-      const outcome = await execTool(def, args, capability, scope, {
+      await markStarted(ctx.pool, who);
+      let outcome = await execTool(def, args, capability, scope, {
         room_id: ctx.room_id,
         participant_id: ctx.principal.participant_id,
         invocation_id: ctx.command_id,
       });
       // Recorded whatever comes next. A failure the tool may be retried after leaves no claim.
       try {
-        if (!outcome.ok && outcome.error.retryable) await releaseClaim(ctx.pool, who);
-        else await recordOutcome(ctx.pool, who, outcome);
+        if (!outcome.ok && outcome.error.retryable) {
+          await releaseClaim(ctx.pool, who);
+          await logOutcome(outcome, capability).catch(() => undefined);
+          return { outcome, capability, scope };
+        }
+        if (!(await recordOutcome(ctx.pool, who, outcome))) {
+          // The claim was taken over while this ran: what stands is what was recorded.
+          const standing = await findRecorded(ctx.pool, who);
+          if (standing) outcome = standing.outcome;
+        }
       } catch (error) {
         // The outcome can't be kept: the key stays claimed, and a retry is told it's in progress,
         // then (for a tool that isn't idempotent) that the outcome is unknown.
@@ -433,12 +531,9 @@ export function registerToolCommands(dispatcher: Dispatcher, options: ToolComman
           cause: error,
         });
       }
-      if (!outcome.ok && def.tier >= 2) {
-        await note("tool.failed", {
-          reason: outcome.error.code,
-          retryable: outcome.error.retryable,
-        }).catch(() => undefined);
-      }
+      // In the ledger from here, not from `execute`: the run happened even if the room is frozen
+      // or the caller's access ended since, and the response can then not be delivered.
+      await logOutcome(outcome, capability).catch(() => undefined);
       return { outcome, capability, scope };
     },
     execute: async (ctx, p) => {
@@ -447,9 +542,10 @@ export function registerToolCommands(dispatcher: Dispatcher, options: ToolComman
       const prepared = ctx.prepared as Prepared | undefined;
       if (!prepared || "denied" in prepared) {
         // Not allowed to start (or no run was made): the real check, which refuses and records it
-        // or, for a gate, asks for approval.
+        // or, for a gate, asks for approval. A caller who holds the tool for no scope at all gets
+        // the answer an unknown tool gets, and the denial is recorded all the same.
         try {
-          await ctx.authorize(def.capability, {}, { anyScope: true });
+          await ctx.authorize(def.capability, {}, { anyScope: true, refuseAs: unknownTool });
         } catch (error) {
           const gated =
             error instanceof CrossoverError &&
@@ -472,8 +568,9 @@ export function registerToolCommands(dispatcher: Dispatcher, options: ToolComman
         );
       }
       // It ran (now, or on an earlier attempt whose result couldn't be committed): what it came
-      // to is what the key stands for. Not re-authorized: that decides *future* invocations.
-      const { outcome, capability } = prepared;
+      // to is what the key stands for. Not re-authorized: that decides *future* invocations. Its
+      // events were appended by `prepare`.
+      const { outcome } = prepared;
       if (!outcome.ok) {
         const { code, message, retryable, details } = outcome.error;
         throw new CrossoverError(code, message, { retryable, ...(details ? { details } : {}) });
@@ -484,22 +581,6 @@ export function registerToolCommands(dispatcher: Dispatcher, options: ToolComman
           result: outcome.result,
           provenance: { author_id: "system", author_kind: "SYSTEM", trust: "external" },
         },
-        events:
-          def.tier >= 2
-            ? [
-                {
-                  type: "tool.completed",
-                  payload: {
-                    tool: def.name,
-                    invocation_id: ctx.command_id,
-                    capability,
-                    tier: def.tier,
-                    duration_ms: outcome.duration_ms,
-                    trust: "external",
-                  },
-                },
-              ]
-            : [],
       };
     },
   });
