@@ -1,5 +1,6 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { canonicalJson, sha256Hex } from "./canonical.js";
+import { canonicalJson, sha256Hex, sha256HexPortable } from "./canonical.js";
 
 describe("canonicalJson", () => {
   it("serializes objects with the same content identically regardless of key order", () => {
@@ -105,5 +106,31 @@ describe("sha256Hex", () => {
     const expected = "43258cff783fe7036d8a43033f830adfc60ec037382473548ac742b888292777";
     expect(sha256Hex(canonicalJson({ b: 2, a: 1 }))).toBe(expected);
     expect(sha256Hex(canonicalJson({ a: 1, b: 2 }))).toBe(expected);
+  });
+});
+
+describe("sha256HexPortable (the browser's SHA-256)", () => {
+  it("agrees with Node's on empty input, block boundaries, multi-byte text and long input", () => {
+    const inputs = [
+      "",
+      "abc",
+      "a".repeat(55),
+      "a".repeat(56),
+      "a".repeat(63),
+      "a".repeat(64),
+      "a".repeat(65),
+      "a".repeat(119),
+      "a".repeat(120),
+      "héllo wörld ✓ 日本語 😀",
+      "x".repeat(100_000),
+    ];
+    for (const input of inputs) {
+      expect(sha256HexPortable(input), input.slice(0, 20)).toBe(
+        createHash("sha256").update(input, "utf8").digest("hex"),
+      );
+    }
+    expect(sha256HexPortable("abc")).toBe(
+      "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+    );
   });
 });

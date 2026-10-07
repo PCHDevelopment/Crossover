@@ -57,3 +57,35 @@ export async function exchangeRoomSession(
     tokens,
   };
 }
+
+export interface UserRoom {
+  id: string;
+  slug: string;
+  name: string;
+  objective: string;
+  status: string;
+  /** The user's own participant in the room. */
+  participant_id: string;
+  role: string;
+  authority: string;
+}
+
+/**
+ * The rooms a platform user belongs to (T1104): where they are an `ACTIVE` or `PAUSED` HUMAN
+ * participant, newest first. Only what the room list shows (no members, no events), and only
+ * their own memberships, so nothing here says which other rooms exist.
+ */
+export async function listUserRooms(
+  db: Pool | PoolClient,
+  user: UserPrincipal,
+): Promise<UserRoom[]> {
+  const { rows } = await db.query<UserRoom>(
+    `SELECT r.id, r.slug, r.name, r.objective, r.status,
+            p.id AS participant_id, p.role, p.authority
+     FROM participants p JOIN rooms r ON r.id = p.room_id
+     WHERE p.user_id = $1 AND p.kind = 'HUMAN' AND p.status IN ('ACTIVE', 'PAUSED')
+     ORDER BY r.created_at DESC, r.id`,
+    [user.user_id],
+  );
+  return rows;
+}
