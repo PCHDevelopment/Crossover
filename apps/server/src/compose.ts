@@ -8,6 +8,7 @@ import {
   RedisEventSubscriber,
   registerRoomEventsSubscribeCommand,
   registerCapabilityCommands,
+  registerDecisionCommands,
   registerInboxCommands,
   registerInviteCommands,
   registerJoinCommand,
@@ -169,6 +170,7 @@ function registerCommands(dispatcher: Dispatcher, config: ServerConfig): void {
   registerTaskLifecycleCommands(dispatcher);
   registerMessageCommands(dispatcher);
   registerMemoryCommands(dispatcher);
+  registerDecisionCommands(dispatcher);
 
   // apply_changeset plus read, list, diff, history, blame, search, and conflict reads/abandon.
   registerWorkspaceCommands(dispatcher);

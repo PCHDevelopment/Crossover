@@ -14,3 +14,4 @@ export * from "./modules/tasks/index.js";
 export * from "./modules/messages/index.js";
 export * from "./modules/inbox/index.js";
 export * from "./modules/memory/index.js";
+export * from "./modules/decisions/index.js";
