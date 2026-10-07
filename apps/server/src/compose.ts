@@ -18,6 +18,7 @@ import {
   registerMessageCommands,
   registerParticipantLifecycleCommands,
   registerParticipantRoleCommand,
+  registerPresenceIntentCommands,
   registerRoomCommands,
   registerRoomDigestCommand,
   registerRoomEventsCommand,
@@ -28,6 +29,7 @@ import {
   type Authorizer,
   type EventPublisher,
   type EventSubscriber,
+  RedisEditIntentStore,
 } from "@crossover/kernel";
 import { authorize } from "@crossover/policy";
 import {
@@ -40,6 +42,7 @@ import {
   registerWorkspaceCommands,
   runHealthCheck,
   publishHealthResult,
+  normalizePath,
 } from "@crossover/workspace";
 import type { ServerConfig } from "./config.js";
 
@@ -103,8 +106,11 @@ export async function composeServer(
     subscriber = redisSubscriber;
   }
 
+  const intentStore = new RedisEditIntentStore(config.redisUrl);
+
   try {
     if (redis) await redis.ready();
+    await intentStore.ready();
 
     const dispatcher = new Dispatcher({
       pool,
@@ -122,7 +128,7 @@ export async function composeServer(
           await publishHealthResult(pool, dispatcher, roomId, revision, outcome.id, outcome.result);
       },
     });
-    registerCommands(dispatcher, config, healthQueue);
+    registerCommands(dispatcher, config, healthQueue, intentStore);
 
     const renewer = new LeaseRenewer({ leases: dispatcher.leases, actors: dispatcher.actors });
     renewer.start();
@@ -147,6 +153,7 @@ export async function composeServer(
         await renewer.close(); // releases every lease once nothing can take a new one
         await redis?.close();
         await redisSubscriber?.close();
+        await intentStore.close();
         if (!overrides.pool) await pool.end();
       })());
 
@@ -155,6 +162,7 @@ export async function composeServer(
     await escalations?.stop();
     await redis?.close();
     await redisSubscriber?.close();
+    await intentStore.close();
     if (!overrides.pool) await pool.end();
     throw err;
   }
@@ -165,6 +173,7 @@ function registerCommands(
   dispatcher: Dispatcher,
   config: ServerConfig,
   healthQueue: HealthCheckQueue,
+  intentStore: RedisEditIntentStore,
 ): void {
   registerRoomCommands(dispatcher, {
     provision: async ({ client, room_id }) => {
@@ -181,6 +190,7 @@ function registerCommands(
   registerRoomEventsCommand(dispatcher);
   registerRoomDigestCommand(dispatcher);
   registerInboxCommands(dispatcher);
+  registerPresenceIntentCommands(dispatcher, intentStore, normalizePath);
   registerRoomEventsSubscribeCommand(dispatcher); // the WebSocket `subscribe` frame
 
   // Tasks: create/update, list/get, and the claim → start → block lifecycle.
