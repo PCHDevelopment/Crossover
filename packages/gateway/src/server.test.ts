@@ -687,3 +687,44 @@ describe("GET /v1/rooms/:roomId/events and /state (T702)", () => {
     errorShape(res.json(), "UNAUTHENTICATED", 401, res);
   });
 });
+
+describe("POST /v1/auth/refresh", () => {
+  it("spends a refresh token for a new pair that works, and the shape matches the join's tokens", async () => {
+    const s = await setup();
+    const res = await post(s, "/v1/auth/refresh", { refresh_token: s.owner.refresh_token });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["cache-control"]).toBe("no-store");
+    const pair = res.json() as TokenPair;
+    expect(Object.keys(pair).sort()).toEqual([
+      "access_expires_at",
+      "access_token",
+      "family_id",
+      "refresh_expires_at",
+      "refresh_token",
+    ]);
+    expect(pair.access_token).not.toBe(s.owner.access_token);
+    const read = await command(
+      s,
+      { id: newId("cmd"), method: "room.get_state", params: {} },
+      pair.access_token,
+    );
+    expect(read.statusCode).toBe(200);
+  });
+
+  it("a spent refresh token is refused and takes its family with it; junk is UNAUTHENTICATED; a bad body is VALIDATION", async () => {
+    const s = await setup();
+    const first = await post(s, "/v1/auth/refresh", { refresh_token: s.owner.refresh_token });
+    const pair = first.json() as TokenPair;
+    const again = await post(s, "/v1/auth/refresh", { refresh_token: s.owner.refresh_token });
+    errorShape(again.json(), "UNAUTHENTICATED", 401, again);
+    // The family is revoked: even the newest pair no longer works.
+    const dead = await post(s, "/v1/auth/refresh", { refresh_token: pair.refresh_token });
+    errorShape(dead.json(), "UNAUTHENTICATED", 401, dead);
+    const junk = await post(s, "/v1/auth/refresh", { refresh_token: "rt_nonsense" });
+    errorShape(junk.json(), "UNAUTHENTICATED", 401, junk);
+    const access = await post(s, "/v1/auth/refresh", { refresh_token: s.owner.access_token });
+    errorShape(access.json(), "UNAUTHENTICATED", 401, access);
+    const bad = await post(s, "/v1/auth/refresh", { nope: 1 });
+    errorShape(bad.json(), "VALIDATION", 400, bad);
+  });
+});
