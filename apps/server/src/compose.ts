@@ -14,6 +14,8 @@ import {
   registerDecisionCommands,
   registerDecisionDecideCommands,
   registerApprovalCommands,
+  registerWakeSecretCommand,
+  WakeWebhookService,
   registerInboxCommands,
   registerInviteCommands,
   registerJoinCommand,
@@ -39,6 +41,7 @@ import {
   type EventSubscriber,
   RedisEditIntentStore,
 } from "@crossover/kernel";
+import { postWebhook } from "@crossover/security";
 import { authorize } from "@crossover/policy";
 import {
   ConflictEscalationSweeper,
@@ -112,6 +115,7 @@ export async function composeServer(
   let redis: RedisEventPublisher | undefined;
   let escalations: ConflictEscalationSweeper | undefined;
   let leaseSweeper: LeaseSweeper | undefined;
+  let wakeWebhooks: WakeWebhookService | undefined;
   let executionService: ExecutionService | undefined;
   if (overrides.publisher) {
     publisher = overrides.publisher;
@@ -197,6 +201,14 @@ export async function composeServer(
         : {}),
     });
     leaseSweeper.start();
+    if (config.wakeWebhookKey) {
+      wakeWebhooks = new WakeWebhookService({
+        pool,
+        key: config.wakeWebhookKey,
+        sender: (request) => postWebhook(request),
+      });
+      wakeWebhooks.start();
+    }
 
     const app = buildGateway({
       dispatcher,
@@ -211,6 +223,7 @@ export async function composeServer(
       (closing ??= (async () => {
         await escalations?.stop();
         await leaseSweeper?.stop();
+        await wakeWebhooks?.stop();
         await executionService?.close();
         await renewer.stop();
         await app.close();
@@ -227,6 +240,7 @@ export async function composeServer(
   } catch (err) {
     await escalations?.stop();
     await leaseSweeper?.stop();
+    await wakeWebhooks?.stop();
     await executionService?.close();
     await redis?.close();
     await redisSubscriber?.close();
@@ -272,6 +286,7 @@ function registerCommands(
   registerRoomDigestCommand(dispatcher);
   registerInboxCommands(dispatcher);
   registerApprovalCommands(dispatcher);
+  registerWakeSecretCommand(dispatcher, config.wakeWebhookKey);
   registerPresenceIntentCommands(dispatcher, intentStore, normalizePath);
   registerRoomEventsSubscribeCommand(dispatcher); // the WebSocket `subscribe` frame
 

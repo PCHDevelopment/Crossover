@@ -69,6 +69,9 @@ importers:
       '@crossover/sdk':
         specifier: workspace:*
         version: link:../../packages/sdk
+      '@crossover/security':
+        specifier: workspace:*
+        version: link:../../packages/security
       '@crossover/workspace':
         specifier: workspace:*
         version: link:../../packages/workspace
@@ -131,6 +134,9 @@ importers:
       '@crossover/protocol':
         specifier: workspace:*
         version: link:../protocol
+      '@crossover/security':
+        specifier: workspace:*
+        version: link:../security
       ioredis:
         specifier: ^6.0.0
         version: 6.0.0
