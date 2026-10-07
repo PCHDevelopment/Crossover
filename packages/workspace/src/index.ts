@@ -30,8 +30,11 @@ export { workspaceSearchParamsSchema } from "./search.js";
 export { workspaceDiffParamsSchema } from "./history.js";
 export { updateCanonicalRef, reconcileRef } from "./reconcile.js";
 export {
+  DEFAULT_HEALTH_LOCKFILE_PATHS,
   DEFAULT_HEALTH_IMAGE,
   DockerHealthRunner,
+  hashHealthLockfiles,
+  normalizeHealthLockfilePaths,
   runHealthCheck,
   storeHealthRun,
 } from "./health-runner.js";

@@ -113,6 +113,7 @@ export async function composeServer(
   let escalations: ConflictEscalationSweeper | undefined;
   let leaseSweeper: LeaseSweeper | undefined;
   let executionService: ExecutionService | undefined;
+  let healthInstallSweepTimer: NodeJS.Timeout | undefined;
   if (overrides.publisher) {
     publisher = overrides.publisher;
   } else {
@@ -168,7 +169,35 @@ export async function composeServer(
       onLeaseAcquire: (roomId) => reconcileRef(pool, roomId),
       ...(overrides.leaseTtlMs !== undefined ? { leaseTtlMs: overrides.leaseTtlMs } : {}),
     });
-    const healthRunner = new DockerHealthRunner({ allowedImages: config.healthImages });
+    const healthRunner = new DockerHealthRunner({
+      allowedImages: config.healthImages,
+      ...(config.sandboxEgressProxyContainer
+        ? { egressProxyContainer: config.sandboxEgressProxyContainer }
+        : {}),
+      ...(config.sandboxEgressProxyPort !== undefined
+        ? { egressProxyPort: config.sandboxEgressProxyPort }
+        : {}),
+      ...(config.sandboxEgressProxySecret
+        ? { egressProxySecret: config.sandboxEgressProxySecret }
+        : {}),
+    });
+    if (config.sandboxEgressProxyContainer) {
+      healthInstallSweepTimer = setInterval(() => {
+        void healthRunner.sweepExpiredInstallRuns(pool).catch((error: unknown) => {
+          process.emitWarning(
+            error instanceof Error ? error : new Error(String(error)),
+            "HealthInstallSweepWarning",
+          );
+        });
+      }, 60_000);
+      healthInstallSweepTimer.unref();
+      void healthRunner.sweepExpiredInstallRuns(pool).catch((error: unknown) => {
+        process.emitWarning(
+          error instanceof Error ? error : new Error(String(error)),
+          "HealthInstallSweepWarning",
+        );
+      });
+    }
     const healthQueue = new HealthCheckQueue({
       run: async (roomId, revision, signal) => {
         const outcome = await runHealthCheck(pool, healthRunner, roomId, revision, signal);
@@ -211,6 +240,7 @@ export async function composeServer(
       (closing ??= (async () => {
         await escalations?.stop();
         await leaseSweeper?.stop();
+        if (healthInstallSweepTimer) clearInterval(healthInstallSweepTimer);
         await executionService?.close();
         await renewer.stop();
         await app.close();
@@ -227,6 +257,7 @@ export async function composeServer(
   } catch (err) {
     await escalations?.stop();
     await leaseSweeper?.stop();
+    if (healthInstallSweepTimer) clearInterval(healthInstallSweepTimer);
     await executionService?.close();
     await redis?.close();
     await redisSubscriber?.close();

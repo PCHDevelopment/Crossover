@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -7,7 +7,10 @@ import { createTestDatabase, type TestDatabase } from "@crossover/db/testing";
 import { git } from "./git.js";
 import {
   DEFAULT_HEALTH_IMAGE,
+  DEFAULT_HEALTH_LOCKFILE_PATHS,
   DockerHealthRunner,
+  hashHealthLockfiles,
+  normalizeHealthLockfilePaths,
   prepareHealthCheckout,
   runHealthCheck,
   storeHealthRun,
@@ -82,6 +85,46 @@ async function makeRepo(): Promise<{ repository: string; revision: string }> {
     await git(["rev-parse", "HEAD"], { cwd: repository, timeoutMs: 10_000 })
   ).stdout.trim();
   return { repository, revision };
+}
+
+function fakeInstallDocker(installExitCode = 0) {
+  let volumeExists = false;
+  let installs = 0;
+  let healthRuns = 0;
+  const calls: string[][] = [];
+  const invoke = vi.fn(async (_binary: string, args: readonly string[]) => {
+    calls.push([...args]);
+    if (args[0] === "network" && args[1] === "ls") return { code: 0, timedOut: false, output: "" };
+    if (args[0] === "volume" && args[1] === "inspect")
+      return { code: volumeExists ? 0 : 1, timedOut: false, output: "" };
+    if (args[0] === "volume" && args[1] === "create") {
+      volumeExists = true;
+      return { code: 0, timedOut: false, output: "cache-volume" };
+    }
+    if (args[0] === "run" && args.includes("--user=0:0"))
+      return { code: 0, timedOut: false, output: "" };
+    if (args[0] === "run" && args.includes("crossover.health.install=true")) {
+      installs++;
+      expect(args.some((arg) => arg.startsWith("--network=crossover-health-install-"))).toBe(true);
+      expect(args.some((arg) => arg.startsWith("HTTPS_PROXY=http://"))).toBe(true);
+      return {
+        code: installExitCode,
+        timedOut: false,
+        output: installExitCode === 0 ? "install ok" : "registry refused",
+      };
+    }
+    if (args[0] === "run" && args.includes("crossover.health.runner=true")) {
+      healthRuns++;
+      return { code: 0, timedOut: false, output: "health ok" };
+    }
+    return { code: 0, timedOut: false, output: "" };
+  });
+  return {
+    invoke,
+    calls,
+    installCount: () => installs,
+    healthCount: () => healthRuns,
+  };
 }
 
 afterEach(async () => {
@@ -159,6 +202,7 @@ describe("DockerHealthRunner", () => {
     expect(() => new DockerHealthRunner({ image: "  " })).toThrow(/allowlist/);
     expect(() => new DockerHealthRunner({ allowedImages: [] })).toThrow(/allowlist/);
     expect(() => new DockerHealthRunner({ timeoutMs: 0 })).toThrow(/timeout/);
+    expect(() => new DockerHealthRunner({ egressProxyContainer: "proxy" })).toThrow(/SECRET/);
   });
 
   it("refuses room-selected images outside the operator allowlist", async () => {
@@ -173,6 +217,133 @@ describe("DockerHealthRunner", () => {
     expect(result.status).toBe("ERROR");
     expect(result.log).toContain("not operator-allowed");
     expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("installs dependencies once per cache key and keeps health runs isolated", async () => {
+    await db.pool.query("DELETE FROM health_install_runs WHERE room_id = $1", ["room_health"]);
+    const { repository } = await makeRepo();
+    await writeFile(join(repository, "package-lock.json"), '{"lock":1}\n');
+    const commit = async (message: string): Promise<string> => {
+      await git(["add", "--all"], { cwd: repository, timeoutMs: 10_000 });
+      await git(
+        [
+          "-c",
+          "user.name=Test",
+          "-c",
+          "user.email=test@example.invalid",
+          "commit",
+          "--quiet",
+          "-m",
+          message,
+        ],
+        { cwd: repository, timeoutMs: 10_000 },
+      );
+      return (
+        await git(["rev-parse", "HEAD"], { cwd: repository, timeoutMs: 10_000 })
+      ).stdout.trim();
+    };
+    const firstRevision = await commit("add package lock");
+    const docker = fakeInstallDocker();
+    const runner = new DockerHealthRunner(
+      {
+        egressProxyContainer: "egress-proxy",
+        egressProxySecret: "0123456789abcdef0123456789abcdef",
+      },
+      docker.invoke,
+    );
+    const dependencyInstall = {
+      pool: db.pool,
+      command: "npm ci",
+      lockfilePaths: ["package-lock.json"],
+    };
+    const run = (revision: string) =>
+      runner.run({
+        repository,
+        revision,
+        roomId: "room_health",
+        command: "npm test",
+        dependencyInstall,
+      });
+
+    const first = await run(firstRevision);
+    await writeFile(join(repository, "sentinel.txt"), "source-only change\n");
+    const sameLocksRevision = await commit("change source only");
+    const second = await run(sameLocksRevision);
+    await writeFile(join(repository, "package-lock.json"), '{"lock":2}\n');
+    const changedLocksRevision = await commit("update package lock");
+    const third = await run(changedLocksRevision);
+
+    expect([first.status, second.status, third.status]).toEqual(["GREEN", "GREEN", "GREEN"]);
+    expect(docker.installCount()).toBe(2);
+    expect(docker.healthCount()).toBe(3);
+    expect(
+      docker.calls.filter((args) => args[0] === "network" && args[1] === "create"),
+    ).toHaveLength(2);
+    expect(docker.calls.filter((args) => args[0] === "network" && args[1] === "rm")).toHaveLength(
+      2,
+    );
+    const healthArgs = docker.calls.find((args) => args.includes("crossover.health.runner=true"))!;
+    expect(healthArgs).toContain("--network=none");
+    expect(healthArgs.some((arg) => arg.includes("target=/workspace/node_modules,readonly"))).toBe(
+      true,
+    );
+    const { rows } = await db.pool.query(
+      "SELECT status FROM health_install_runs WHERE room_id = $1 ORDER BY started_at",
+      ["room_health"],
+    );
+    expect(rows.map((row) => row.status)).toEqual(["SUCCEEDED", "SUCCEEDED"]);
+  });
+
+  it("records install failure as ERROR and skips the health command", async () => {
+    await db.pool.query("DELETE FROM health_install_runs WHERE room_id = $1", ["room_health"]);
+    const { repository } = await makeRepo();
+    await writeFile(join(repository, "package-lock.json"), "{}\n");
+    await git(["add", "--all"], { cwd: repository, timeoutMs: 10_000 });
+    await git(
+      [
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "commit",
+        "--quiet",
+        "-m",
+        "add lockfile",
+      ],
+      { cwd: repository, timeoutMs: 10_000 },
+    );
+    const revision = (
+      await git(["rev-parse", "HEAD"], { cwd: repository, timeoutMs: 10_000 })
+    ).stdout.trim();
+    const docker = fakeInstallDocker(1);
+    const result = await new DockerHealthRunner(
+      {
+        egressProxyContainer: "egress-proxy",
+        egressProxySecret: "0123456789abcdef0123456789abcdef",
+      },
+      docker.invoke,
+    ).run({
+      repository,
+      revision,
+      roomId: "room_health",
+      command: "npm test",
+      dependencyInstall: {
+        pool: db.pool,
+        command: "npm ci",
+        lockfilePaths: ["package-lock.json"],
+      },
+    });
+
+    expect(result.status).toBe("ERROR");
+    expect(result.log).toContain("registry refused");
+    expect(result.log).toContain("installation failed");
+    expect(docker.installCount()).toBe(1);
+    expect(docker.healthCount()).toBe(0);
+    const { rows } = await db.pool.query(
+      "SELECT status FROM health_install_runs WHERE room_id = $1",
+      ["room_health"],
+    );
+    expect(rows).toEqual([{ status: "FAILED" }]);
   });
 
   it.skipIf(!dockerImageAvailable)(
@@ -292,6 +463,51 @@ describe("DockerHealthRunner", () => {
     expect(rows[0]).toMatchObject({ revision: "0", status: "RED", log: "failed" });
   });
 
+  it("passes validated dependency-install settings to the runner", async () => {
+    const run = vi.fn(async () => ({ status: "GREEN" as const, durationMs: 8, log: "ok" }));
+    await db.pool.query("UPDATE rooms SET settings = $2 WHERE id = $1", [
+      "room_health",
+      JSON.stringify({
+        health_command: "npm test",
+        health_install_command: "npm ci",
+        health_lockfile_paths: ["pnpm-lock.yaml", "package-lock.json"],
+      }),
+    ]);
+
+    const completed = await runHealthCheck(db.pool, { run }, "room_health", 0);
+
+    expect(run).toHaveBeenCalledWith({
+      repository: "/repo.git",
+      revision: "commit_health",
+      command: "npm test",
+      roomId: "room_health",
+      dependencyInstall: {
+        pool: db.pool,
+        command: "npm ci",
+        lockfilePaths: ["package-lock.json", "pnpm-lock.yaml"],
+      },
+    });
+    expect(completed?.result.status).toBe("GREEN");
+  });
+
+  it("persists invalid lockfile-path settings as ERROR without running health", async () => {
+    const run = vi.fn(async () => ({ status: "GREEN" as const, durationMs: 8, log: "ok" }));
+    await db.pool.query("UPDATE rooms SET settings = $2 WHERE id = $1", [
+      "room_health",
+      JSON.stringify({
+        health_command: "npm test",
+        health_install_command: "npm ci",
+        health_lockfile_paths: Array.from({ length: 11 }, (_, index) => `${index}.lock`),
+      }),
+    ]);
+
+    const completed = await runHealthCheck(db.pool, { run }, "room_health", 0);
+
+    expect(run).not.toHaveBeenCalled();
+    expect(completed?.result.status).toBe("ERROR");
+    expect(completed?.result.log).toMatch(/at most 10/);
+  });
+
   it("does not persist a health result when its run is aborted", async () => {
     await db.pool.query("UPDATE rooms SET settings = $2 WHERE id = $1", [
       "room_health",
@@ -327,5 +543,103 @@ describe("DockerHealthRunner", () => {
       ["room_health"],
     );
     expect(after[0]?.count).toBe(before[0]?.count);
+  });
+});
+
+describe("hashHealthLockfiles", () => {
+  it("keys the selected lockfile contents independent of input order", async () => {
+    const { repository, revision } = await makeRepo();
+    const commit = async (message: string): Promise<string> => {
+      await git(["add", "--all"], { cwd: repository, timeoutMs: 10_000 });
+      await git(
+        [
+          "-c",
+          "user.name=Test",
+          "-c",
+          "user.email=test@example.invalid",
+          "commit",
+          "--quiet",
+          "-m",
+          message,
+        ],
+        { cwd: repository, timeoutMs: 10_000 },
+      );
+      return (
+        await git(["rev-parse", "HEAD"], { cwd: repository, timeoutMs: 10_000 })
+      ).stdout.trim();
+    };
+    const initial = await hashHealthLockfiles(repository, revision, [
+      "package-lock.json",
+      "pnpm-lock.yaml",
+    ]);
+    await writeFile(join(repository, "package-lock.json"), '{"lock":1}\n');
+    const firstRevision = await commit("add package lock");
+    const first = await hashHealthLockfiles(repository, firstRevision, [
+      "package-lock.json",
+      "pnpm-lock.yaml",
+    ]);
+    const reordered = await hashHealthLockfiles(repository, firstRevision, [
+      "pnpm-lock.yaml",
+      "package-lock.json",
+      "package-lock.json",
+    ]);
+    await writeFile(join(repository, "package-lock.json"), '{"lock":2}\n');
+    const secondRevision = await commit("update package lock");
+    const second = await hashHealthLockfiles(repository, secondRevision, [
+      "package-lock.json",
+      "pnpm-lock.yaml",
+    ]);
+
+    expect(first).not.toBe(initial);
+    expect(reordered).toBe(first);
+    expect(second).not.toBe(first);
+  });
+
+  it("reads symlink lockfiles from the Git tree without following them on the host", async () => {
+    const { repository } = await makeRepo();
+    await symlink("/path/that/must/not/be/read", join(repository, "package-lock.json"));
+    await git(["add", "package-lock.json"], { cwd: repository, timeoutMs: 10_000 });
+    await git(
+      [
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "commit",
+        "--quiet",
+        "-m",
+        "add symlink lockfile",
+      ],
+      { cwd: repository, timeoutMs: 10_000 },
+    );
+    const revision = (
+      await git(["rev-parse", "HEAD"], { cwd: repository, timeoutMs: 10_000 })
+    ).stdout.trim();
+
+    await expect(hashHealthLockfiles(repository, revision, ["package-lock.json"])).resolves.toMatch(
+      /^[a-f0-9]{64}$/,
+    );
+  });
+
+  it("rejects paths outside the repository", async () => {
+    const { repository, revision } = await makeRepo();
+
+    await expect(hashHealthLockfiles(repository, revision, ["../outside.lock"])).rejects.toThrow(
+      /parent segment/,
+    );
+  });
+
+  it("ignores missing configured files and enforces the room setting limit", async () => {
+    const { repository, revision } = await makeRepo();
+    const absentA = await hashHealthLockfiles(repository, revision, ["absent-a.lock"]);
+    const absentB = await hashHealthLockfiles(repository, revision, ["absent-b.lock"]);
+
+    expect(absentA).toBe(absentB);
+    expect(normalizeHealthLockfilePaths(undefined)).toEqual(
+      [...DEFAULT_HEALTH_LOCKFILE_PATHS].sort(),
+    );
+    expect(() =>
+      normalizeHealthLockfilePaths(Array.from({ length: 11 }, (_, index) => `${index}.lock`)),
+    ).toThrow(/at most 10/);
   });
 });

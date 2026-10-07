@@ -811,11 +811,12 @@ Implement `HealthGate` for T309: GREEN at a revision including the task's artifa
 
 ### T611 · Health dependency cache — S2
 
-Deps: T607, T1007 · Migration: —
+Deps: T607, T1007 · Migration: 0027
 
 Added in Review 4. Health runs have no network (T607), so a project's dependencies can't be installed in the run itself. Each room gets a dependency-cache volume. A separate **install step** fills it: the room setting `health_install_command`, e.g. `npm ci`, runs in the same image with egress only through the T1007 allowlist proxy (package registries), whenever the lockfile at the target revision differs from the one the cache was built from. Health runs mount the cache read-only, with no network.
 
-- The cache key is the lockfile hash (configurable path list, default `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `poetry.lock`, `go.sum`); an unchanged lockfile means no install.
+- `health_lockfile_paths` is a validated list of up to 10 normalized relative paths, defaulting to `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `poetry.lock`, and `go.sum`. Missing files are ignored. An unchanged lockfile, image, and install command means no install.
+- The install proxy identity is `hinstall_<run id>` and works only while its database row is `RUNNING` and the room is active. Install networks are internal, per-run, and swept when stale.
 - An install failure records the health run as `ERROR` with the install log, never as `RED`.
 - Tests: a non-allowlisted host is refused during install; the health run itself still has no network; a changed lockfile triggers exactly one reinstall.
 
