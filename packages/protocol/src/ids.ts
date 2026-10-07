@@ -14,6 +14,7 @@ export const ID_PREFIXES = [
   "conf",
   "rev",
   "health",
+  "hinstall",
   "inv",
   "usr",
   "grant",
