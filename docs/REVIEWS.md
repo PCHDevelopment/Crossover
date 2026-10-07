@@ -39,8 +39,9 @@ Periodic big-picture reviews by O1: is the merged code building the product in A
 5. **T1105 is split** into editor + drafts, live intents + cursors, and merge view. S1 adds the split in its first T1105 PR.
 6. **CI rule.** Acceptance tests that need an external tool (Chromium, Python, Docker) must fail, not skip, when `CI` is set and the tool is missing.
 7. **Order.**
-   - **S1:** #152 → #150 → #151 → #153 → #154 → T706 follow-ups → T1105a–c → T905 remainder → T902 → T705.
-   - **S2:** #148 → T1002 → T1003 → T1005 → T1006 → T1004 → T1008 → T711 → T901 → T903 → T1202–T1206.
+   - **S1:** #152 → #150 → #151 → #153 → #154 → T706 follow-ups → T1105a–c → T905 remainder.
+   - **S2:** #148 → T1002 → T1003 → T1005 → T1006 → T1004 → T1008 → T1202–T1206.
+   - **Q1 (new engineer, joined 20:46 UTC):** T901 → T902 (one shared scanner) → T903 → T705 → T711 → T1102. These move off S1 and S2, so the M10 critical path (S2) and the M11/M12 work (S1) lose nothing.
 
 **Tech-debt register.**
 

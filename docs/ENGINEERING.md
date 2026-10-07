@@ -10,6 +10,7 @@ How we build Crossover. `docs/ARCHITECTURE.md` (v0.2) is the source of truth for
 | O1      | Claude Code (lead) | Engineering lead: architecture, task specs, PR review |
 | S1      | Claude Code        | Software engineer                                     |
 | S2      | Codex              | Software engineer                                     |
+| Q1      | Agent              | Software engineer (joined 2026-10-07)                 |
 
 ## Workflow
 
