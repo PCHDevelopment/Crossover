@@ -5,6 +5,8 @@ import { CrossoverError, newId } from "@crossover/protocol";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Dispatcher } from "../../dispatcher.js";
 import type { Principal } from "../../principal.js";
+import { registerParticipantLifecycleCommands } from "../participants/lifecycle.js";
+import { registerRoomLifecycleCommands } from "../rooms/lifecycle.js";
 import { registerTaskCommands } from "./create-update.js";
 import { registerTaskLifecycleCommands } from "./lifecycle.js";
 import { LeaseSweeper, registerTaskHeartbeat, sweepExpiredLeases, SYSTEM_ACTOR } from "./leases.js";
@@ -50,6 +52,8 @@ async function setup() {
   registerTaskCommands(d);
   registerTaskLifecycleCommands(d);
   registerTaskHeartbeat(d);
+  registerParticipantLifecycleCommands(d);
+  registerRoomLifecycleCommands(d);
   const room = newId("room");
   const ownerId = newId("part");
   await pool.query(
@@ -383,5 +387,160 @@ describe("frozen rooms and the timer", () => {
     expect(() => new LeaseSweeper({ pool, dispatcher: {} as Dispatcher, intervalMs: 0 })).toThrow(
       RangeError,
     );
+  });
+});
+
+describe("paused participants and the frozen rule (§22.1)", () => {
+  const lapse = (taskId: string) =>
+    pool.query("UPDATE tasks SET lease_expires_at = now() - interval '1 minute' WHERE id = $1", [
+      taskId,
+    ]);
+  const taskRow = async (id: string) =>
+    (await pool.query("SELECT status, lease_expires_at FROM tasks WHERE id = $1", [id]))
+      .rows[0] as {
+      status: string;
+      lease_expires_at: Date | null;
+    };
+  const minutesLeft = (d: Date | null) => (d ? (d.getTime() - Date.now()) / 60_000 : null);
+
+  it("a paused agent's lapsed claim is not swept; resuming restarts its lease", async () => {
+    const s = await setup();
+    const t = await claimed(s, s.agent);
+    await lapse(t.id);
+    await s.d.dispatch(
+      s.owner,
+      cmd("participants.pause", { participant_id: s.agent.participant_id }),
+    );
+    expect(await sweepExpiredLeases(s.d, pool, { rooms: [s.room] })).toEqual([]);
+    expect((await taskRow(t.id)).status).toBe("CLAIMED");
+
+    await s.d.dispatch(
+      s.owner,
+      cmd("participants.resume", { participant_id: s.agent.participant_id }),
+    );
+    const left = minutesLeft((await taskRow(t.id)).lease_expires_at)!;
+    expect(left).toBeGreaterThan(14);
+    expect(left).toBeLessThanOrEqual(15);
+    expect(await sweepExpiredLeases(s.d, pool, { rooms: [s.room] })).toEqual([]);
+  });
+
+  it("resuming one agent restarts only its own claims, and not a human's (which have none)", async () => {
+    const s = await setup();
+    const mine = await claimed(s, s.agent);
+    const theirs = await claimed(s, s.agents[1]!);
+    await lapse(mine.id);
+    await lapse(theirs.id);
+    await s.d.dispatch(
+      s.owner,
+      cmd("participants.pause", { participant_id: s.agent.participant_id }),
+    );
+    await s.d.dispatch(
+      s.owner,
+      cmd("participants.resume", { participant_id: s.agent.participant_id }),
+    );
+    expect(minutesLeft((await taskRow(mine.id)).lease_expires_at)!).toBeGreaterThan(14);
+    expect(minutesLeft((await taskRow(theirs.id)).lease_expires_at)!).toBeLessThan(0);
+  });
+
+  it("freezing a room stops the sweep; resuming restarts every active agent's lease", async () => {
+    const s = await setup();
+    const a = await claimed(s, s.agents[0]!);
+    const b = await claimed(s, s.agents[1]!);
+    await lapse(a.id);
+    await lapse(b.id);
+    await s.d.dispatch(s.owner, cmd("room.freeze"));
+    expect(await sweepExpiredLeases(s.d, pool, { rooms: [s.room] })).toEqual([]);
+    await s.d.dispatch(s.owner, cmd("room.resume"));
+    for (const t of [a, b]) {
+      expect(minutesLeft((await taskRow(t.id)).lease_expires_at)!).toBeGreaterThan(14);
+    }
+    expect(await sweepExpiredLeases(s.d, pool, { rooms: [s.room] })).toEqual([]);
+  });
+
+  it("room resume leaves a still-paused agent's claim alone until that agent resumes", async () => {
+    const s = await setup();
+    const t = await claimed(s, s.agent);
+    await s.d.dispatch(
+      s.owner,
+      cmd("participants.pause", { participant_id: s.agent.participant_id }),
+    );
+    await lapse(t.id);
+    await s.d.dispatch(s.owner, cmd("room.freeze"));
+    await s.d.dispatch(s.owner, cmd("room.resume"));
+    expect(minutesLeft((await taskRow(t.id)).lease_expires_at)!).toBeLessThan(0);
+    expect(await sweepExpiredLeases(s.d, pool, { rooms: [s.room] })).toEqual([]);
+  });
+
+  it("re-checks under the lock: an owner paused after the candidates were read is not swept", async () => {
+    const s = await setup();
+    const t = await claimed(s, s.agent);
+    await lapse(t.id);
+    const swept = await sweepExpiredLeases(s.d, pool, {
+      rooms: [s.room],
+      isConnected: async (id) => {
+        await pool.query("UPDATE participants SET status = 'PAUSED' WHERE id = $1", [id]);
+        return false;
+      },
+    });
+    expect(swept).toEqual([]);
+    expect((await taskRow(t.id)).status).toBe("CLAIMED");
+  });
+
+  it("re-checks under the lock: a room frozen after the candidates were read is not swept", async () => {
+    const s = await setup();
+    const t = await claimed(s, s.agent);
+    await lapse(t.id);
+    const swept = await sweepExpiredLeases(s.d, pool, {
+      rooms: [s.room],
+      isConnected: async () => {
+        await pool.query("UPDATE rooms SET status = 'PAUSED' WHERE id = $1", [s.room]);
+        return false;
+      },
+    });
+    expect(swept).toEqual([]);
+    expect((await taskRow(t.id)).status).toBe("CLAIMED");
+  });
+});
+
+describe("Dispatcher.runSystem on a frozen room", () => {
+  it("skips non-ACTIVE rooms without running the work, using whenFrozen", async () => {
+    for (const status of ["PAUSED", "ARCHIVED", "DELETED"]) {
+      const s = await setup();
+      await pool.query("UPDATE rooms SET status = $2 WHERE id = $1", [s.room, status]);
+      let ran = false;
+      const out = await s.d.runSystem(
+        s.room,
+        "test.work",
+        async () => {
+          ran = true;
+          return { result: "ran", events: [] };
+        },
+        { whenFrozen: () => "skipped" },
+      );
+      expect(out, status).toEqual({ result: "skipped", events: [] });
+      expect(ran).toBe(false);
+    }
+  });
+
+  it("without whenFrozen it fails with ROOM_PAUSED and the room status", async () => {
+    const s = await setup();
+    await pool.query("UPDATE rooms SET status = 'ARCHIVED' WHERE id = $1", [s.room]);
+    const err = await s.d
+      .runSystem(s.room, "test.work", async () => ({ result: 1, events: [] }))
+      .then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+    expect(err).toBeInstanceOf(CrossoverError);
+    expect((err as CrossoverError).code).toBe("ROOM_PAUSED");
+    expect((err as CrossoverError).details).toMatchObject({ room_status: "ARCHIVED" });
+  });
+
+  it("runs normally in an ACTIVE room", async () => {
+    const s = await setup();
+    const out = await s.d.runSystem(s.room, "test.work", async () => ({ result: 7, events: [] }), {
+      whenFrozen: () => 0,
+    });
+    expect(out.result).toBe(7);
   });
 });

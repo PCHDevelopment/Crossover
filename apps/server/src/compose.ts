@@ -16,6 +16,7 @@ import {
   registerParticipantLifecycleCommands,
   registerParticipantRoleCommand,
   registerRoomCommands,
+  registerRoomDigestCommand,
   registerRoomEventsCommand,
   registerRoomLifecycleCommands,
   registerTaskCommands,
@@ -170,6 +171,7 @@ function registerCommands(dispatcher: Dispatcher, config: ServerConfig): void {
   registerLeadCommands(dispatcher);
   registerRoomLifecycleCommands(dispatcher);
   registerRoomEventsCommand(dispatcher);
+  registerRoomDigestCommand(dispatcher);
   registerInboxCommands(dispatcher);
   registerRoomEventsSubscribeCommand(dispatcher); // the WebSocket `subscribe` frame
 

@@ -1,5 +1,6 @@
 import { CrossoverError, newId } from "@crossover/protocol";
 import { z } from "zod";
+import { deliverInbox } from "../inbox/inbox.js";
 import type { Dispatcher } from "../../dispatcher.js";
 
 export const MAX_BODY_BYTES = 32 * 1024;
@@ -147,6 +148,15 @@ export function registerMessageCommands(dispatcher: Dispatcher): void {
         );
       }
       const message = messageView(rows[0]!);
+      // Each mentioned participant (not the author mentioning themselves) gets it in their inbox.
+      for (const who of mentions) {
+        if (who === ctx.principal.participant_id) continue;
+        await deliverInbox(ctx.client, ctx.room_id, who, {
+          kind: "MENTION",
+          ref: { kind: "message", id: message.id },
+          summary: p.body.slice(0, 200),
+        });
+      }
       return {
         response: message,
         events: [{ type: "message.sent" as const, payload: { message } }],

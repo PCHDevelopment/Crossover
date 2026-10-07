@@ -3,6 +3,7 @@ import type { PoolClient } from "@crossover/db";
 import { z } from "zod";
 import type { Dispatcher } from "../../dispatcher.js";
 import { revokeParticipantTokens } from "../auth/tokens.js";
+import { restartAgentLeases } from "../tasks/task.js";
 
 const params = z.strictObject({ participant_id: z.string().min(1).max(100) });
 
@@ -167,6 +168,8 @@ export function registerParticipantLifecycleCommands(
           "UPDATE participants SET status = 'ACTIVE' WHERE id = $1 AND room_id = $2",
           [target.id, ctx.room_id],
         );
+        // Their claims were frozen while paused: the lease clock starts over (§22.1).
+        await restartAgentLeases(ctx.client, ctx.room_id, target.id);
       }
       return {
         response: { participant_id: target.id, status: "ACTIVE" as const, changed },

@@ -580,6 +580,11 @@ export class Dispatcher {
    * room's actor, holding its lease, in one transaction that also appends the events `execute`
    * returns (each with an explicit `actor_id`), which are published after the commit. There is
    * no principal, no authorizer and no idempotency key; `name` is only for logs and errors.
+   *
+   * **A room that isn't `ACTIVE` is frozen** (§5, §22.1): the platform doesn't change it either.
+   * The status is read under a lock inside the transaction, so a freeze that commits first wins,
+   * and `execute` doesn't run: `whenFrozen()` gives the result (no events), or, if you passed
+   * none, the call fails with `ROOM_PAUSED` carrying `details.room_status`.
    */
   async runSystem<R>(
     room_id: string,
@@ -589,6 +594,7 @@ export class Dispatcher {
       room_id: string;
       command_id: string;
     }) => Promise<{ result: R; events: (EmittedEvent & { actor_id: string })[] }>,
+    options: { whenFrozen?: () => R } = {},
   ): Promise<{ result: R; events: RoomEvent[] }> {
     const command_id = newId("cmd");
     return this.actors.get(room_id).submit(async () => {
@@ -596,6 +602,17 @@ export class Dispatcher {
       let out: { result: R; events: RoomEvent[] };
       try {
         out = await withTransaction(this.pool, async (client) => {
+          const { rows: room } = await client.query<{ status: string }>(
+            "SELECT status FROM rooms WHERE id = $1 FOR SHARE",
+            [room_id],
+          );
+          const status = room[0]?.status;
+          if (status !== "ACTIVE") {
+            if (options.whenFrozen) return { result: options.whenFrozen(), events: [] };
+            throw new CrossoverError("ROOM_PAUSED", `Room ${room_id} is ${status ?? "missing"}`, {
+              details: { room_status: status ?? null },
+            });
+          }
           const done = await execute({ client, room_id, command_id });
           const events = await appendEvents(
             client,
