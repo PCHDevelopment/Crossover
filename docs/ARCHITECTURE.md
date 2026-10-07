@@ -645,8 +645,8 @@ Edits that don't overlap can still break the build (Peter renames a function whi
 
 ## 12.1 Mechanism
 
-- The room has a configurable `health_command` (e.g. `npm run typecheck && npm test`), set by the lead or owner. Default: none until configured; the import flow suggests one based on the repository.
-- A dedicated **system health sandbox** runs the command against each new head.
+- The room has a configurable `health_command` (e.g. `npm run typecheck && npm test`), set by the lead or owner. Default: none until configured; the import flow suggests one based on the repository. `health_image` is also configurable by the lead or owner and defaults to `node:22-bookworm-slim`; the operator's `HEALTH_IMAGES` allowlist controls which images rooms may select.
+- A dedicated **system health sandbox** runs the command against each new head in a no-network, non-root Docker container with a read-only checkout, resource limits, and a 10-minute timeout.
 - **Coalescing:** at most one run in progress and one queued. A queued run always targets the latest head, so bursts of ChangeSets produce few runs.
 - Each run emits `workspace.health` with `{ revision, status: GREEN | RED | ERROR, duration, failing_summary, log_ref }`.
 - On RED, the event identifies the last GREEN revision, giving the range of suspect ChangeSets. Authors of ChangeSets in that range receive an inbox item.

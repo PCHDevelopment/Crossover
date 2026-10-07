@@ -41,6 +41,7 @@ function config(extra: Partial<ServerConfig> = {}): ServerConfig {
     port: 0,
     nodeId: `node-${++n}`,
     devLogin: true,
+    healthImages: ["node:22-bookworm-slim"],
     ...extra,
   };
 }
@@ -299,6 +300,7 @@ describe("loadConfig", () => {
   it("applies defaults: loopback, port 8080, dev login off, a node id", () => {
     const c = loadConfig(env);
     expect(c).toMatchObject({ host: "127.0.0.1", port: 8080, devLogin: false });
+    expect(c.healthImages).toEqual(["node:22-bookworm-slim"]);
     expect(c.nodeId).toMatch(/-\d+$/);
     expect(c.workspaceRoot.startsWith("/")).toBe(true);
   });
@@ -307,6 +309,14 @@ describe("loadConfig", () => {
     expect(loadConfig({ ...env, DEV_LOGIN: "true" }).devLogin).toBe(true);
     expect(loadConfig({ ...env, DEV_LOGIN: "0" }).devLogin).toBe(false);
     expect(() => loadConfig({ ...env, DEV_LOGIN: "yes" })).toThrow(/DEV_LOGIN/);
+  });
+
+  it("parses the operator health image allowlist", () => {
+    expect(loadConfig({ ...env, HEALTH_IMAGES: "node:22, python:3.13 " }).healthImages).toEqual([
+      "node:22",
+      "python:3.13",
+    ]);
+    expect(() => loadConfig({ ...env, HEALTH_IMAGES: " , " })).toThrow(/HEALTH_IMAGES/);
   });
 
   it("names every missing or malformed variable at once", () => {
