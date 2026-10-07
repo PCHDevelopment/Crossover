@@ -9,6 +9,7 @@
     { "path": "../../packages/mcp" },
     { "path": "../../packages/policy" },
     { "path": "../../packages/workspace" },
-    { "path": "../../packages/gateway" }
+    { "path": "../../packages/gateway" },
+    { "path": "../../packages/sdk" }
   ]
 }

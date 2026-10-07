@@ -2,7 +2,13 @@ import type { Dispatcher } from "@crossover/kernel";
 import { CrossoverError } from "@crossover/protocol";
 import { z } from "zod";
 import { git } from "./git.js";
-import { assertPublicHttpsUrl, HttpsGitPusher, noCredentials, validBranch } from "./upstream.js";
+import {
+  assertPublicHttpsUrl,
+  HttpsGitPusher,
+  noCredentials,
+  scrub,
+  validBranch,
+} from "./upstream.js";
 import { UPSTREAM_ACTOR, type UpstreamDeps } from "./upstream-import.js";
 
 export const DEFAULT_PLATFORM_DOMAIN = "crossover.local";
@@ -329,9 +335,23 @@ export function registerCheckpointExport(dispatcher: Dispatcher, deps: UpstreamD
           });
         } catch (error) {
           // The branch is pushed and the commits are deterministic: exporting again retries this.
-          if (error instanceof CrossoverError) throw error;
+          // What the provider says may carry the credential it was given: scrub it.
+          if (error instanceof CrossoverError) {
+            throw new CrossoverError(error.code, scrub(error.message, credential), {
+              retryable: error.retryable,
+              ...(error.details
+                ? {
+                    details: JSON.parse(scrub(JSON.stringify(error.details), credential)) as Record<
+                      string,
+                      unknown
+                    >,
+                  }
+                : {}),
+            });
+          }
+          const text = scrub(error instanceof Error ? error.message : String(error), credential);
           throw refuse("pull_request_failed", "The pull request couldn't be opened", {
-            message: (error instanceof Error ? error.message : String(error)).slice(0, 300),
+            message: text.split("\n")[0]?.slice(0, 300) ?? "",
           });
         }
       }

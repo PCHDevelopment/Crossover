@@ -487,6 +487,24 @@ describe("checkpoints.export (§24.3, T805)", () => {
     expect(s.opened).toHaveLength(1);
   });
 
+  it("what the pull request provider says is scrubbed of the credential it was given", async () => {
+    const s = await setup();
+    await s.edit("src/a.ts", "export const a = 1;\n");
+    await s.checkpoint("x");
+    s.failure.next = new Error("401 Bad credentials: tok_push_secret\nsecond line");
+    const err = await s.exportIt({ pull_request: {} }).catch((e: unknown) => e);
+    expect(JSON.stringify((err as CrossoverError).details)).not.toContain("tok_push_secret");
+    expect((err as CrossoverError).details).toMatchObject({ reason: "pull_request_failed" });
+    s.failure.next = new CrossoverError("FORBIDDEN", "no for tok_push_secret", {
+      details: { echoed: "tok_push_secret" },
+    });
+    const refused = await s.exportIt({ pull_request: {} }).catch((e: unknown) => e);
+    expect(refused).toMatchObject({ code: "FORBIDDEN" });
+    expect(
+      JSON.stringify([(refused as CrossoverError).message, (refused as CrossoverError).details]),
+    ).not.toContain("tok_push_secret");
+  });
+
   it("needs an upstream and a checkpoint; asks for write access; no credential leaves the pusher", async () => {
     const s = await setup();
     await rejects(s.exportIt(), "no_checkpoint");

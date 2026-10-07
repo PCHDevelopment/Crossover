@@ -5,6 +5,7 @@ import {
   createUserSession,
   exchangeRoomSession,
   findOrCreateUser,
+  refresh,
   type Dispatcher,
 } from "@crossover/kernel";
 import { CrossoverError, newId } from "@crossover/protocol";
@@ -29,6 +30,8 @@ export interface GatewayOptions {
   /** Serve `GET /v1/rooms/:roomId/ws` (T703). Off unless given. */
   ws?: Omit<WebSocketOptions, "dispatcher" | "pool">;
 }
+
+const refreshBody = z.strictObject({ refresh_token: z.string().min(1).max(200) });
 
 const devLoginBody = z.strictObject({
   /** Stable per-person key; the same subject always signs in as the same user. */
@@ -69,6 +72,9 @@ function expectObject(body: unknown): Record<string, unknown> {
  *   (`us_…`), not a room token. The creating user becomes the new room's owner.
  * - `POST /v1/rooms/:roomId/session`: a user session (`us_…`) for room tokens, if the user is an
  *   active human member of the room.
+ * - `POST /v1/auth/refresh`: body `{ refresh_token }`; the refresh token is the credential, so
+ *   there is no bearer header. Spends it and returns a new access and refresh token (the same
+ *   shape as the join's `tokens`); a spent token presented again revokes its whole family.
  * - `POST /v1/auth/dev-login`: only when `devLogin` is on. Body `{ subject, display_name }`;
  *   returns a user session.
  *
@@ -179,6 +185,18 @@ export function buildGateway(options: GatewayOptions): FastifyInstance {
     const session = await exchangeRoomSession(pool, user, request.params.roomId);
     void reply.header("Cache-Control", "no-store");
     return session;
+  });
+
+  app.post("/v1/auth/refresh", async (request, reply) => {
+    const parsed = refreshBody.safeParse(expectObject(request.body));
+    if (!parsed.success) {
+      throw new CrossoverError("VALIDATION", "Invalid refresh request", {
+        details: { issues: parsed.error.issues },
+      });
+    }
+    const pair = await refresh(pool, parsed.data.refresh_token);
+    void reply.header("Cache-Control", "no-store");
+    return pair;
   });
 
   app.post("/v1/commands", async (request, reply) => {
