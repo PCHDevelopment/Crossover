@@ -260,6 +260,34 @@ describe("composeServer", () => {
     sock.close();
   });
 
+  it("serves decisions over HTTP: propose, then a position, which a second one replaces", async () => {
+    const { server } = await start();
+    const { owner, agent, cmd } = await walkthrough(server.app);
+    const proposed = await ok(
+      await cmd(
+        envelope("decisions.propose", {
+          title: "Pick a database",
+          options: [{ summary: "PostgreSQL" }, { summary: "SQLite" }],
+        }),
+        owner.tokens.access_token,
+      ),
+    );
+    expect(proposed.response).toMatchObject({ status: "PROPOSED", version: 1 });
+    const position = (option: string) =>
+      cmd(
+        envelope("decisions.add_position", {
+          decision_id: proposed.response.id,
+          option_id: option,
+          argument: "because",
+        }),
+        agent.tokens.access_token,
+      );
+    expect((await ok(await position("opt_1"))).response).toMatchObject({ replaced: false });
+    expect((await ok(await position("opt_2"))).response).toMatchObject({ replaced: true });
+    const bad = await position("opt_9");
+    expect(bad.statusCode).toBe(400);
+  });
+
   it("enforces the real policy: an observer can't apply a ChangeSet", async () => {
     const { server } = await start();
     const { owner, cmd, roomId } = await walkthrough(server.app);
