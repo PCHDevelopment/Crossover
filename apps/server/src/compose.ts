@@ -1,6 +1,7 @@
 import { createPool, type Pool } from "@crossover/db";
 import { buildGateway } from "@crossover/gateway";
 import { registerMcp } from "@crossover/mcp";
+import { buildInternalGitServer } from "./internal-git.js";
 import {
   Dispatcher,
   RedisBudgetLimiter,
@@ -17,6 +18,8 @@ import {
   registerToolCommands,
   ToolRegistry,
   type ToolRunner,
+  registerWakeSecretCommand,
+  WakeWebhookService,
   registerInboxCommands,
   registerInviteCommands,
   registerJoinCommand,
@@ -42,6 +45,7 @@ import {
   type EventSubscriber,
   RedisEditIntentStore,
 } from "@crossover/kernel";
+import { postWebhook } from "@crossover/security";
 import { authorize, tierOf } from "@crossover/policy";
 import {
   ConflictEscalationSweeper,
@@ -86,6 +90,8 @@ export interface ComposeOverrides {
 
 export interface CrossoverServer {
   app: ReturnType<typeof buildGateway>;
+  /** Separate Git-only Fastify server; never mounted on the public gateway. */
+  gitApp: ReturnType<typeof buildInternalGitServer>;
   dispatcher: Dispatcher;
   pool: Pool;
   execution: ExecutionService;
@@ -117,7 +123,10 @@ export async function composeServer(
   let redis: RedisEventPublisher | undefined;
   let escalations: ConflictEscalationSweeper | undefined;
   let leaseSweeper: LeaseSweeper | undefined;
+  let wakeWebhooks: WakeWebhookService | undefined;
   let executionService: ExecutionService | undefined;
+  let gitApp: ReturnType<typeof buildInternalGitServer> | undefined;
+  let healthInstallSweepTimer: NodeJS.Timeout | undefined;
   if (overrides.publisher) {
     publisher = overrides.publisher;
   } else {
@@ -158,6 +167,14 @@ export async function composeServer(
         ...(config.sandboxEgressProxySecret
           ? { egressProxySecret: config.sandboxEgressProxySecret }
           : {}),
+        ...(config.gitInternalContainer
+          ? { gitInternalContainer: config.gitInternalContainer }
+          : {}),
+        gitInternalPort: config.gitInternalPort ?? 8081,
+        ...(config.gitInternalTokenSecret
+          ? { gitInternalTokenSecret: config.gitInternalTokenSecret }
+          : {}),
+        gitFetcherImage: config.gitFetcherImage ?? "crossover-git-fetcher:latest",
       });
     executionService = new ExecutionService(pool, executionDriver, {
       diskEnforcement: config.sandboxDiskEnforcement ?? "soft",
@@ -173,7 +190,37 @@ export async function composeServer(
       onLeaseAcquire: (roomId) => reconcileRef(pool, roomId),
       ...(overrides.leaseTtlMs !== undefined ? { leaseTtlMs: overrides.leaseTtlMs } : {}),
     });
-    const healthRunner = new DockerHealthRunner({ allowedImages: config.healthImages });
+    const healthRunner = new DockerHealthRunner({
+      allowedImages: config.healthImages,
+      nodeId: config.nodeId,
+      ...(config.sandboxRuntime ? { runtime: config.sandboxRuntime } : {}),
+      ...(config.sandboxEgressProxyContainer
+        ? { egressProxyContainer: config.sandboxEgressProxyContainer }
+        : {}),
+      ...(config.sandboxEgressProxyPort !== undefined
+        ? { egressProxyPort: config.sandboxEgressProxyPort }
+        : {}),
+      ...(config.sandboxEgressProxySecret
+        ? { egressProxySecret: config.sandboxEgressProxySecret }
+        : {}),
+    });
+    if (config.sandboxEgressProxyContainer) {
+      healthInstallSweepTimer = setInterval(() => {
+        void healthRunner.sweepExpiredInstallRuns(pool).catch((error: unknown) => {
+          process.emitWarning(
+            error instanceof Error ? error : new Error(String(error)),
+            "HealthInstallSweepWarning",
+          );
+        });
+      }, 60_000);
+      healthInstallSweepTimer.unref();
+      void healthRunner.sweepExpiredInstallRuns(pool).catch((error: unknown) => {
+        process.emitWarning(
+          error instanceof Error ? error : new Error(String(error)),
+          "HealthInstallSweepWarning",
+        );
+      });
+    }
     const healthQueue = new HealthCheckQueue({
       run: async (roomId, revision, signal) => {
         const outcome = await runHealthCheck(pool, healthRunner, roomId, revision, signal);
@@ -203,12 +250,25 @@ export async function composeServer(
         : {}),
     });
     leaseSweeper.start();
+    if (config.wakeWebhookKey) {
+      wakeWebhooks = new WakeWebhookService({
+        pool,
+        key: config.wakeWebhookKey,
+        sender: (request) => postWebhook(request),
+      });
+      wakeWebhooks.start();
+    }
 
     const app = buildGateway({
       dispatcher,
       pool,
       devLogin: config.devLogin,
       ws: { subscriber },
+    });
+    gitApp = buildInternalGitServer({
+      pool,
+      authorize: overrides.authorize ?? authorize,
+      ...(config.gitInternalTokenSecret ? { tokenSecret: config.gitInternalTokenSecret } : {}),
     });
     registerMcp(app, { dispatcher, pool }); // POST /mcp, the agents' tool surface
 
@@ -217,8 +277,11 @@ export async function composeServer(
       (closing ??= (async () => {
         await escalations?.stop();
         await leaseSweeper?.stop();
+        if (healthInstallSweepTimer) clearInterval(healthInstallSweepTimer);
+        await wakeWebhooks?.stop();
         await executionService?.close();
         await renewer.stop();
+        await gitApp?.close();
         await app.close();
         await healthQueue.close();
         await renewer.close(); // releases every lease once nothing can take a new one
@@ -229,11 +292,14 @@ export async function composeServer(
         if (!overrides.pool) await pool.end();
       })());
 
-    return { app, dispatcher, pool, execution: executionService, renewer, close };
+    return { app, gitApp, dispatcher, pool, execution: executionService, renewer, close };
   } catch (err) {
     await escalations?.stop();
     await leaseSweeper?.stop();
+    if (healthInstallSweepTimer) clearInterval(healthInstallSweepTimer);
+    await wakeWebhooks?.stop();
     await executionService?.close();
+    await gitApp?.close();
     await redis?.close();
     await redisSubscriber?.close();
     await intentStore.close();
@@ -285,6 +351,7 @@ function registerCommands(
     ...(tools.runner ? { runner: tools.runner } : {}),
     ...(tools.timeoutMs !== undefined ? { timeoutMs: tools.timeoutMs } : {}),
   });
+  registerWakeSecretCommand(dispatcher, config.wakeWebhookKey);
   registerPresenceIntentCommands(dispatcher, intentStore, normalizePath);
   registerRoomEventsSubscribeCommand(dispatcher); // the WebSocket `subscribe` frame
 

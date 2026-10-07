@@ -14,6 +14,7 @@ export interface EgressLog {
   timestamp: string;
   event: "egress";
   sandbox_id?: string;
+  health_install_id?: string;
   room_id?: string;
   host: string;
   allowed: boolean;
@@ -33,7 +34,7 @@ export interface EgressProxyOptions extends EgressPolicyOptions {
   maxTunnelsPerSandbox?: number;
 }
 
-/** A CONNECT-only HTTPS proxy with room policy, per-sandbox identity, and pinned public DNS. */
+/** A CONNECT-only HTTPS proxy with room policy and pinned public DNS. */
 export function createEgressProxyServer(options: EgressProxyOptions): Server {
   if (Buffer.byteLength(options.secret) < 32)
     throw new Error("SANDBOX_EGRESS_PROXY_SECRET must be at least 32 bytes");
@@ -76,6 +77,7 @@ async function handleConnect(
   if (!decision.allowed) {
     log(options.logger, {
       ...(decision.sandboxId ? { sandbox_id: decision.sandboxId } : {}),
+      ...(decision.healthInstallId ? { health_install_id: decision.healthInstallId } : {}),
       ...(decision.roomId ? { room_id: decision.roomId } : {}),
       host: decision.host,
       allowed: false,
@@ -92,27 +94,31 @@ async function handleConnect(
 
   if (client.destroyed) return;
   const maxTunnels = options.maxTunnelsPerSandbox ?? MAX_TUNNELS_PER_SANDBOX;
-  const sandboxTunnels = activeTunnels.get(decision.sandboxId) ?? new Set<object>();
-  if (sandboxTunnels.size >= maxTunnels) {
+  const identityTunnels = activeTunnels.get(decision.identityId) ?? new Set<object>();
+  if (identityTunnels.size >= maxTunnels) {
     log(options.logger, {
-      sandbox_id: decision.sandboxId,
+      ...(decision.sandboxId ? { sandbox_id: decision.sandboxId } : {}),
+      ...(decision.healthInstallId ? { health_install_id: decision.healthInstallId } : {}),
       room_id: decision.roomId,
       host: decision.host,
       allowed: false,
-      reason: "sandbox_tunnel_limit",
+      reason:
+        decision.identityType === "sandbox"
+          ? "sandbox_tunnel_limit"
+          : "health_install_tunnel_limit",
     });
     writeProxyError(client, 503, "Service Unavailable");
     return;
   }
   const reservation = {};
-  sandboxTunnels.add(reservation);
-  activeTunnels.set(decision.sandboxId, sandboxTunnels);
+  identityTunnels.add(reservation);
+  activeTunnels.set(decision.identityId, identityTunnels);
   let slotReleased = false;
   const releaseSlot = () => {
     if (slotReleased) return;
     slotReleased = true;
-    sandboxTunnels.delete(reservation);
-    if (sandboxTunnels.size === 0) activeTunnels.delete(decision.sandboxId);
+    identityTunnels.delete(reservation);
+    if (identityTunnels.size === 0) activeTunnels.delete(decision.identityId);
   };
 
   let upstream: Socket;
@@ -121,7 +127,8 @@ async function handleConnect(
   } catch {
     releaseSlot();
     log(options.logger, {
-      sandbox_id: decision.sandboxId,
+      ...(decision.sandboxId ? { sandbox_id: decision.sandboxId } : {}),
+      ...(decision.healthInstallId ? { health_install_id: decision.healthInstallId } : {}),
       room_id: decision.roomId,
       host: decision.host,
       allowed: true,
@@ -148,7 +155,8 @@ async function handleConnect(
     if (logged) return;
     logged = true;
     log(options.logger, {
-      sandbox_id: decision.sandboxId,
+      ...(decision.sandboxId ? { sandbox_id: decision.sandboxId } : {}),
+      ...(decision.healthInstallId ? { health_install_id: decision.healthInstallId } : {}),
       room_id: decision.roomId,
       host: decision.host,
       allowed: true,

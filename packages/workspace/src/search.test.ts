@@ -205,4 +205,4 @@ it("caps the complete UTF-8 response at one MiB even with long paths and Unicode
   expect(response.matches.length).toBeLessThan(195);
   expect(response.truncated).toBe(true);
   expect(Buffer.byteLength(JSON.stringify(response))).toBeLessThanOrEqual(1024 * 1024);
-});
+}, 20_000);

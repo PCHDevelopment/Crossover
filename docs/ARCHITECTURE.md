@@ -648,6 +648,8 @@ Edits that don't overlap can still break the build (Peter renames a function whi
 
 - The room has a configurable `health_command` (e.g. `npm run typecheck && npm test`), set by the lead or owner. Default: none until configured; the import flow suggests one based on the repository. `health_image` is also configurable by the lead or owner and defaults to `node:22-bookworm-slim`; the operator's `HEALTH_IMAGES` allowlist controls which images rooms may select.
 - A dedicated **system health sandbox** runs the command against each new head in a no-network, non-root Docker container with a read-only checkout, resource limits, and a 10-minute timeout.
+- When `health_install_command` is configured, a separate unprivileged install container prepares a per-room Docker dependency cache. It receives egress only on an ephemeral internal Docker network attached to the platform proxy; the proxy requires a per-run HMAC identity recorded as `RUNNING` and applies the platform registry defaults plus `settings.egress_allowlist`. The run identity expires and its status ends before the network is removed. The health sandbox mounts the cache read-only and remains on `--network=none`.
+- `health_lockfile_paths` optionally selects up to 10 normalized relative paths for cache invalidation. It defaults to `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `poetry.lock`, and `go.sum`; absent paths are ignored. Changing the lockfile content, image, or install command rebuilds the cache.
 - **Coalescing:** at most one run in progress and one queued. A queued run always targets the latest head, so bursts of ChangeSets produce few runs.
 - Each run emits `workspace.health` with `{ revision, status: GREEN | RED | ERROR, duration, log_ref, last_green_revision? }`. The event carries **no log text**: logs routinely name files a path-scoped participant may not see, and can echo secrets, and the ledger is room-wide and permanent (§34.5). The failing summary and log tail are read through `workspace.health.get { run_id }`, which is limited to participants with unscoped `workspace.read`. Scoped participants see the status only.
 - On RED, the event identifies the last GREEN revision, giving the range of suspect ChangeSets. Authors of ChangeSets in that range receive an inbox item.
@@ -728,8 +730,9 @@ Each sandbox tracks:
 
 ## 14.3 Materialization
 
-- On first use (`sandbox.*` or a coding tool call through MCP), the Execution Service starts a container and fetches the canonical head from the workspace node over an internal Git endpoint, authenticated with a sandbox-scoped read token.
-- Sandbox hosts keep a per-room reference repository so new sandboxes fetch only missing objects.
+- On first use (`sandbox.*` or a coding tool call through MCP), the Execution Service starts a container and materializes the workspace through a short-lived fetcher container. The fetcher alone joins the unpublished `crossover-git` Docker network, mounts the sandbox workspace, and reads from a separate internal Git listener on the workspace node. The server binds `GIT_INTERNAL_HOST` to its configured address on that private network; the deployment connects the server to the network before startup and never publishes `GIT_INTERNAL_PORT`.
+- Each fetch carries an HMAC read token bound to the room, participant, sandbox, canonical workspace revision, and an expiry no more than five minutes away. The agent container never joins `crossover-git` and never receives the token. The listener accepts upload-pack only. For path-scoped readers it creates a deterministic synthetic root commit, packs only that commit's reachable objects, and serves it without canonical object alternates; for unscoped readers it serves the real canonical commit shallowly.
+- The fetcher uses the canonical per-room repository as a read-only clone reference. Its `repo_path` must be visible at the same source path to the Docker daemon that runs the fetcher. The clone is dissociated before it is copied into the sandbox volume, so the sandbox never retains that alternate.
 
 ## 14.4 Staying current
 
@@ -737,7 +740,7 @@ The sandbox never changes files underneath a running agent without warning.
 
 - When canonical advances, the sandbox owner receives `sandbox.behind { behind_by, changed_paths, overlaps_local_changes, intents }`.
 - **Auto-sync:** if the sandbox has no running process and none of the changed paths overlap local modifications, it fast-forwards automatically and emits `sandbox.synced`.
-- **Explicit sync:** otherwise the agent calls `sandbox.sync`. The sandbox stashes local modifications as a temporary commit, fetches head, and rebases.
+- **Explicit sync:** otherwise the agent calls `sandbox.sync`. The execution service runs a short-lived fetcher with a fresh revision-bound token, stashes local modifications as a temporary commit, fetches the new scoped or canonical snapshot, and rebases onto it.
   - Clean → returns `{ synced_to: r42 }`.
   - Conflicts → conflict markers are left in the affected files (the format coding agents already understand), and the call returns the conflicted paths. The agent fixes them and continues.
 - **Human sandboxes** run in follow-head mode: they always auto-sync, because humans edit through the editor, not the sandbox.
@@ -1032,6 +1035,16 @@ Each participant has an **inbox** of targeted items that require attention: assi
 ## 17.4 Wake-up webhooks
 
 Agents run elsewhere and may not hold a WebSocket open. If the manifest sets `wake_webhook_url`, the platform POSTs a signed (HMAC-SHA256) notification when a new inbox item arrives, rate-limited to one per agent per 30 s with batching.
+
+T706: the body is `{ type: "inbox.wake", room_id, participant_id, count, items: [{ id, kind, ref }], more, sent_at }`: ids, kinds and refs only, never the items' text; the agent reads `inbox.list` for the rest. The first item after a quiet spell goes out at once; what arrives within the next 30 s is one batched delivery (up to 200 items; `more: true` says the rest follow in the next window). It is an outbox in PostgreSQL (`inbox_items.wake_notified_at`, `wake_windows`), so any number of nodes may run it, the 30 s limit holds across all of them and across restarts, and an item that commits late is still announced. Delivery is at least once. Items acknowledged before the send are left out; paused or removed agents, agents without a URL and frozen rooms are not called (their items wait). A failed delivery is retried after a window that doubles with each failure in a row (up to about an hour). Headers: `X-Crossover-Delivery` (unique id), `X-Crossover-Timestamp` (unix seconds) and `X-Crossover-Signature: sha256=<hex>`, where the hex is HMAC-SHA256 over `<timestamp>.<body>` keyed with the agent's secret. A receiver must compute the HMAC over the raw body, compare it in constant time, and reject a timestamp more than 5 minutes from its clock:
+
+```js
+const expected = "sha256=" + crypto.createHmac("sha256", secret).update(`${ts}.${rawBody}`).digest("hex");
+const ok = Math.abs(Date.now() / 1000 - Number(ts)) < 300 &&
+  expected.length === sig.length && crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(sig));
+```
+
+The agent reads its secret with `participants.wake_secret`; it is derived from the server's `WAKE_WEBHOOK_KEY` and the agent's id, so nothing is stored. The manifest URL must be `https` on the default port, without credentials, not `localhost` and not a private address literal; the POST goes only to a public host: the name is resolved once, every address must be public, the connection goes to that address, redirects aren't followed, and the whole exchange (DNS included) is bounded to 10 s and a small response size.
 
 ## 17.5 Mentions
 

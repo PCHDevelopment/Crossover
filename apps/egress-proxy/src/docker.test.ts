@@ -1,8 +1,11 @@
 import { execFileSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { URL } from "node:url";
 import { createTestDatabase, type TestDatabase } from "@crossover/db/testing";
-import { DockerExecutionDriver } from "@crossover/workspace";
+import { DockerExecutionDriver, DockerHealthRunner } from "@crossover/workspace";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 const IMAGE = "crossover-egress-proxy:test";
@@ -15,10 +18,14 @@ const dockerImageAvailable = (() => {
     return false;
   }
 })();
+const skipDockerIntegration = !dockerImageAvailable && !process.env["CI"];
 
-describe.skipIf(!dockerImageAvailable)("egress proxy Docker smoke", () => {
+describe.skipIf(skipDockerIntegration)("egress proxy Docker smoke", () => {
   let db: TestDatabase;
   let proxyName: string;
+  let roomId: string;
+  let healthRepository: string | undefined;
+  let healthCacheVolume: string | undefined;
   let driver: DockerExecutionDriver;
   let sandboxId: string;
   let resources: { volume_ref: string; container_ref: string } | undefined;
@@ -27,7 +34,7 @@ describe.skipIf(!dockerImageAvailable)("egress proxy Docker smoke", () => {
     db = await createTestDatabase();
     proxyName = `crossover-egress-proxy-test-${process.pid}`;
     sandboxId = `sandbox_${randomBytes(12).toString("hex")}`;
-    const roomId = `room_${randomBytes(12).toString("hex")}`;
+    roomId = `room_${randomBytes(12).toString("hex")}`;
     const participantId = `part_${randomBytes(12).toString("hex")}`;
     const volumeRef = `crossover-sbx-${sandboxId.toLowerCase()}`;
     await db.pool.query(
@@ -112,6 +119,20 @@ describe.skipIf(!dockerImageAvailable)("egress proxy Docker smoke", () => {
         // The driver may already have removed the network.
       }
     }
+    if (healthCacheVolume) {
+      try {
+        execFileSync("docker", ["volume", "rm", healthCacheVolume], {
+          stdio: "ignore",
+          timeout: 10_000,
+        });
+      } catch {
+        // The runner may have failed before it created the cache volume.
+      }
+    }
+    if (healthRepository)
+      await rm(healthRepository, { recursive: true, force: true }).catch((error: unknown) =>
+        cleanupErrors.push(error),
+      );
     if (db) await db.drop().catch((error: unknown) => cleanupErrors.push(error));
     if (cleanupErrors.length)
       throw new AggregateError(cleanupErrors, "Docker smoke cleanup failed");
@@ -128,4 +149,79 @@ describe.skipIf(!dockerImageAvailable)("egress proxy Docker smoke", () => {
     expect(logs).toContain('"allowed":false');
     expect(logs).not.toContain(SECRET);
   });
+
+  it("refuses an unlisted install host and keeps the health command offline", async () => {
+    healthRepository = await mkdtemp(join(tmpdir(), "crossover-health-proxy-smoke-"));
+    execFileSync("git", ["init", "--quiet", healthRepository], { timeout: 10_000 });
+    await writeFile(join(healthRepository, "package.json"), '{"name":"proxy-smoke"}\n');
+    execFileSync("git", ["-C", healthRepository, "add", "package.json"], { timeout: 10_000 });
+    execFileSync(
+      "git",
+      [
+        "-C",
+        healthRepository,
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "commit",
+        "--quiet",
+        "-m",
+        "health proxy smoke",
+      ],
+      { timeout: 10_000 },
+    );
+    const revision = execFileSync("git", ["-C", healthRepository, "rev-parse", "HEAD"], {
+      encoding: "utf8",
+      timeout: 10_000,
+    }).trim();
+    const cacheRoomLabel = createHash("sha256").update(roomId).digest("hex").slice(0, 24);
+    const runner = new DockerHealthRunner({
+      image: IMAGE,
+      allowedImages: [IMAGE],
+      egressProxyContainer: proxyName,
+      egressProxySecret: SECRET,
+    });
+    const installCommand = `mkdir -p /health-dependency-cache && printf shared-cache-proof > /health-dependency-cache/proof.txt && node -e 'const p=new URL(process.env.HTTPS_PROXY);const headers={"Proxy-Authorization":"Basic "+Buffer.from(decodeURIComponent(p.username)+":"+decodeURIComponent(p.password)).toString("base64")};const req=require("node:http").request({host:p.hostname,port:Number(p.port),method:"CONNECT",path:"example.com:443",headers});req.once("connect",(response,socket)=>{socket.destroy();process.exit(response.statusCode===403?0:1)});req.once("error",()=>process.exit(2));req.setTimeout(5000,()=>{req.destroy();process.exit(3)});req.end();'`;
+    const healthCommand = `test "$(cat /health-dependency-cache/proof.txt)" = shared-cache-proof && node -e 'const socket=require("node:net").connect({host:"93.184.216.34",port:443});socket.setTimeout(1500);socket.once("connect",()=>process.exit(1));socket.once("error",()=>process.exit(0));socket.once("timeout",()=>process.exit(0));'`;
+
+    const result = await runner.run({
+      repository: healthRepository,
+      revision,
+      roomId,
+      command: healthCommand,
+      dependencyInstall: {
+        pool: db.pool,
+        command: installCommand,
+        lockfilePaths: ["package-lock.json"],
+      },
+    });
+    const cacheVolumes = execFileSync(
+      "docker",
+      [
+        "volume",
+        "ls",
+        "--filter",
+        "label=crossover.health.cache=true",
+        "--filter",
+        `label=crossover.health.cache_room=${cacheRoomLabel}`,
+        "--format",
+        "{{.Name}}",
+      ],
+      { encoding: "utf8", timeout: 5_000 },
+    )
+      .trim()
+      .split(/\r?\n/)
+      .filter(Boolean);
+    expect(cacheVolumes).toHaveLength(1);
+    healthCacheVolume = cacheVolumes[0];
+
+    expect(result.status).toBe("GREEN");
+    expect(healthCacheVolume).toContain(cacheRoomLabel);
+    const logs = execFileSync("docker", ["logs", proxyName], { encoding: "utf8", timeout: 5_000 });
+    expect(logs).toContain('"health_install_id":"hinstall_');
+    expect(logs).toContain('"host":"example.com"');
+    expect(logs).toContain('"allowed":false');
+    expect(logs).not.toContain(SECRET);
+  }, 60_000);
 });

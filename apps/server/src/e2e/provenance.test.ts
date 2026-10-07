@@ -303,6 +303,7 @@ describe("provenance labels (§16.5)", () => {
       "tasks.heartbeat": "the caller's own lease",
       "tools.list":
         "tool descriptions the platform registered, filtered to what the caller may use",
+      "participants.wake_secret": "the caller's own webhook secret",
     };
     const reads = server.dispatcher
       .commandInfo()

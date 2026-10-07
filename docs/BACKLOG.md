@@ -20,11 +20,11 @@ Conventions are in `docs/ENGINEERING.md`. Section references (§) point to `docs
 | M5 Workspace engine                   | T501–T520   | S2                                                      |
 | M6 Conflicts and health               | T601–T610   | S2                                                      |
 | M7 Gateway, MCP, end-to-end           | T701–T713   | S1 (T701–T709, T713), S2 (T710–T711), O1 (T712)         |
-| M8 Git interoperability (§24)         | T801–T806   | S1 (moved from S2 in Review 4)                          |
+| M8 Git interoperability (§24)         | T801–T807   | S1 (moved from S2 in Review 4)                          |
 | M9 Safety controls (§22–23)           | T901–T906   | S1 (T902, T904–T906), S2 (T901, T903)                   |
-| M10 Execution sandboxes (§14)         | T1001–T1008 | S2                                                      |
-| M11 Clients (§27, §29)                | T1101–T1105 | S1                                                      |
-| M12 Plugins (§21.4–21.5)              | T1201–T1206 | S2                                                      |
+| M10 Execution sandboxes (§14)         | T1001–T1008 | S2 (T1007 split into T1007 + T1007b in Review 5)        |
+| M11 Clients (§27, §29)                | T1101–T1106 | S1                                                      |
+| M12 Plugins (§21.4–21.5)              | T1201–T1206 | S1 (T1201, moved in Review 5), S2 (T1202–T1206)         |
 | M13 Lessons from building (§34)       | T1301–T1303 | S1                                                      |
 
 **Start here:** S1 → T101, T105, T114 (independent). S2 → T501, T505 (only need the scaffold).
@@ -811,11 +811,13 @@ Implement `HealthGate` for T309: GREEN at a revision including the task's artifa
 
 ### T611 · Health dependency cache — S2
 
-Deps: T607, T1007 · Migration: —
+Deps: T607, T1007 · Migration: 0028
 
-Added in Review 4. Health runs have no network (T607), so a project's dependencies can't be installed in the run itself. Each room gets a dependency-cache volume. A separate **install step** fills it: the room setting `health_install_command`, e.g. `npm ci`, runs in the same image with egress only through the T1007 allowlist proxy (package registries), whenever the lockfile at the target revision differs from the one the cache was built from. Health runs mount the cache read-only, with no network.
+Added in Review 4. Health runs have no network (T607), so a project's dependencies can't be installed in the run itself. Each room gets a dependency-cache volume per cache key. A separate **install step** fills it: the room setting `health_install_command`, e.g. `npm ci`, runs in the same image with egress only through the T1007 allowlist proxy (package registries), whenever the lockfile at the target revision differs from the one the cache was built from. Health runs mount the cache read-only, with no network.
 
-- The cache key is the lockfile hash (configurable path list, default `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `poetry.lock`, `go.sum`); an unchanged lockfile means no install.
+- `health_lockfile_paths` is a validated list of up to 10 normalized relative paths, defaulting to `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `poetry.lock`, and `go.sum`. Missing files are ignored. An unchanged lockfile, image, install command, and runtime means no install.
+- Each install gets a fresh Docker volume named and labeled with its install id. Health runs mount only the volume from the newest successful install for that cache key, so a failed or concurrent install volume is never reused. Cache collection keeps the two most recently successful generations per room and removes older or incomplete volumes. The volume persists root `node_modules` and files explicitly written under `HEALTH_DEPENDENCY_CACHE`; package-manager download caches use `/tmp`, and workspace-local links, virtualenvs, and Plug'n'Play layouts are not persisted.
+- The install proxy identity is `hinstall_<run id>` and works only while its database row is `RUNNING` and the room is active. Install networks are internal, per-run, and swept when stale.
 - An install failure records the health run as `ERROR` with the install log, never as `RED`.
 - Tests: a non-allowlisted host is refused during install; the health run itself still has no network; a changed lockfile triggers exactly one reinstall.
 
@@ -948,7 +950,7 @@ After import, suggest a `health_command` (§24.1) from `package.json` scripts (`
 
 Deps: T801 · Migration: —
 
-Fetch the upstream branch, diff `last_synced_sha → new tip`, and submit it as an `UPSTREAM` ChangeSet based on `last_synced_room_revision` through the normal apply pipeline (§24.2). Conflicts follow the normal flow with the lead as submitter of record.
+Fetch the upstream branch, diff `last_synced_sha → new tip`, and submit it as an `UPSTREAM` ChangeSet based on `last_synced_room_revision` through the normal apply pipeline (§24.2). Conflicts follow the normal flow with the caller (lead or owner) as submitter of record (changed in Review 5; escalation still reaches the lead).
 
 - Non-overlapping upstream and room edits merge; overlapping ones create a conflict.
 - `upstream.last_synced_*` advance only when the ChangeSet applies.
@@ -977,6 +979,15 @@ Deps: T805 · Migration: —
 After export, open a pull request through a `PullRequestProvider` interface (Tier 2 `github.create_pull_request`); a fake provider in tests, the GitHub implementation with the plugin runner.
 
 - Export with PR returns the provider's PR URL; without the capability → `FORBIDDEN`.
+
+### T807 · Dispatcher prepare phase for slow I/O — S1
+
+Deps: T803 · Migration: —
+
+Added in Review 5. `git.import` and `git.pull_upstream` fetch over the network inside the command, holding the room lease and row locks for up to 120 s, which blocks every other mutation in the room. Add an optional `prepare(ctx, params)` to `CommandDefinition` that runs before the transaction, off the room actor and without locks, and hands its result to `execute`. `execute` re-validates anything `prepare` assumed, because the room may have changed. Move both upstream fetches into `prepare`. Also: a pull larger than 500 changed files is split into ordered ChangeSets instead of refused.
+
+- A pull's fetch doesn't block a concurrent `messages.send` in the same room (test with a slow fake fetcher).
+- A `prepare` whose assumption no longer holds (the upstream moved, or a conflict opened) is refused in `execute` with `CONFLICT_VERSION`.
 
 ---
 
@@ -1018,7 +1029,7 @@ Per-participant budgets (§22.3: 120 commands/min, 10 messages/min, 60 ChangeSet
 
 Deps: T210, T402 · Migration: `0020_approvals`
 
-Grants with `requires_approval` make invocations return `APPROVAL_REQUIRED` with an approval id; `approvals.list`, `approvals.decide` (owner/lead); approved actions execute; approvals expire after 24 h (§22.2).
+Grants with `requires_approval` make invocations return `APPROVAL_REQUIRED` with an approval id; `approvals.list`, `approvals.decide` (owner and admins, not the lead: an agent lead approving agents defeats the gate; decided in Review 5); approved actions execute exactly once, the requester's idempotency key replaying the result; approvals expire after 24 h (§22.2).
 
 - Approve executes exactly once (idempotent); reject and expiry never execute.
 
@@ -1049,9 +1060,12 @@ Deps: T512, T207 · Migration: `0022_sandboxes`
 
 Deps: T1001, T514 · Migration: —
 
-Internal read-only Git endpoint on the workspace node, authenticated with a sandbox-scoped read token (room, participant, expiry; never valid on the public API). The sandbox fetches the canonical head into an ordinary clone, and `base_revision` is set. Per-room reference repository so new sandboxes fetch only missing objects (§14.3).
+An internal read-only Git listener on a configured `GIT_INTERNAL_HOST:GIT_INTERNAL_PORT` address on the private `crossover-git` Docker network, never published; it is a separate server from the public gateway and serves `git-upload-pack` only. A hardened, short-lived fetcher container joins that network, mounts the sandbox workspace and the canonical per-room repository read-only as a clone reference, and runs each fetch with a sandbox-scoped HMAC token (room, participant, sandbox, canonical revision, expiry ≤5 minutes). The Docker daemon must see the canonical repository at the same source path recorded in `repo_path`. The agent container never joins `crossover-git` or receives the token. The fetcher materializes the requested canonical revision into an ordinary shallow clone and `base_revision` stores that canonical revision. For a scoped reader, the endpoint serves a deterministic synthetic root commit packed without canonical alternates, so arbitrary canonical object IDs cannot be fetched; for an unscoped reader, it serves the real canonical commit shallowly.
 
-- The token can't read another room or call any command. Paths outside the participant's read scope are not materialized (T521 rules).
+- The token can't read another room or call a public command; the internal listener rejects receive-pack and all non-Git routes. Paths outside the participant's read scope are absent from the sandbox object store (T521 rules), verified with `git cat-file`.
+- Synthetic commits use fixed author/committer identities, the canonical commit timestamp, a fixed message, no parent/history, and map their SHA to the canonical revision and scope hash. Identical revision/scope inputs produce identical SHAs.
+- Fetcher hardening matches the T611 installer, and a new sandbox reuses the canonical per-room repository as a read-only reference without retaining it as an object alternate in the sandbox clone.
+- Tests reject a token used for another room, verify the public API does not accept it, verify read-only Git transport, and prove out-of-scope blobs are absent after materialization.
 
 ### T1003 · Working-copy status — S2
 
@@ -1093,6 +1107,15 @@ gVisor (`runsc`) runtime when configured. Default-deny network egress except thr
 
 - Tests: a non-allowlisted host and IMDS are refused; an allowlisted registry works; the sandbox environment contains no platform secrets.
 
+### T1007b · Egress proxy — S2
+
+Deps: T1007 · Migration: —
+
+Added in Review 5. T1007 delivered isolation and the per-sandbox network wiring. The allowlist proxy is the platform's own: `apps/egress-proxy`, a CONNECT-only forward proxy on port 443 (plain HTTP refused), in its own non-root container. Each sandbox gets an HMAC credential in `HTTPS_PROXY`, which maps to an active sandbox, participant and room. The allowlist is the platform defaults (package registries, GitHub read-only) plus `settings.egress_allowlist` (exact host or `*.suffix`). The proxy resolves DNS itself, refuses private, loopback, link-local (IMDS), CGNAT and IPv4-mapped addresses even for allowlisted names, and connects to the pinned address. It writes a structured per-sandbox egress log (host, verdict, bytes) and nothing to the ledger.
+
+- A non-allowlisted host, IMDS, and an allowlisted name resolving to a private address are refused. An allowlisted host works (local TLS server and resolver seam). A Docker smoke test runs through the proxy in CI.
+- The credential stops working when the sandbox is destroyed, the participant is paused or removed, or the room is frozen.
+
 ### T1008 · MCP coding tools — S2
 
 Deps: T1004, T1005, T1006, T707 · Migration: —
@@ -1131,6 +1154,15 @@ The same surface as T1101, typed from the same catalog.
 
 - Shares T1101's contract test fixtures.
 
+### T1106 · Token refresh over REST and in the SDK — S1
+
+Deps: T206, T1101 · Migration: —
+
+Added after Review 5. `refresh()` (T206) exists in the kernel but no route exposes it, so an SDK client can't refresh, and every subscription is closed with 4401 when its 1-hour access token expires. Add `POST /v1/auth/refresh { refresh_token }`: it rotates the refresh token, reuse revokes the whole family (§15.3), and it is rate-limited per IP. In the SDK, add a token source (`getToken`, or automatic refresh with a stored refresh token) that the REST transport uses on `UNAUTHENTICATED` and the subscription uses before reconnecting.
+
+- A subscription outlives the access token (fake clock): it reconnects with a fresh token, with no gap and no duplicate.
+- Reusing a rotated refresh token revokes the family, and the SDK surfaces `UNAUTHENTICATED` once instead of looping.
+
 ### T1104 · Web app shell — S1
 
 Deps: T1101, T216, T217 · Migration: —
@@ -1151,7 +1183,7 @@ Editor with live intents, draft flush, live cursors and merge view (§27; demo s
 
 Added in Review 4. Plugins run server-side and agents never receive credentials (§21.4, D10). The first plugins are the §29 MVP set: GitHub, Browser and AWS (read plus staging deploy). The runner reuses M10's container isolation and egress proxy.
 
-### T1201 · Tool registry, `tools.list` and `tools.invoke` — S2
+### T1201 · Tool registry, `tools.list` and `tools.invoke` — S1 (moved in Review 5)
 
 Deps: T208, T215 · Migration: —
 

@@ -20,8 +20,10 @@
     "@crossover/mcp": "workspace:*",
     "@crossover/policy": "workspace:*",
     "@crossover/protocol": "workspace:*",
+    "@crossover/security": "workspace:*",
     "@crossover/sdk": "workspace:*",
     "@crossover/workspace": "workspace:*",
+    "fastify": "^5.12.5",
     "zod": "^4.6.5"
   }
 }
