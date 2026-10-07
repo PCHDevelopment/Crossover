@@ -151,6 +151,67 @@ describe("composeServer", () => {
     expect(seqs).toEqual([...seqs].sort((a, b) => a - b));
   });
 
+  it("serves tasks, messages, room events and room lifecycle over HTTP", async () => {
+    const { server } = await start();
+    const { roomId, owner, agent, cmd } = await walkthrough(server.app);
+    const ownerToken = owner.tokens.access_token as string;
+    const agentToken = agent.tokens.access_token as string;
+
+    const created = await ok(
+      await cmd(
+        envelope("tasks.create", { title: "Login form", requirements: ["Form submits"] }),
+        ownerToken,
+      ),
+    );
+    const task = created.response as { id: string; version: number };
+    const claimed = await ok(
+      await cmd(
+        envelope("tasks.claim", { task_id: task.id, expected_version: task.version }),
+        agentToken,
+      ),
+    );
+    await ok(
+      await cmd(
+        envelope("tasks.start", { task_id: task.id, expected_version: claimed.response.version }),
+        agentToken,
+      ),
+    );
+    await ok(
+      await cmd(
+        envelope("messages.send", {
+          body: "Starting on the login form",
+          refs: [{ kind: "task", id: task.id }],
+        }),
+        agentToken,
+      ),
+    );
+
+    const got = await ok(await cmd(envelope("tasks.get", { task_id: task.id }), ownerToken));
+    expect(got.response).toMatchObject({ status: "IN_PROGRESS" });
+    const messages = await ok(await cmd(envelope("messages.list"), ownerToken));
+    expect(messages.response.messages).toMatchObject([{ body: "Starting on the login form" }]);
+
+    const events = await server.app.inject({
+      method: "GET",
+      url: `/v1/rooms/${roomId}/events?types=task.*`,
+      headers: { authorization: `Bearer ${ownerToken}` },
+    });
+    expect(events.statusCode, events.body).toBe(200);
+    expect(events.json().events.map((e: RoomEvent) => e.type)).toEqual([
+      "task.created",
+      "task.claimed",
+      "task.started",
+    ]);
+
+    // Room lifecycle: a frozen room refuses the agent's mutations until the owner resumes it.
+    await ok(await cmd(envelope("room.freeze"), ownerToken));
+    const refused = await cmd(envelope("messages.send", { body: "Still here?" }), agentToken);
+    expect(refused.statusCode, refused.body).toBeGreaterThanOrEqual(400);
+    expect(refused.json().error.code).toBe("ROOM_PAUSED");
+    await ok(await cmd(envelope("room.resume"), ownerToken));
+    await ok(await cmd(envelope("messages.send", { body: "Back" }), agentToken));
+  });
+
   it("enforces the real policy: an observer can't apply a ChangeSet", async () => {
     const { server } = await start();
     const { owner, cmd, roomId } = await walkthrough(server.app);
