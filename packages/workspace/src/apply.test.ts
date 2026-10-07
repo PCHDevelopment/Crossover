@@ -156,9 +156,27 @@ describe("workspace.apply_changeset", () => {
       status: "REJECTED",
       rejection_reason: "SUPERSEDED",
     });
+    const revisionCount = (await f.rowsFor("workspace_revisions")).length;
+    await expect(
+      f.dispatchAs(
+        lead,
+        "LEAD",
+      )({
+        ...resolutionRequest,
+        id: newId("cmd"),
+        idempotency_key: newId("cmd"),
+      }),
+    ).rejects.toMatchObject({
+      code: "CONFLICT_VERSION",
+      details: { status: "RESOLVED" },
+    });
+    expect((await f.rowsFor("workspace_revisions")).length).toBe(revisionCount);
+    expect((await f.rowsFor("changesets")).find((row) => row.id === originalId)?.status).toBe(
+      "REJECTED",
+    );
   });
 
-  it("keeps a failed resolution on the same open conflict and increments attempts once", async () => {
+  it("keeps an escalated conflict escalated when a resolution attempt fails", async () => {
     let failMerge = false;
     const f = await fixture(allowAll, {
       merge: async (...args) =>
@@ -181,6 +199,7 @@ describe("workspace.apply_changeset", () => {
     );
     const conflictId = (conflictResult.response as { conflict_id: string }).conflict_id;
     const originalId = (conflictResult.response as { changeset_id: string }).changeset_id;
+    await db.pool.query("UPDATE conflicts SET status = 'ESCALATED' WHERE id = $1", [conflictId]);
     failMerge = true;
     const retry = f.request([{ type: "modify", path: "file", content: "retry\n" }], 2);
     const retryRequest = {
@@ -191,7 +210,7 @@ describe("workspace.apply_changeset", () => {
     expect(retryResult.response).toMatchObject({ status: "CONFLICT", conflict_id: conflictId });
     expect(retryResult.events).toEqual([]);
     expect(await f.rowsFor("conflicts")).toMatchObject([
-      { id: conflictId, status: "OPEN", attempts: 1, changeset_id: originalId },
+      { id: conflictId, status: "ESCALATED", attempts: 1, changeset_id: originalId },
     ]);
     expect(await f.rowsFor("conflicts")).toHaveLength(1);
     expect(await f.dispatch({ ...retryRequest, id: newId("cmd") })).toEqual({
@@ -222,6 +241,98 @@ describe("workspace.apply_changeset", () => {
     });
     expect(await f.rowsFor("changesets")).toHaveLength(3);
     expect(await f.rowsFor("conflicts")).toMatchObject([{ id: conflictId, attempts: 0 }]);
+  });
+
+  it("allows the original submitter and room owner to resolve", async () => {
+    for (const resolver of ["submitter", "owner"] as const) {
+      const f = await fixture();
+      const submitter = newId("part");
+      await f.addParticipant(submitter);
+      await f.apply([{ type: "create", path: "file", content: "base\n" }]);
+      await f.apply([{ type: "modify", path: "file", content: "head\n" }], 1);
+      const submitted = f.request([{ type: "modify", path: "file", content: "candidate\n" }], 1);
+      const conflictResult = await f.dispatchAs(submitter)(submitted);
+      const conflictId = (conflictResult.response as { conflict_id: string }).conflict_id;
+      const who = resolver === "submitter" ? submitter : f.actor;
+      const resolution = f.request([{ type: "modify", path: "file", content: "resolved\n" }], 2);
+      const result = await f.dispatchAs(who)({
+        ...resolution,
+        params: {
+          ...resolution.params,
+          source: "RESOLUTION" as const,
+          conflict_id: conflictId,
+        } as typeof resolution.params & { conflict_id: string },
+      });
+      expect(result.response).toMatchObject({ status: "APPLIED" });
+      expect((await f.rowsFor("conflicts"))[0]).toMatchObject({
+        id: conflictId,
+        status: "RESOLVED",
+        resolver_id: who,
+      });
+    }
+  });
+
+  it("returns NOT_FOUND for unknown and cross-room conflict IDs", async () => {
+    const f = await fixture();
+    const otherRoom = await fixture();
+    const unknown = f.request([{ type: "create", path: "file", content: "x" }]);
+    await expect(
+      f.dispatch({
+        ...unknown,
+        params: {
+          ...unknown.params,
+          source: "RESOLUTION",
+          conflict_id: "conf_unknown",
+        } as typeof unknown.params & { conflict_id: string },
+      }),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+
+    await f.apply([{ type: "create", path: "file", content: "base\n" }]);
+    await f.apply([{ type: "modify", path: "file", content: "head\n" }], 1);
+    const conflictResult = await f.apply(
+      [{ type: "modify", path: "file", content: "candidate\n" }],
+      1,
+    );
+    const crossRoom = otherRoom.request([{ type: "create", path: "file", content: "x" }]);
+    await expect(
+      otherRoom.dispatch({
+        ...crossRoom,
+        params: {
+          ...crossRoom.params,
+          source: "RESOLUTION",
+          conflict_id: (conflictResult.response as { conflict_id: string }).conflict_id,
+        } as typeof crossRoom.params & { conflict_id: string },
+      }),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(await otherRoom.rowsFor("changesets")).toEqual([]);
+  });
+
+  it("enforces the resolver's path scope on resolution operations", async () => {
+    const scoped: Authorizer = async (_principal, _action, resource) => {
+      if (resource.path && !String(resource.path).startsWith("docs/"))
+        throw new CrossoverError("FORBIDDEN", "Path is outside the grant");
+    };
+    const f = await fixture(scoped);
+    await f.apply([{ type: "create", path: "docs/file", content: "base\n" }]);
+    await f.apply([{ type: "modify", path: "docs/file", content: "head\n" }], 1);
+    const conflictResult = await f.apply(
+      [{ type: "modify", path: "docs/file", content: "candidate\n" }],
+      1,
+    );
+    const conflictId = (conflictResult.response as { conflict_id: string }).conflict_id;
+    const resolution = f.request([{ type: "create", path: "outside/file", content: "x" }], 2);
+    await expect(
+      f.dispatch({
+        ...resolution,
+        params: {
+          ...resolution.params,
+          source: "RESOLUTION",
+          conflict_id: conflictId,
+        } as typeof resolution.params & { conflict_id: string },
+      }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(await f.rowsFor("conflicts")).toMatchObject([{ id: conflictId, attempts: 0 }]);
+    expect(await f.rowsFor("changesets")).toHaveLength(3);
   });
 
   it("commits revision, file history and event together, then replays the original result", async () => {

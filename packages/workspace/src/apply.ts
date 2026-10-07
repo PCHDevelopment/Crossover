@@ -105,7 +105,9 @@ async function apply(
     const conflict = rows[0];
     if (!conflict) throw new CrossoverError("NOT_FOUND", "Conflict not found");
     if (conflict.status !== "OPEN" && conflict.status !== "ESCALATED")
-      throw new CrossoverError("CONFLICT_VERSION", "Conflict is no longer open");
+      throw new CrossoverError("CONFLICT_VERSION", "Conflict is no longer open", {
+        details: { status: conflict.status },
+      });
     if (
       ctx.principal.participant_id !== conflict.submitter_id &&
       ctx.principal.participant_id !== conflict.lead_participant_id &&
@@ -213,7 +215,7 @@ async function apply(
     const conflictId = resolution?.conflictId ?? newId("conf");
     if (resolution) {
       await client.query(
-        `UPDATE conflicts SET status = 'OPEN', attempts = attempts + 1,
+        `UPDATE conflicts SET attempts = attempts + 1,
          head_revision_at_detection = $3, files = $4, counterparty_changesets = $5
          WHERE id = $1 AND room_id = $2`,
         [
