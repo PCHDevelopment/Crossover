@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { capabilityFor, ToolRegistry, type ToolDefinition } from "./registry.js";
+import { canonicalScope, capabilityFor, ToolRegistry, type ToolDefinition } from "./registry.js";
 
 const tool = (
   over: Partial<ToolDefinition<{ repo: string }>> = {},
@@ -44,5 +44,33 @@ describe("capabilityFor", () => {
     expect(capabilityFor(unscoped, { repo: "x" })).toBe("github.create_pull_request");
     expect(() => capabilityFor(tool(), { repo: "has space" })).toThrow(/scope/);
     expect(() => capabilityFor(tool(), { repo: "" })).toThrow(/scope/);
+  });
+});
+
+describe("canonicalScope", () => {
+  it("refuses what could re-route a scope, and applies the tool's own normalization", () => {
+    for (const bad of [
+      "",
+      "a/../b",
+      "a/./b",
+      "a//b",
+      "/a",
+      "a/",
+      "a/%2e%2e/b",
+      "a?x",
+      "a#x",
+      "a\\b",
+      "a\u0000b",
+      "a b",
+      "a/*",
+      "a/[x]",
+      "x".repeat(201),
+    ]) {
+      expect(() => canonicalScope(bad), JSON.stringify(bad)).toThrow(/scope/);
+    }
+    expect(canonicalScope("Acme/Widgets", (s) => s.toLowerCase())).toBe("acme/widgets");
+    // A normalization can't produce what the rules refuse.
+    expect(() => canonicalScope("acme/x", () => "acme/../x")).toThrow(/scope/);
+    expect(canonicalScope("x".repeat(200))).toHaveLength(200);
   });
 });

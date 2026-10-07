@@ -208,6 +208,12 @@ export interface CommandDefinition<S extends z.ZodType, R> {
    * commands only.
    */
   prepare?(ctx: PrepareContext, params: z.infer<S>): Promise<unknown>;
+  /**
+   * For a command that must not run inside the approver's transaction (it has a side effect that
+   * can't be rolled back): approving only lifts the gate for the requester's retry of the same
+   * request (same idempotency key and params), which then runs through the ordinary path.
+   */
+  approvalLiftsGate?: boolean;
   /** Release what `prepare` made (a temporary directory), whatever `execute` did. Never throws into the command. */
   disposePrepared?(prepared: unknown): Promise<void>;
   execute(ctx: CommandContext, params: z.infer<S>): Promise<CommandResult<R>>;
@@ -1329,6 +1335,7 @@ export class Dispatcher {
     try {
       // Only for a principal who may run it, and not for a replay of a request that already ran.
       // A refusal here is left for the command's own authorization to report and record.
+      const lifted = await this.gateLifted(principal, envelope, def);
       const allowed = await this.mayPrepare(principal, envelope, action, def, params);
       if (allowed && key !== undefined && !(await this.isReplay(principal, envelope))) {
         ran = true;
@@ -1340,7 +1347,15 @@ export class Dispatcher {
             command_id: envelope.id,
             idempotency_key: key,
             isAllowed: (a, resource, options) =>
-              this.isAllowed(principal, envelope.method, params, a, resource, options?.anyScope),
+              this.isAllowed(
+                principal,
+                envelope.method,
+                params,
+                a,
+                resource,
+                options?.anyScope,
+                lifted,
+              ),
           },
           params,
         );
@@ -1361,6 +1376,7 @@ export class Dispatcher {
     action: string,
     resource: Record<string, unknown> = {},
     anyScope = false,
+    approved = false,
   ): Promise<boolean> {
     const client = await this.pool.connect();
     try {
@@ -1368,7 +1384,13 @@ export class Dispatcher {
         principal,
         action,
         { ...resource, room_id: principal.room_id },
-        { method, params, client, ...(anyScope ? { perPath: true } : {}) },
+        {
+          method,
+          params,
+          client,
+          ...(anyScope ? { perPath: true } : {}),
+          ...(approved ? { approved: true } : {}),
+        },
       );
       return true;
     } catch (error) {
@@ -1381,6 +1403,47 @@ export class Dispatcher {
     } finally {
       client.release();
     }
+  }
+
+  /**
+   * Whether an owner or admin approved this very request (same requester, idempotency key and
+   * params) for a command that waits for the requester's retry instead of running on approval.
+   */
+  private async gateLifted(
+    principal: Principal,
+    envelope: { method: string; idempotency_key?: string | undefined; params?: unknown },
+    def: CommandDefinition<z.ZodType, unknown>,
+  ): Promise<boolean> {
+    if (!def.approvalLiftsGate || envelope.idempotency_key === undefined) return false;
+    let hash: string;
+    try {
+      hash = hashRequest({
+        room_id: principal.room_id,
+        method: envelope.method,
+        params: envelope.params,
+      });
+    } catch {
+      return false;
+    }
+    const { rowCount } = await this.pool.query(
+      `SELECT 1 FROM approvals
+       WHERE room_id = $1 AND requester_id = $2 AND idempotency_key = $3 AND idempotency_hash = $4
+         AND status = 'APPROVED'
+         AND decided_at >= clock_timestamp() - make_interval(hours => $5)`,
+      [
+        principal.room_id,
+        principal.participant_id,
+        envelope.idempotency_key,
+        hash,
+        IDEMPOTENCY_TTL_HOURS,
+      ],
+    );
+    return (rowCount ?? 0) > 0;
+  }
+
+  /** Whether `method` runs when an approval is granted (the usual case), or waits for the requester's retry. */
+  runsOnApproval(method: string): boolean {
+    return !this.commands.get(method)?.def.approvalLiftsGate;
   }
 
   /** Whether the principal passes the command's authorization now, without recording a denial. */
@@ -1443,6 +1506,7 @@ export class Dispatcher {
 
     return this.actors.get(room_id).submit(async () => {
       const token = await this.leases.ensure(room_id);
+      const lifted = await this.gateLifted(principal, envelope, def);
       const afterCommit: (() => void | Promise<void>)[] = [];
       let oneTime: unknown;
       let result: DispatchResult;
@@ -1487,6 +1551,7 @@ export class Dispatcher {
                       params,
                       client,
                       ...(options?.anyScope ? { perPath: true } : {}),
+                      ...(lifted ? { approved: true } : {}),
                     },
                   ),
                 authorizeAs: async (participantId, a, resource) =>

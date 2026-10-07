@@ -20,6 +20,12 @@ export interface ToolDefinition<A = Record<string, unknown>> {
    */
   scope?: (args: A) => string | undefined;
   /**
+   * Put a scope in the tool's own canonical form before it is matched and handed to the runner
+   * (a GitHub `owner/repo` lower-cased). The platform's rules (no `.`/`..`/empty segments, no
+   * `%?#\` or control characters, at most {@link MAX_SCOPE_LENGTH}) apply either way.
+   */
+  normalizeScope?: (scope: string) => string;
+  /**
    * Whether running it twice has the same effect as once. The platform never retries a tool
    * either way (§26); this tells callers whether they may.
    */
@@ -32,6 +38,11 @@ export interface ToolInvocation {
   args: unknown;
   /** The capability string that was authorized, scope included. */
   capability: string;
+  /**
+   * The canonical scope (`undefined` for an unscoped tool). **The runner acts only on this**, never
+   * on a value it re-derives from `args`: what was authorized is exactly this scope.
+   */
+  scope: string | undefined;
   room_id: string;
   participant_id: string;
   /** Unique per invocation; the command id. */
@@ -40,8 +51,6 @@ export interface ToolInvocation {
 
 export interface ToolOutput {
   result: unknown;
-  /** The result contains text from outside the platform (a web page, an issue): labeled `trust: external`. */
-  external: boolean;
 }
 
 /** Runs a tool. The plugin runner (T1202) implements it; it never hands a credential back. */
@@ -98,15 +107,37 @@ export class ToolRegistry {
   }
 }
 
-/** The capability string for one call: the base, plus `:scope` when the tool has one. */
-export function capabilityFor<A>(tool: ToolDefinition<A>, args: A): string {
-  const scope = tool.scope?.(args);
-  if (scope === undefined) return tool.capability;
-  // eslint-disable-next-line no-control-regex
-  if (scope === "" || /[\s\u0000-\u001f]/.test(scope)) {
-    throw new CrossoverError("VALIDATION", "The arguments name an invalid scope", {
+export const MAX_SCOPE_LENGTH = 200;
+
+/** A scope as one canonical string, or `VALIDATION`: no empty, `.` or `..` segments, nothing that could re-route it. */
+export function canonicalScope(raw: string, normalize?: (scope: string) => string): string {
+  const bad = () =>
+    new CrossoverError("VALIDATION", "The arguments name an invalid scope", {
       details: { reason: "invalid_scope" },
     });
-  }
-  return `${tool.capability}:${scope}`;
+  const check = (value: string) => {
+    if (
+      value === "" ||
+      value.length > MAX_SCOPE_LENGTH ||
+      // eslint-disable-next-line no-control-regex
+      /[\s\u0000-\u001f\u007f%?#*[\]{}\\]/.test(value)
+    )
+      throw bad();
+    if (value.split("/").some((segment) => segment === "" || segment === "." || segment === ".."))
+      throw bad();
+    return value;
+  };
+  return check(normalize ? check(normalize(check(raw))) : raw);
+}
+
+/** The canonical scope of one call, if the tool has one. */
+export function scopeOf<A>(tool: ToolDefinition<A>, args: A): string | undefined {
+  const raw = tool.scope?.(args);
+  return raw === undefined ? undefined : canonicalScope(raw, tool.normalizeScope);
+}
+
+/** The capability string for one call: the base, plus `:scope` (canonical) when the tool has one. */
+export function capabilityFor<A>(tool: ToolDefinition<A>, args: A): string {
+  const scope = scopeOf(tool, args);
+  return scope === undefined ? tool.capability : `${tool.capability}:${scope}`;
 }

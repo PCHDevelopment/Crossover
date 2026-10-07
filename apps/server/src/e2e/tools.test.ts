@@ -25,19 +25,19 @@ let server: CrossoverServer;
 let serial = 0;
 const invoked: ToolInvocation[] = [];
 let gate: Promise<void> | undefined;
+const hung: (() => void)[] = [];
 
 const runner: ToolRunner = {
   async run(invocation): Promise<ToolOutput> {
     invoked.push(invocation);
     const args = invocation.args as Record<string, unknown>;
     if (args["title"] === "slow") await gate;
+    if (args["title"] === "hang" || args["url"] === "hang")
+      await new Promise<void>((resolve) => hung.push(resolve));
     if (args["title"] === "boom")
       throw new ToolProviderError("GitHub is down", { retryable: true });
     if (args["title"] === "weird") throw new Error("socket hang up, token tok_leaky_secret");
-    return {
-      result: { ok: true, tool: invocation.tool },
-      external: invocation.tool === "browser.navigate",
-    };
+    return { result: { ok: true, tool: invocation.tool } };
   },
 };
 
@@ -59,6 +59,7 @@ function registry() {
     tier: 2,
     input: z.object({ repo: z.string(), title: z.string() }),
     scope: (a) => a.repo,
+    normalizeScope: (scope) => scope.toLowerCase(),
     idempotent: false,
   });
   r.register({
@@ -103,6 +104,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  for (const release of hung) release();
   await server?.close();
   await db?.drop();
   await rm(root, { recursive: true, force: true });
@@ -230,7 +232,7 @@ describe("tools over HTTP", () => {
     expect(done.response).toMatchObject({
       tool: "github.create_pull_request",
       result: { ok: true },
-      provenance: { author_kind: "SYSTEM", trust: "system" },
+      provenance: { author_kind: "SYSTEM", trust: "external" },
     });
     expect(invoked[invoked.length - 1]).toMatchObject({
       capability: "github.create_pull_request:acme/widgets",
@@ -247,12 +249,12 @@ describe("tools over HTTP", () => {
     expect(finished!.payload).toMatchObject({
       tool: "github.create_pull_request",
       tier: 2,
-      trust: "system",
+      trust: "external",
     });
     expect(JSON.stringify([started, finished])).not.toContain("Ship it"); // no arguments in the ledger
   });
 
-  it("a tier 0 tool leaves no tool events; a page's content is labeled external", async () => {
+  it("a tier 0 tool leaves no tool events; every tool result is labeled external", async () => {
     const r = await newRoom();
     await ok(await r.grant("github.read_repository"));
     await ok(await r.grant("browser.navigate"));
@@ -333,10 +335,202 @@ describe("tools over HTTP", () => {
     expect((await running).statusCode).toBe(200);
   });
 
-  it("bad arguments are VALIDATION, an unknown tool is NOT_FOUND", async () => {
+  it("bad arguments are VALIDATION for a holder; an unknown tool is the same FORBIDDEN as one you don't hold, and the arguments of a tool you don't hold aren't described", async () => {
     const r = await newRoom();
     await ok(await r.grant("github.read_repository"));
     expect((await r.invoke("github.read_repository", { repo: 5 })).statusCode).toBe(400);
-    expect((await r.invoke("nope.nothing", {})).statusCode).toBe(404);
+    const unknown = await r.invoke("nope.nothing", {});
+    expect(unknown.statusCode).toBe(403);
+    const unheld = await r.invoke("browser.navigate", { nonsense: true });
+    expect(unheld.statusCode).toBe(403);
+    expect(unheld.body).not.toContain("issues");
+    expect(JSON.stringify(unheld.json().error.details)).toContain("browser.navigate");
+  });
+});
+
+/** Exactly-once (review of T1201): the key is claimed before the effect, and the outcome kept whatever happens next. */
+describe("tools run exactly once", () => {
+  const send = (r: Awaited<ReturnType<typeof newRoom>>, request: unknown) =>
+    post(`/v1/rooms/${r.roomId}/commands`, request, r.dev);
+  const pr = (title: string, repo = "acme/widgets") =>
+    envelope("tools.invoke", { tool: "github.create_pull_request", args: { repo, title } });
+  const waitRuns = async (count: number) => {
+    for (let i = 0; i < 100 && invoked.length < count; i++)
+      await new Promise((res) => setTimeout(res, 20));
+  };
+
+  it("the same key twice at once runs the tool once: the second is 'in progress', then replays", async () => {
+    const r = await newRoom();
+    await ok(await r.grant("github.create_pull_request:acme/widgets"));
+    let release!: () => void;
+    gate = new Promise<void>((resolve) => (release = resolve));
+    const before = invoked.length;
+    const request = pr("slow");
+    const first = send(r, request);
+    await waitRuns(before + 1);
+    const second = await send(r, request);
+    expect(second.statusCode).toBe(409);
+    expect(second.json().error).toMatchObject({
+      retryable: true,
+      details: { reason: "in_progress" },
+    });
+    release();
+    expect((await first).statusCode).toBe(200);
+    const third = await ok(await send(r, request));
+    expect(third.replayed).toBe(true);
+    expect(invoked.length).toBe(before + 1);
+  });
+
+  it("another request under a used key is the key-reuse error and runs nothing", async () => {
+    const r = await newRoom();
+    await ok(await r.grant("github.create_pull_request:acme/widgets"));
+    const request = pr("first");
+    await ok(await send(r, request));
+    const before = invoked.length;
+    const other = await send(r, { ...pr("second"), idempotency_key: request.idempotency_key });
+    expect(other.statusCode).toBe(400);
+    expect(invoked.length).toBe(before);
+  });
+
+  it("a timeout of a tool that isn't idempotent is not retryable (outcome unknown), kept under the key, and a retry doesn't run it again", async () => {
+    const r = await newRoom();
+    await ok(await r.grant("github.create_pull_request:acme/widgets"));
+    const request = pr("hang");
+    const before = invoked.length;
+    const timedOut = await send(r, request);
+    expect(timedOut.statusCode).toBe(503);
+    expect(timedOut.json().error).toMatchObject({
+      code: "PROVIDER_UNAVAILABLE",
+      retryable: false,
+      details: { outcome: "unknown" },
+    });
+    const retried = await send(r, request);
+    expect(retried.statusCode).toBe(503);
+    expect(retried.json().error.details.outcome).toBe("unknown");
+    expect(invoked.length).toBe(before + 1);
+  });
+
+  it("a timeout of an idempotent tool may be retried: the key is released and the retry runs it again", async () => {
+    const r = await newRoom();
+    await ok(await r.grant("browser.navigate"));
+    const request = envelope("tools.invoke", { tool: "browser.navigate", args: { url: "hang" } });
+    const before = invoked.length;
+    const first = await send(r, request);
+    expect(first.statusCode).toBe(503);
+    expect(first.json().error).toMatchObject({ retryable: true });
+    expect(first.json().error.details.outcome).toBeUndefined();
+    const second = await send(r, request);
+    expect(second.statusCode).toBe(503);
+    expect(invoked.length).toBe(before + 2);
+  });
+
+  it("a grant revoked while the tool runs doesn't lose its result: it is recorded and a retry replays it", async () => {
+    const r = await newRoom();
+    await ok(await r.grant("github.create_pull_request:acme/widgets"));
+    let release!: () => void;
+    gate = new Promise<void>((resolve) => (release = resolve));
+    const before = invoked.length;
+    const request = pr("slow");
+    const running = send(r, request);
+    await waitRuns(before + 1);
+    await ok(
+      await r.call(r.owner, "capabilities.revoke", {
+        participant_id: r.devId,
+        capability: "github.create_pull_request:acme/widgets",
+      }),
+    );
+    release();
+    const done = await running;
+    expect(done.statusCode, done.body).toBe(200);
+    expect((await r.events("tool.completed")).length).toBe(1);
+    const retry = await ok(await send(r, request)); // its own result, replayed; nothing runs
+    expect(retry.replayed).toBe(true);
+    expect(invoked.length).toBe(before + 1);
+  });
+
+  it("an approved invocation doesn't run on approval: the requester's retry with the same key runs it once", async () => {
+    const r = await newRoom();
+    await ok(
+      await r.call(r.owner, "capabilities.grant", {
+        participant_id: r.devId,
+        capability: "github.create_pull_request:acme/widgets",
+        requires_approval: true,
+      }),
+    );
+    const request = pr("gated");
+    const before = invoked.length;
+    const waiting = await send(r, request);
+    expect(waiting.statusCode).toBe(202);
+    const approvalId = waiting.json().error.details.approval_id as string;
+    expect(invoked.length).toBe(before);
+
+    const decided = await ok(
+      await r.call(r.owner, "approvals.decide", { approval_id: approvalId, decision: "approve" }),
+    );
+    expect(decided.response.approval.status).toBe("APPROVED");
+    expect(decided.response.result).toBeUndefined();
+    expect(invoked.length).toBe(before); // not run inside the approver's transaction
+
+    const ran = await ok(await send(r, request));
+    expect(ran.replayed).toBe(false);
+    expect(invoked.length).toBe(before + 1);
+    expect((await r.events("tool.invoked")).length).toBe(1);
+    const again = await ok(await send(r, request));
+    expect(again.replayed).toBe(true);
+    expect(invoked.length).toBe(before + 1);
+
+    // The approval is for that request only: another invocation waits for its own.
+    const next = await send(r, pr("another"));
+    expect(next.statusCode).toBe(202);
+  });
+
+  it("tools.list shows gated tools with requires_approval and never answers a read with APPROVAL_REQUIRED", async () => {
+    const r = await newRoom();
+    const gated = (capability: string) =>
+      r.call(r.owner, "capabilities.grant", {
+        participant_id: r.devId,
+        capability,
+        requires_approval: true,
+      });
+    await ok(await gated("github.create_pull_request")); // unscoped
+    await ok(await gated("github.read_repository:acme/widgets")); // scoped
+    await ok(await r.grant("browser.navigate"));
+    const listed = (await ok(await r.call(r.dev, "tools.list"))).response.tools as {
+      name: string;
+      requires_approval: boolean;
+    }[];
+    expect(listed.map((t) => [t.name, t.requires_approval])).toEqual([
+      ["browser.navigate", false],
+      ["github.create_pull_request", true],
+      ["github.read_repository", true],
+    ]);
+  });
+
+  it("scopes are canonical: traversal and encoding don't slip past a wildcard grant, and the runner gets the canonical scope", async () => {
+    const r = await newRoom();
+    await ok(await r.grant("github.create_pull_request:acme/*"));
+    const before = invoked.length;
+    for (const repo of [
+      "acme/../evil/repo",
+      "acme/./x",
+      "acme//x",
+      "acme/x/..",
+      "acme/%2e%2e/evil",
+      "acme/x?y=1",
+      "acme/x#frag",
+      "acme\\..\\evil",
+      "acme/x\u0000y",
+      "acme/*",
+      `acme/${"a".repeat(300)}`,
+    ]) {
+      const res = await r.invoke("github.create_pull_request", { repo, title: "t" });
+      expect(res.statusCode, repo).toBe(400);
+    }
+    expect(invoked.length).toBe(before);
+    await ok(await r.invoke("github.create_pull_request", { repo: "ACME/Widgets", title: "t" }));
+    expect(invoked.at(-1)).toMatchObject({
+      scope: "acme/widgets",
+      capability: "github.create_pull_request:acme/widgets",
+    });
   });
 });
