@@ -861,7 +861,7 @@ export class Dispatcher {
 
   /**
    * The command was stopped by an approval gate (§22.2) and rolled back: keep it for the owner
-   * or lead in a transaction of its own (`approval.requested`, inbox items), and return the
+   * or an admin in a transaction of its own (`approval.requested`, inbox items), and return the
    * error to throw, now naming the approval. If it can't be kept, the original error stands.
    */
   private async queueForApproval(

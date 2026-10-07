@@ -241,6 +241,18 @@ describe("approval gates (§22.2, T905)", () => {
     await s.queued(s.dev, "no", "key-new");
   });
 
+  it("a key reused for a different request while gated is the key-reuse error, and leaves no approval behind", async () => {
+    const s = await setup();
+    await s.gate(s.dev);
+    const id = await s.queued(s.dev, "first", "same-key");
+    await failsWith(s.send(s.dev, "something else", "same-key"), "VALIDATION");
+    const waiting = await pool.query("SELECT id FROM approvals WHERE room_id = $1", [s.room]);
+    expect(waiting.rows).toEqual([{ id }]);
+    // The one approval is still decidable, and runs the first request.
+    await s.decide(s.owner, id);
+    expect(await s.messages()).toEqual(["first"]);
+  });
+
   it("a command that returns a one-time secret can't wait for approval", async () => {
     const s = await setup();
     await s.gate(s.lead, "room.invite");

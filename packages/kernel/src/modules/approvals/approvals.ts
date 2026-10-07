@@ -86,13 +86,22 @@ export async function queueApproval(
 ): Promise<{ approval: ApprovalView; created: boolean }> {
   const room_id = requester.room_id;
   const request_hash = hashRequest({ method: request.method, params: request.params });
-  const { rows: decided } = await client.query<ApprovalRow>(
+  // The key stands for one request: reusing it for another is the usual key-reuse error, and must
+  // not leave an approval behind that nobody could ever decide on.
+  const { rows: sameKey } = await client.query<ApprovalRow>(
     `SELECT ${COLUMNS} FROM approvals
-     WHERE room_id = $1 AND requester_id = $2 AND idempotency_key = $3 AND idempotency_hash = $4
-       AND status IN ('APPROVED', 'REJECTED', 'WITHDRAWN')
+     WHERE room_id = $1 AND requester_id = $2 AND idempotency_key = $3
      ORDER BY created_at DESC LIMIT 1`,
-    [room_id, requester.participant_id, request.idempotency_key, request.idempotency_hash],
+    [room_id, requester.participant_id, request.idempotency_key],
   );
+  if (sameKey[0] && sameKey[0].idempotency_hash !== request.idempotency_hash) {
+    throw new CrossoverError(
+      "VALIDATION",
+      "Idempotency key was already used with a different request",
+      { details: { idempotency_key: request.idempotency_key } },
+    );
+  }
+  const decided = sameKey.filter((a) => ["APPROVED", "REJECTED", "WITHDRAWN"].includes(a.status));
   if (decided[0]) {
     const reason = { APPROVED: "already_approved", REJECTED: "rejected", WITHDRAWN: "withdrawn" }[
       decided[0].status as "APPROVED" | "REJECTED" | "WITHDRAWN"
