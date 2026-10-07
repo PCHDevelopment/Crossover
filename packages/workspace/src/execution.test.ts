@@ -171,6 +171,32 @@ describe("ExecutionService", () => {
     expect(driver.started).toEqual([creating!.id]);
   });
 
+  it("destroys resources when participant cleanup wins after driver creation", async () => {
+    const { roomId, participantIds } = await makeParticipants();
+    const driver = new FakeExecutionDriver();
+    const gate = { entered: deferred(), release: deferred() };
+    const execution = new ExecutionService(db.pool, driver, {
+      afterDriverCreate: async () => {
+        gate.entered.resolve();
+        await gate.release.promise;
+      },
+    });
+
+    const ensuring = execution.ensure(roomId, participantIds[0]!);
+    await gate.entered.promise;
+    const creating = await execution.get(roomId, participantIds[0]!);
+    expect(creating).toMatchObject({ status: "CREATING" });
+
+    await execution.destroyParticipant(roomId, participantIds[0]!);
+    expect(await execution.get(roomId, participantIds[0]!)).toMatchObject({ status: "DESTROYED" });
+
+    gate.release.resolve();
+    await expect(ensuring).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(driver.destroyCalls).toEqual([creating!.id, creating!.id]);
+    expect(driver.provisioned.has(creating!.id)).toBe(false);
+    expect(driver.running.has(creating!.id)).toBe(false);
+  });
+
   it("recovers resources when a failure occurs after create but before refs are recorded", async () => {
     const { roomId, participantIds } = await makeParticipants();
     const driver = new FakeExecutionDriver();

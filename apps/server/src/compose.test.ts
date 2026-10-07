@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { createTestDatabase, type TestDatabase } from "@crossover/db/testing";
 import type { EventPublisher } from "@crossover/kernel";
 import { newId, type RoomEvent } from "@crossover/protocol";
-import { git } from "@crossover/workspace";
+import { git, type ExecutionDriver, type SandboxLimits } from "@crossover/workspace";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { composeServer, type ComposeOverrides, type CrossoverServer } from "./compose.js";
 import { loadConfig, type ServerConfig } from "./config.js";
@@ -29,6 +29,22 @@ class RecordingPublisher implements EventPublisher {
   readonly events: RoomEvent[] = [];
   async publish(_roomId: string, events: readonly RoomEvent[]): Promise<void> {
     this.events.push(...events);
+  }
+}
+
+class RecordingExecutionDriver implements ExecutionDriver {
+  readonly stopped: string[] = [];
+  readonly destroyed: string[] = [];
+
+  async create({ sandbox_id }: { sandbox_id: string; limits: SandboxLimits }) {
+    return { volume_ref: `volume:${sandbox_id}`, container_ref: `container:${sandbox_id}` };
+  }
+  async start(_input: { sandbox_id: string }): Promise<void> {}
+  async stop(input: { sandbox_id: string }): Promise<void> {
+    this.stopped.push(input.sandbox_id);
+  }
+  async destroy(input: { sandbox_id: string }): Promise<void> {
+    this.destroyed.push(input.sandbox_id);
   }
 }
 
@@ -135,6 +151,49 @@ async function walkthrough(app: App, withAppliedChange = true) {
 }
 
 describe("composeServer", () => {
+  it("stops agent sandboxes on freeze and cleans up on participant removal and archive", async () => {
+    const driver = new RecordingExecutionDriver();
+    const { server } = await start({}, new RecordingPublisher(), { executionDriver: driver });
+    const first = await walkthrough(server.app, false);
+    const agentRows = await db.pool.query<{ id: string }>(
+      "SELECT id FROM participants WHERE room_id = $1 AND kind = 'AGENT'",
+      [first.roomId],
+    );
+    const agentId = agentRows.rows[0]!.id;
+    const agentSandbox = await server.execution.ensure(first.roomId, agentId);
+
+    await ok(await first.cmd(envelope("room.freeze"), first.owner.tokens.access_token));
+    expect(await server.execution.get(first.roomId, agentId)).toMatchObject({
+      id: agentSandbox.id,
+      status: "HIBERNATED",
+    });
+    await ok(await first.cmd(envelope("room.resume"), first.owner.tokens.access_token));
+    await ok(
+      await first.cmd(
+        envelope("participants.remove", { participant_id: agentId }),
+        first.owner.tokens.access_token,
+      ),
+    );
+    expect(await server.execution.get(first.roomId, agentId)).toMatchObject({
+      id: agentSandbox.id,
+      status: "DESTROYED",
+    });
+
+    const second = await walkthrough(server.app, false);
+    const ownerRows = await db.pool.query<{ id: string }>(
+      "SELECT id FROM participants WHERE room_id = $1 AND authority = 'OWNER'",
+      [second.roomId],
+    );
+    const ownerSandbox = await server.execution.ensure(second.roomId, ownerRows.rows[0]!.id);
+    await ok(await second.cmd(envelope("room.archive"), second.owner.tokens.access_token));
+    expect(await server.execution.get(second.roomId, ownerRows.rows[0]!.id)).toMatchObject({
+      id: ownerSandbox.id,
+      status: "DESTROYED",
+    });
+    expect(driver.stopped).toHaveLength(1);
+    expect(driver.destroyed).toHaveLength(2);
+  });
+
   it("serves the skeleton flow end to end: login, create, session, invite, join, apply, read", async () => {
     const { server, publisher } = await start();
     const { roomId, owner, applied, cmd } = await walkthrough(server.app);
