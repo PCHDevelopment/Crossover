@@ -35,6 +35,11 @@ export interface SandboxResources {
   container_ref: string;
 }
 
+export interface SandboxWorkspaceHead {
+  repo_path: string;
+  revision: number;
+}
+
 export interface ExecutionDriver {
   /**
    * Every operation is repeatable by sandbox ID: create adopts deterministic existing resources;
@@ -46,6 +51,14 @@ export interface ExecutionDriver {
     participant_id: string;
     limits: SandboxLimits;
   }): Promise<SandboxResources>;
+  /** Fetch the canonical head into the stopped sandbox volume through the private Git network. */
+  materialize?(input: {
+    sandbox_id: string;
+    room_id: string;
+    participant_id: string;
+    resources: SandboxResources;
+    workspace: SandboxWorkspaceHead;
+  }): Promise<void>;
   start(input: { sandbox_id: string; resources: SandboxResources }): Promise<void>;
   stop(input: { sandbox_id: string; resources: SandboxResources }): Promise<void>;
   destroy(input: { sandbox_id: string; resources?: SandboxResources }): Promise<void>;
@@ -69,6 +82,7 @@ export class ExecutionService {
   private readonly sweepIntervalMs: number;
   private readonly diskEnforcement: DiskEnforcementMode;
   private sweepTimer: NodeJS.Timeout | undefined;
+  private readonly ensureLocks = new Map<string, Promise<void>>();
 
   constructor(
     private readonly pool: Pool,
@@ -88,6 +102,21 @@ export class ExecutionService {
 
   /** Create lazily, or resume, the one sandbox owned by this room participant. */
   async ensure(roomId: string, participantId: string): Promise<SandboxRecord> {
+    const key = `${roomId}\0${participantId}`;
+    const previous = this.ensureLocks.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => (release = resolve));
+    this.ensureLocks.set(key, current);
+    await previous;
+    try {
+      return await this.ensureExclusive(roomId, participantId);
+    } finally {
+      release();
+      if (this.ensureLocks.get(key) === current) this.ensureLocks.delete(key);
+    }
+  }
+
+  private async ensureExclusive(roomId: string, participantId: string): Promise<SandboxRecord> {
     let sandbox = await this.getOrCreate(roomId, participantId);
     for (;;) {
       if (sandbox.status === "DESTROYED" || sandbox.status === "DESTROYING")
@@ -120,6 +149,23 @@ export class ExecutionService {
         continue;
       }
 
+      if (sandbox.base_revision === null && this.driver.materialize) {
+        const workspace = await this.workspaceHead(roomId);
+        await this.driver.materialize({
+          sandbox_id: sandbox.id,
+          room_id: roomId,
+          participant_id: participantId,
+          resources,
+          workspace,
+        });
+        const recorded = await this.recordBaseRevision(sandbox.id, roomId, workspace.revision);
+        if (!recorded) {
+          await this.throwIfDestroyed(sandbox.id, roomId, resources);
+          sandbox = await this.claimForStart(roomId, participantId);
+          continue;
+        }
+      }
+
       // Always start before handing a sandbox back; this also repairs a stale RUNNING row.
       await this.driver.start({ sandbox_id: sandbox.id, resources });
       const running = await this.recordRunning(sandbox.id, roomId, resources);
@@ -130,6 +176,31 @@ export class ExecutionService {
     }
   }
 
+  private async workspaceHead(roomId: string): Promise<SandboxWorkspaceHead> {
+    const { rows } = await this.pool.query<{ repo_path: string; revision: string }>(
+      `SELECT w.repo_path, wr.revision
+       FROM workspaces w
+       JOIN workspace_revisions wr ON wr.workspace_id = w.id AND wr.room_id = w.room_id
+       WHERE w.room_id = $1
+       ORDER BY wr.revision DESC LIMIT 1`,
+      [roomId],
+    );
+    const head = rows[0];
+    if (!head) throw new CrossoverError("NOT_FOUND", "Workspace is not provisioned");
+    return { repo_path: head.repo_path, revision: Number(head.revision) };
+  }
+
+  private async recordBaseRevision(id: string, roomId: string, revision: number): Promise<boolean> {
+    return withTransaction(this.pool, async (client) => {
+      const { rowCount } = await client.query(
+        `UPDATE sandboxes SET base_revision = $3, updated_at = clock_timestamp()
+         WHERE id = $1 AND room_id = $2 AND status = 'STARTING' AND base_revision IS NULL`,
+        [id, roomId, revision],
+      );
+      return rowCount === 1;
+    });
+  }
+
   /** Look up only by the caller's room and participant identity, never by another sandbox ID. */
   async get(roomId: string, participantId: string): Promise<SandboxRecord | null> {
     const { rows } = await this.pool.query<SandboxRow>(
@@ -138,7 +209,7 @@ export class ExecutionService {
        FROM sandboxes WHERE room_id = $1 AND participant_id = $2`,
       [roomId, participantId],
     );
-    return rows[0] ?? null;
+    return rows[0] ? normalizeSandbox(rows[0]) : null;
   }
 
   /** Hibernate idle sandboxes; the container stops while its Docker volume is retained. */
@@ -271,7 +342,7 @@ export class ExecutionService {
       const sandbox = rows[0];
       if (!sandbox || sandbox.status === "DESTROYED" || sandbox.status === "DESTROYING")
         throw new CrossoverError("NOT_FOUND", "Participant sandbox has been destroyed");
-      return sandbox;
+      return normalizeSandbox(sandbox);
     });
   }
 
@@ -298,9 +369,9 @@ export class ExecutionService {
                      last_active_at, updated_at`,
           [sandbox.id, roomId],
         );
-        return updated.rows[0]!;
+        return normalizeSandbox(updated.rows[0]!);
       }
-      return sandbox;
+      return normalizeSandbox(sandbox);
     });
   }
 
@@ -334,7 +405,7 @@ export class ExecutionService {
                    last_active_at, updated_at`,
         [id, roomId, resources.volume_ref, resources.container_ref],
       );
-      return rows[0] ?? null;
+      return rows[0] ? normalizeSandbox(rows[0]) : null;
     });
   }
 
@@ -451,6 +522,13 @@ export class ExecutionService {
       throw new Error(`Sandbox ${sandbox.id} is missing its driver references`);
     return { volume_ref: sandbox.volume_ref, container_ref: sandbox.container_ref };
   }
+}
+
+function normalizeSandbox(sandbox: SandboxRow): SandboxRecord {
+  return {
+    ...sandbox,
+    base_revision: sandbox.base_revision === null ? null : Number(sandbox.base_revision),
+  };
 }
 
 function delay(ms: number): Promise<void> {
