@@ -188,6 +188,9 @@ importers:
       '@crossover/protocol':
         specifier: workspace:*
         version: link:../protocol
+      '@vscode/tree-sitter-wasm':
+        specifier: ^0.3.1
+        version: 0.3.1
       zod:
         specifier: ^4.6.5
         version: 4.6.5
@@ -514,6 +517,9 @@ packages:
 
   '@vitest/spy@5.0.3':
     resolution: {integrity: sha512-XhFysQTB8AZ+P4gMi+Lpo99vg2AZi0qKpaB9yXQl37+CaMEAPO3iH/wGVnSyL5MPERiLezpqTVtrR6UZH5GCXg==}
+
+  '@vscode/tree-sitter-wasm@0.3.1':
+    resolution: {integrity: sha512-RJFoomET6FajjG511fmQxeBQfU6M24a0aFZPqpid+ttIxanWf1VGytBG0UmsGjt07qmIPJS8U31D+aecuCucsQ==}
 
   abstract-logging@2.0.1:
     resolution: {integrity: sha512-2BjRTZxTPvheOvGbBslFSYOUkr+SjPtOnrLP33f+VIWLzezQpZcqVg7ja3L4dBXmzzgwT+a029jRx5PCi3JuiA==}
@@ -1847,6 +1853,8 @@ snapshots:
       vite: 8.3.2(@types/node@22.20.5)
 
   '@vitest/spy@5.0.3': {}
+
+  '@vscode/tree-sitter-wasm@0.3.1': {}
 
   abstract-logging@2.0.1: {}
 

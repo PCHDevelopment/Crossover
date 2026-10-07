@@ -3,7 +3,7 @@ import { extractHunks } from "./hunks.js";
 import type { ConflictHunk } from "./hunks.js";
 import type { MergeMessage, MergeResult } from "./merge.js";
 
-export type ConflictKind = "CONTENT" | "MODIFY_DELETE" | "RENAME" | "ADD_ADD" | "BINARY";
+export type ConflictKind = "CONTENT" | "MODIFY_DELETE" | "RENAME" | "ADD_ADD" | "BINARY" | "PARSE";
 export interface ClassifiedConflict {
   path: string;
   kind: ConflictKind;
@@ -39,7 +39,8 @@ export async function classifyConflicts(
       );
       const stages = new Set(file.stages.map((entry) => entry.stage));
       let kind: ConflictKind;
-      if (
+      if (types.some((type) => type === "CONFLICT (parse)")) kind = "PARSE";
+      else if (
         types.some((type) => type.includes("binary")) ||
         [...blobs.values()].some((blob) => blob.binary)
       )

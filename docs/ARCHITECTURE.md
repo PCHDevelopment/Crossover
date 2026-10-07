@@ -594,7 +594,7 @@ Conflict
   head_revision_at_detection
   files[]
     path
-    kind                       CONTENT | MODIFY_DELETE | RENAME | ADD_ADD | BINARY
+    kind                       CONTENT | MODIFY_DELETE | RENAME | ADD_ADD | BINARY | PARSE
     hunks[]                    { base, ours (submitter), theirs (head), line ranges }
   counterparty_changesets[]    applied ChangeSets between base and head that touched
                                the conflicting regions (for attribution and pinging)

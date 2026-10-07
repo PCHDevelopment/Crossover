@@ -7,6 +7,8 @@ import { allowAll, Dispatcher, type Authorizer } from "@crossover/kernel";
 import { CrossoverError, newId } from "@crossover/protocol";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { git } from "./git.js";
+import { materialize } from "./materialize.js";
+import { merge } from "./merge.js";
 import { registerWorkspaceCommands, type WorkspaceCommandDeps } from "./apply.js";
 import { ConflictEscalationSweeper } from "./conflict-escalation-sweeper.js";
 import { HealthCheckQueue } from "./health-queue.js";
@@ -134,6 +136,60 @@ async function seedConflict(
 }
 
 describe("workspace.apply_changeset", () => {
+  it("records a parse conflict when a clean merge introduces syntax errors", async () => {
+    const f = await fixture(allowAll, {
+      merge: async (repo, base, head, candidate) => {
+        const result = await merge(repo, base, head, candidate);
+        if (!result.clean || base === head) return result;
+        const malformed = await materialize(repo, head, [
+          {
+            type: "modify",
+            path: "src/main.ts",
+            content: "const value = ;\nconst other = 0;\n",
+          },
+        ]);
+        const tree = (
+          await git(["rev-parse", `${malformed}^{tree}`], {
+            gitDir: repo,
+            timeoutMs: 10_000,
+          })
+        ).stdout.trim();
+        return { clean: true, tree };
+      },
+    });
+
+    await f.apply([
+      { type: "create", path: "src/main.ts", content: "const value = 0;\n" },
+      { type: "create", path: "src/other.ts", content: "const other = 0;\n" },
+    ]);
+    await f.apply(
+      [
+        {
+          type: "modify",
+          path: "src/other.ts",
+          content: "const other = 1;\n",
+        },
+      ],
+      1,
+    );
+    const response = await f.apply(
+      [
+        {
+          type: "modify",
+          path: "src/main.ts",
+          content: "const value = 2;\n",
+        },
+      ],
+      1,
+    );
+
+    expect(response.response).toMatchObject({ status: "CONFLICT" });
+    expect(await f.rowsFor("conflicts")).toMatchObject([
+      { files: [{ path: "src/main.ts", kind: "PARSE" }] },
+    ]);
+    expect(await f.rowsFor("workspace_revisions")).toHaveLength(3);
+  });
+
   it("coalesces ten rapid applied revisions into the active and latest health checks", async () => {
     const firstGate = deferred();
     const secondGate = deferred();
