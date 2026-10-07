@@ -1,43 +1,49 @@
 import { lookup } from "node:dns/promises";
-import { isIP } from "node:net";
+import { BlockList, isIP } from "node:net";
+
+const blockedIpv4 = new BlockList();
+for (const [subnet, prefix] of [
+  ["0.0.0.0", 8],
+  ["10.0.0.0", 8],
+  ["100.64.0.0", 10],
+  ["127.0.0.0", 8],
+  ["169.254.0.0", 16],
+  ["172.16.0.0", 12],
+  ["192.0.0.0", 24],
+  ["192.0.2.0", 24],
+  ["192.88.99.0", 24],
+  ["192.168.0.0", 16],
+  ["198.18.0.0", 15],
+  ["198.51.100.0", 24],
+  ["203.0.113.0", 24],
+  ["224.0.0.0", 4],
+  ["240.0.0.0", 4],
+] as const) {
+  blockedIpv4.addSubnet(subnet, prefix, "ipv4");
+}
+
+const blockedIpv6 = new BlockList();
+for (const [subnet, prefix] of [
+  ["::", 96], // unspecified, loopback, and deprecated IPv4-compatible forms
+  ["::ffff:0:0", 96], // IPv4-mapped
+  ["::ffff:0:0:0", 96], // IPv4-translated
+  ["64:ff9b::", 96], // well-known NAT64 prefix
+  ["2001::", 32], // Teredo embeds an IPv4 address
+  ["2002::", 16], // 6to4 embeds an IPv4 address
+  ["2001:db8::", 32], // documentation
+  ["fc00::", 7], // unique local
+  ["fe80::", 10], // link-local
+  ["fec0::", 10], // deprecated site-local
+  ["ff00::", 8], // multicast
+] as const) {
+  blockedIpv6.addSubnet(subnet, prefix, "ipv6");
+}
 
 /** Addresses a server must not connect to on a user's say-so (SSRF protection). */
 export function isPrivateAddress(address: string): boolean {
   const version = isIP(address);
-  if (version === 4) {
-    const [a, b] = address.split(".").map(Number) as [number, number];
-    return (
-      a === 0 ||
-      a === 10 ||
-      a === 127 ||
-      (a === 100 && b >= 64 && b <= 127) ||
-      (a === 169 && b === 254) ||
-      (a === 172 && b >= 16 && b <= 31) ||
-      (a === 192 && b === 168) ||
-      (a === 192 && b === 0) ||
-      (a === 198 && (b === 18 || b === 19)) ||
-      a >= 224
-    );
-  }
-  if (version === 6) {
-    const lower = address.toLowerCase();
-    // IPv4-mapped (::ffff:10.0.0.1), which URL parsing also writes as ::ffff:a00:1.
-    const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(lower);
-    if (mapped) return isPrivateAddress(mapped[1]!);
-    const mappedHex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(lower);
-    if (mappedHex) {
-      const hi = parseInt(mappedHex[1]!, 16);
-      const lo = parseInt(mappedHex[2]!, 16);
-      return isPrivateAddress(`${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`);
-    }
-    return (
-      lower === "::" ||
-      lower === "::1" ||
-      /^f[cd]/.test(lower) || // unique local fc00::/7
-      /^fe[89ab]/.test(lower) || // link-local fe80::/10
-      lower.startsWith("ff") // multicast
-    );
-  }
+  if (version === 4) return blockedIpv4.check(address, "ipv4");
+  if (version === 6) return blockedIpv6.check(address, "ipv6");
   return true; // not an address at all: refuse
 }
 
