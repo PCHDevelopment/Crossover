@@ -8,6 +8,7 @@ import { git } from "./git.js";
 import {
   DEFAULT_HEALTH_IMAGE,
   DockerHealthRunner,
+  prepareHealthCheckout,
   runHealthCheck,
   storeHealthRun,
 } from "./health-runner.js";
@@ -90,6 +91,17 @@ afterEach(async () => {
 });
 
 describe("DockerHealthRunner", () => {
+  it("maps root UID/GID to unprivileged 1000:1000 and changes checkout ownership", async () => {
+    const checkout = await mkdtemp(join(tmpdir(), "crossover-health-root-test-"));
+    directories.push(checkout);
+    const changeOwner = vi.fn(async () => {});
+    await expect(prepareHealthCheckout(checkout, 0, 0, changeOwner)).resolves.toEqual({
+      uid: 1000,
+      gid: 1000,
+    });
+    expect(changeOwner).toHaveBeenCalledWith(checkout, 1000, 1000);
+  });
+
   it.each([
     { code: 0, timedOut: false, status: "GREEN" },
     { code: 1, timedOut: false, status: "RED" },
@@ -124,7 +136,9 @@ describe("DockerHealthRunner", () => {
     expect(args).toContain("--network=none");
     expect(args).toContain(DEFAULT_HEALTH_IMAGE);
     expect(args).toContain("--read-only");
-    expect(args).toContain("--user=1000:1000");
+    const expectedUid = process.getuid?.() === 0 ? 1000 : (process.getuid?.() ?? 1000);
+    const expectedGid = process.getgid?.() === 0 ? 1000 : (process.getgid?.() ?? 1000);
+    expect(args).toContain(`--user=${expectedUid}:${expectedGid}`);
     expect(args).toContain("--init");
     expect(args).toContain("--env");
     expect(args).toContain("HOME=/tmp");
@@ -161,16 +175,21 @@ describe("DockerHealthRunner", () => {
     expect(invoke).not.toHaveBeenCalled();
   });
 
-  it.skipIf(!dockerImageAvailable)("runs with a read-write checkout and uid 1000", async () => {
-    const { repository, revision } = await makeRepo();
-    const result = await new DockerHealthRunner({ allowedImages: [DEFAULT_HEALTH_IMAGE] }).run({
-      repository,
-      revision,
-      command: 'test "$(id -u)" = 1000 && test -w /workspace && printf docker-health-ok',
-    });
-    expect(result.status).toBe("GREEN");
-    expect(result.log).toContain("docker-health-ok");
-  });
+  it.skipIf(!dockerImageAvailable)(
+    "runs with a writable checkout as its unprivileged UID",
+    async () => {
+      const { repository, revision } = await makeRepo();
+      const uid = process.getuid?.() === 0 ? 1000 : (process.getuid?.() ?? 1000);
+      const gid = process.getgid?.() === 0 ? 1000 : (process.getgid?.() ?? 1000);
+      const result = await new DockerHealthRunner({ allowedImages: [DEFAULT_HEALTH_IMAGE] }).run({
+        repository,
+        revision,
+        command: `test "$(id -u)" = ${uid} && test "$(id -g)" = ${gid} && test -w /workspace && printf docker-health-ok`,
+      });
+      expect(result.status).toBe("GREEN");
+      expect(result.log).toContain("docker-health-ok");
+    },
+  );
 
   it.skipIf(!dockerImageAvailable)("blocks network access from the container", async () => {
     const { repository, revision } = await makeRepo();

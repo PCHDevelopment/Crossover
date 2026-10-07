@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { chmod, mkdtemp, rm } from "node:fs/promises";
+import { chmod, chown, lchown, mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { Pool } from "@crossover/db";
@@ -126,6 +126,30 @@ function clipLog(log: string): string {
   return `${bytes.subarray(0, MAX_LOG_BYTES).toString("utf8")}\n[log truncated]`;
 }
 
+async function chownCheckout(checkout: string, uid: number, gid: number): Promise<void> {
+  for (const entry of await readdir(checkout, { withFileTypes: true })) {
+    const path = join(checkout, entry.name);
+    if (entry.isSymbolicLink()) await lchown(path, uid, gid);
+    else if (entry.isDirectory()) await chownCheckout(path, uid, gid);
+    else await chown(path, uid, gid);
+  }
+  await chown(checkout, uid, gid);
+}
+
+/** Give a throwaway checkout to the server's unprivileged UID, remapping root to uid 1000. */
+export async function prepareHealthCheckout(
+  checkout: string,
+  hostUid = process.getuid?.() ?? 1000,
+  hostGid = process.getgid?.() ?? 1000,
+  changeOwner = chownCheckout,
+): Promise<{ uid: number; gid: number }> {
+  const uid = hostUid === 0 ? 1000 : hostUid;
+  const gid = hostGid === 0 ? 1000 : hostGid;
+  await chmod(checkout, 0o700);
+  if (uid !== hostUid || gid !== hostGid) await changeOwner(checkout, uid, gid);
+  return { uid, gid };
+}
+
 /** Execute a configured check in a network-isolated Docker container (§12.1). */
 export class DockerHealthRunner implements HealthRunner {
   private readonly timeoutMs: number;
@@ -168,6 +192,7 @@ export class DockerHealthRunner implements HealthRunner {
         cwd: checkout,
         timeoutMs: 30_000,
       });
+      const user = await prepareHealthCheckout(checkout);
       const image = input.image ?? this.image;
       if (!this.allowedImages.has(image))
         throw new Error("Room health image is not operator-allowed");
@@ -186,7 +211,7 @@ export class DockerHealthRunner implements HealthRunner {
             "crossover.health.runner=true",
             "--network=none",
             "--read-only",
-            "--user=1000:1000",
+            `--user=${user.uid}:${user.gid}`,
             "--cap-drop=ALL",
             "--security-opt=no-new-privileges",
             "--memory=1g",
