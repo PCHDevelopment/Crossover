@@ -103,8 +103,8 @@ export function registerMemoryAccessCommands(dispatcher: Dispatcher): void {
          FROM memory_entries
          WHERE room_id = $1 AND key LIKE $2 ESCAPE '\\'
            AND ($3 OR NOT deleted)
-           AND ($4::text IS NULL OR key > $4)
-         ORDER BY key
+           AND ($4::text IS NULL OR key COLLATE "C" > $4)
+         ORDER BY key COLLATE "C"
          LIMIT $5`,
         [ctx.room_id, likePrefix(p.prefix), p.include_deleted, p.after ?? null, p.limit],
       );

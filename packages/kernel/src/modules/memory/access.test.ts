@@ -158,6 +158,24 @@ describe("memory.list", () => {
     expect((await list(s, s.dev, { prefix: "zzz" })).entries).toEqual([]);
   });
 
+  it("orders keys bytewise whatever the database locale, paging one at a time", async () => {
+    const s = await setup();
+    // A locale such as en_US ignores punctuation and would put ab/x before a/one.
+    const keys = ["a/one", "a/three", "ab/x", "b/two", "A/upper", "a-b"];
+    for (const key of keys) await put(s, s.dev, key, "v");
+    const expected = [...keys].sort((x, y) => (Buffer.from(x) < Buffer.from(y) ? -1 : 1));
+    expect(expected.slice(0, 3)).toEqual(["A/upper", "a-b", "a/one"]);
+    const seen: string[] = [];
+    let after: string | undefined;
+    for (;;) {
+      const page = await list(s, s.dev, { limit: 1, ...(after ? { after } : {}) });
+      seen.push(...page.entries.map((e) => e.key));
+      if (!page.next_after) break;
+      after = page.next_after;
+    }
+    expect(seen).toEqual(expected);
+  });
+
   it("treats % and _ in a prefix literally", async () => {
     const s = await setup();
     await put(s, s.dev, "a_b/x", "1");
