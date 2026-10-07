@@ -728,6 +728,8 @@ Each sandbox tracks:
 - local modifications relative to that base (computed with `git status`/`git diff` inside the sandbox; the sandbox clone is ordinary Git internally),
 - ignored and generated files, which never leave the sandbox.
 
+`sandbox.status` returns `{ base_revision, head_revision, behind_by, modified, added, deleted }`. `head_revision` is the latest canonical workspace revision; `behind_by` is the nonnegative difference from `base_revision`. File lists come from porcelain Git status with rename detection disabled, so a rename is reported as a deletion plus an addition. An isolated Git helper reads the sandbox volume with no network access and a read-only mount; `.gitignore` and `.roomignore` paths are omitted.
+
 ## 14.3 Materialization
 
 - On first use (`sandbox.*` or a coding tool call through MCP), the Execution Service starts a container and materializes the workspace through a short-lived fetcher container. The fetcher alone joins the unpublished `crossover-git` Docker network, mounts the sandbox workspace, and reads from a separate internal Git listener on the workspace node. The server binds `GIT_INTERNAL_HOST` to its configured address on that private network; the deployment connects the server to the network before startup and never publishes `GIT_INTERNAL_PORT`.

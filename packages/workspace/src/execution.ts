@@ -1,6 +1,7 @@
 import type { Pool } from "@crossover/db";
 import { withTransaction } from "@crossover/db";
 import { CrossoverError, newId } from "@crossover/protocol";
+import type { SandboxFileChanges } from "./sandbox-status.js";
 
 const SANDBOX_IDLE_MS = 30 * 60 * 1000;
 const SWEEP_INTERVAL_MS = 60 * 1000;
@@ -40,6 +41,12 @@ export interface SandboxWorkspaceHead {
   revision: number;
 }
 
+export interface SandboxWorkingCopyStatus extends SandboxFileChanges {
+  base_revision: number;
+  head_revision: number;
+  behind_by: number;
+}
+
 export interface ExecutionDriver {
   /**
    * Every operation is repeatable by sandbox ID: create adopts deterministic existing resources;
@@ -59,6 +66,7 @@ export interface ExecutionDriver {
     resources: SandboxResources;
     workspace: SandboxWorkspaceHead;
   }): Promise<void>;
+  status(input: { sandbox_id: string; resources: SandboxResources }): Promise<SandboxFileChanges>;
   start(input: { sandbox_id: string; resources: SandboxResources }): Promise<void>;
   stop(input: { sandbox_id: string; resources: SandboxResources }): Promise<void>;
   destroy(input: { sandbox_id: string; resources?: SandboxResources }): Promise<void>;
@@ -210,6 +218,29 @@ export class ExecutionService {
       [roomId, participantId],
     );
     return rows[0] ? normalizeSandbox(rows[0]) : null;
+  }
+
+  /** Report local file changes against this sandbox's base and the current canonical head. */
+  async status(roomId: string, participantId: string): Promise<SandboxWorkingCopyStatus> {
+    const sandbox = await this.ensure(roomId, participantId);
+    if (sandbox.base_revision === null)
+      throw new Error("Sandbox workspace has not been materialized");
+    if (!sandbox.volume_ref || !sandbox.container_ref)
+      throw new Error("Sandbox workspace resources are unavailable");
+
+    const [workspace, changes] = await Promise.all([
+      this.workspaceHead(roomId),
+      this.driver.status({
+        sandbox_id: sandbox.id,
+        resources: { volume_ref: sandbox.volume_ref, container_ref: sandbox.container_ref },
+      }),
+    ]);
+    return {
+      base_revision: sandbox.base_revision,
+      head_revision: workspace.revision,
+      behind_by: Math.max(0, workspace.revision - sandbox.base_revision),
+      ...changes,
+    };
   }
 
   /** Hibernate idle sandboxes; the container stops while its Docker volume is retained. */

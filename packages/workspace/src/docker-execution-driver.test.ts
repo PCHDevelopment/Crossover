@@ -110,6 +110,52 @@ describe("DockerExecutionDriver", () => {
     expect(runArgs.at(-1)).toBe("crossover-git-fetcher:test");
   });
 
+  it("reads status from the sandbox volume with an isolated Git helper", async () => {
+    const calls: string[][] = [];
+    const driver = new DockerExecutionDriver({
+      invoke: async (args) => {
+        calls.push([...args]);
+        return {
+          code: 0,
+          stdout: " M src/changed.ts\0?? notes/new.md\0 D old.txt\0",
+          stderr: "",
+        };
+      },
+      gitFetcherImage: "crossover-git-fetcher:test",
+    });
+    const sandboxId = newId("sandbox");
+    const suffix = sandboxId.toLowerCase();
+
+    await expect(
+      driver.status({
+        sandbox_id: sandboxId,
+        resources: {
+          volume_ref: `crossover-sbx-${suffix}`,
+          container_ref: `crossover-sbx-${suffix}`,
+        },
+      }),
+    ).resolves.toEqual({
+      modified: ["src/changed.ts"],
+      added: ["notes/new.md"],
+      deleted: ["old.txt"],
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain("--network=none");
+    expect(calls[0]).toContain("--read-only");
+    expect(calls[0]).toContain("--cap-drop=ALL");
+    expect(calls[0]).toContain("--security-opt=no-new-privileges");
+    expect(calls[0]).toContain("--memory=512m");
+    expect(calls[0]).toContain("--cpus=1");
+    expect(calls[0]).toContain(
+      `type=volume,source=crossover-sbx-${suffix},target=/workspace,readonly,volume-nocopy`,
+    );
+    expect(calls[0]).toContain("core.excludesFile=/workspace/.roomignore");
+    expect(calls[0]).toContain("core.fsmonitor=false");
+    expect(calls[0]).toContain("--no-renames");
+    expect(calls[0]).toContain("crossover-git-fetcher:test");
+  });
+
   it("creates a hard-quota volume and container with deterministic names", async () => {
     const calls: string[][] = [];
     let containerExists = false;

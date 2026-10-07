@@ -1071,9 +1071,9 @@ An internal read-only Git listener on a configured `GIT_INTERNAL_HOST:GIT_INTERN
 
 Deps: T1002 · Migration: —
 
-`sandbox.status` → `{ base_revision, head_revision, behind_by, modified, added, deleted }`, computed with `git status` inside the sandbox. Ignored and generated files are never reported or submitted.
+`sandbox.status` → `{ base_revision, head_revision, behind_by, modified, added, deleted }`; `head_revision` is the current canonical head and `behind_by` is its nonnegative distance from the sandbox base. File lists come from Git status; a rename is an added destination and deleted source. Ignored and generated files are never reported or submitted.
 
-- Fixtures for modified, new, deleted, ignored and renamed files.
+- Fixtures for modified, new, deleted, ignored and renamed files; renames appear as a deleted old path plus an added new path.
 
 ### T1004 · Staying current: behind, auto-sync, `sandbox.sync` — S2
 

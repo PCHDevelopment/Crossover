@@ -27,6 +27,8 @@ class FakeExecutionDriver implements ExecutionDriver {
   readonly limits: SandboxLimits[] = [];
   readonly provisioned = new Map<string, SandboxResources>();
   readonly running = new Set<string>();
+  readonly statusCalls: string[] = [];
+  changes = { modified: [] as string[], added: [] as string[], deleted: [] as string[] };
   failCreateAfterProvision = false;
   failDestroyOnce = false;
   stopGate: { entered: Deferred; release: Deferred } | undefined;
@@ -74,6 +76,11 @@ class FakeExecutionDriver implements ExecutionDriver {
       this.failDestroyOnce = false;
       throw new Error("injected Docker destroy failure after removal");
     }
+  }
+
+  async status(input: { sandbox_id: string; resources: SandboxResources }) {
+    this.statusCalls.push(input.sandbox_id);
+    return this.changes;
   }
 }
 
@@ -196,6 +203,44 @@ describe("ExecutionService", () => {
     ]);
     expect(driver.order[0]).toBe("materialize");
     expect(driver.order[1]).toBe("start");
+  });
+
+  it("reports the canonical base and head with local working-copy changes", async () => {
+    const { roomId, participantIds } = await makeParticipants();
+    const workspaceId = newId("ws");
+    await db.pool.query("INSERT INTO workspaces (id, room_id, repo_path) VALUES ($1, $2, $3)", [
+      workspaceId,
+      roomId,
+      `/workspace/${roomId}.git`,
+    ]);
+    await db.pool.query(
+      `INSERT INTO workspace_revisions (workspace_id, room_id, revision, commit_sha)
+       VALUES ($1, $2, 7, $3)`,
+      [workspaceId, roomId, "a".repeat(40)],
+    );
+    const driver = new MaterializingExecutionDriver();
+    driver.changes = {
+      modified: ["src/changed.ts"],
+      added: ["notes/new.md"],
+      deleted: ["old.txt"],
+    };
+    const execution = new ExecutionService(db.pool, driver);
+    const sandbox = await execution.ensure(roomId, participantIds[0]!);
+    await db.pool.query(
+      `INSERT INTO workspace_revisions (workspace_id, room_id, revision, commit_sha)
+       VALUES ($1, $2, 10, $3)`,
+      [workspaceId, roomId, "b".repeat(40)],
+    );
+
+    await expect(execution.status(roomId, participantIds[0]!)).resolves.toEqual({
+      base_revision: 7,
+      head_revision: 10,
+      behind_by: 3,
+      modified: ["src/changed.ts"],
+      added: ["notes/new.md"],
+      deleted: ["old.txt"],
+    });
+    expect(driver.statusCalls).toEqual([sandbox.id]);
   });
 
   it("creates one sandbox per room participant and records the selected disk policy", async () => {
