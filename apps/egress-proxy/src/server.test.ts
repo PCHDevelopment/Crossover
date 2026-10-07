@@ -1,4 +1,4 @@
-import { once } from "node:events";
+import { EventEmitter, once } from "node:events";
 import { readFileSync } from "node:fs";
 import type { Server as HttpServer } from "node:http";
 import { connect as tcpConnect, type Socket } from "node:net";
@@ -8,8 +8,8 @@ import {
   connect as tlsConnect,
   type Server as TlsServer,
 } from "node:tls";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createEgressProxyServer, type EgressLog } from "./server.js";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { createEgressProxyServer, type EgressLog, type EgressProxyOptions } from "./server.js";
 import { proxyAuthorization } from "./test-fixtures/auth.js";
 import { createProxyTestFixture, type ProxyTestFixture } from "./test-fixtures/database.js";
 
@@ -38,18 +38,14 @@ beforeAll(async () => {
     });
   });
   tlsPort = await listen(tlsServer);
-  proxy = createEgressProxyServer({
-    pool: fixture.db.pool,
-    secret: SECRET,
-    resolveHost: async () => ["93.184.216.34"],
-    connect: (address, port) => {
-      expect(address).toBe("93.184.216.34");
-      return tcpConnect({ host: "127.0.0.1", port: tlsPort || port });
-    },
-    logger: (entry) => logs.push(entry),
-  });
-  proxyPort = await listen(proxy);
+  const started = await startProxy();
+  proxy = started.server;
+  proxyPort = started.port;
 }, 60_000);
+
+beforeEach(() => {
+  logs.length = 0;
+});
 
 afterAll(async () => {
   if (proxy) await close(proxy);
@@ -59,31 +55,45 @@ afterAll(async () => {
 
 describe("egress proxy transport", () => {
   it("refuses plain HTTP", async () => {
-    expect(await requestPlainHttp()).toMatch(/^HTTP\/1\.1 405/);
+    expect(await requestPlainHttp(proxyPort)).toMatch(/^HTTP\/1\.1 405/);
     expect(logs.at(-1)).toMatchObject({ host: "registry.npmjs.org", allowed: false });
   });
 
-  it("tunnels an allowlisted TLS host and logs its host, decision, and byte counts", async () => {
-    const tunnel = await requestConnect("registry.npmjs.org:443");
-    expect(tunnel.status).toBe(200);
-    const secure = tlsConnect({
-      socket: tunnel.socket,
-      servername: "registry.npmjs.org",
-      rejectUnauthorized: false,
-    });
-    await once(secure, "secureConnect");
-    const body = new Promise<string>((resolve, reject) => {
-      const chunks: Buffer[] = [];
-      secure.on("data", (chunk: Buffer) => chunks.push(chunk));
-      secure.once("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
-      secure.once("error", reject);
-    });
-    secure.write("GET /test HTTP/1.1\r\nHost: registry.npmjs.org\r\nConnection: close\r\n\r\n");
-    expect(await body).toContain("\r\n\r\nok");
-    secure.destroy();
-    if (!secure.closed) await once(secure, "close");
-    if (!tunnel.socket.closed) await once(tunnel.socket, "close");
+  it("tries every pinned public address and logs the successful TLS tunnel", async () => {
+    const attempted: string[] = [];
+    await withProxy(
+      {
+        resolveHost: async () => ["93.184.216.34", "2606:4700:4700::1111"],
+        connect: (address, port) => {
+          attempted.push(address);
+          if (attempted.length === 1) throw new Error("first route unavailable");
+          return tcpConnect({ host: "127.0.0.1", port: tlsPort || port });
+        },
+      },
+      async (port) => {
+        const tunnel = await requestConnectAt(port, "registry.npmjs.org:443");
+        expect(tunnel.status).toBe(200);
+        const secure = tlsConnect({
+          socket: tunnel.socket,
+          servername: "registry.npmjs.org",
+          rejectUnauthorized: false,
+        });
+        await once(secure, "secureConnect");
+        const body = new Promise<string>((resolve, reject) => {
+          const chunks: Buffer[] = [];
+          secure.on("data", (chunk: Buffer) => chunks.push(chunk));
+          secure.once("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+          secure.once("error", reject);
+        });
+        secure.write("GET /test HTTP/1.1\r\nHost: registry.npmjs.org\r\nConnection: close\r\n\r\n");
+        expect(await body).toContain("\r\n\r\nok");
+        secure.destroy();
+        if (!secure.closed) await once(secure, "close");
+        if (!tunnel.socket.closed) await once(tunnel.socket, "close");
+      },
+    );
 
+    expect(attempted).toEqual(["93.184.216.34", "2606:4700:4700::1111"]);
     const entry = logs.findLast((log) => log.host === "registry.npmjs.org");
     expect(entry).toMatchObject({
       sandbox_id: fixture.sandboxId,
@@ -95,33 +105,215 @@ describe("egress proxy transport", () => {
     expect(JSON.stringify(entry)).not.toContain(SECRET);
   });
 
-  it("denies CONNECT when the room egress policy is malformed", async () => {
-    await fixture.db.pool.query("UPDATE rooms SET settings = $2 WHERE id = $1", [
-      fixture.roomId,
-      JSON.stringify({ egress_allowlist: "example.com" }),
-    ]);
-    const denied = await requestConnect("registry.npmjs.org:443");
-    expect(denied.status).toBe(403);
-    expect(logs.at(-1)).toMatchObject({ allowed: false, reason: "invalid_room_allowlist" });
+  it("denies unlisted hosts, bad credentials, and names resolving to IMDS over CONNECT", async () => {
+    const unlisted = await requestConnectAt(proxyPort, "example.com:443");
+    expect(unlisted.status).toBe(403);
+    unlisted.socket.destroy();
+
+    const badCredential = await requestConnectAt(
+      proxyPort,
+      "registry.npmjs.org:443",
+      "Basic Zm9vOmJhcg==",
+    );
+    expect(badCredential.status).toBe(407);
+    badCredential.socket.destroy();
+
+    await withProxy({ resolveHost: async () => ["169.254.169.254"] }, async (port) => {
+      const imds = await requestConnectAt(port, "registry.npmjs.org:443");
+      expect(imds.status).toBe(403);
+      expect(logs.at(-1)).toMatchObject({
+        host: "registry.npmjs.org",
+        allowed: false,
+        reason: "unsafe_or_unresolved_address",
+      });
+      imds.socket.destroy();
+    });
+  });
+
+  it("survives a client reset while authorization is pending", async () => {
+    const client = tcpConnect({ host: "127.0.0.1", port: proxyPort });
+    client.on("error", () => {});
+    await once(client, "connect");
+    client.write(
+      "CONNECT registry.npmjs.org:443 HTTP/1.1\r\nHost: registry.npmjs.org:443\r\nProxy-Authorization: Basic Zm9vOmJhcg==\r\n\r\n",
+    );
+    client.resetAndDestroy();
+    await once(client, "close");
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(proxy.listening).toBe(true);
+  });
+
+  it("destroys a timed-out upstream and survives its later socket error", async () => {
+    const upstream = new TimedOutSocket();
+    const lateError = new Promise<void>((resolve) => upstream.once("lateError", resolve));
+    await withProxy({ connect: () => upstream as unknown as Socket }, async (port, server) => {
+      const response = await requestConnectAt(port, "registry.npmjs.org:443");
+      expect(response.status).toBe(502);
+      response.socket.destroy();
+      await lateError;
+      expect(upstream.destroyed).toBe(true);
+      expect(server.listening).toBe(true);
+      expect(logs.at(-1)).toMatchObject({
+        allowed: true,
+        reason: "upstream_connect_failed",
+      });
+    });
+  });
+
+  it("closes an idle tunnel and logs the timeout", async () => {
+    await withProxy({ idleTimeoutMs: 100 }, async (port) => {
+      const tunnel = await requestConnectAt(port, "registry.npmjs.org:443");
+      expect(tunnel.status).toBe(200);
+      await once(tunnel.socket, "close");
+      expect(logs.at(-1)).toMatchObject({
+        sandbox_id: fixture.sandboxId,
+        allowed: true,
+        reason: "tunnel_idle_timeout",
+      });
+    });
+  });
+
+  it("limits active tunnels per sandbox and releases a slot after close", async () => {
+    await withProxy({ maxTunnelsPerSandbox: 2, idleTimeoutMs: 5_000 }, async (port) => {
+      const first = await requestConnectAt(port, "registry.npmjs.org:443");
+      const second = await requestConnectAt(port, "registry.npmjs.org:443");
+      expect(first.status).toBe(200);
+      expect(second.status).toBe(200);
+
+      const limited = await requestConnectAt(port, "registry.npmjs.org:443");
+      expect(limited.status).toBe(503);
+      expect(logs.at(-1)).toMatchObject({
+        sandbox_id: fixture.sandboxId,
+        allowed: false,
+        reason: "sandbox_tunnel_limit",
+      });
+      limited.socket.destroy();
+
+      const firstClosed = once(first.socket, "close");
+      first.socket.destroy();
+      await firstClosed;
+      const afterRelease = await requestConnectAt(port, "registry.npmjs.org:443");
+      expect(afterRelease.status).toBe(200);
+      second.socket.destroy();
+      afterRelease.socket.destroy();
+    });
+  });
+
+  it("expires a long-lived tunnel and rechecks participant status on reconnect", async () => {
+    await withProxy({ idleTimeoutMs: 2_000, maxTunnelLifetimeMs: 100 }, async (port) => {
+      const tunnel = await requestConnectAt(port, "registry.npmjs.org:443");
+      expect(tunnel.status).toBe(200);
+      await fixture.db.pool.query("UPDATE participants SET status = 'PAUSED' WHERE id = $1", [
+        fixture.participantId,
+      ]);
+      try {
+        await once(tunnel.socket, "close");
+        expect(logs.at(-1)).toMatchObject({
+          sandbox_id: fixture.sandboxId,
+          allowed: true,
+          reason: "tunnel_lifetime_exceeded",
+        });
+        const reconnect = await requestConnectAt(port, "registry.npmjs.org:443");
+        expect(reconnect.status).toBe(403);
+        reconnect.socket.destroy();
+      } finally {
+        await fixture.db.pool.query("UPDATE participants SET status = 'ACTIVE' WHERE id = $1", [
+          fixture.participantId,
+        ]);
+      }
+    });
+  });
+
+  it("restores room settings after refusing a malformed allowlist", async () => {
+    const { rows } = await fixture.db.pool.query<{ settings: unknown }>(
+      "SELECT settings FROM rooms WHERE id = $1",
+      [fixture.roomId],
+    );
+    const previousSettings = rows[0]!.settings;
+    try {
+      await fixture.db.pool.query("UPDATE rooms SET settings = $2 WHERE id = $1", [
+        fixture.roomId,
+        JSON.stringify({ egress_allowlist: "example.com" }),
+      ]);
+      const denied = await requestConnectAt(proxyPort, "registry.npmjs.org:443");
+      expect(denied.status).toBe(403);
+      expect(logs.at(-1)).toMatchObject({ allowed: false, reason: "invalid_room_allowlist" });
+      denied.socket.destroy();
+    } finally {
+      await fixture.db.pool.query("UPDATE rooms SET settings = $2 WHERE id = $1", [
+        fixture.roomId,
+        JSON.stringify(previousSettings),
+      ]);
+    }
   });
 });
+
+class TimedOutSocket extends EventEmitter {
+  destroyed = false;
+
+  setTimeout(milliseconds: number): this {
+    if (milliseconds > 0) setImmediate(() => this.emit("timeout"));
+    return this;
+  }
+
+  destroy(): this {
+    if (!this.destroyed) {
+      this.destroyed = true;
+      setImmediate(() => {
+        this.emit("error", new Error("late ETIMEDOUT"));
+        this.emit("lateError");
+      });
+    }
+    return this;
+  }
+}
 
 function authorization(): string {
   return proxyAuthorization(fixture.sandboxId, SECRET);
 }
 
-async function requestConnect(authority: string): Promise<{ socket: Socket; status: number }> {
-  const socket = tcpConnect({ host: "127.0.0.1", port: proxyPort });
+async function startProxy(
+  overrides: Partial<EgressProxyOptions> = {},
+): Promise<{ server: HttpServer; port: number }> {
+  const server = createEgressProxyServer({
+    pool: fixture.db.pool,
+    secret: SECRET,
+    resolveHost: async () => ["93.184.216.34"],
+    connect: (_address, port) => tcpConnect({ host: "127.0.0.1", port: tlsPort || port }),
+    logger: (entry) => logs.push(entry),
+    ...overrides,
+  });
+  return { server, port: await listen(server) };
+}
+
+async function withProxy<T>(
+  overrides: Partial<EgressProxyOptions>,
+  action: (port: number, server: HttpServer) => Promise<T>,
+): Promise<T> {
+  const started = await startProxy(overrides);
+  try {
+    return await action(started.port, started.server);
+  } finally {
+    await close(started.server);
+  }
+}
+
+async function requestConnectAt(
+  port: number,
+  authority: string,
+  proxyAuthorizationHeader = authorization(),
+): Promise<{ socket: Socket; status: number }> {
+  const socket = tcpConnect({ host: "127.0.0.1", port });
   await once(socket, "connect");
   const headers = await readHeaders(
     socket,
-    `CONNECT ${authority} HTTP/1.1\r\nHost: ${authority}\r\nProxy-Authorization: ${authorization()}\r\n\r\n`,
+    `CONNECT ${authority} HTTP/1.1\r\nHost: ${authority}\r\nProxy-Authorization: ${proxyAuthorizationHeader}\r\n\r\n`,
   );
   return { socket, status: Number(/^HTTP\/1\.1 (\d+)/.exec(headers)?.[1]) };
 }
 
-async function requestPlainHttp(): Promise<string> {
-  const socket = tcpConnect({ host: "127.0.0.1", port: proxyPort });
+async function requestPlainHttp(port: number): Promise<string> {
+  const socket = tcpConnect({ host: "127.0.0.1", port });
   await once(socket, "connect");
   const response = await readHeaders(
     socket,

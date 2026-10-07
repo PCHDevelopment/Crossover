@@ -6,6 +6,9 @@ import { normalizeEgressHost } from "./allowlist.js";
 
 const MAX_HEADER_SIZE = 8 * 1024;
 const CONNECT_TIMEOUT_MS = 5_000;
+const IDLE_TIMEOUT_MS = 60_000;
+const MAX_TUNNEL_LIFETIME_MS = 10 * 60_000;
+const MAX_TUNNELS_PER_SANDBOX = 32;
 
 export interface EgressLog {
   timestamp: string;
@@ -23,6 +26,11 @@ export interface EgressProxyOptions extends EgressPolicyOptions {
   /** Test seam; production connects to the exact IP returned by the checked resolver. */
   connect?: (address: string, port: number) => Socket;
   logger?: (entry: EgressLog) => void;
+  /** Test seams for the production tunnel limits. */
+  connectTimeoutMs?: number;
+  idleTimeoutMs?: number;
+  maxTunnelLifetimeMs?: number;
+  maxTunnelsPerSandbox?: number;
 }
 
 /** A CONNECT-only HTTPS proxy with room policy, per-sandbox identity, and pinned public DNS. */
@@ -35,8 +43,10 @@ export function createEgressProxyServer(options: EgressProxyOptions): Server {
   server.requestTimeout = 10_000;
   server.headersTimeout = 10_000;
   server.maxConnections = 1_000;
+  const activeTunnels = new Map<string, Set<object>>();
   server.on("connect", (request, client, head) => {
-    void handleConnect(request, client, head, options).catch(() => {
+    client.on("error", () => client.destroy());
+    void handleConnect(request, client, head, options, activeTunnels).catch(() => {
       log(options.logger, {
         host: safeHostForLog(request.url),
         allowed: false,
@@ -56,6 +66,7 @@ async function handleConnect(
   client: Duplex,
   head: Buffer,
   options: EgressProxyOptions,
+  activeTunnels: Map<string, Set<object>>,
 ): Promise<void> {
   const decision = await authorizeConnect(
     request.url ?? "",
@@ -79,14 +90,36 @@ async function handleConnect(
     return;
   }
 
+  if (client.destroyed) return;
+  const maxTunnels = options.maxTunnelsPerSandbox ?? MAX_TUNNELS_PER_SANDBOX;
+  const sandboxTunnels = activeTunnels.get(decision.sandboxId) ?? new Set<object>();
+  if (sandboxTunnels.size >= maxTunnels) {
+    log(options.logger, {
+      sandbox_id: decision.sandboxId,
+      room_id: decision.roomId,
+      host: decision.host,
+      allowed: false,
+      reason: "sandbox_tunnel_limit",
+    });
+    writeProxyError(client, 503, "Service Unavailable");
+    return;
+  }
+  const reservation = {};
+  sandboxTunnels.add(reservation);
+  activeTunnels.set(decision.sandboxId, sandboxTunnels);
+  let slotReleased = false;
+  const releaseSlot = () => {
+    if (slotReleased) return;
+    slotReleased = true;
+    sandboxTunnels.delete(reservation);
+    if (sandboxTunnels.size === 0) activeTunnels.delete(decision.sandboxId);
+  };
+
   let upstream: Socket;
   try {
-    upstream = (options.connect ?? ((address, port) => tcpConnect({ host: address, port })))(
-      decision.address,
-      decision.port,
-    );
-    await waitForConnect(upstream);
+    upstream = await connectToPinnedAddress(decision.addresses, decision.port, client, options);
   } catch {
+    releaseSlot();
     log(options.logger, {
       sandbox_id: decision.sandboxId,
       room_id: decision.roomId,
@@ -102,13 +135,16 @@ async function handleConnect(
 
   if (client.destroyed) {
     upstream.destroy();
+    releaseSlot();
     return;
   }
   client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
   let bytesFromSandbox = head.length;
   let bytesToSandbox = 0;
   let logged = false;
-  const finish = () => {
+  let finished = false;
+  let idleTimer: NodeJS.Timeout;
+  const logTunnel = (reason?: string) => {
     if (logged) return;
     logged = true;
     log(options.logger, {
@@ -118,29 +154,104 @@ async function handleConnect(
       allowed: true,
       bytes_from_sandbox: bytesFromSandbox,
       bytes_to_sandbox: bytesToSandbox,
+      ...(reason ? { reason } : {}),
     });
   };
-  client.on("data", (chunk: Buffer) => (bytesFromSandbox += chunk.length));
-  upstream.on("data", (chunk: Buffer) => (bytesToSandbox += chunk.length));
-  client.once("close", finish);
-  upstream.once("close", finish);
-  client.once("end", finish);
-  upstream.once("end", finish);
-  client.once("error", finish);
-  upstream.once("error", finish);
-  client.once("close", () => upstream.destroy());
-  upstream.once("close", () => client.destroy());
+
+  const finish = (reason?: string) => {
+    if (finished) return;
+    finished = true;
+    clearTimeout(idleTimer);
+    clearTimeout(lifetimeTimer);
+    releaseSlot();
+    logTunnel(reason);
+  };
+  const closeTunnel = (reason: string) => {
+    finish(reason);
+    client.destroy();
+    upstream.destroy();
+  };
+  const resetIdleTimer = () => {
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(
+      () => closeTunnel("tunnel_idle_timeout"),
+      options.idleTimeoutMs ?? IDLE_TIMEOUT_MS,
+    );
+    idleTimer.unref();
+  };
+  const lifetimeTimer = setTimeout(
+    () => closeTunnel("tunnel_lifetime_exceeded"),
+    options.maxTunnelLifetimeMs ?? MAX_TUNNEL_LIFETIME_MS,
+  );
+  lifetimeTimer.unref();
+
+  client.on("data", (chunk: Buffer) => {
+    bytesFromSandbox += chunk.length;
+    resetIdleTimer();
+  });
+  upstream.on("data", (chunk: Buffer) => {
+    bytesToSandbox += chunk.length;
+    resetIdleTimer();
+  });
+  client.on("error", () => closeTunnel("client_error"));
+  upstream.on("error", () => closeTunnel("upstream_error"));
+  client.once("close", () => {
+    finish();
+    upstream.destroy();
+  });
+  upstream.once("close", () => {
+    finish();
+    client.destroy();
+  });
+  resetIdleTimer();
   if (head.length > 0) upstream.write(head);
   client.pipe(upstream);
   upstream.pipe(client);
 }
 
-function waitForConnect(socket: Socket): Promise<void> {
+async function connectToPinnedAddress(
+  addresses: string[],
+  port: number,
+  client: Duplex,
+  options: EgressProxyOptions,
+): Promise<Socket> {
+  const connect =
+    options.connect ??
+    ((address: string, targetPort: number) => tcpConnect({ host: address, port: targetPort }));
+  let lastError: unknown;
+  for (const address of addresses) {
+    if (client.destroyed) throw new Error("client closed before upstream connected");
+    let socket: Socket;
+    try {
+      socket = connect(address, port);
+    } catch (error) {
+      lastError = error;
+      continue;
+    }
+    // Keep a listener after a timeout or destroy so a late OS error cannot crash the proxy.
+    socket.on("error", () => {
+      // The connect attempt has its own listener; keep consuming errors after cancellation.
+    });
+    const onClientClose = () => socket.destroy();
+    client.once("close", onClientClose);
+    try {
+      await waitForConnect(socket, options.connectTimeoutMs ?? CONNECT_TIMEOUT_MS);
+      if (client.destroyed) throw new Error("client closed before upstream connected");
+      return socket;
+    } catch (error) {
+      lastError = error;
+      socket.destroy();
+      if (client.destroyed) throw error;
+    } finally {
+      client.off("close", onClientClose);
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("upstream connection failed");
+}
+
+function waitForConnect(socket: Socket, timeoutMs: number): Promise<void> {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(
-      () => finish(new Error("upstream connect timed out")),
-      CONNECT_TIMEOUT_MS,
-    );
+    const timer = setTimeout(() => finish(new Error("upstream connect timed out")), timeoutMs);
     const finish = (error?: Error) => {
       clearTimeout(timer);
       socket.setTimeout(0);
@@ -156,7 +267,7 @@ function waitForConnect(socket: Socket): Promise<void> {
     socket.once("connect", connected);
     socket.once("error", failed);
     socket.once("timeout", timedOut);
-    socket.setTimeout(CONNECT_TIMEOUT_MS);
+    socket.setTimeout(timeoutMs);
   });
 }
 
