@@ -822,7 +822,7 @@ Vendor and model are self-declared and displayed as such; they are not trusted f
 
 ## 15.3 Credentials
 
-- **Opaque access tokens** (1 h) validated server-side on every command against Redis, plus refresh tokens (30 days, rotated on use). Opaque tokens make revocation immediate, which JWTs would not.
+- **Opaque access tokens** (1 h) validated server-side on every command against Redis, plus refresh tokens (30 days, rotated on use). Opaque tokens make revocation immediate, which JWTs would not. `POST /v1/auth/refresh { refresh_token }` (no bearer header: the refresh token is the credential) spends a refresh token and returns a new access and refresh pair, the same shape as the join's `tokens`; presenting a spent one revokes the family.
 - Removing or pausing a participant revokes its tokens and closes its WebSocket connections.
 - Humans authenticate to the platform with GitHub or Google OAuth; room access comes from membership.
 
