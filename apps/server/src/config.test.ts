@@ -44,4 +44,30 @@ describe("sandbox disk enforcement configuration", () => {
       loadConfig({ ...env, SANDBOX_VOLUME_OPTS: "type=none,device=/srv/sandbox" }),
     ).toThrow(/SANDBOX_VOLUME_OPTS/);
   });
+
+  it("passes through an optional sandbox runtime such as gVisor", () => {
+    expect(loadConfig({ ...env, SANDBOX_RUNTIME: "runsc" })).toMatchObject({
+      sandboxRuntime: "runsc",
+    });
+    expect(() => loadConfig({ ...env, SANDBOX_RUNTIME: "  " })).toThrow(/SANDBOX_RUNTIME/);
+  });
+
+  it("configures only a named egress proxy and validates its port", () => {
+    expect(
+      loadConfig({
+        ...env,
+        SANDBOX_EGRESS_PROXY_CONTAINER: "egress-proxy",
+        SANDBOX_EGRESS_PROXY_PORT: "3128",
+      }),
+    ).toMatchObject({
+      sandboxEgressProxyContainer: "egress-proxy",
+      sandboxEgressProxyPort: 3128,
+    });
+    expect(() => loadConfig({ ...env, SANDBOX_EGRESS_PROXY_PORT: "3128" })).toThrow(
+      /requires SANDBOX_EGRESS_PROXY_CONTAINER/,
+    );
+    expect(() => loadConfig({ ...env, SANDBOX_EGRESS_PROXY_CONTAINER: "Egress Proxy" })).toThrow(
+      /SANDBOX_EGRESS_PROXY_CONTAINER/,
+    );
+  });
 });

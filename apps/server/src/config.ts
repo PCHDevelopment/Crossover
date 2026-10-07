@@ -29,6 +29,13 @@ const envSchema = z.object({
   SANDBOX_DISK_ENFORCEMENT: z.enum(["hard", "soft"]).optional(),
   SANDBOX_VOLUME_DRIVER: z.string().trim().min(1).optional(),
   SANDBOX_VOLUME_OPTS: z.string().optional(),
+  SANDBOX_RUNTIME: z.string().trim().min(1).optional(),
+  SANDBOX_EGRESS_PROXY_CONTAINER: z
+    .string()
+    .trim()
+    .regex(/^[a-z0-9][a-z0-9_.-]*$/)
+    .optional(),
+  SANDBOX_EGRESS_PROXY_PORT: z.coerce.number().int().min(1).max(65_535).optional(),
 });
 
 export interface ServerConfig {
@@ -46,6 +53,11 @@ export interface ServerConfig {
   sandboxDiskEnforcement?: DiskEnforcementMode;
   sandboxVolumeDriver?: string;
   sandboxVolumeOptions?: Readonly<Record<string, string>>;
+  /** Optional Docker runtime, e.g. gVisor's `runsc`. */
+  sandboxRuntime?: string;
+  /** Operator-provisioned HTTP allowlist proxy; absent means network-none sandboxes. */
+  sandboxEgressProxyContainer?: string;
+  sandboxEgressProxyPort?: number;
 }
 
 /**
@@ -62,6 +74,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   const sandboxDiskEnforcement =
     e.SANDBOX_DISK_ENFORCEMENT ?? (env.NODE_ENV === "production" ? "hard" : "soft");
   const sandboxVolumeOptions = parseVolumeOptions(e.SANDBOX_VOLUME_OPTS);
+  if (e.SANDBOX_EGRESS_PROXY_PORT !== undefined && !e.SANDBOX_EGRESS_PROXY_CONTAINER)
+    throw new Error(
+      "Invalid server configuration:\n  SANDBOX_EGRESS_PROXY_PORT requires SANDBOX_EGRESS_PROXY_CONTAINER",
+    );
   if (
     sandboxDiskEnforcement === "hard" &&
     (!e.SANDBOX_VOLUME_DRIVER || Object.keys(sandboxVolumeOptions).length === 0)
@@ -82,6 +98,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     sandboxDiskEnforcement,
     ...(e.SANDBOX_VOLUME_DRIVER ? { sandboxVolumeDriver: e.SANDBOX_VOLUME_DRIVER } : {}),
     sandboxVolumeOptions,
+    ...(e.SANDBOX_RUNTIME ? { sandboxRuntime: e.SANDBOX_RUNTIME } : {}),
+    ...(e.SANDBOX_EGRESS_PROXY_CONTAINER
+      ? { sandboxEgressProxyContainer: e.SANDBOX_EGRESS_PROXY_CONTAINER }
+      : {}),
+    ...(e.SANDBOX_EGRESS_PROXY_PORT !== undefined
+      ? { sandboxEgressProxyPort: e.SANDBOX_EGRESS_PROXY_PORT }
+      : {}),
   };
 }
 

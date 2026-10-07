@@ -15,6 +15,11 @@ export interface DockerExecutionDriverOptions {
   /** Required with hard enforcement; passed directly as Docker --opt values. */
   volumeDriver?: string;
   volumeOptions?: Readonly<Record<string, string>>;
+  /** Optional Docker runtime such as gVisor's `runsc`. */
+  runtime?: string;
+  /** Operator-provisioned allowlist proxy container; sandboxes get a private internal network. */
+  egressProxyContainer?: string;
+  egressProxyPort?: number;
   /** Test seam; production callers should use the Docker CLI. */
   invoke?: DockerInvoker;
 }
@@ -49,6 +54,9 @@ export class DockerExecutionDriver implements ExecutionDriver {
   private readonly image: string;
   private readonly volumeDriver: string | undefined;
   private readonly volumeOptions: Readonly<Record<string, string>>;
+  private readonly runtime: string | undefined;
+  private readonly egressProxyContainer: string | undefined;
+  private readonly egressProxyPort: number;
   private readonly invoke: DockerInvoker;
 
   constructor(options: DockerExecutionDriverOptions = {}) {
@@ -56,6 +64,27 @@ export class DockerExecutionDriver implements ExecutionDriver {
     this.image = options.image ?? DEFAULT_IMAGE;
     this.volumeDriver = options.volumeDriver?.trim() || undefined;
     this.volumeOptions = options.volumeOptions ?? {};
+    if (options.runtime !== undefined && !options.runtime.trim())
+      throw new Error("SANDBOX_RUNTIME must be a nonempty Docker runtime name");
+    this.runtime = options.runtime?.trim() || undefined;
+    this.egressProxyContainer = options.egressProxyContainer?.trim() || undefined;
+    if (
+      this.egressProxyContainer !== undefined &&
+      !/^[a-z0-9][a-z0-9_.-]*$/.test(this.egressProxyContainer)
+    ) {
+      throw new Error("SANDBOX_EGRESS_PROXY_CONTAINER must be a Docker container name");
+    }
+    if (
+      options.egressProxyPort !== undefined &&
+      (!Number.isSafeInteger(options.egressProxyPort) ||
+        options.egressProxyPort < 1 ||
+        options.egressProxyPort > 65_535)
+    ) {
+      throw new Error("SANDBOX_EGRESS_PROXY_PORT must be a port from 1 to 65535");
+    }
+    if (!this.egressProxyContainer && options.egressProxyPort !== undefined)
+      throw new Error("SANDBOX_EGRESS_PROXY_PORT requires SANDBOX_EGRESS_PROXY_CONTAINER");
+    this.egressProxyPort = options.egressProxyPort ?? 3128;
     if (
       Object.entries(this.volumeOptions).some(
         ([key, value]) =>
@@ -81,6 +110,7 @@ export class DockerExecutionDriver implements ExecutionDriver {
     }
 
     const resources = sandboxResources(input.sandbox_id);
+    if (this.egressProxyContainer) await this.ensureProxyNetwork(input.sandbox_id);
     if (hard) await this.ensureHardVolume(resources.volume_ref);
     else await this.ensureSoftVolume(resources.volume_ref);
     await this.ensureContainer(input, resources, hard);
@@ -126,6 +156,14 @@ export class DockerExecutionDriver implements ExecutionDriver {
     const volume = await this.invoke(["volume", "rm", resources.volume_ref]);
     if (volume.code !== 0 && !volume.stderr.toLowerCase().includes("no such volume"))
       throw new Error(`ERROR: Docker volume removal failed: ${volume.stderr.trim()}`);
+    const network = await this.invoke(["network", "rm", sandboxNetworkName(input.sandbox_id)]);
+    if (
+      network.code !== 0 &&
+      !network.stderr.toLowerCase().includes("no such network") &&
+      !network.stderr.toLowerCase().includes("not found")
+    ) {
+      throw new Error(`ERROR: Docker sandbox network removal failed: ${network.stderr.trim()}`);
+    }
   }
 
   private async ensureSoftVolume(name: string): Promise<void> {
@@ -162,11 +200,14 @@ export class DockerExecutionDriver implements ExecutionDriver {
     resources: SandboxResources,
     hard: boolean,
   ): Promise<void> {
+    const network = this.egressProxyContainer ? sandboxNetworkName(input.sandbox_id) : "none";
     const existing = await this.inspectContainer(resources.container_ref);
     if (existing) {
+      await this.assertIsolation(resources.container_ref, network);
       if (hard) await this.assertHardContainer(resources.container_ref);
       return;
     }
+    await this.initializeWorkspaceVolume(resources.volume_ref);
     const args = [
       "container",
       "create",
@@ -179,13 +220,38 @@ export class DockerExecutionDriver implements ExecutionDriver {
       "--label",
       `crossover.participant=${input.participant_id}`,
       "--init",
+      `--network=${network}`,
+      "--user=1000:1000",
+      "--cap-drop=ALL",
+      "--security-opt=no-new-privileges",
+      "--pids-limit=256",
+      "--env",
+      "HOME=/tmp",
       "--cpus=2",
       "--memory=4g",
+      "--tmpfs",
+      "/tmp:rw,nosuid,size=512m",
     ];
+    if (this.egressProxyContainer) {
+      const proxyUrl = `http://${this.egressProxyContainer}:${this.egressProxyPort}`;
+      for (const [name, value] of [
+        ["HTTP_PROXY", proxyUrl],
+        ["HTTPS_PROXY", proxyUrl],
+        ["ALL_PROXY", proxyUrl],
+        ["NO_PROXY", "localhost,127.0.0.1,::1"],
+        ["http_proxy", proxyUrl],
+        ["https_proxy", proxyUrl],
+        ["all_proxy", proxyUrl],
+        ["no_proxy", "localhost,127.0.0.1,::1"],
+      ]) {
+        args.push("--env", `${name}=${value}`);
+      }
+    }
+    if (this.runtime) args.push("--runtime", this.runtime);
     if (hard) args.push("--storage-opt=size=20G");
     args.push(
       "--mount",
-      `type=volume,source=${resources.volume_ref},target=/workspace`,
+      `type=volume,source=${resources.volume_ref},target=/workspace,volume-nocopy`,
       "--workdir",
       "/workspace",
       this.image,
@@ -201,8 +267,113 @@ export class DockerExecutionDriver implements ExecutionDriver {
       );
     } catch (error) {
       if (!(await this.inspectContainer(resources.container_ref))) throw error;
+      await this.assertIsolation(resources.container_ref, network);
       if (hard) await this.assertHardContainer(resources.container_ref);
     }
+  }
+
+  /** Give the sandbox's unprivileged UID write access to the workspace volume root. */
+  private async initializeWorkspaceVolume(name: string): Promise<void> {
+    const args = [
+      "run",
+      "--rm",
+      "--network=none",
+      "--user=0:0",
+      "--mount",
+      `type=volume,source=${name},target=/workspace,volume-nocopy`,
+      ...(this.runtime ? ["--runtime", this.runtime] : []),
+      "--entrypoint",
+      "/bin/chown",
+      this.image,
+      "1000:1000",
+      "/workspace",
+    ];
+    await this.mustSucceed(args, "ERROR: workspace volume ownership setup failed");
+  }
+
+  /** Reject resources created before the default-deny and unprivileged defaults were enforced. */
+  private async assertIsolation(name: string, expectedNetwork: string): Promise<void> {
+    const inspected = await this.invoke([
+      "container",
+      "inspect",
+      "--format",
+      "{{.Config.User}}|{{.HostConfig.NetworkMode}}|{{.HostConfig.Runtime}}",
+      name,
+    ]);
+    if (inspected.code !== 0)
+      throw new Error(`ERROR: Docker inspect failed: ${inspected.stderr.trim()}`);
+    const [user, network, runtime] = inspected.stdout.trim().split("|");
+    if (
+      user !== "1000:1000" ||
+      network !== expectedNetwork ||
+      (this.runtime && runtime !== this.runtime)
+    )
+      throw new Error(
+        `ERROR: existing Docker sandbox container ${name} does not enforce non-root and network isolation`,
+      );
+  }
+
+  /** Isolate each sandbox and expose only the operator's allowlist proxy on its internal network. */
+  private async ensureProxyNetwork(sandboxId: string): Promise<void> {
+    const name = sandboxNetworkName(sandboxId);
+    let inspected = await this.inspectProxyNetwork(name);
+    if (!inspected) {
+      try {
+        await this.mustSucceed(
+          ["network", "create", "--internal", "--label", "crossover.sandbox=true", name],
+          "ERROR: isolated sandbox network creation failed",
+        );
+      } catch (error) {
+        if (!(await this.inspectProxyNetwork(name))) throw error;
+      }
+      inspected = await this.inspectProxyNetwork(name);
+    }
+    if (!inspected?.internal)
+      throw new Error(`ERROR: Docker sandbox network ${name} is not internal`);
+    if (inspected.proxyConnected) return;
+
+    try {
+      await this.mustSucceed(
+        ["network", "connect", name, this.egressProxyContainer!],
+        "ERROR: egress proxy connection failed",
+      );
+    } catch (error) {
+      if (!(await this.inspectProxyNetwork(name))?.proxyConnected) throw error;
+    }
+  }
+
+  private async inspectProxyNetwork(
+    name: string,
+  ): Promise<{ internal: boolean; proxyConnected: boolean } | null> {
+    const inspected = await this.invoke([
+      "network",
+      "inspect",
+      "--format",
+      "{{.Internal}}|{{json .Containers}}",
+      name,
+    ]);
+    if (inspected.code !== 0) {
+      if (inspected.stderr.toLowerCase().includes("no such network")) return null;
+      throw new Error(`ERROR: Docker network inspect failed: ${inspected.stderr.trim()}`);
+    }
+    const separator = inspected.stdout.indexOf("|");
+    if (separator < 0) throw new Error("ERROR: Docker returned invalid network inspection data");
+    let containers: unknown;
+    try {
+      containers = JSON.parse(inspected.stdout.slice(separator + 1).trim()) as unknown;
+    } catch {
+      throw new Error("ERROR: Docker returned invalid network inspection data");
+    }
+    if (containers === null) containers = {};
+    if (!containers || typeof containers !== "object" || Array.isArray(containers))
+      throw new Error("ERROR: Docker returned invalid network inspection data");
+    const attached = Object.values(containers as Record<string, { Name?: unknown }>).some(
+      (container) => container?.Name === this.egressProxyContainer,
+    );
+    return {
+      internal: inspected.stdout.slice(0, separator).trim() === "true",
+      proxyConnected: attached,
+    };
   }
 
   private async inspectContainer(name: string): Promise<{ running: boolean } | null> {
@@ -302,7 +473,15 @@ export class DockerExecutionDriver implements ExecutionDriver {
 }
 
 function sandboxResources(sandboxId: string): SandboxResources {
-  const safeId = sandboxId.toLowerCase().replaceAll(/[^a-z0-9_.-]/g, "-");
+  const safeId = safeSandboxId(sandboxId);
   const name = `crossover-sbx-${safeId}`;
   return { volume_ref: name, container_ref: name };
+}
+
+function sandboxNetworkName(sandboxId: string): string {
+  return `crossover-net-${safeSandboxId(sandboxId)}`;
+}
+
+function safeSandboxId(sandboxId: string): string {
+  return sandboxId.toLowerCase().replaceAll(/[^a-z0-9_.-]/g, "-");
 }
