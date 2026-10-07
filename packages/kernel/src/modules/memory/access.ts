@@ -46,6 +46,7 @@ interface RevisionRow {
   author_id: string;
   source_refs: { kind: string; id: string }[];
   deleted: boolean;
+  redacted: boolean;
   created_at: Date;
 }
 
@@ -106,7 +107,7 @@ export function registerMemoryAccessCommands(dispatcher: Dispatcher): void {
       const { rows } = await ctx.client.query<
         Omit<Parameters<typeof memoryEntryView>[0], "value"> & { bytes: number }
       >(
-        `SELECT key, content_type, author_id, revision, source_refs, deleted, created_at, updated_at,
+        `SELECT key, content_type, author_id, revision, source_refs, deleted, redacted, created_at, updated_at,
                 octet_length(value) AS bytes
          FROM memory_entries
          WHERE room_id = $1 AND key LIKE $2 ESCAPE '\\'
@@ -151,7 +152,7 @@ export function registerMemoryAccessCommands(dispatcher: Dispatcher): void {
       );
       if (!rowCount) throw new CrossoverError("NOT_FOUND", `Memory key ${p.key} not found`);
       const { rows } = await ctx.client.query<RevisionRow>(
-        `SELECT revision, value, content_type, author_id, source_refs, deleted, created_at
+        `SELECT revision, value, content_type, author_id, source_refs, deleted, redacted, created_at
          FROM memory_revisions
          WHERE room_id = $1 AND key = $2 AND revision > $3
          ORDER BY revision

@@ -29,7 +29,7 @@ describe("egress policy", () => {
       sandboxId: fixture.sandboxId,
       roomId: fixture.roomId,
       host: "registry.npmjs.org",
-      address: "93.184.216.34",
+      addresses: ["93.184.216.34"],
       port: 443,
     });
   });

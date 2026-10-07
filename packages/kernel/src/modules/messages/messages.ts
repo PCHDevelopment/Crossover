@@ -64,6 +64,8 @@ interface MessageRow {
   reply_to: string | null;
   created_at: Date;
   edited_at: Date | null;
+  /** The owner redacted the text (§19.6): `body` is empty. */
+  redacted: boolean;
 }
 
 export interface MessageView extends Omit<MessageRow, "created_at" | "edited_at"> {
@@ -81,7 +83,8 @@ export const labelMessage = (message: MessageView, kinds: AuthorKinds): LabeledM
   provenance: provenanceOf(kinds, message.author_id),
 });
 
-const COLUMNS = "id, room_id, author_id, body, mentions, refs, reply_to, created_at, edited_at";
+const COLUMNS =
+  "id, room_id, author_id, body, mentions, refs, reply_to, created_at, edited_at, redacted";
 
 export function messageView(row: MessageRow): MessageView {
   return {
@@ -202,6 +205,11 @@ export function registerMessageCommands(dispatcher: Dispatcher): void {
       );
       const current = found[0];
       if (!current) throw new CrossoverError("NOT_FOUND", `Message ${p.message_id} not found`);
+      if (current.redacted) {
+        throw new CrossoverError("VALIDATION", "A redacted message can't be edited", {
+          details: { reason: "redacted" },
+        });
+      }
       if (current.author_id !== ctx.principal.participant_id) {
         throw new CrossoverError("FORBIDDEN", "Only the author can edit a message", {
           details: { reason: "not_author" },
