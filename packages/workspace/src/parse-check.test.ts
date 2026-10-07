@@ -108,6 +108,21 @@ describe("parseConflicts", () => {
     ]);
   });
 
+  it.each([
+    ["semicolon-separated statements", "a = 1; b = 2\n"],
+    ["an indented top-level comment", "x = 1\n    # c\n"],
+  ])("allows valid Python with %s", async (_name, source) => {
+    const f = await fixture();
+    const valid = await materialize(f.repo, f.base, [
+      { type: "modify", path: "src/main.py", content: source },
+    ]);
+    const tree = (await git(["rev-parse", `${valid}^{tree}`], f.options)).stdout.trim();
+
+    await expect(parseConflicts(f.repo, f.base, f.base, { clean: true, tree })).resolves.toEqual(
+      [],
+    );
+  });
+
   it("skips a source file version above the per-file byte cap", async () => {
     const f = await fixture();
     const tooLarge = `def broken(:\n#${"x".repeat(PARSE_FILE_MAX_BYTES)}\n`;
