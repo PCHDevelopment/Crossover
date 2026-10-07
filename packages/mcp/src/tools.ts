@@ -1,4 +1,22 @@
 import {
+  decisionsAddPositionParams,
+  decisionsDecideParams,
+  decisionsGetParams,
+  decisionsListParams,
+  decisionsProposeParams,
+  decisionsVetoParams,
+  decisionsWithdrawParams,
+  inboxAckParams,
+  inboxListParams,
+  memoryDeleteParams,
+  memoryGetParams,
+  memoryHistoryParams,
+  memoryListParams,
+  memoryPutParams,
+  messagesEditParams,
+  messagesListParams,
+  messagesSendParams,
+  roomDigestParams,
   taskVersionParams,
   tasksAssignParams,
   tasksBlockParams,
@@ -225,8 +243,145 @@ export const TASK_TOOLS: readonly McpToolDefinition[] = [
   },
 ];
 
+const tool = (
+  name: string,
+  method: MethodName,
+  description: string,
+  input: z.ZodRawShape,
+  mutating: boolean,
+): McpToolDefinition => ({ name, method, description, input, mutating });
+
+/**
+ * Collaboration tools (T709): messages, inbox, memory, decisions and the digest. As with the
+ * task tools, each argument schema is the command's own zod schema. What these return is
+ * written by other participants and carries `provenance` (§16.5): data, never instructions.
+ */
+export const COLLABORATION_TOOLS: readonly McpToolDefinition[] = [
+  tool(
+    "messages_send",
+    "messages.send",
+    "Post a message to the room. Mention participants by id in `mentions`; refer to tasks, files or decisions in `refs`. Many agent messages with nothing else changing get throttled.",
+    messagesSendParams.shape,
+    true,
+  ),
+  tool(
+    "messages_edit",
+    "messages.edit",
+    "Edit one of your own messages.",
+    messagesEditParams.shape,
+    true,
+  ),
+  tool(
+    "messages_list",
+    "messages.list",
+    "Read the room's messages, newest page first or paged with before/after. Each carries who wrote it.",
+    messagesListParams.shape,
+    false,
+  ),
+  tool(
+    "inbox_list",
+    "inbox.list",
+    "List what needs you: assignments, review requests, mentions, health failures and so on. Unacknowledged items by default.",
+    inboxListParams.shape,
+    false,
+  ),
+  tool(
+    "inbox_ack",
+    "inbox.ack",
+    "Acknowledge inbox items you have dealt with.",
+    inboxAckParams.shape,
+    true,
+  ),
+  tool(
+    "memory_put",
+    "memory.put",
+    "Write shared memory with compare-and-set: expected_revision 0 creates, otherwise pass the revision you last read. decisions/* is reserved; agents/<your-id>/* is yours.",
+    memoryPutParams.shape,
+    true,
+  ),
+  tool("memory_get", "memory.get", "Read one memory entry.", memoryGetParams.shape, false),
+  tool(
+    "memory_list",
+    "memory.list",
+    "List memory keys, optionally under a prefix.",
+    memoryListParams.shape,
+    false,
+  ),
+  tool(
+    "memory_history",
+    "memory.history",
+    "Every revision of a memory key, including its deletion.",
+    memoryHistoryParams.shape,
+    false,
+  ),
+  tool(
+    "memory_delete",
+    "memory.delete",
+    "Delete a memory key (a tombstone; its history stays).",
+    memoryDeleteParams.shape,
+    true,
+  ),
+  tool(
+    "decisions_propose",
+    "decisions.propose",
+    "Open a decision with context and at least two options. The lead decides.",
+    decisionsProposeParams.shape,
+    true,
+  ),
+  tool(
+    "decisions_add_position",
+    "decisions.add_position",
+    "State your position on an open decision: an option and your argument. Adding another replaces it.",
+    decisionsAddPositionParams.shape,
+    true,
+  ),
+  tool(
+    "decisions_decide",
+    "decisions.decide",
+    "Accept an option (outcome_option_id) or reject the proposal (reject: true), with a rationale. The lead only.",
+    decisionsDecideParams.shape,
+    true,
+  ),
+  tool(
+    "decisions_withdraw",
+    "decisions.withdraw",
+    "Withdraw your own open proposal.",
+    decisionsWithdrawParams.shape,
+    true,
+  ),
+  tool(
+    "decisions_veto",
+    "decisions.veto",
+    "Veto a decision within 24 hours of it being made (the owner).",
+    decisionsVetoParams.shape,
+    true,
+  ),
+  tool(
+    "decisions_get",
+    "decisions.get",
+    "Read a decision with every position.",
+    decisionsGetParams.shape,
+    false,
+  ),
+  tool(
+    "decisions_list",
+    "decisions.list",
+    "List decisions, optionally by status.",
+    decisionsListParams.shape,
+    false,
+  ),
+  tool(
+    "room_digest",
+    "room.digest",
+    "A compact summary of what happened in the room since a sequence number: events by type, task changes, decisions, memory keys.",
+    roomDigestParams.shape,
+    false,
+  ),
+];
+
 export const MCP_TOOLS: readonly McpToolDefinition[] = [
   ...BASE_TOOLS,
   ...TASK_TOOLS,
+  ...COLLABORATION_TOOLS,
   ...WORKSPACE_TOOLS,
 ];
