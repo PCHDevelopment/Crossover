@@ -9,8 +9,16 @@ export interface WebhookRequest {
 }
 
 export interface PostWebhookOptions {
-  /** Default 5 s for the whole request. */
-  timeoutMs?: number;
+  /**
+   * The deadline for the whole exchange, name lookup included (default 10 s): a receiver that
+   * answers a byte at a time still ends here.
+   */
+  deadlineMs?: number;
+  /** For tests only: the port to connect to (default 443) and extra trusted certificates. */
+  port?: number;
+  /** For tests only: connect here instead of the resolved (and checked) address. */
+  connectTo?: string;
+  ca?: string | Buffer;
   resolve?: HostResolver;
   /** Largest response body read before giving up on it (the body is never used). Default 64 KiB. */
   maxResponseBytes?: number;
@@ -34,14 +42,48 @@ export async function postWebhook(
   if (url.port !== "" && url.port !== "443")
     throw new Error("webhook URL must use the default port");
   const hostname = url.hostname.replace(/^\[|\]$/g, "");
-  const [address] = await resolvePublicAddresses(hostname, options.resolve);
-  const timeoutMs = options.timeoutMs ?? 5_000;
+  const deadlineMs = options.deadlineMs ?? 10_000;
+  const started = Date.now();
+  let timer: NodeJS.Timeout | undefined;
+  const expired = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error("webhook timed out")), deadlineMs);
+  });
+  try {
+    const [address] = await Promise.race([
+      resolvePublicAddresses(hostname, options.resolve),
+      expired,
+    ]);
+    return await Promise.race([
+      send(
+        req,
+        url,
+        hostname,
+        options.connectTo ?? address!,
+        options,
+        Math.max(1, deadlineMs - (Date.now() - started)),
+      ),
+      expired,
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function send(
+  req: WebhookRequest,
+  url: URL,
+  hostname: string,
+  address: string,
+  options: PostWebhookOptions,
+  remainingMs: number,
+): Promise<{ status: number }> {
   const maxBytes = options.maxResponseBytes ?? 64 * 1024;
   return new Promise((resolve, reject) => {
     const clientReq = request(
       {
         host: address,
-        port: 443,
+        port: options.port ?? 443,
+        ...(options.ca ? { ca: options.ca } : {}),
         method: "POST",
         path: `${url.pathname}${url.search}`,
         servername: hostname,
@@ -51,7 +93,6 @@ export async function postWebhook(
           "content-type": "application/json",
           "content-length": String(Buffer.byteLength(req.body)),
         },
-        timeout: timeoutMs,
       },
       (res) => {
         let bytes = 0;
@@ -67,7 +108,9 @@ export async function postWebhook(
         res.on("error", reject);
       },
     );
-    clientReq.on("timeout", () => clientReq.destroy(new Error("webhook timed out")));
+    // The overall deadline also destroys the socket, so nothing lingers once it has passed.
+    const kill = setTimeout(() => clientReq.destroy(new Error("webhook timed out")), remainingMs);
+    clientReq.on("close", () => clearTimeout(kill));
     clientReq.on("error", reject);
     clientReq.end(req.body);
   });

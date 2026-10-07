@@ -13,6 +13,7 @@ import {
   WakeWebhookService,
   wakeSecretFor,
   type WakeRequest,
+  type WakeSender,
 } from "./wake.js";
 
 let db: TestDatabase;
@@ -29,6 +30,10 @@ afterAll(async () => {
 });
 
 async function setup() {
+  // The database is shared by the tests: what earlier ones left waiting is not this one's business.
+  await pool.query(
+    "UPDATE inbox_items SET wake_notified_at = now() WHERE wake_notified_at IS NULL",
+  );
   const room = newId("room");
   await pool.query(
     `INSERT INTO rooms (id, slug, name, objective, owner_id) VALUES ($1, $1, 'n', 'o', 'x')`,
@@ -47,29 +52,36 @@ async function setup() {
   const sent: WakeRequest[] = [];
   let now = 1_700_000_000_000;
   let failing: Error | undefined;
-  const service = new WakeWebhookService({
-    pool,
-    key: KEY,
-    lagMs: 0,
-    now: () => now,
-    sender: async (request) => {
-      if (failing) throw failing;
-      sent.push(request);
-    },
-    onError: () => {},
-  });
-  await service.tick(); // starts from now: nothing before counts
-  const give = async (to: string, kind = "MENTION", summary = "secret words from someone") => {
-    const client = await pool.connect();
+  let sender: WakeSender = async (request) => {
+    if (failing) throw failing;
+    sent.push(request);
+  };
+  /** A node: its own service object, the same database. */
+  const node = (options: { batch?: number; sender?: WakeSender } = {}) =>
+    new WakeWebhookService({
+      pool,
+      key: KEY,
+      now: () => now,
+      sender: options.sender ?? ((request) => sender(request)),
+      onError: () => {},
+      ...(options.batch ? { batch: options.batch } : {}),
+    });
+  const give = async (
+    to: string,
+    kind = "MENTION",
+    summary = "secret words from someone",
+    client?: { query: (sql: string, params?: unknown[]) => Promise<unknown> },
+  ) => {
+    const own = client ? undefined : await pool.connect();
     try {
-      return await deliverInbox(client, room, to, {
+      return await deliverInbox((client ?? own) as never, room, to, {
         kind: kind as "MENTION",
         ref: { kind: "message", id: `msg_${++n}` },
         summary,
         author_id: "system",
       });
     } finally {
-      client.release();
+      own?.release();
     }
   };
   return {
@@ -77,28 +89,34 @@ async function setup() {
     add,
     hooked,
     sent,
-    service,
+    node,
     give,
     advance: (ms: number) => (now += ms),
     fail: (error: Error | undefined) => (failing = error),
+    setSender: (next: WakeSender) => (sender = next),
   };
 }
 
 const bodyOf = (r: WakeRequest) =>
-  JSON.parse(r.body) as { items: { id: string; kind: string }[]; count: number; dropped: number };
+  JSON.parse(r.body) as {
+    items: { id: string; kind: string; ref: Record<string, string> }[];
+    count: number;
+    more: boolean;
+  };
 
 describe("wake-up webhooks (§17.4, T706)", () => {
-  it("the first item goes out at once, signed with a scheme the agent can verify, naming ids and kinds only", async () => {
+  it("the first item goes out at once, signed with a scheme the agent can verify, naming ids, kinds and refs only", async () => {
     const s = await setup();
     const id = await s.give(s.hooked, "ASSIGNMENT", "private text that quotes someone");
-    expect(await s.service.tick()).toBe(1);
+    expect(await s.node().tick()).toBe(1);
     const [req] = s.sent;
     expect(req!.url).toBe("https://hooks.example/agent-a");
     expect(bodyOf(req!)).toMatchObject({
       count: 1,
-      dropped: 0,
+      more: false,
       items: [{ id, kind: "ASSIGNMENT" }],
     });
+    expect(Object.keys(bodyOf(req!).items[0]!.ref).sort()).toEqual(["id", "kind"]);
     expect(req!.body).not.toContain("private text");
     // Verifiable with the documented algorithm and the secret the agent can read.
     const timestamp = req!.headers["x-crossover-timestamp"]!;
@@ -111,75 +129,148 @@ describe("wake-up webhooks (§17.4, T706)", () => {
     expect(req!.headers["x-crossover-delivery"]).toBeTruthy();
   });
 
-  it("at most one per agent per 30 s: a burst is batched, and goes out when the window passes (fake clock)", async () => {
+  it("at most one per agent per 30 s: a burst is batched and goes out when the window passes (fake clock)", async () => {
     const s = await setup();
+    const node = s.node();
     await s.give(s.hooked);
-    expect(await s.service.tick()).toBe(1);
+    expect(await node.tick()).toBe(1);
     const batch: string[] = [];
     for (let i = 0; i < 5; i++) batch.push(await s.give(s.hooked));
     s.advance(10_000);
-    expect(await s.service.tick()).toBe(0);
+    expect(await node.tick()).toBe(0);
     batch.push(await s.give(s.hooked));
     s.advance(19_000); // 29 s since the first
-    expect(await s.service.tick()).toBe(0);
+    expect(await node.tick()).toBe(0);
     s.advance(1_000); // 30 s
-    expect(await s.service.tick()).toBe(1);
+    expect(await node.tick()).toBe(1);
     expect(bodyOf(s.sent[1]!).items.map((i) => i.id)).toEqual(batch);
-    expect(bodyOf(s.sent[1]!).count).toBe(6);
-    // Nothing new: nothing sent, however long it is.
     s.advance(120_000);
-    expect(await s.service.tick()).toBe(0);
+    expect(await node.tick()).toBe(0); // nothing new
     expect(s.sent).toHaveLength(2);
   });
 
-  it("only agents with a webhook, still active: humans, agents without a URL and paused agents are not called", async () => {
+  it("several nodes on one database send once: the rate limit and the items are shared", async () => {
+    const s = await setup();
+    const other = await s.add("AGENT", { wake_webhook_url: "https://hooks.example/agent-b" });
+    await s.give(s.hooked);
+    await s.give(other);
+    const nodes = [s.node(), s.node(), s.node()];
+    const results = await Promise.all(nodes.map((nd) => nd.tick()));
+    expect(results.reduce((a, b) => a + b, 0)).toBe(2); // one delivery per agent, however many nodes
+    expect(s.sent.map((r) => r.url).sort()).toEqual([
+      "https://hooks.example/agent-a",
+      "https://hooks.example/agent-b",
+    ]);
+    // And again inside the window: still nothing.
+    await s.give(s.hooked);
+    s.advance(5_000);
+    expect((await Promise.all(nodes.map((nd) => nd.tick()))).reduce((a, b) => a + b, 0)).toBe(0);
+  });
+
+  it("an item whose transaction commits late is still announced; it isn't skipped by what was announced meanwhile", async () => {
+    const s = await setup();
+    const held = await pool.connect();
+    await held.query("BEGIN");
+    const late = await s.give(s.hooked, "MENTION", "late", held); // inserted, not yet committed
+    s.advance(1_000);
+    const early = await s.give(s.hooked); // committed at once
+    const node = s.node();
+    expect(await node.tick()).toBe(1);
+    expect(bodyOf(s.sent[0]!).items.map((i) => i.id)).toEqual([early]);
+    s.advance(60_000); // far past any lag a cursor could allow
+    await held.query("COMMIT");
+    held.release();
+    expect(await node.tick()).toBe(1);
+    expect(bodyOf(s.sent[1]!).items.map((i) => i.id)).toEqual([late]);
+  });
+
+  it("a restart in the middle of a window keeps the limit and loses nothing", async () => {
+    const s = await setup();
+    await s.give(s.hooked);
+    expect(await s.node().tick()).toBe(1); // node A, then it goes away
+    const second = await s.give(s.hooked);
+    s.advance(10_000);
+    const restarted = s.node(); // a new process: no memory of anything
+    expect(await restarted.tick()).toBe(0); // the window still holds
+    s.advance(20_000);
+    expect(await restarted.tick()).toBe(1);
+    expect(bodyOf(s.sent[1]!).items.map((i) => i.id)).toEqual([second]);
+  });
+
+  it("only agents with a webhook, active, in an active room: others are not called, and items acknowledged first are left out", async () => {
     const s = await setup();
     const human = await s.add("HUMAN", null);
     const plain = await s.add("AGENT", { name: "no url" });
     const paused = await s.add("AGENT", { wake_webhook_url: "https://hooks.example/p" }, "PAUSED");
     for (const who of [human, plain, paused]) await s.give(who);
-    expect(await s.service.tick()).toBe(0);
+    const node = s.node();
+    expect(await node.tick()).toBe(0);
     expect(s.sent).toEqual([]);
-    // An agent paused after the item arrived isn't called either.
-    await s.give(s.hooked);
-    await pool.query("UPDATE participants SET status = 'PAUSED' WHERE id = $1", [s.hooked]);
-    expect(await s.service.tick()).toBe(0);
+
+    // A frozen room isn't called; when it is active again, the items are still there.
+    const kept = await s.give(s.hooked);
+    await pool.query("UPDATE rooms SET status = 'PAUSED' WHERE id = $1", [s.room]);
+    expect(await node.tick()).toBe(0);
+    await pool.query("UPDATE rooms SET status = 'ACTIVE' WHERE id = $1", [s.room]);
+    const acked = await s.give(s.hooked);
+    await pool.query("UPDATE inbox_items SET acked_at = now() WHERE id = $1", [acked]);
+    expect(await node.tick()).toBe(1);
+    expect(bodyOf(s.sent[0]!).items.map((i) => i.id)).toEqual([kept]);
   });
 
-  it("items acknowledged before the send are left out", async () => {
+  it("a failing receiver is retried after a window that doubles, and nothing is lost or repeated", async () => {
     const s = await setup();
-    const a = await s.give(s.hooked);
-    const b = await s.give(s.hooked);
-    await pool.query("UPDATE inbox_items SET acked_at = now() WHERE id = $1", [a]);
-    await s.service.tick();
-    expect(bodyOf(s.sent[0]!).items.map((i) => i.id)).toEqual([b]);
-  });
-
-  it("a delivery that fails is kept and tried again in the next window, once", async () => {
-    const s = await setup();
+    const node = s.node();
     const id = await s.give(s.hooked);
     s.fail(new Error("receiver is down"));
-    expect(await s.service.tick()).toBe(0);
+    expect(await node.tick()).toBe(0); // fails: the window opens anyway
     s.fail(undefined);
-    s.advance(5_000);
-    expect(await s.service.tick()).toBe(0); // still inside the window the failed try opened
-    s.advance(25_000);
-    expect(await s.service.tick()).toBe(1);
+    s.advance(30_000);
+    expect(await node.tick()).toBe(0); // one failure in a row doubles the wait: 60 s
+    s.advance(30_000);
+    expect(await node.tick()).toBe(1);
     expect(bodyOf(s.sent[0]!).items.map((i) => i.id)).toEqual([id]);
-    s.advance(60_000);
-    expect(await s.service.tick()).toBe(0);
+    // Recovered: back to a 30 s window.
+    await s.give(s.hooked);
+    s.advance(30_000);
+    expect(await node.tick()).toBe(1);
+    expect(s.sent).toHaveLength(2);
   });
 
-  it("a very long backlog is capped, and says how much was left out", async () => {
+  it("one slow receiver delays no other agent: sends run concurrently", async () => {
     const s = await setup();
+    const fast = await s.add("AGENT", { wake_webhook_url: "https://hooks.example/fast" });
     await s.give(s.hooked);
-    await s.service.tick();
-    for (let i = 0; i < 205; i++) await s.give(s.hooked);
+    await s.give(fast);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const delivered: string[] = [];
+    s.setSender(async (request) => {
+      if (request.url.endsWith("agent-a")) await gate; // the slow one
+      delivered.push(request.url);
+    });
+    const ticking = s.node().tick();
+    for (let i = 0; i < 100 && !delivered.includes("https://hooks.example/fast"); i++) {
+      await new Promise((res) => setTimeout(res, 20));
+    }
+    expect(delivered).toEqual(["https://hooks.example/fast"]); // while the slow one is still open
+    release();
+    expect(await ticking).toBe(2);
+  });
+
+  it("a long backlog goes out in batches, one per window, with `more` saying so", async () => {
+    const s = await setup();
+    const node = s.node({ batch: 3 });
+    const ids: string[] = [];
+    for (let i = 0; i < 5; i++) ids.push(await s.give(s.hooked));
+    await node.tick();
+    expect(bodyOf(s.sent[0]!)).toMatchObject({ count: 3, more: true });
     s.advance(30_000);
-    await s.service.tick();
-    const body = bodyOf(s.sent[1]!);
-    expect(body.items).toHaveLength(200);
-    expect(body).toMatchObject({ dropped: 5, count: 205 });
+    await node.tick();
+    expect(bodyOf(s.sent[1]!)).toMatchObject({ count: 2, more: false });
+    expect([...bodyOf(s.sent[0]!).items, ...bodyOf(s.sent[1]!).items].map((i) => i.id)).toEqual(
+      ids,
+    );
   });
 });
 

@@ -134,6 +134,9 @@ importers:
       '@crossover/protocol':
         specifier: workspace:*
         version: link:../protocol
+      '@crossover/security':
+        specifier: workspace:*
+        version: link:../security
       ioredis:
         specifier: ^6.0.0
         version: 6.0.0

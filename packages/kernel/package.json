@@ -17,6 +17,7 @@
     "@crossover/ledger": "workspace:*",
     "@crossover/policy": "workspace:*",
     "@crossover/protocol": "workspace:*",
+    "@crossover/security": "workspace:*",
     "ioredis": "^6.0.0",
     "zod": "^4.6.5"
   }
