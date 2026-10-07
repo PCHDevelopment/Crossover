@@ -146,6 +146,9 @@ describe("refresh", () => {
     expect(rows[0].revoked_at).toBeNull();
   });
 
+  // These tests are about reuse itself, so the grace window for a lost response is switched off.
+  const strict = { reuseGraceSeconds: 0 };
+
   it("reuse of an old refresh token revokes every token in the family", async () => {
     const { id } = await newParticipant();
     const t1 = await issueTokens(pool, id);
@@ -154,7 +157,7 @@ describe("refresh", () => {
     expect((await rows(t1.family_id)).every((r) => r.revoked_at === null)).toBe(true);
 
     // Someone replays the first refresh token.
-    const err = await refresh(pool, t1.refresh_token).catch((e: unknown) => e);
+    const err = await refresh(pool, t1.refresh_token, strict).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(CrossoverError);
     expect(err).toMatchObject(unauthenticated);
 
@@ -166,6 +169,51 @@ describe("refresh", () => {
     await expect(refresh(pool, t3.refresh_token)).rejects.toMatchObject(unauthenticated);
   });
 
+  it("a lost response: the spent token presented again soon after gets a new pair, and the pair nobody saw is dead", async () => {
+    const { id } = await newParticipant();
+    const first = await issueTokens(pool, id);
+    const lost = await refresh(pool, first.refresh_token); // the client never got this answer
+    const retry = await refresh(pool, first.refresh_token); // …so it asks again with the same token
+    expect(retry.refresh_token).not.toBe(lost.refresh_token);
+    expect(retry.family_id).toBe(first.family_id);
+    // The lost pair was revoked (nobody has seen its secrets); the new pair is live.
+    await expect(refresh(pool, lost.refresh_token)).rejects.toMatchObject(unauthenticated);
+    const live = (await rows(first.family_id)).filter((r) => r.revoked_at === null);
+    expect(live.length).toBeGreaterThanOrEqual(2); // the new access and refresh tokens
+  });
+
+  it("after a lost response the new pair works and the login survives", async () => {
+    const { id } = await newParticipant();
+    const first = await issueTokens(pool, id);
+    await refresh(pool, first.refresh_token); // lost
+    const retry = await refresh(pool, first.refresh_token);
+    const next = await refresh(pool, retry.refresh_token);
+    expect(next.family_id).toBe(first.family_id);
+    expect(
+      (await rows(first.family_id)).filter((r) => r.revoked_at === null).length,
+    ).toBeGreaterThanOrEqual(2);
+  });
+
+  it("reuse after the grace window, or after the successor was used, still revokes the login", async () => {
+    const { id } = await newParticipant();
+    // Too late: the spent token is older than the window.
+    const a = await issueTokens(pool, id);
+    await refresh(pool, a.refresh_token);
+    await pool.query(
+      "UPDATE auth_tokens SET used_at = used_at - interval '31 seconds' WHERE token_hash = $1",
+      [hashToken(a.refresh_token)],
+    );
+    await expect(refresh(pool, a.refresh_token)).rejects.toMatchObject(unauthenticated);
+    expect((await rows(a.family_id)).every((r) => r.revoked_at instanceof Date)).toBe(true);
+
+    // Its successor was used: someone else is already rotating this login.
+    const b = await issueTokens(pool, id);
+    const b2 = await refresh(pool, b.refresh_token);
+    await refresh(pool, b2.refresh_token); // the successor is spent
+    await expect(refresh(pool, b.refresh_token)).rejects.toMatchObject(unauthenticated);
+    expect((await rows(b.family_id)).every((r) => r.revoked_at instanceof Date)).toBe(true);
+  });
+
   it("reuse in one family doesn't touch another family or another participant", async () => {
     const a = await newParticipant();
     const b = await newParticipant();
@@ -175,7 +223,7 @@ describe("refresh", () => {
       await issueTokens(pool, b.id),
     ];
     const rotated = await refresh(pool, a1.refresh_token);
-    await expect(refresh(pool, a1.refresh_token)).rejects.toMatchObject(unauthenticated);
+    await expect(refresh(pool, a1.refresh_token, strict)).rejects.toMatchObject(unauthenticated);
     expect((await rows(a1.family_id)).every((r) => r.revoked_at)).toBe(true);
     expect((await rows(a2.family_id)).every((r) => r.revoked_at === null)).toBe(true);
     expect((await rows(b1.family_id)).every((r) => r.revoked_at === null)).toBe(true);
@@ -188,7 +236,7 @@ describe("refresh", () => {
     const { id } = await newParticipant();
     const first = await issueTokens(pool, id);
     const results = await Promise.allSettled(
-      Array.from({ length: 5 }, () => refresh(pool, first.refresh_token)),
+      Array.from({ length: 5 }, () => refresh(pool, first.refresh_token, strict)),
     );
     expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
     for (const r of results.filter((r) => r.status === "rejected")) {

@@ -72,7 +72,9 @@ export class TokenStore {
       this.refreshUrl,
       undefined,
       { refresh_token: this.tokens.refresh_token },
-      this.retry,
+      // Exactly once: a refresh token is single-use, so sending it again after a lost response
+      // would look like a theft. A failure surfaces as a retryable error, not as "refused".
+      { ...this.retry, attempts: 1 },
     );
     const pair = json as RoomTokens;
     this.tokens = { ...pair };

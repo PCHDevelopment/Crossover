@@ -140,7 +140,7 @@ describe("authenticate", () => {
       const c = await newParticipant();
       const first = await issueTokens(pool, c.id);
       const second = await refresh(pool, first.refresh_token);
-      await refresh(pool, first.refresh_token).catch(() => {}); // replay → family revoked
+      await refresh(pool, first.refresh_token, { reuseGraceSeconds: 0 }).catch(() => {}); // replay → family revoked
       await expect(authenticate(pool, second.access_token)).rejects.toMatchObject(rejected);
       await expect(authenticate(pool, first.access_token)).rejects.toMatchObject(rejected);
     });

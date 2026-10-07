@@ -15,7 +15,7 @@ import type { FastifyInstance } from "fastify";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { HTTP_STATUS, toHttpError } from "./errors.js";
-import { buildGateway } from "./server.js";
+import { buildGateway, clientKey } from "./server.js";
 
 let db: TestDatabase;
 let pool: Pool;
@@ -720,6 +720,10 @@ describe("POST /v1/auth/refresh", () => {
     const s = await setup();
     const first = await post(s, "/v1/auth/refresh", { refresh_token: s.owner.refresh_token });
     const pair = first.json() as TokenPair;
+    // Past the grace window for a lost response, a spent token is a replay.
+    await pool.query(
+      "UPDATE auth_tokens SET used_at = used_at - interval '31 seconds' WHERE kind = 'REFRESH' AND used_at IS NOT NULL",
+    );
     const again = await post(s, "/v1/auth/refresh", { refresh_token: s.owner.refresh_token });
     errorShape(again.json(), "UNAUTHENTICATED", 401, again);
     // The family is revoked: even the newest pair no longer works.
@@ -767,7 +771,7 @@ describe("POST /v1/auth/refresh rate limit", () => {
   it("is per address: X-Forwarded-For counts only behind a trusted proxy", async () => {
     const via = (ip: string) => ({ "x-forwarded-for": ip });
     const trusted = await setup(undefined, false, {
-      trustProxy: true,
+      trustProxy: ["127.0.0.1"],
       refreshLimit: { limiter: counter(), perMinute: 1 },
     });
     expect((await post(trusted, "/v1/auth/refresh", junk, via("203.0.113.1"))).statusCode).toBe(
@@ -779,12 +783,33 @@ describe("POST /v1/auth/refresh rate limit", () => {
     expect((await post(trusted, "/v1/auth/refresh", junk, via("203.0.113.2"))).statusCode).toBe(
       401,
     );
+    // Behind one trusted hop, what the client wrote on the left is not its address: the entry the
+    // proxy added is. Each forged value must not buy a fresh allowance.
+    const forged = await setup(undefined, false, {
+      trustProxy: ["127.0.0.1"],
+      refreshLimit: { limiter: counter(), perMinute: 1 },
+    });
+    expect(
+      (await post(forged, "/v1/auth/refresh", junk, via("1.1.1.1, 203.0.113.9"))).statusCode,
+    ).toBe(401);
+    expect(
+      (await post(forged, "/v1/auth/refresh", junk, via("2.2.2.2, 203.0.113.9"))).statusCode,
+    ).toBe(429);
     const direct = await setup(undefined, false, {
       refreshLimit: { limiter: counter(), perMinute: 1 },
     });
     expect((await post(direct, "/v1/auth/refresh", junk, via("203.0.113.1"))).statusCode).toBe(401);
     // A spoofed header doesn't get a fresh allowance.
     expect((await post(direct, "/v1/auth/refresh", junk, via("203.0.113.9"))).statusCode).toBe(429);
+  });
+
+  it("limits an IPv6 client by its /64 and an IPv4-mapped address as IPv4", () => {
+    expect(clientKey("2001:db8:abcd:12:1:2:3:4")).toBe(clientKey("2001:db8:abcd:12:ffff::9"));
+    expect(clientKey("2001:db8:abcd:12::1")).toBe("2001:db8:abcd:12::/64");
+    expect(clientKey("2001:db8:abcd:13::1")).not.toBe(clientKey("2001:db8:abcd:12::1"));
+    expect(clientKey("::1")).toBe("0:0:0:0::/64");
+    expect(clientKey("::ffff:203.0.113.5")).toBe("203.0.113.5");
+    expect(clientKey("203.0.113.5")).toBe("203.0.113.5");
   });
 
   it("a limiter that fails doesn't take refreshing down", async () => {

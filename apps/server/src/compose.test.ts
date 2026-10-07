@@ -793,9 +793,11 @@ describe("loadConfig", () => {
   });
 
   it("reads the proxy and refresh-limit settings", () => {
-    expect(loadConfig(env)).toMatchObject({ trustProxy: false, refreshPerMinute: 30 });
-    expect(loadConfig({ ...env, TRUST_PROXY: "true", REFRESH_PER_MINUTE: "5" })).toMatchObject({
-      trustProxy: true,
+    expect(loadConfig(env)).toMatchObject({ trustProxy: [], refreshPerMinute: 30 });
+    expect(
+      loadConfig({ ...env, TRUST_PROXY: "10.0.0.0/8, 127.0.0.1", REFRESH_PER_MINUTE: "5" }),
+    ).toMatchObject({
+      trustProxy: ["10.0.0.0/8", "127.0.0.1"],
       refreshPerMinute: 5,
     });
     expect(() => loadConfig({ ...env, REFRESH_PER_MINUTE: "0" })).toThrow(/REFRESH_PER_MINUTE/);

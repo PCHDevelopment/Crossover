@@ -39,6 +39,8 @@ export interface UserSession {
 export class CrossoverClient {
   readonly options: Required<Pick<ClientOptions, "clientName" | "clientVersion">> & ClientOptions;
   private readonly fetchImpl: FetchLike;
+  /** Token stores by the refresh token they started from: one per login. */
+  private readonly stores = new Map<string, TokenStore>();
 
   constructor(options: ClientOptions) {
     this.options = {
@@ -120,16 +122,25 @@ export class CrossoverClient {
    * Work in a room with its access token, or with the `tokens` that `join` / `roomSession`
    * returned: then an expired access token is renewed with the refresh token (once, however many
    * calls and subscriptions notice) and the request retried, and `onTokens` receives each new pair
-   * to persist (refresh tokens are single-use).
+   * to persist (refresh tokens are single-use). `onTokens` runs after the new pair is held in
+   * memory: if it throws, the call that triggered the refresh fails with that error but the client
+   * keeps working with the new pair (so persist best-effort, and expect a restart to need a new
+   * login if you lost it). Rooms entered with the same refresh token share one token store, so two
+   * `room()` calls never refresh the same login twice.
    */
   room(roomId: string, tokens: string | RoomTokens, options: TokenOptions = {}): RoomClient {
-    const store = new TokenStore(
-      tokens,
-      `${this.options.baseUrl}/v1/auth/refresh`,
-      this.fetchImpl,
-      this.options.retry,
-      options,
-    );
+    const login = typeof tokens === "string" ? undefined : tokens.refresh_token;
+    let store = login ? this.stores.get(login) : undefined;
+    if (!store) {
+      store = new TokenStore(
+        tokens,
+        `${this.options.baseUrl}/v1/auth/refresh`,
+        this.fetchImpl,
+        this.options.retry,
+        options,
+      );
+      if (login) this.stores.set(login, store);
+    }
     return new RoomClient(this, roomId, store, this.fetchImpl);
   }
 }

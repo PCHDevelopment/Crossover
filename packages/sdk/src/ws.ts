@@ -212,8 +212,8 @@ export class RoomSocket {
     } catch (error) {
       // An expired access token: renew it and connect once more.
       const expired = error instanceof CrossoverError && error.code === "UNAUTHENTICATED";
-      if (!expired || !this.config.refresh || !(await this.config.refresh(used).catch(() => false)))
-        throw error;
+      // A refresh that fails for a transient reason throws its own (retryable) error.
+      if (!expired || !this.config.refresh || !(await this.config.refresh(used))) throw error;
       session = await this.connect();
     }
     const id = newId("cmd");
@@ -314,8 +314,17 @@ export class Subscription implements AsyncIterable<SdkEvent> {
     let first = true;
     // One renewal per refusal: a token that is refused again right after renewing ends it.
     let renewed = false;
-    const renew = async (used: string) =>
-      this.config.refresh ? await this.config.refresh(used).catch(() => false) : false;
+    // "later": the refresh itself failed in a way that may pass (the server busy, the network),
+    // which is not the token being refused: wait and connect again.
+    const renew = async (used: string): Promise<"renewed" | "refused" | "later"> => {
+      if (!this.config.refresh) return "refused";
+      try {
+        return (await this.config.refresh(used)) ? "renewed" : "refused";
+      } catch (error) {
+        if (error instanceof CrossoverError) this.retryAfterMs = retryAfterOf(error);
+        return "later";
+      }
+    };
     while (!this.done) {
       this.options.onState?.(first ? "connecting" : "reconnecting");
       first = false;
@@ -385,12 +394,16 @@ export class Subscription implements AsyncIterable<SdkEvent> {
           this.retryAfterMs = retryAfterOf(error);
         } else if (error instanceof CrossoverError && error.code === "UNAUTHENTICATED") {
           // The access token expired: renew it and connect again at once.
-          if (!renewed && (await renew(used))) {
+          const outcome = renewed ? "refused" : await renew(used);
+          if (outcome === "renewed") {
             renewed = true;
             continue;
           }
-          this.finish(error);
-          return;
+          if (outcome === "refused") {
+            this.finish(error);
+            return;
+          }
+          end = "dropped"; // "later": back off below
         } else if (
           error instanceof CrossoverError ||
           (error instanceof TransportError && !error.retryable)
@@ -401,9 +414,13 @@ export class Subscription implements AsyncIterable<SdkEvent> {
       }
       this.session = undefined;
       if (this.done) return;
-      if (end === "expired" && !renewed && (await renew(used))) {
-        renewed = true;
-        continue;
+      if (end === "expired" && !renewed) {
+        const outcome = await renew(used);
+        if (outcome === "renewed") {
+          renewed = true;
+          continue;
+        }
+        if (outcome === "later") end = "dropped";
       }
       if (end === "fatal" || end === "expired") {
         this.finish(new CrossoverError("UNAUTHENTICATED", "The subscription can't continue"));

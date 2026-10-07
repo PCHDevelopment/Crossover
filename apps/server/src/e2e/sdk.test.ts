@@ -288,6 +288,11 @@ describe("SDK token refresh against a real server", () => {
       body: JSON.stringify({ refresh_token: spent.devTokens.refresh_token }),
     });
     expect(pair.status).toBe(200);
+    // Past the window in which a spent token is taken for a retry after a lost response.
+    await db.pool.query(
+      "UPDATE auth_tokens SET used_at = used_at - interval '31 seconds' WHERE room_id = $1 AND used_at IS NOT NULL",
+      [spent.roomId],
+    );
     await expireAccessTokens(spent.roomId);
     const stale = client.room(spent.roomId, spent.devTokens);
     await expect(stale.api.messages.list()).rejects.toMatchObject({ code: "UNAUTHENTICATED" });
@@ -332,5 +337,82 @@ describe("SDK token refresh against a real server", () => {
     const sent = await socket.api.messages.send({ body: "over a renewed socket" });
     expect(sent.replayed).toBe(false);
     socket.close();
+  });
+
+  it("a refresh response lost on the way back is not retried by the SDK: one request, a retryable error, and the next attempt works (the server takes the spent token for a retry)", async () => {
+    let refreshes = 0;
+    let drop = true;
+    const client = new CrossoverClient({
+      baseUrl,
+      WebSocket: TrackedWebSocket,
+      fetch: async (input, init) => {
+        const res = await fetch(input, init);
+        if (String(input).endsWith("/v1/auth/refresh")) {
+          refreshes += 1;
+          if (drop) {
+            drop = false;
+            await res.text();
+            throw new TypeError("the response never arrived");
+          }
+        }
+        return res;
+      },
+    });
+    const r = await newRoom(client);
+    const dev = client.room(r.roomId, r.devTokens);
+    await expireAccessTokens(r.roomId);
+    const first = await dev.api.messages.send({ body: "one" }).catch((e: unknown) => e);
+    expect(refreshes).toBe(1); // sent once, not re-sent by the retry loop
+    expect(first).toBeInstanceOf(Error);
+    expect((first as { retryable?: boolean }).retryable).toBe(true);
+    expect((first as { code?: string }).code).not.toBe("UNAUTHENTICATED");
+    const second = await dev.api.messages.send({ body: "two" }); // the login is still alive
+    expect(second.replayed).toBe(false);
+    expect(refreshes).toBe(2);
+  });
+
+  it("a refresh that fails for a transient reason doesn't end a subscription: it backs off and tries again", async () => {
+    let failOnce = true;
+    const client = new CrossoverClient({
+      baseUrl,
+      WebSocket: TrackedWebSocket,
+      fetch: async (input, init) => {
+        if (String(input).endsWith("/v1/auth/refresh") && failOnce) {
+          failOnce = false;
+          return new Response("busy", { status: 503 });
+        }
+        return fetch(input, init);
+      },
+    });
+    const r = await newRoom(client);
+    const dev = client.room(r.roomId, r.devTokens);
+    const received: number[] = [];
+    const sub = dev.subscribe({
+      after: 0,
+      reconnect: { minMs: 20, maxMs: 60 },
+      onEvent: (e) => received.push(e.sequence),
+    });
+    await r.owner.api.messages.send({ body: "one" });
+    for (let i = 0; i < 100 && received.length < 3; i++)
+      await new Promise((res) => setTimeout(res, 50));
+    await expireAccessTokens(r.roomId);
+    sockets.at(-1)?.close();
+    await r.owner.api.messages.send({ body: "two" });
+    const target = await lastSequence(r.owner);
+    for (let i = 0; i < 200 && sub.lastSequence < target; i++)
+      await new Promise((res) => setTimeout(res, 50));
+    sub.close();
+    expect(failOnce).toBe(false); // the 503 happened
+    expect(sub.lastSequence).toBe(target);
+  }, 60_000);
+
+  it("two clients entered with the same tokens share one refresh", async () => {
+    const { client, refreshes } = counting();
+    const r = await newRoom(client);
+    const a = client.room(r.roomId, r.devTokens);
+    const b = client.room(r.roomId, r.devTokens);
+    await expireAccessTokens(r.roomId);
+    await Promise.all([a.api.messages.send({ body: "a" }), b.api.messages.send({ body: "b" })]);
+    expect(refreshes.n).toBe(1);
   });
 });

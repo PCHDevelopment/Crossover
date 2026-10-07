@@ -22,7 +22,12 @@ export interface TokenOptions {
   /** Override the lifetimes (tests, or shorter-lived deployments). */
   accessTtlMs?: number;
   refreshTtlMs?: number;
+  /** How long after a rotation its spent token may still be presented once more (a lost response). Default 30 s. */
+  reuseGraceSeconds?: number;
 }
+
+/** See {@link refresh}: the window in which a spent refresh token is a retry, not a theft. */
+export const REUSE_GRACE_SECONDS = 30;
 
 type Db = Pool | PoolClient;
 
@@ -115,15 +120,50 @@ export async function refresh(
       return { ok: false as const };
     }
     if (token.used) {
+      // A response can be lost on the way back: the client then presents the token it already
+      // spent. If that was the latest rotation of the login, no more than REUSE_GRACE_SECONDS ago,
+      // and its successor was never used, hand out a new pair and kill the unused successor (whose
+      // secret nobody has seen) instead of revoking the login. Anything else is reuse.
+      const { rows: graced } = await client.query<{ used_at: Date }>(
+        `SELECT t.used_at FROM auth_tokens t
+          WHERE t.token_hash = $1
+            AND t.used_at > clock_timestamp() - make_interval(secs => $2)
+            AND NOT EXISTS (SELECT 1 FROM auth_tokens later
+                             WHERE later.family_id = t.family_id AND later.kind = 'REFRESH'
+                               AND later.used_at > t.used_at)
+            AND NOT EXISTS (SELECT 1 FROM auth_tokens succ
+                             WHERE succ.family_id = t.family_id AND succ.kind = 'REFRESH'
+                               AND succ.created_at >= t.used_at AND succ.used_at IS NOT NULL)
+            AND EXISTS (SELECT 1 FROM auth_tokens succ
+                         WHERE succ.family_id = t.family_id AND succ.kind = 'REFRESH'
+                           AND succ.created_at >= t.used_at AND succ.used_at IS NULL
+                           AND succ.revoked_at IS NULL)`,
+        [hash, options.reuseGraceSeconds ?? REUSE_GRACE_SECONDS],
+      );
+      if (graced[0]) {
+        await client.query(
+          `UPDATE auth_tokens SET revoked_at = clock_timestamp()
+            WHERE family_id = $1 AND revoked_at IS NULL AND created_at >= $2`,
+          [token.family_id, graced[0].used_at],
+        );
+        const pair = await insertPair(
+          client,
+          token.participant_id,
+          token.room_id,
+          token.family_id,
+          options,
+        );
+        return { ok: true as const, pair };
+      }
       await client.query(
         "UPDATE auth_tokens SET revoked_at = clock_timestamp() WHERE family_id = $1 AND revoked_at IS NULL",
         [token.family_id],
       );
       return { ok: false as const };
     }
-    await client.query("UPDATE auth_tokens SET used_at = clock_timestamp() WHERE token_hash = $1", [
-      hash,
-    ]);
+    // now(), the transaction's time, is also the new pair's created_at: that is how a spent
+    // token finds its successor.
+    await client.query("UPDATE auth_tokens SET used_at = now() WHERE token_hash = $1", [hash]);
     const pair = await insertPair(
       client,
       token.participant_id,

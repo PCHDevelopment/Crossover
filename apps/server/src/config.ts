@@ -18,8 +18,18 @@ const envSchema = z.object({
   NODE_ID: z.string().min(1).max(200).optional(),
   /** Serve `POST /v1/auth/dev-login`. Development only; off unless set. */
   DEV_LOGIN: flag,
-  /** Behind a reverse proxy: take the client address from `X-Forwarded-For` (per-IP limits). */
-  TRUST_PROXY: flag,
+  /** Reverse proxies in front of the server (comma-separated addresses or CIDRs): the client address is the first `X-Forwarded-For` hop that is not one of them. Default: none. */
+  TRUST_PROXY: z
+    .string()
+    .optional()
+    .transform((v) =>
+      v
+        ? v
+            .split(",")
+            .map((x) => x.trim())
+            .filter(Boolean)
+        : [],
+    ),
   /** Refresh attempts per client address per minute (`POST /v1/auth/refresh`). Default 30. */
   REFRESH_PER_MINUTE: z.coerce.number().int().min(1).max(100_000).default(30),
   /** Comma-separated operator-approved images usable by room health checks. */
@@ -63,7 +73,7 @@ export interface ServerConfig {
   port: number;
   nodeId: string;
   devLogin: boolean;
-  trustProxy?: boolean;
+  trustProxy?: string[];
   refreshPerMinute?: number;
   /** Operator allowlist for room-selected health container images. */
   healthImages: readonly string[];

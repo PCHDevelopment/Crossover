@@ -257,7 +257,7 @@ export async function composeServer(
       dispatcher,
       pool,
       devLogin: config.devLogin,
-      trustProxy: config.trustProxy ?? false,
+      trustProxy: config.trustProxy && config.trustProxy.length > 0 ? config.trustProxy : false,
       refreshLimit: {
         limiter: {
           // The budget limiter's counters, under keys no room can have.
