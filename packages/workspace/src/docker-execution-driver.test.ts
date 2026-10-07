@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { newId } from "@crossover/protocol";
+import { createSandboxProxyCredential } from "@crossover/security";
 import { DockerExecutionDriver, type DockerInvoker } from "./docker-execution-driver.js";
 
 const hardOptions = {
@@ -228,11 +229,16 @@ describe("DockerExecutionDriver", () => {
     const driver = new DockerExecutionDriver({
       egressProxyContainer: "crossover-egress-proxy",
       egressProxyPort: 3128,
+      egressProxySecret: "0123456789abcdef0123456789abcdef",
       invoke: async (args) => {
         calls.push([...args]);
         if (args[0] === "network" && args[1] === "inspect") {
           if (!networkExists)
-            return { code: 1, stdout: "", stderr: "Error response from daemon: no such network" };
+            return {
+              code: 1,
+              stdout: "",
+              stderr: "Error response from daemon: network crossover-net-test not found",
+            };
           return {
             code: 0,
             stdout: `true|${JSON.stringify(proxyConnected ? { proxy: { Name: "crossover-egress-proxy" } } : {})}`,
@@ -258,6 +264,9 @@ describe("DockerExecutionDriver", () => {
     });
     const network = `crossover-net-${sandboxId.toLowerCase()}`;
     const create = calls.find((args) => args[0] === "container" && args[1] === "create")!;
+    const sandboxEnvironment = create.flatMap((value, index) =>
+      create[index - 1] === "--env" ? [value] : [],
+    );
 
     expect(calls.find((args) => args[0] === "network" && args[1] === "create")).toEqual([
       "network",
@@ -274,11 +283,31 @@ describe("DockerExecutionDriver", () => {
       "crossover-egress-proxy",
     ]);
     expect(create).toContain(`--network=${network}`);
-    expect(create).toContain("HTTP_PROXY=http://crossover-egress-proxy:3128");
-    expect(create).toContain("HTTPS_PROXY=http://crossover-egress-proxy:3128");
+    const proxyUrl = `http://${sandboxId}:${createSandboxProxyCredential(sandboxId, "0123456789abcdef0123456789abcdef")}@crossover-egress-proxy:3128`;
+    expect(create).toContain(`HTTP_PROXY=${proxyUrl}`);
+    expect(create).toContain(`HTTPS_PROXY=${proxyUrl}`);
     expect(create).toContain("NO_PROXY=localhost,127.0.0.1,::1");
+    expect(sandboxEnvironment.map((entry) => entry.slice(0, entry.indexOf("="))).sort()).toEqual([
+      "ALL_PROXY",
+      "HOME",
+      "HTTPS_PROXY",
+      "HTTP_PROXY",
+      "NO_PROXY",
+      "all_proxy",
+      "http_proxy",
+      "https_proxy",
+      "no_proxy",
+    ]);
+    expect(sandboxEnvironment.join("\n")).not.toContain("0123456789abcdef0123456789abcdef");
 
     await driver.destroy({ sandbox_id: sandboxId, resources });
+    expect(calls).toContainEqual([
+      "network",
+      "disconnect",
+      "--force",
+      network,
+      "crossover-egress-proxy",
+    ]);
     expect(calls).toContainEqual(["network", "rm", network]);
   });
 

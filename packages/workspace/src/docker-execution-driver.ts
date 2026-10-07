@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { createSandboxProxyCredential } from "@crossover/security";
 import type { ExecutionDriver, SandboxLimits, SandboxResources } from "./execution.js";
 
 const DEFAULT_IMAGE = "node:22-bookworm-slim";
@@ -20,6 +21,8 @@ export interface DockerExecutionDriverOptions {
   /** Operator-provisioned allowlist proxy container; sandboxes get a private internal network. */
   egressProxyContainer?: string;
   egressProxyPort?: number;
+  /** Shared HMAC secret used to mint a credential scoped to each sandbox ID. */
+  egressProxySecret?: string;
   /** Test seam; production callers should use the Docker CLI. */
   invoke?: DockerInvoker;
 }
@@ -57,6 +60,7 @@ export class DockerExecutionDriver implements ExecutionDriver {
   private readonly runtime: string | undefined;
   private readonly egressProxyContainer: string | undefined;
   private readonly egressProxyPort: number;
+  private readonly egressProxySecret: string | undefined;
   private readonly invoke: DockerInvoker;
 
   constructor(options: DockerExecutionDriverOptions = {}) {
@@ -84,6 +88,18 @@ export class DockerExecutionDriver implements ExecutionDriver {
     }
     if (!this.egressProxyContainer && options.egressProxyPort !== undefined)
       throw new Error("SANDBOX_EGRESS_PROXY_PORT requires SANDBOX_EGRESS_PROXY_CONTAINER");
+    if (this.egressProxyContainer && !options.egressProxySecret)
+      throw new Error(
+        "SANDBOX_EGRESS_PROXY_SECRET is required with SANDBOX_EGRESS_PROXY_CONTAINER",
+      );
+    if (!this.egressProxyContainer && options.egressProxySecret)
+      throw new Error("SANDBOX_EGRESS_PROXY_SECRET requires SANDBOX_EGRESS_PROXY_CONTAINER");
+    if (
+      options.egressProxySecret !== undefined &&
+      Buffer.byteLength(options.egressProxySecret) < 32
+    )
+      throw new Error("SANDBOX_EGRESS_PROXY_SECRET must be at least 32 bytes");
+    this.egressProxySecret = options.egressProxySecret;
     this.egressProxyPort = options.egressProxyPort ?? 3128;
     if (
       Object.entries(this.volumeOptions).some(
@@ -156,7 +172,30 @@ export class DockerExecutionDriver implements ExecutionDriver {
     const volume = await this.invoke(["volume", "rm", resources.volume_ref]);
     if (volume.code !== 0 && !volume.stderr.toLowerCase().includes("no such volume"))
       throw new Error(`ERROR: Docker volume removal failed: ${volume.stderr.trim()}`);
-    const network = await this.invoke(["network", "rm", sandboxNetworkName(input.sandbox_id)]);
+    const networkName = sandboxNetworkName(input.sandbox_id);
+    if (this.egressProxyContainer) {
+      const disconnected = await this.invoke([
+        "network",
+        "disconnect",
+        "--force",
+        networkName,
+        this.egressProxyContainer,
+      ]);
+      if (disconnected.code !== 0) {
+        const message = disconnected.stderr.toLowerCase();
+        const alreadyDisconnected =
+          message.includes("not found") ||
+          message.includes("no such network") ||
+          message.includes("no such container") ||
+          message.includes("not connected") ||
+          message.includes("endpoint not found");
+        if (!alreadyDisconnected)
+          throw new Error(
+            `ERROR: Docker proxy network disconnect failed: ${disconnected.stderr.trim()}`,
+          );
+      }
+    }
+    const network = await this.invoke(["network", "rm", networkName]);
     if (
       network.code !== 0 &&
       !network.stderr.toLowerCase().includes("no such network") &&
@@ -233,7 +272,8 @@ export class DockerExecutionDriver implements ExecutionDriver {
       "/tmp:rw,nosuid,size=512m",
     ];
     if (this.egressProxyContainer) {
-      const proxyUrl = `http://${this.egressProxyContainer}:${this.egressProxyPort}`;
+      const credential = createSandboxProxyCredential(input.sandbox_id, this.egressProxySecret!);
+      const proxyUrl = `http://${encodeURIComponent(input.sandbox_id)}:${encodeURIComponent(credential)}@${this.egressProxyContainer}:${this.egressProxyPort}`;
       for (const [name, value] of [
         ["HTTP_PROXY", proxyUrl],
         ["HTTPS_PROXY", proxyUrl],
@@ -353,7 +393,8 @@ export class DockerExecutionDriver implements ExecutionDriver {
       name,
     ]);
     if (inspected.code !== 0) {
-      if (inspected.stderr.toLowerCase().includes("no such network")) return null;
+      const message = inspected.stderr.toLowerCase();
+      if (message.includes("no such network") || message.includes("not found")) return null;
       throw new Error(`ERROR: Docker network inspect failed: ${inspected.stderr.trim()}`);
     }
     const separator = inspected.stdout.indexOf("|");

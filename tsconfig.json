@@ -10,6 +10,7 @@
     { "path": "packages/ledger" },
     { "path": "packages/policy" },
     { "path": "packages/workspace" },
+    { "path": "apps/egress-proxy" },
     { "path": "apps/server" }
   ]
 }
