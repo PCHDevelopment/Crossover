@@ -1,3 +1,16 @@
 export { isPrivateAddress, resolvePublicAddresses } from "./network.js";
 export type { HostResolver } from "./network.js";
-export { createSandboxProxyCredential, verifySandboxProxyCredential } from "./proxy-credentials.js";
+export {
+  createSandboxReadToken,
+  SANDBOX_READ_TOKEN_MAX_TTL_MS,
+  verifySandboxReadToken,
+} from "./sandbox-read-token.js";
+export type { SandboxReadTokenClaims } from "./sandbox-read-token.js";
+export {
+  createHealthInstallProxyCredential,
+  createSandboxProxyCredential,
+  verifyHealthInstallProxyCredential,
+  verifySandboxProxyCredential,
+} from "./proxy-credentials.js";
+export { postWebhook } from "./webhook.js";
+export type { PostWebhookOptions, WebhookRequest } from "./webhook.js";

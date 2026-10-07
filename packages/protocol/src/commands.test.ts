@@ -24,6 +24,7 @@ const CATALOG = `
   participants.list / participants.get
   participants.set_role
   participants.update_manifest
+  participants.wake_secret
   participants.pause / participants.resume / participants.remove
   presence.update
   presence.set_intent
@@ -84,6 +85,7 @@ const READ_ONLY = [
   "room.events.list",
   "participants.list",
   "participants.get",
+  "participants.wake_secret",
   "presence.update",
   "presence.set_intent",
   "presence.clear_intent",
@@ -132,7 +134,7 @@ const valid = (extra: Record<string, unknown> = {}) => ({
 
 describe("METHODS", () => {
   it("contains every §16.1 method plus room.create, and nothing else", () => {
-    expect(catalog).toHaveLength(89);
+    expect(catalog).toHaveLength(90);
     expect([...METHOD_NAMES].sort()).toEqual([...catalog].sort());
   });
 

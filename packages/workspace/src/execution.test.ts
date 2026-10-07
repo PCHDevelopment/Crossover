@@ -77,6 +77,31 @@ class FakeExecutionDriver implements ExecutionDriver {
   }
 }
 
+class MaterializingExecutionDriver extends FakeExecutionDriver {
+  readonly materialized: Array<{
+    sandbox_id: string;
+    room_id: string;
+    participant_id: string;
+    workspace: { repo_path: string; revision: number };
+  }> = [];
+  readonly order: string[] = [];
+
+  async materialize(input: {
+    sandbox_id: string;
+    room_id: string;
+    participant_id: string;
+    workspace: { repo_path: string; revision: number };
+  }): Promise<void> {
+    this.order.push("materialize");
+    this.materialized.push(input);
+  }
+
+  override async start(input: { sandbox_id: string; resources: SandboxResources }): Promise<void> {
+    this.order.push("start");
+    await super.start(input);
+  }
+}
+
 interface Deferred {
   promise: Promise<void>;
   resolve(): void;
@@ -136,6 +161,43 @@ async function makeParticipants(count = 1, kind: "HUMAN" | "AGENT" = "AGENT") {
 }
 
 describe("ExecutionService", () => {
+  it("materializes the canonical revision before starting and records the numeric base", async () => {
+    const { roomId, participantIds } = await makeParticipants();
+    const workspaceId = newId("ws");
+    const repoPath = `/workspace/${roomId}.git`;
+    await db.pool.query("INSERT INTO workspaces (id, room_id, repo_path) VALUES ($1, $2, $3)", [
+      workspaceId,
+      roomId,
+      repoPath,
+    ]);
+    await db.pool.query(
+      `INSERT INTO workspace_revisions (workspace_id, room_id, revision, commit_sha)
+       VALUES ($1, $2, 7, $3)`,
+      [workspaceId, roomId, "a".repeat(40)],
+    );
+    const driver = new MaterializingExecutionDriver();
+    const execution = new ExecutionService(db.pool, driver);
+
+    const sandbox = await execution.ensure(roomId, participantIds[0]!);
+    await execution.ensure(roomId, participantIds[0]!);
+
+    expect(sandbox.base_revision).toBe(7);
+    expect(driver.materialized).toEqual([
+      {
+        sandbox_id: sandbox.id,
+        room_id: roomId,
+        participant_id: participantIds[0],
+        resources: {
+          volume_ref: `volume:${sandbox.id}`,
+          container_ref: `container:${sandbox.id}`,
+        },
+        workspace: { repo_path: repoPath, revision: 7 },
+      },
+    ]);
+    expect(driver.order[0]).toBe("materialize");
+    expect(driver.order[1]).toBe("start");
+  });
+
   it("creates one sandbox per room participant and records the selected disk policy", async () => {
     const { roomId, participantIds } = await makeParticipants(2);
     const driver = new FakeExecutionDriver();
