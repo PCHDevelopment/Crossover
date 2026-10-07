@@ -508,7 +508,7 @@ describe("subscribe: ordered, exactly-once events", () => {
 
     const watch = async (token: string) => {
       const c = await ready(env, token);
-      c.send({ type: "subscribe", after: 0 });
+      c.send({ type: "subscribe", after: 0, profile: "all" });
       await c.frame("subscribed");
       await c.until(() => c.events().some((e) => e.type === "capability.denied"), "a denial");
       return c;
@@ -564,7 +564,7 @@ describe("subscribe: ordered, exactly-once events", () => {
     const watcher = await ready(env, lead);
     const leadId = (watcher.frames.find((f) => f.type === "hello_ok") as Frame).participant_id;
     await asOwner("room.set_lead", { participant_id: leadId });
-    watcher.send({ type: "subscribe", after: 0 });
+    watcher.send({ type: "subscribe", after: 0, profile: "all" });
     await watcher.frame("subscribed");
 
     const deny = async () => {

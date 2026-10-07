@@ -1,10 +1,12 @@
 import type { Pool } from "@crossover/db";
 import {
   authenticate,
+  createEventMatcher,
   type Dispatcher,
   type EventSubscriber,
   redactEventFor,
   type Principal,
+  type SubscriptionFilter,
 } from "@crossover/kernel";
 import { listEvents } from "@crossover/ledger";
 import { CrossoverError, isId, newId, type RoomEvent } from "@crossover/protocol";
@@ -48,6 +50,10 @@ export const CLOSE = {
 
 interface Stream {
   lastSent: number;
+  /** Whether the subscriber wants an event (T704); every event passes for `all`. */
+  match: (event: RoomEvent) => Promise<boolean>;
+  /** Sends in order: a filter that has to ask the database must not reorder the stream. */
+  out: Promise<void>;
   /** Live events that arrived while a backfill was running. */
   pending: RoomEvent[];
   syncing: boolean;
@@ -66,8 +72,9 @@ interface Stream {
  * - `command { id, method, params, idempotency_key? }`: the same envelope as REST, with the
  *   same semantics; answered with `result { id, response, events, replayed, one_time? }` or
  *   `error { id, error }` (the §16.3 body).
- * - `subscribe { after }`: authorized as `room.events.subscribe`; the server sends
- *   `subscribed { after, last_sequence }` and then every event after `after` as
+ * - `subscribe { after, profile?, types?, scopes? }`: authorized as `room.events.subscribe`; the
+ *   server sends `subscribed { after, last_sequence, filter }` (the resolved filter, §17.1: an
+ *   agent gets `relevant` unless it asks for `all` or `custom`) and then every event after `after` as
  *   `event { event }`, in sequence order and each exactly once: history from PostgreSQL, then
  *   live from Redis, and whenever a live event shows a gap (or nothing arrives for a while) the
  *   missing range is fetched from PostgreSQL.
@@ -293,17 +300,28 @@ class Connection {
       auth = await this.o.dispatcher.dispatch(this.principal!, {
         id: newId("cmd"),
         method: "room.events.subscribe",
-        params: { after: frame.after ?? 0 },
+        params: {
+          after: frame.after ?? 0,
+          ...(frame.profile === undefined ? {} : { profile: frame.profile }),
+          ...(frame.types === undefined ? {} : { types: frame.types }),
+          ...(frame.scopes === undefined ? {} : { scopes: frame.scopes }),
+        },
       });
     } catch (error) {
       this.send({ type: "error", error: toHttpError(error).body.error });
       return;
     }
-    const { after, last_sequence } = auth.response as { after: number; last_sequence: number };
+    const { after, last_sequence, filter } = auth.response as {
+      after: number;
+      last_sequence: number;
+      filter: SubscriptionFilter;
+    };
     await this.stopStream();
 
     const stream: Stream = {
       lastSent: after,
+      match: createEventMatcher(this.o.pool, this.principal!, filter),
+      out: Promise.resolve(),
       pending: [],
       syncing: true,
       unsubscribe: async () => undefined,
@@ -314,7 +332,7 @@ class Connection {
     stream.unsubscribe = await this.o.subscriber.subscribe(this.roomId, (event) =>
       this.onLive(stream, event),
     );
-    this.send({ type: "subscribed", after, last_sequence });
+    this.send({ type: "subscribed", after, last_sequence, filter });
     await this.backfill(stream);
     stream.syncing = false;
     this.drain(stream);
@@ -338,12 +356,22 @@ class Connection {
     this.deliver(stream, event);
   }
 
+  /** Send `event` if the subscriber wants it, after everything queued before it. */
+  private emit(stream: Stream, event: RoomEvent): Promise<void> {
+    stream.out = stream.out.then(async () => {
+      if (this.stream !== stream || this.closed) return;
+      if (!(await stream.match(event))) return;
+      this.send({ type: "event", event: this.view(event) });
+    });
+    return stream.out;
+  }
+
   /** Send `event` if it is the next one; on a gap, fetch the missing range from PostgreSQL. */
   private deliver(stream: Stream, event: RoomEvent): void {
     if (event.sequence <= stream.lastSent) return; // already sent (backfill overlapped)
     if (event.sequence === stream.lastSent + 1) {
       stream.lastSent = event.sequence;
-      this.send({ type: "event", event: this.view(event) });
+      void this.emit(stream, event);
       return;
     }
     void this.catchUp(); // a gap: some message was missed
@@ -368,7 +396,7 @@ class Connection {
       });
       for (const event of events) {
         stream.lastSent = event.sequence;
-        this.send({ type: "event", event: this.view(event) });
+        await this.emit(stream, event);
       }
       if (events.length < pageSize) return;
     }
