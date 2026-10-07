@@ -1,4 +1,3 @@
-import type { Pool } from "@crossover/db";
 import type { RoomEvent } from "@crossover/protocol";
 import { z } from "zod";
 import type { Principal } from "../../principal.js";
@@ -69,14 +68,38 @@ export function resolveFilter(
   };
 }
 
+/**
+ * Glob over one dotted-name segment (`*` matches any run of letters/underscores), without a regex:
+ * the two-pointer walk is linear in practice and cannot be made to backtrack exponentially.
+ */
+function segmentMatches(pattern: string, text: string): boolean {
+  let p = 0;
+  let t = 0;
+  let star = -1;
+  let mark = 0;
+  while (t < text.length) {
+    if (p < pattern.length && pattern[p] === "*") {
+      star = p++;
+      mark = t;
+    } else if (p < pattern.length && pattern[p] === text[t]) {
+      p++;
+      t++;
+    } else if (star !== -1) {
+      p = star + 1;
+      t = ++mark;
+    } else {
+      return false;
+    }
+  }
+  while (p < pattern.length && pattern[p] === "*") p++;
+  return p === pattern.length;
+}
+
 /** `task.*` matches `task.created` (the star stays inside one dotted name). */
 export function typeMatches(pattern: string, type: string): boolean {
-  if (!pattern.includes("*")) return pattern === type;
-  const source = pattern
-    .split("*")
-    .map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&"))
-    .join("[a-z_]*");
-  return new RegExp(`^${source}$`).test(type);
+  const want = pattern.split(".");
+  const have = type.split(".");
+  return want.length === have.length && want.every((w, i) => segmentMatches(w, have[i]!));
 }
 
 /** Payload keys that name the participant an event is about. */
@@ -91,10 +114,18 @@ const ABOUT_KEYS = [
   "submitter_id",
   "resolver_id",
   "to",
+  "author_id",
 ];
+
+/** Payload keys that list participants an event is about. */
+const ABOUT_LISTS = ["suspect_ids"];
 
 const names = (payload: Record<string, unknown>, me: string): boolean => {
   for (const key of ABOUT_KEYS) if (payload[key] === me) return true;
+  for (const key of ABOUT_LISTS) {
+    const list = payload[key];
+    if (Array.isArray(list) && list.includes(me)) return true;
+  }
   const nested = (payload["task"] ?? payload["decision"] ?? payload["position"]) as
     Record<string, unknown> | undefined;
   if (nested && typeof nested === "object") {
@@ -110,11 +141,14 @@ const mentions = (payload: Record<string, unknown>, me: string): boolean => {
 
 /**
  * Whether an event is about this participant (§17.1 `relevant`): its task changed or was
- * assigned, a mention, a conflict on its ChangeSet, its sandbox, a lead's decision, a change of
- * lead, a room status change, an approval, a budget or capability change that concerns it, and
- * health turning RED on a range that includes its ChangeSets.
+ * assigned or sent to it for review (and a new task nobody owns yet), a mention, a conflict or
+ * ChangeSet event on its own ChangeSets, its sandbox, a lead's decision, a change of lead, a room
+ * status change, an approval, a budget or capability change that concerns it, and health turning
+ * RED where it is a suspect. **Decided from the event alone**: what an event is about travels in
+ * its payload as of that moment, so a replay from `after` and the live stream agree, and nothing
+ * here asks the database.
  */
-async function isRelevant(db: Pool, principal: Principal, event: RoomEvent): Promise<boolean> {
+function isRelevant(principal: Principal, event: RoomEvent): boolean {
   const me = principal.participant_id;
   const p = (event.payload ?? {}) as Record<string, unknown>;
   const type = event.type;
@@ -122,68 +156,52 @@ async function isRelevant(db: Pool, principal: Principal, event: RoomEvent): Pro
   if (/^decision\.(decided|vetoed|superseded)$/.test(type)) return true;
   if (type === "message.sent" || type === "message.edited") return mentions(p, me);
   if (type === "capability.denied") return event.actor_id === me;
-  if (type === "workspace.health") {
-    if (p["status"] !== "RED") return false;
-    const { rowCount } = await db.query(
-      `SELECT 1 FROM inbox_items WHERE room_id = $1 AND participant_id = $2
-         AND kind = 'HEALTH_RED' AND ref ->> 'id' = $3`,
-      [event.room_id, me, String(p["log_ref"] ?? "")],
-    );
-    return (rowCount ?? 0) > 0;
+  if (type === "workspace.health") return p["status"] === "RED" && names(p, me);
+  if (type === "task.created") {
+    // Unowned tasks are for whoever claims from the open pool.
+    const task = p["task"] as { owner_id?: unknown } | undefined;
+    return names(p, me) || task?.owner_id === null || task?.owner_id === undefined;
   }
-  if (/^task\./.test(type)) {
-    if (names(p, me)) return true;
-    const id = typeof p["task_id"] === "string" ? p["task_id"] : undefined;
-    if (!id) return false;
-    const { rowCount } = await db.query(
-      "SELECT 1 FROM tasks WHERE id = $1 AND room_id = $2 AND owner_id = $3",
-      [id, event.room_id, me],
-    );
-    return (rowCount ?? 0) > 0;
-  }
+  if (/^task\./.test(type)) return names(p, me);
   if (/^workspace\.(changeset|conflict)\./.test(type)) {
-    if (names(p, me)) return true;
-    const id = typeof p["changeset_id"] === "string" ? p["changeset_id"] : undefined;
-    if (id) {
-      const { rowCount } = await db.query(
-        "SELECT 1 FROM changesets WHERE id = $1 AND room_id = $2 AND actor_id = $3",
-        [id, event.room_id, me],
-      );
-      if ((rowCount ?? 0) > 0) return true;
-    }
     // An escalated conflict is the lead's to resolve.
-    return type === "workspace.conflict.escalated" && principal.role === "LEAD";
+    return names(p, me) || (type === "workspace.conflict.escalated" && principal.role === "LEAD");
   }
   // Participants, approvals, budgets, sandboxes, checkpoints, …: when they name this participant.
   return names(p, me);
 }
 
 /**
- * The test a connection applies to each event of the stream (T704). It answers in order and never
- * throws: if the database can't be asked, the event is delivered (a filter may drop noise, never
- * information). The viewer's redaction still applies to whatever passes.
+ * The test a connection applies to each event of the stream (T704). Pure and synchronous: it
+ * reads the event and nothing else, so it cannot reorder the stream or disagree between a replay
+ * and the live feed. The viewer's redaction still applies to whatever passes.
  */
 export function createEventMatcher(
-  db: Pool,
   principal: Principal,
   filter: SubscriptionFilter,
-): (event: RoomEvent) => Promise<boolean> {
-  if (filter.profile === "all") return async () => true;
-  return async (event) => {
-    try {
-      if (filter.profile === "relevant") return await isRelevant(db, principal, event);
-      const p = (event.payload ?? {}) as Record<string, unknown>;
-      const me = principal.participant_id;
-      if (filter.scopes?.mentions && event.type === "message.sent" && mentions(p, me)) return true;
-      const typeOk =
-        filter.types === undefined || filter.types.some((t) => typeMatches(t, event.type));
-      if (!typeOk) return false;
-      if (filter.scopes?.tasks === "mine" && /^task\./.test(event.type)) {
-        return await isRelevant(db, principal, event);
-      }
-      return true;
-    } catch {
+): (event: RoomEvent) => boolean {
+  if (filter.profile === "all") return () => true;
+  if (filter.profile === "relevant") return (event) => isRelevant(principal, event);
+  const me = principal.participant_id;
+  const types = filter.types?.map((t) => t.split("."));
+  const typeOk = (type: string): boolean => {
+    if (!types) return true;
+    const have = type.split(".");
+    return types.some(
+      (want) => want.length === have.length && want.every((w, i) => segmentMatches(w, have[i]!)),
+    );
+  };
+  return (event) => {
+    const p = (event.payload ?? {}) as Record<string, unknown>;
+    if (
+      filter.scopes?.mentions &&
+      (event.type === "message.sent" || event.type === "message.edited") &&
+      mentions(p, me)
+    ) {
       return true;
     }
+    if (!typeOk(event.type)) return false;
+    if (filter.scopes?.tasks === "mine" && /^task\./.test(event.type)) return names(p, me);
+    return true;
   };
 }

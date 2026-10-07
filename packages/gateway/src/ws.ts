@@ -51,7 +51,7 @@ export const CLOSE = {
 interface Stream {
   lastSent: number;
   /** Whether the subscriber wants an event (T704); every event passes for `all`. */
-  match: (event: RoomEvent) => Promise<boolean>;
+  match: (event: RoomEvent) => boolean;
   /** Sends in order: a filter that has to ask the database must not reorder the stream. */
   out: Promise<void>;
   /** Live events that arrived while a backfill was running. */
@@ -320,7 +320,7 @@ class Connection {
 
     const stream: Stream = {
       lastSent: after,
-      match: createEventMatcher(this.o.pool, this.principal!, filter),
+      match: createEventMatcher(this.principal!, filter),
       out: Promise.resolve(),
       pending: [],
       syncing: true,
@@ -358,11 +358,14 @@ class Connection {
 
   /** Send `event` if the subscriber wants it, after everything queued before it. */
   private emit(stream: Stream, event: RoomEvent): Promise<void> {
-    stream.out = stream.out.then(async () => {
-      if (this.stream !== stream || this.closed) return;
-      if (!(await stream.match(event))) return;
-      this.send({ type: "event", event: this.view(event) });
-    });
+    stream.out = stream.out
+      .then(() => {
+        if (this.stream !== stream || this.closed) return;
+        if (!stream.match(event)) return;
+        this.send({ type: "event", event: this.view(event) });
+      })
+      // One failing send must not leave every later one waiting behind a rejected promise.
+      .catch(() => undefined);
     return stream.out;
   }
 

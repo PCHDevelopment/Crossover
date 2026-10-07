@@ -157,7 +157,12 @@ export async function sweepExpiredLeases(
           events.push({
             type: "task.lease_expired" as const,
             actor_id: SYSTEM_ACTOR,
-            payload: { task_id: c.id, previous_owner_id: c.owner_id, version: row.version },
+            payload: {
+              task_id: c.id,
+              owner_id: null,
+              previous_owner_id: c.owner_id,
+              version: row.version,
+            },
           });
         }
         return { result: released, events };

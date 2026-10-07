@@ -175,7 +175,8 @@ describe("filtered subscriptions", () => {
     expect(types(seenB)).toContain("message.sent");
     expect(seenB.filter((e) => e.type === "message.sent")).toHaveLength(1);
     expect(types(seenB)).toContain("capability.denied");
-    expect(types(seenB).filter((t) => t.startsWith("task."))).toEqual([]);
+    // A new task nobody owns yet is for whoever claims it; the assignment and the work are A's.
+    expect(types(seenB).filter((t) => t.startsWith("task."))).toEqual(["task.created"]);
     // The owner (a human) and the `all` agent see the whole stream, in order, once.
     const everything = Array.from({ length: target - after }, (_, i) => after + 1 + i);
     expect(seenOwner.map((e) => e.sequence)).toEqual(everything);
@@ -213,5 +214,79 @@ describe("filtered subscriptions", () => {
         for await (const e of unsupported) void e;
       })(),
     ).rejects.toMatchObject({ code: "VALIDATION" });
+  });
+
+  it("a replay from `after` agrees with the live stream, even when the task changed hands since", async () => {
+    const r = await newRoom();
+    const a = await r.agent("AgentA");
+    const b = await r.agent("AgentB");
+    const liveA: SdkEvent[] = [];
+    const base = await lastSequence(r.owner);
+    const live = a.room.subscribe({
+      after: base,
+      onEvent: (e) => liveA.push(e),
+      reconnect: { minMs: 20, maxMs: 60 },
+    });
+    const task = (
+      await r.owner.api.tasks.create<{ id: string; version: number }>({
+        title: "Handed over",
+        requirements: ["done"],
+      })
+    ).response;
+    const assigned = (
+      await r.owner.api.tasks.assign<{ version: number }>({
+        task_id: task.id,
+        expected_version: task.version,
+        participant_id: a.id,
+      })
+    ).response;
+    const updated = (
+      await r.owner.api.tasks.update<{ version: number }>({
+        task_id: task.id,
+        expected_version: assigned.version,
+        description: "more words",
+      })
+    ).response;
+    const released = (
+      await a.room.api.tasks.release<{ version: number }>({
+        task_id: task.id,
+        expected_version: updated.version,
+      })
+    ).response;
+    await b.room.api.tasks.claim({ task_id: task.id, expected_version: released.version });
+    await r.owner.api.tasks.update({
+      task_id: task.id,
+      expected_version: released.version + 1,
+      description: "B's now",
+    });
+    const target = await lastSequence(r.owner);
+    await collect(live, liveA, target);
+    live.close();
+
+    // A comes back later with the sequence it had before all this: nothing is lost, nothing extra.
+    const replayed: SdkEvent[] = [];
+    const again = a.room.subscribe({ after: base, onEvent: (e) => replayed.push(e) });
+    await collect(again, replayed, target);
+    again.close();
+    expect(replayed.map((e) => e.sequence)).toEqual(liveA.map((e) => e.sequence));
+    const types = replayed.map((e) => e.type);
+    expect(types).toEqual(
+      expect.arrayContaining(["task.assigned", "task.updated", "task.released"]),
+    );
+    // B's claim and the update after it are B's: A gets neither, on replay or live.
+    expect(types).not.toContain("task.claimed");
+    expect(types.filter((t) => t === "task.updated")).toHaveLength(1);
+  }, 60_000);
+
+  it("a pathological type pattern doesn't stall the gateway for everyone else", async () => {
+    const r = await newRoom();
+    const a = await r.agent("AgentA");
+    const started = Date.now();
+    const sub = a.room.subscribe({ types: [`workspace.changeset.${"*".repeat(60)}x`] });
+    await r.owner.api.messages.send({ body: "still served" });
+    const listed = await r.owner.api.messages.list<{ messages: { body: string }[] }>();
+    sub.close();
+    expect(listed.response.messages).toHaveLength(1);
+    expect(Date.now() - started).toBeLessThan(5_000);
   });
 });
