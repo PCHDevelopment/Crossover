@@ -835,3 +835,52 @@ describe("0013_memory", () => {
     await expect(rev("missing", 1)).rejects.toMatchObject({ code: "23503" });
   });
 });
+
+describe("0024_task_evidence", () => {
+  const room = async () => {
+    const id = `room_ev${Math.random().toString(36).slice(2)}`;
+    await db.pool.query(
+      `INSERT INTO rooms (id, slug, name, objective, owner_id) VALUES ($1, $1, 'n', 'o', 'x')`,
+      [id],
+    );
+    await db.pool.query(
+      `INSERT INTO participants (id, room_id, kind, display_name, role, status)
+       VALUES ($2, $1, 'AGENT', 'a', 'DEVELOPER', 'ACTIVE')`,
+      [id, `${id}_p`],
+    );
+    return { id, who: `${id}_p` };
+  };
+  const task = (r: { id: string; who: string }, evidence?: string) =>
+    db.pool.query(
+      evidence === undefined
+        ? `INSERT INTO tasks (id, room_id, title, requirements, created_by)
+           VALUES ($1, $2, 't', '["r"]'::jsonb, $3) RETURNING evidence`
+        : `INSERT INTO tasks (id, room_id, title, requirements, created_by, evidence)
+           VALUES ($1, $2, 't', '["r"]'::jsonb, $3, $4::jsonb) RETURNING evidence`,
+      [
+        `task_${Math.random().toString(36).slice(2)}`,
+        r.id,
+        r.who,
+        ...(evidence === undefined ? [] : [evidence]),
+      ],
+    );
+
+  it("is recorded as applied", async () => {
+    const { rows } = await db.pool.query("SELECT name FROM schema_migrations WHERE version = 24");
+    expect(rows).toEqual([{ name: "task_evidence" }]);
+  });
+
+  it("a task starts with no evidence, and evidence must be a JSON array", async () => {
+    const r = await room();
+    expect((await task(r)).rows[0].evidence).toEqual([]);
+    await expect(task(r, '{"a":1}')).rejects.toMatchObject({ code: "23514" });
+    await task(r, '[{"requirement":0,"proof":[{"kind":"test","ref":"x"}]}]');
+  });
+
+  it("evidence is capped at 32 KiB", async () => {
+    const r = await room();
+    const big = (n: number) => JSON.stringify([{ note: "x".repeat(n) }]);
+    await task(r, big(32_000));
+    await expect(task(r, big(33_000))).rejects.toMatchObject({ code: "23514" });
+  });
+});
