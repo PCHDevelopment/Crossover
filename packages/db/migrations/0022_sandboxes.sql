@@ -3,7 +3,11 @@ CREATE TABLE sandboxes (
   id             text PRIMARY KEY,
   room_id        text NOT NULL,
   participant_id text NOT NULL,
-  status         text NOT NULL CHECK (status IN ('CREATING', 'RUNNING', 'HIBERNATED', 'DESTROYED')),
+  status         text NOT NULL CHECK (status IN (
+                   'CREATING', 'STARTING', 'RUNNING', 'HIBERNATING', 'HIBERNATED', 'DESTROYING', 'DESTROYED'
+                 )),
+  limits         jsonb NOT NULL DEFAULT '{"disk_enforcement":"soft"}'::jsonb
+                   CHECK (limits ? 'disk_enforcement' AND limits->>'disk_enforcement' IN ('hard', 'soft')),
   base_revision  bigint CHECK (base_revision >= 0),
   volume_ref     text,
   container_ref  text,
@@ -15,8 +19,12 @@ CREATE TABLE sandboxes (
   CONSTRAINT sandboxes_participant_room_fk
     FOREIGN KEY (participant_id, room_id) REFERENCES participants (id, room_id),
   CONSTRAINT sandboxes_resource_refs_check CHECK (
-    (status IN ('RUNNING', 'HIBERNATED') AND volume_ref IS NOT NULL AND container_ref IS NOT NULL)
-    OR status IN ('CREATING', 'DESTROYED')
+    (volume_ref IS NULL) = (container_ref IS NULL)
+    AND (
+      (status IN ('CREATING', 'DESTROYED') AND volume_ref IS NULL)
+      OR status = 'DESTROYING'
+      OR (status IN ('STARTING', 'RUNNING', 'HIBERNATING', 'HIBERNATED') AND volume_ref IS NOT NULL)
+    )
   )
 );
 

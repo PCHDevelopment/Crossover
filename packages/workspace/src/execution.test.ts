@@ -1,7 +1,13 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import type { Pool } from "@crossover/db";
 import { createTestDatabase, type TestDatabase } from "@crossover/db/testing";
 import { newId } from "@crossover/protocol";
-import { ExecutionService, type ExecutionDriver, type SandboxResources } from "./execution.js";
+import {
+  ExecutionService,
+  type ExecutionDriver,
+  type SandboxLimits,
+  type SandboxResources,
+} from "./execution.js";
 
 let db: TestDatabase;
 beforeAll(async () => {
@@ -13,27 +19,99 @@ afterAll(async () => {
 
 class FakeExecutionDriver implements ExecutionDriver {
   readonly created: string[] = [];
-  readonly started: SandboxResources[] = [];
-  readonly stopped: SandboxResources[] = [];
+  readonly createCalls: string[] = [];
+  readonly started: string[] = [];
+  readonly stopped: string[] = [];
+  readonly destroyCalls: string[] = [];
   readonly destroyed: SandboxResources[] = [];
+  readonly limits: SandboxLimits[] = [];
+  readonly provisioned = new Map<string, SandboxResources>();
+  readonly running = new Set<string>();
+  failCreateAfterProvision = false;
+  stopGate: { entered: Deferred; release: Deferred } | undefined;
 
-  async create(input: { sandbox_id: string }): Promise<SandboxResources> {
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    this.created.push(input.sandbox_id);
-    return {
-      volume_ref: `volume:${input.sandbox_id}`,
-      container_ref: `container:${input.sandbox_id}`,
-    };
+  async create(input: { sandbox_id: string; limits: SandboxLimits }): Promise<SandboxResources> {
+    this.createCalls.push(input.sandbox_id);
+    let resources = this.provisioned.get(input.sandbox_id);
+    if (!resources) {
+      resources = {
+        volume_ref: `volume:${input.sandbox_id}`,
+        container_ref: `container:${input.sandbox_id}`,
+      };
+      this.provisioned.set(input.sandbox_id, resources);
+      this.created.push(input.sandbox_id);
+      this.limits.push(input.limits);
+    }
+    if (this.failCreateAfterProvision) {
+      this.failCreateAfterProvision = false;
+      throw new Error("injected Docker create failure after provisioning");
+    }
+    return resources;
   }
-  async start(resources: SandboxResources): Promise<void> {
-    this.started.push(resources);
+
+  async start(input: { sandbox_id: string; resources: SandboxResources }): Promise<void> {
+    this.started.push(input.sandbox_id);
+    this.running.add(input.sandbox_id);
   }
-  async stop(resources: SandboxResources): Promise<void> {
-    this.stopped.push(resources);
+
+  async stop(input: { sandbox_id: string; resources: SandboxResources }): Promise<void> {
+    this.stopped.push(input.sandbox_id);
+    if (this.stopGate) {
+      this.stopGate.entered.resolve();
+      await this.stopGate.release.promise;
+    }
+    this.running.delete(input.sandbox_id);
   }
-  async destroy(resources: SandboxResources): Promise<void> {
-    this.destroyed.push(resources);
+
+  async destroy(input: { sandbox_id: string; resources?: SandboxResources }): Promise<void> {
+    this.destroyCalls.push(input.sandbox_id);
+    const resources = this.provisioned.get(input.sandbox_id);
+    if (resources) this.destroyed.push(resources);
+    this.provisioned.delete(input.sandbox_id);
+    this.running.delete(input.sandbox_id);
   }
+}
+
+interface Deferred {
+  promise: Promise<void>;
+  resolve(): void;
+}
+
+function deferred(): Deferred {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => (resolve = done));
+  return { promise, resolve };
+}
+
+function failOneTransactionQuery(pool: Pool, sqlFragment: string): Pool {
+  let shouldFail = true;
+  return new Proxy(pool, {
+    get(target, property, receiver) {
+      if (property === "query") return target.query.bind(target);
+      if (property === "connect")
+        return async () => {
+          const client = await target.connect();
+          const originalQuery = client.query.bind(client);
+          return new Proxy(client, {
+            get(clientTarget, clientProperty, clientReceiver) {
+              if (clientProperty === "query")
+                return async (...args: unknown[]) => {
+                  const sql = args[0];
+                  if (shouldFail && typeof sql === "string" && sql.includes(sqlFragment)) {
+                    shouldFail = false;
+                    throw new Error("injected database write failure");
+                  }
+                  return Reflect.apply(originalQuery, clientTarget, args);
+                };
+              const value = Reflect.get(clientTarget, clientProperty, clientReceiver);
+              return typeof value === "function" ? value.bind(clientTarget) : value;
+            },
+          });
+        };
+      const value = Reflect.get(target, property, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  }) as Pool;
 }
 
 async function makeParticipants(count = 1, kind: "HUMAN" | "AGENT" = "AGENT") {
@@ -53,10 +131,10 @@ async function makeParticipants(count = 1, kind: "HUMAN" | "AGENT" = "AGENT") {
 }
 
 describe("ExecutionService", () => {
-  it("creates one sandbox per room participant and does not expose another participant's sandbox", async () => {
+  it("creates one sandbox per room participant and records the selected disk policy", async () => {
     const { roomId, participantIds } = await makeParticipants(2);
     const driver = new FakeExecutionDriver();
-    const execution = new ExecutionService(db.pool, driver);
+    const execution = new ExecutionService(db.pool, driver, { diskEnforcement: "hard" });
     const [first, concurrent] = await Promise.all([
       execution.ensure(roomId, participantIds[0]!),
       execution.ensure(roomId, participantIds[0]!),
@@ -66,12 +144,59 @@ describe("ExecutionService", () => {
     expect(first.id).toBe(concurrent.id);
     expect(first.id).not.toBe(second.id);
     expect(first.volume_ref).not.toBe(second.volume_ref);
+    expect(first.limits).toEqual({ disk_enforcement: "hard" });
+    expect(driver.limits).toEqual([{ disk_enforcement: "hard" }, { disk_enforcement: "hard" }]);
     expect(driver.created).toHaveLength(2);
+    expect(driver.started).toContain(first.id);
     expect(await execution.get(roomId, participantIds[0]!)).toMatchObject({ id: first.id });
     expect(await execution.get(roomId, newId("part"))).toBeNull();
   });
 
-  it("hibernates after 30 minutes, keeps the volume, and resumes the same sandbox", async () => {
+  it("retries a failed create by adopting the stable CREATING row and its resources", async () => {
+    const { roomId, participantIds } = await makeParticipants();
+    const driver = new FakeExecutionDriver();
+    driver.failCreateAfterProvision = true;
+    const execution = new ExecutionService(db.pool, driver);
+
+    await expect(execution.ensure(roomId, participantIds[0]!)).rejects.toThrow(
+      "injected Docker create failure",
+    );
+    const creating = await execution.get(roomId, participantIds[0]!);
+    expect(creating).toMatchObject({ status: "CREATING" });
+
+    const resumed = await execution.ensure(roomId, participantIds[0]!);
+    expect(resumed).toMatchObject({ id: creating!.id, status: "RUNNING" });
+    expect(driver.createCalls).toEqual([creating!.id, creating!.id]);
+    expect(driver.created).toEqual([creating!.id]);
+    expect(driver.started).toEqual([creating!.id]);
+  });
+
+  it("recovers resources when a failure occurs after create but before refs are recorded", async () => {
+    const { roomId, participantIds } = await makeParticipants();
+    const driver = new FakeExecutionDriver();
+    let failOnce = true;
+    const execution = new ExecutionService(db.pool, driver, {
+      afterDriverCreate: async () => {
+        if (failOnce) {
+          failOnce = false;
+          throw new Error("injected failure before recording resources");
+        }
+      },
+    });
+
+    await expect(execution.ensure(roomId, participantIds[0]!)).rejects.toThrow(
+      "injected failure before recording resources",
+    );
+    const creating = await execution.get(roomId, participantIds[0]!);
+    expect(creating).toMatchObject({ status: "CREATING", volume_ref: null, container_ref: null });
+
+    const retried = await execution.ensure(roomId, participantIds[0]!);
+    expect(retried).toMatchObject({ id: creating!.id, status: "RUNNING" });
+    expect(driver.createCalls).toEqual([creating!.id, creating!.id]);
+    expect(driver.created).toEqual([creating!.id]);
+  });
+
+  it("hibernates after 30 minutes, retains the volume, and resumes the same sandbox", async () => {
     const { roomId, participantIds } = await makeParticipants();
     const driver = new FakeExecutionDriver();
     const execution = new ExecutionService(db.pool, driver);
@@ -93,39 +218,96 @@ describe("ExecutionService", () => {
       status: "RUNNING",
       volume_ref: created.volume_ref,
     });
-    expect(driver.stopped).toHaveLength(1);
-    expect(driver.started).toEqual([
-      { volume_ref: created.volume_ref, container_ref: created.container_ref },
-    ]);
+    expect(driver.stopped).toEqual([created.id]);
+    expect(driver.started).toEqual([created.id, created.id]);
   });
 
-  it("destroys a participant sandbox and every remaining sandbox when a room is archived", async () => {
-    const { roomId, participantIds } = await makeParticipants(2);
+  it("restores a stopped container when hibernation's database write fails", async () => {
+    const { roomId, participantIds } = await makeParticipants();
+    const driver = new FakeExecutionDriver();
+    const flakyPool = failOneTransactionQuery(db.pool, "SET status = 'HIBERNATED'");
+    const execution = new ExecutionService(flakyPool, driver);
+    const created = await execution.ensure(roomId, participantIds[0]!);
+    await db.pool.query(
+      "UPDATE sandboxes SET last_active_at = clock_timestamp() - interval '31 minutes' WHERE id = $1",
+      [created.id],
+    );
+
+    await expect(execution.sweepIdle()).rejects.toThrow("injected database write failure");
+    expect(await execution.get(roomId, participantIds[0]!)).toMatchObject({ status: "RUNNING" });
+    const healed = await execution.ensure(roomId, participantIds[0]!);
+    expect(healed.status).toBe("RUNNING");
+    expect(driver.started).toEqual([created.id, created.id]);
+  });
+
+  it("keeps an active ensure from being hibernated by a concurrent idle sweep", async () => {
+    const { roomId, participantIds } = await makeParticipants();
     const driver = new FakeExecutionDriver();
     const execution = new ExecutionService(db.pool, driver);
+    const created = await execution.ensure(roomId, participantIds[0]!);
+    await db.pool.query(
+      "UPDATE sandboxes SET last_active_at = clock_timestamp() - interval '31 minutes' WHERE id = $1",
+      [created.id],
+    );
+    const gate = { entered: deferred(), release: deferred() };
+    driver.stopGate = gate;
+
+    const sweep = execution.sweepIdle();
+    await gate.entered.promise;
+    const ensure = execution.ensure(roomId, participantIds[0]!);
+    gate.release.resolve();
+    expect(await sweep).toBe(1);
+    const active = await ensure;
+    expect(active.status).toBe("RUNNING");
+    expect(driver.running.has(active.id)).toBe(true);
+  });
+
+  it("makes participant and room cleanup safe to retry after Docker has removed resources", async () => {
+    const { roomId, participantIds } = await makeParticipants(2);
+    const driver = new FakeExecutionDriver();
+    const flakyPool = failOneTransactionQuery(db.pool, "SET status = 'DESTROYED'");
+    const execution = new ExecutionService(flakyPool, driver);
     const [first, second] = await Promise.all(
       participantIds.map((participantId) => execution.ensure(roomId, participantId)),
     );
 
+    await expect(execution.destroyParticipant(roomId, participantIds[0]!)).rejects.toThrow(
+      "injected database write failure",
+    );
+    expect(await execution.get(roomId, participantIds[0]!)).toMatchObject({ status: "DESTROYING" });
     await execution.destroyParticipant(roomId, participantIds[0]!);
     expect(await execution.get(roomId, participantIds[0]!)).toMatchObject({ status: "DESTROYED" });
     await execution.destroyRoom(roomId);
     expect(await execution.get(roomId, participantIds[1]!)).toMatchObject({ status: "DESTROYED" });
+    expect(driver.destroyCalls.filter((id) => id === first!.id)).toHaveLength(2);
     expect(driver.destroyed.map(({ container_ref }) => container_ref).sort()).toEqual(
       [first!.container_ref, second!.container_ref].sort(),
     );
   });
 
-  it("rejects sandbox creation for a removed participant", async () => {
+  it("does not create sandboxes for removed or paused participants or paused rooms", async () => {
     const { roomId, participantIds } = await makeParticipants();
+    const driver = new FakeExecutionDriver();
+    const execution = new ExecutionService(db.pool, driver);
     await db.pool.query("UPDATE participants SET status = 'REMOVED' WHERE id = $1", [
       participantIds[0],
     ]);
-    const driver = new FakeExecutionDriver();
-    const execution = new ExecutionService(db.pool, driver);
-
     await expect(execution.ensure(roomId, participantIds[0]!)).rejects.toMatchObject({
       code: "NOT_FOUND",
+    });
+
+    const paused = await makeParticipants();
+    await db.pool.query("UPDATE participants SET status = 'PAUSED' WHERE id = $1", [
+      paused.participantIds[0],
+    ]);
+    await expect(execution.ensure(paused.roomId, paused.participantIds[0]!)).rejects.toMatchObject({
+      code: "PARTICIPANT_PAUSED",
+    });
+
+    const frozen = await makeParticipants();
+    await db.pool.query("UPDATE rooms SET status = 'PAUSED' WHERE id = $1", [frozen.roomId]);
+    await expect(execution.ensure(frozen.roomId, frozen.participantIds[0]!)).rejects.toMatchObject({
+      code: "ROOM_PAUSED",
     });
     expect(driver.created).toEqual([]);
   });
