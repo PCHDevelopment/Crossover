@@ -14,8 +14,8 @@ import {
 } from "./task.js";
 
 /**
- * Is the workspace healthy enough to approve `task` (§12)? The real gate (T610) runs the room's
- * health command at the reviewed revision; until then {@link alwaysGreen} lets everything through.
+ * Is the workspace healthy enough to approve `task` (§12)? The server composition root wires the
+ * T610 workspace gate; {@link alwaysGreen} remains available for isolated command-module use.
  */
 export interface HealthGate {
   isGreenFor(task: TaskView, ctx: CommandContext): Promise<boolean>;
