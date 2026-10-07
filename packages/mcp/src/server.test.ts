@@ -601,6 +601,7 @@ describe("MCP task tools (T708)", () => {
     });
     expect(stale.isError).toBe(true);
     expect(stale.body.error.code).toBe("CONFLICT_VERSION");
+    expect(stale.body.error.details.current.provenance.author_id).toBe(s.agentId);
     expect(stale.body.error.details.current.id).toBe(created.body.id);
   });
 
@@ -684,6 +685,11 @@ describe("MCP collaboration tools (T709)", () => {
       mentions: [s.agentId],
     });
     expect(sent.body.author_id).toBe(s.ownerId);
+    expect(sent.body.provenance).toEqual({
+      author_id: s.ownerId,
+      author_kind: "HUMAN",
+      trust: "participant",
+    });
     const inbox = await call(agent, "inbox_list");
     expect(inbox.body.items).toHaveLength(1);
     expect(inbox.body.items[0]).toMatchObject({ kind: "MENTION" });
@@ -700,7 +706,11 @@ describe("MCP collaboration tools (T709)", () => {
       value: "PostgreSQL",
       expected_revision: 0,
     });
-    expect(put.body).toMatchObject({ revision: 1, author_id: s.agentId });
+    expect(put.body).toMatchObject({
+      revision: 1,
+      author_id: s.agentId,
+      provenance: { author_id: s.agentId, author_kind: "AGENT", trust: "participant" },
+    });
     const stale = await call(owner, "memory_put", {
       key: "architecture/database",
       value: "SQLite",
@@ -732,6 +742,10 @@ describe("MCP collaboration tools (T709)", () => {
     });
     const got = await call(agent, "decisions_get", { decision_id: id });
     expect(got.body.positions[0].participant_id).toBe(s.ownerId);
+    expect(got.body.positions[0].provenance).toMatchObject({
+      author_id: s.ownerId,
+      trust: "participant",
+    });
     const refused = await call(agent, "decisions_decide", {
       decision_id: id,
       expected_version: 1,
