@@ -1,12 +1,13 @@
 import { CrossoverError } from "@crossover/protocol";
 import { z } from "zod";
+import { loadAuthorKinds, provenanceOf } from "../provenance.js";
 import type { Dispatcher } from "../../dispatcher.js";
 import {
   DECISION_COLUMNS,
   decisionConflict,
   decisionView,
+  labeledDecision,
   loadDecision,
-  loadPositions,
   type DecisionRow,
 } from "./decisions.js";
 import { mirrorDecision } from "./mirror.js";
@@ -133,7 +134,7 @@ export function registerDecisionDecideCommands(dispatcher: Dispatcher): void {
         );
         superseded = old[0];
       }
-      const decision = decisionView(updated, await loadPositions(ctx.client, ctx.room_id, row.id));
+      const decision = await labeledDecision(ctx.client, ctx.room_id, updated);
       // An accepted decision is mirrored into memory in this same transaction (§7.4, T407).
       const mirrored = await mirrorDecision(ctx.client, ctx.room_id, updated);
       // …and the superseded one's entry moves to SUPERSEDED with it.
@@ -210,7 +211,7 @@ export function registerDecisionDecideCommands(dispatcher: Dispatcher): void {
       // A vetoed decision that had been accepted is no longer knowledge: its entry says so.
       const mirrored = await mirrorDecision(ctx.client, ctx.room_id, updated);
       return {
-        response: decisionView(updated, await loadPositions(ctx.client, ctx.room_id, row.id)),
+        response: await labeledDecision(ctx.client, ctx.room_id, updated),
         events: [
           {
             type: "decision.vetoed" as const,
@@ -253,7 +254,7 @@ export function registerDecisionDecideCommands(dispatcher: Dispatcher): void {
       const updated = rows[0];
       if (!updated) throw await decisionConflict(ctx.client, ctx.room_id, row.id);
       return {
-        response: decisionView(updated, await loadPositions(ctx.client, ctx.room_id, row.id)),
+        response: await labeledDecision(ctx.client, ctx.room_id, updated),
         events: [
           {
             type: "decision.withdrawn" as const,
@@ -279,7 +280,7 @@ export function registerDecisionDecideCommands(dispatcher: Dispatcher): void {
     execute: async (ctx, p) => {
       const row = await loadDecision(ctx.client, ctx.room_id, p.decision_id);
       return {
-        response: decisionView(row, await loadPositions(ctx.client, ctx.room_id, row.id)),
+        response: await labeledDecision(ctx.client, ctx.room_id, row),
       };
     },
   });
@@ -305,10 +306,15 @@ export function registerDecisionDecideCommands(dispatcher: Dispatcher): void {
          LIMIT $4`,
         [ctx.room_id, p.status ?? null, p.after ?? null, p.limit],
       );
+      const kinds = await loadAuthorKinds(
+        ctx.client,
+        ctx.room_id,
+        rows.map((r) => r.proposed_by),
+      );
       const decisions = rows.map(({ position_count, ...row }) => {
         const { positions: _positions, ...view } = decisionView(row);
         void _positions;
-        return { ...view, position_count };
+        return { ...view, provenance: provenanceOf(kinds, row.proposed_by), position_count };
       });
       const last = rows[rows.length - 1];
       return {

@@ -1,6 +1,13 @@
 import { CrossoverError, newId } from "@crossover/protocol";
 import { z } from "zod";
 import { deliverInbox } from "../inbox/inbox.js";
+import {
+  loadAuthorKinds,
+  principalKinds,
+  provenanceOf,
+  type AuthorKinds,
+  type Provenance,
+} from "../provenance.js";
 import { checkLoopProtection } from "./loop.js";
 import type { Dispatcher } from "../../dispatcher.js";
 
@@ -63,6 +70,16 @@ export interface MessageView extends Omit<MessageRow, "created_at" | "edited_at"
   created_at: string;
   edited_at: string | null;
 }
+
+/** What a reader gets: the message plus who wrote it (§16.5). The ledger keeps the plain view. */
+export interface LabeledMessage extends MessageView {
+  provenance: Provenance;
+}
+
+export const labelMessage = (message: MessageView, kinds: AuthorKinds): LabeledMessage => ({
+  ...message,
+  provenance: provenanceOf(kinds, message.author_id),
+});
 
 const COLUMNS = "id, room_id, author_id, body, mentions, refs, reply_to, created_at, edited_at";
 
@@ -164,7 +181,7 @@ export function registerMessageCommands(dispatcher: Dispatcher): void {
         });
       }
       return {
-        response: message,
+        response: labelMessage(message, principalKinds(ctx.principal)),
         events: [
           { type: "message.sent" as const, payload: { message } },
           ...(loop.detected ? [loop.detected.event] : []),
@@ -196,7 +213,7 @@ export function registerMessageCommands(dispatcher: Dispatcher): void {
       );
       const message = messageView(rows[0]!);
       return {
-        response: message,
+        response: labelMessage(message, principalKinds(ctx.principal)),
         events: [
           {
             type: "message.edited" as const,
@@ -244,7 +261,17 @@ export function registerMessageCommands(dispatcher: Dispatcher): void {
       );
       const page = rows.slice(0, p.limit);
       if (older) page.reverse(); // oldest first
-      return { response: { messages: page.map(messageView), has_more: rows.length > p.limit } };
+      const kinds = await loadAuthorKinds(
+        ctx.client,
+        ctx.room_id,
+        page.map((m) => m.author_id),
+      );
+      return {
+        response: {
+          messages: page.map((m) => labelMessage(messageView(m), kinds)),
+          has_more: rows.length > p.limit,
+        },
+      };
     },
   });
 }

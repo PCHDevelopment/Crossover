@@ -1,5 +1,12 @@
 import { CrossoverError } from "@crossover/protocol";
 import type { PoolClient } from "@crossover/db";
+import {
+  loadAuthorKinds,
+  provenanceOf,
+  type AuthorKinds,
+  type Provenance,
+  principalKinds,
+} from "../provenance.js";
 import { z } from "zod";
 import type { Dispatcher } from "../../dispatcher.js";
 
@@ -67,10 +74,26 @@ export function memoryEntryView(row: EntryRow): MemoryEntryView {
   };
 }
 
+/** A memory entry as a reader gets it: with who wrote it (§16.5). */
+export interface LabeledMemoryEntry extends MemoryEntryView {
+  provenance: Provenance;
+}
+
+export const labelMemory = (entry: MemoryEntryView, kinds: AuthorKinds): LabeledMemoryEntry => ({
+  ...entry,
+  provenance: provenanceOf(kinds, entry.author_id),
+});
+
 /** The stale-write answer: `CONFLICT_VERSION`, carrying the entry as it is now (§18.2). */
-export function memoryConflict(current: EntryRow | undefined, key: string): CrossoverError {
+export async function memoryConflict(
+  client: PoolClient,
+  roomId: string,
+  current: EntryRow | undefined,
+  key: string,
+): Promise<CrossoverError> {
+  const kinds = current ? await loadAuthorKinds(client, roomId, [current.author_id]) : undefined;
   return new CrossoverError("CONFLICT_VERSION", `Memory key ${key} changed since you read it`, {
-    details: { current: current ? memoryEntryView(current) : null },
+    details: { current: current && kinds ? labelMemory(memoryEntryView(current), kinds) : null },
   });
 }
 
@@ -140,7 +163,7 @@ export async function putMemory(
       `SELECT ${MEMORY_COLUMNS} FROM memory_entries WHERE room_id = $1 AND key = $2`,
       [roomId, p.key],
     );
-    throw memoryConflict(rows[0], p.key);
+    throw await memoryConflict(client, roomId, rows[0], p.key);
   }
   await client.query(
     `INSERT INTO memory_revisions (room_id, key, revision, value, content_type, author_id, source_refs, deleted)
@@ -177,7 +200,7 @@ export function registerMemoryCommands(dispatcher: Dispatcher): void {
       }
       const entry = await putMemory(ctx.client, ctx.room_id, ctx.principal.participant_id, p);
       return {
-        response: entry,
+        response: labelMemory(entry, principalKinds(ctx.principal)),
         events: [
           {
             type: "memory.updated" as const,

@@ -1,4 +1,5 @@
 import type { PoolClient } from "@crossover/db";
+import { provenanceOf, type AuthorKinds, type Provenance } from "../provenance.js";
 import { CrossoverError } from "@crossover/protocol";
 
 export const TASK_STATUSES = [
@@ -109,3 +110,12 @@ export async function restartAgentLeases(
   );
   return rowCount ?? 0;
 }
+
+/** A task as a reader gets it: who wrote its description (the creator), §16.5. */
+export const labelTask = <T extends { created_by: string }>(
+  view: T,
+  kinds: AuthorKinds,
+): T & { provenance: Provenance } => ({
+  ...view,
+  provenance: provenanceOf(kinds, view.created_by),
+});

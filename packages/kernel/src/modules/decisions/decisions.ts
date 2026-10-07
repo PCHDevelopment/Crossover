@@ -1,5 +1,12 @@
 import { CrossoverError, newId } from "@crossover/protocol";
 import type { PoolClient } from "@crossover/db";
+import {
+  loadAuthorKinds,
+  principalKinds,
+  provenanceOf,
+  type AuthorKinds,
+  type Provenance,
+} from "../provenance.js";
 import { z } from "zod";
 import type { Dispatcher } from "../../dispatcher.js";
 
@@ -98,6 +105,35 @@ export function decisionView(row: DecisionRow, positions: PositionView[] = []): 
   };
 }
 
+/** A decision as a reader gets it: who proposed it, and who took each position (§16.5). */
+export interface LabeledDecision extends Omit<DecisionView, "positions"> {
+  provenance: Provenance;
+  positions: (PositionView & { provenance: Provenance })[];
+}
+
+export const labelDecision = (view: DecisionView, kinds: AuthorKinds): LabeledDecision => ({
+  ...view,
+  provenance: provenanceOf(kinds, view.proposed_by),
+  positions: view.positions.map((p) => ({
+    ...p,
+    provenance: provenanceOf(kinds, p.participant_id),
+  })),
+});
+
+/** `row` with its positions, labeled for a reader: the one way a read returns a decision. */
+export async function labeledDecision(
+  client: PoolClient,
+  roomId: string,
+  row: DecisionRow,
+): Promise<LabeledDecision> {
+  const positions = await loadPositions(client, roomId, row.id);
+  const kinds = await loadAuthorKinds(client, roomId, [
+    row.proposed_by,
+    ...positions.map((p) => p.participant_id),
+  ]);
+  return labelDecision(decisionView(row, positions), kinds);
+}
+
 /**
  * Register `decisions.propose` and `decisions.add_position` (T404, §7.1-7.2).
  *
@@ -166,7 +202,7 @@ export function registerDecisionCommands(dispatcher: Dispatcher): void {
       );
       const decision = decisionView(rows[0]!);
       return {
-        response: decision,
+        response: labelDecision(decision, principalKinds(ctx.principal)),
         events: [{ type: "decision.proposed" as const, payload: { decision } }],
       };
     },
@@ -268,7 +304,7 @@ export async function decisionConflict(
   decisionId: string,
 ): Promise<CrossoverError> {
   const row = await loadDecision(client, roomId, decisionId);
-  const current = decisionView(row, await loadPositions(client, roomId, decisionId));
+  const current = await labeledDecision(client, roomId, row);
   return new CrossoverError("CONFLICT_VERSION", "Decision was updated by another participant", {
     details: { current },
   });
