@@ -207,3 +207,34 @@ describe("git.import over HTTP", () => {
     expect(local.json().error.details.reason).toBe("url_host");
   });
 });
+
+describe("git.pull_upstream over HTTP", () => {
+  it("the owner pulls what changed upstream; a developer can't, and nothing is fetched for them", async () => {
+    const r = await newRoom();
+    await ok(
+      await r.call(r.owner, "git.import", {
+        url: "https://github.com/acme/widgets",
+        branch: "main",
+      }),
+    );
+    await writeFile(join(upstreamDir, "src/main.ts"), "export const hello = 'again';\n");
+    await run(upstreamDir, ["commit", "-q", "-am", "Change"]);
+    const newSha = (await run(upstreamDir, ["rev-parse", "HEAD"])).stdout.trim();
+
+    const before = fetches;
+    const denied = await r.call(r.dev, "git.pull_upstream");
+    expect(denied.statusCode).toBe(403);
+    expect(fetches).toBe(before);
+
+    const out = await ok(await r.call(r.owner, "git.pull_upstream"));
+    expect(out.response).toMatchObject({
+      status: "APPLIED",
+      applied_revision: 2,
+      upstream: { last_synced_sha: newSha, last_synced_room_revision: 2 },
+    });
+    const read = await ok(await r.call(r.dev, "workspace.read", { path: "src/main.ts" }));
+    expect(read.response.content).toBe("export const hello = 'again';\n");
+    const again = await ok(await r.call(r.owner, "git.pull_upstream"));
+    expect(again.response.status).toBe("UP_TO_DATE");
+  });
+});
