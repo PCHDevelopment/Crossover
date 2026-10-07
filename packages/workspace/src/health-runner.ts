@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { spawn } from "node:child_process";
 import { chmod, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -45,26 +45,78 @@ interface ProcessResult {
 function runProcess(
   binary: string,
   args: readonly string[],
-  options: { cwd?: string; timeoutMs: number; maxBuffer: number },
+  options: {
+    cwd?: string;
+    timeoutMs: number;
+    maxBuffer: number;
+    onTimeout?: () => Promise<void>;
+  },
 ): Promise<ProcessResult> {
   return new Promise((resolveProcess) => {
-    execFile(
-      binary,
-      [...args],
-      {
-        ...(options.cwd ? { cwd: options.cwd } : {}),
-        timeout: options.timeoutMs,
-        maxBuffer: options.maxBuffer,
-      },
-      (error, stdout, stderr) => {
-        const out = `${stdout}\n${stderr}`.trim();
-        resolveProcess({
-          code: typeof error?.code === "number" ? error.code : error ? null : 0,
-          timedOut: Boolean(error?.killed),
-          output: out,
-        });
-      },
-    );
+    const child = spawn(binary, [...args], {
+      ...(options.cwd ? { cwd: options.cwd } : {}),
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const chunks: Buffer[] = [];
+    let buffered = 0;
+    let timedOut = false;
+    let exitCode: number | null = null;
+    let spawnError: Error | undefined;
+    let timeoutWork: Promise<void> | undefined;
+    let closed = false;
+    const append = (chunk: Buffer): void => {
+      if (chunk.length >= options.maxBuffer) {
+        chunks.splice(0, chunks.length, chunk.subarray(chunk.length - options.maxBuffer));
+        buffered = options.maxBuffer;
+        return;
+      }
+      chunks.push(chunk);
+      buffered += chunk.length;
+      while (buffered > options.maxBuffer) {
+        const first = chunks[0]!;
+        const excess = buffered - options.maxBuffer;
+        if (first.length <= excess) {
+          chunks.shift();
+          buffered -= first.length;
+        } else {
+          chunks[0] = first.subarray(excess);
+          buffered -= excess;
+        }
+      }
+    };
+    child.stdout.on("data", append);
+    child.stderr.on("data", append);
+    child.on("error", (error) => {
+      spawnError = error;
+    });
+    child.on("exit", (code) => {
+      exitCode = code;
+    });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      timeoutWork = (async () => {
+        try {
+          await options.onTimeout?.();
+        } finally {
+          child.kill("SIGTERM");
+          const forceKill = setTimeout(() => {
+            if (!closed) child.kill("SIGKILL");
+          }, 1000);
+          forceKill.unref();
+        }
+      })();
+    }, options.timeoutMs);
+    child.on("close", async () => {
+      closed = true;
+      clearTimeout(timer);
+      await timeoutWork?.catch(() => {});
+      const output = Buffer.concat(chunks, buffered).toString("utf8");
+      resolveProcess({
+        code: spawnError ? null : exitCode,
+        timedOut,
+        output: spawnError ? `${output}\n${spawnError.message}`.trim() : output.trim(),
+      });
+    });
   });
 }
 
@@ -119,32 +171,57 @@ export class DockerHealthRunner implements HealthRunner {
       const image = input.image ?? this.image;
       if (!this.allowedImages.has(image))
         throw new Error("Room health image is not operator-allowed");
-      const result = await this.processRunner(
-        this.dockerBinary,
-        [
-          "run",
-          "--rm",
-          "--network=none",
-          "--read-only",
-          "--user=1000:1000",
-          "--cap-drop=ALL",
-          "--security-opt=no-new-privileges",
-          "--memory=1g",
-          "--cpus=2",
-          "--pids-limit=256",
-          "--tmpfs",
-          "/tmp:rw,noexec,nosuid,size=64m",
-          "--volume",
-          `${checkout}:/workspace:ro`,
-          "--workdir",
-          "/workspace",
-          image,
-          "/bin/sh",
-          "-lc",
-          input.command,
-        ],
-        { timeoutMs: this.timeoutMs, maxBuffer: MAX_LOG_BYTES },
-      );
+      const containerName = `health-${newId("health").slice("health_".length)}`;
+      let result: ProcessResult;
+      try {
+        result = await this.processRunner(
+          this.dockerBinary,
+          [
+            "run",
+            "--rm",
+            "--init",
+            "--name",
+            containerName,
+            "--label",
+            "crossover.health.runner=true",
+            "--network=none",
+            "--read-only",
+            "--user=1000:1000",
+            "--cap-drop=ALL",
+            "--security-opt=no-new-privileges",
+            "--memory=1g",
+            "--cpus=2",
+            "--pids-limit=256",
+            "--tmpfs",
+            "/tmp:rw,nosuid,size=512m",
+            "--env",
+            "HOME=/tmp",
+            "--volume",
+            `${checkout}:/workspace:rw`,
+            "--workdir",
+            "/workspace",
+            image,
+            "/bin/sh",
+            "-lc",
+            input.command,
+          ],
+          {
+            timeoutMs: this.timeoutMs,
+            maxBuffer: MAX_LOG_BYTES,
+            onTimeout: async () => {
+              await this.processRunner(this.dockerBinary, ["kill", containerName], {
+                timeoutMs: 5_000,
+                maxBuffer: 8192,
+              });
+            },
+          },
+        );
+      } finally {
+        await this.processRunner(this.dockerBinary, ["rm", "-f", containerName], {
+          timeoutMs: 5_000,
+          maxBuffer: 8192,
+        }).catch(() => ({ code: null, timedOut: false, output: "" }));
+      }
       const status: HealthStatus =
         result.timedOut || result.code === null ? "ERROR" : result.code === 0 ? "GREEN" : "RED";
       const log = result.timedOut

@@ -24,6 +24,19 @@ const dockerImageAvailable = (() => {
     return false;
   }
 })();
+
+function dockerHealthContainers(): string[] {
+  const output = execFileSync(
+    "docker",
+    ["ps", "-aq", "--filter", "label=crossover.health.runner=true"],
+    {
+      timeout: 1000,
+    },
+  )
+    .toString("utf8")
+    .trim();
+  return output ? output.split("\n").sort() : [];
+}
 let db: TestDatabase;
 
 beforeAll(async () => {
@@ -85,12 +98,20 @@ describe("DockerHealthRunner", () => {
   ] as const)("maps process result to $status", async ({ code, timedOut, status }) => {
     const { repository, revision } = await makeRepo();
     let checkedOutText = "";
-    const invoke = vi.fn(async (_binary: string, args: readonly string[]) => {
-      const volume = args[args.indexOf("--volume") + 1]!;
-      const checkout = volume.slice(0, volume.lastIndexOf(":/workspace:ro"));
-      checkedOutText = await readFile(join(checkout, "sentinel.txt"), "utf8");
-      return { code, timedOut, output: "runner output" };
-    });
+    const invoke = vi.fn(
+      async (
+        _binary: string,
+        args: readonly string[],
+        options?: { onTimeout?: () => Promise<void> },
+      ) => {
+        if (args[0] !== "run") return { code: 0, timedOut: false, output: "" };
+        const volume = args[args.indexOf("--volume") + 1]!;
+        const checkout = volume.slice(0, volume.lastIndexOf(":/workspace:rw"));
+        checkedOutText = await readFile(join(checkout, "sentinel.txt"), "utf8");
+        if (timedOut) await options?.onTimeout?.();
+        return { code, timedOut, output: "runner output" };
+      },
+    );
     const runner = new DockerHealthRunner({ timeoutMs: 1234 }, invoke);
 
     const result = await runner.run({ repository, revision, command: "npm test" });
@@ -104,13 +125,20 @@ describe("DockerHealthRunner", () => {
     expect(args).toContain(DEFAULT_HEALTH_IMAGE);
     expect(args).toContain("--read-only");
     expect(args).toContain("--user=1000:1000");
-    expect(args).toContain("--network=none");
+    expect(args).toContain("--init");
+    expect(args).toContain("--env");
+    expect(args).toContain("HOME=/tmp");
+    expect(args).toContain("/tmp:rw,nosuid,size=512m");
+    expect(args).toContain("crossover.health.runner=true");
     expect(args.at(-1)).toBe("npm test");
     expect(checkedOutText).toBe("target revision\n");
     const volume = args[args.indexOf("--volume") + 1]!;
-    expect(volume.endsWith(":/workspace:ro")).toBe(true);
-    const checkout = volume.slice(0, volume.lastIndexOf(":/workspace:ro"));
+    expect(volume.endsWith(":/workspace:rw")).toBe(true);
+    const checkout = volume.slice(0, volume.lastIndexOf(":/workspace:rw"));
     await expect(readFile(join(checkout, "sentinel.txt"), "utf8")).rejects.toThrow();
+    expect(invoke.mock.calls.map((call) => call[1][0])).toEqual(
+      timedOut ? ["run", "kill", "rm"] : ["run", "rm"],
+    );
   });
 
   it("validates runner configuration", () => {
@@ -121,7 +149,7 @@ describe("DockerHealthRunner", () => {
 
   it("refuses room-selected images outside the operator allowlist", async () => {
     const { repository, revision } = await makeRepo();
-    const invoke = vi.fn();
+    const invoke = vi.fn(async () => ({ code: 0, timedOut: false, output: "" }));
     const result = await new DockerHealthRunner({}, invoke).run({
       repository,
       revision,
@@ -133,15 +161,48 @@ describe("DockerHealthRunner", () => {
     expect(invoke).not.toHaveBeenCalled();
   });
 
-  it.skipIf(!dockerImageAvailable)("runs the configured allowlisted image in Docker", async () => {
+  it.skipIf(!dockerImageAvailable)("runs with a read-write checkout and uid 1000", async () => {
     const { repository, revision } = await makeRepo();
     const result = await new DockerHealthRunner({ allowedImages: [DEFAULT_HEALTH_IMAGE] }).run({
       repository,
       revision,
-      command: "printf docker-health-ok",
+      command: 'test "$(id -u)" = 1000 && test -w /workspace && printf docker-health-ok',
     });
     expect(result.status).toBe("GREEN");
     expect(result.log).toContain("docker-health-ok");
+  });
+
+  it.skipIf(!dockerImageAvailable)("blocks network access from the container", async () => {
+    const { repository, revision } = await makeRepo();
+    const result = await new DockerHealthRunner({ allowedImages: [DEFAULT_HEALTH_IMAGE] }).run({
+      repository,
+      revision,
+      command:
+        "node -e \"fetch('https://example.com',{signal:AbortSignal.timeout(2000)}).then(()=>process.exit(1),()=>process.exit(0))\"",
+    });
+    expect(result.status).toBe("GREEN");
+  });
+
+  it.skipIf(!dockerImageAvailable)("keeps successful status with output over 1 MiB", async () => {
+    const { repository, revision } = await makeRepo();
+    const result = await new DockerHealthRunner({ allowedImages: [DEFAULT_HEALTH_IMAGE] }).run({
+      repository,
+      revision,
+      command: "node -e \"process.stdout.write('x'.repeat(2*1024*1024))\"",
+    });
+    expect(result.status).toBe("GREEN");
+    expect(Buffer.byteLength(result.log)).toBeLessThanOrEqual(1024 * 1024 + 20);
+  });
+
+  it.skipIf(!dockerImageAvailable)("kills and removes a container on timeout", async () => {
+    const before = dockerHealthContainers();
+    const { repository, revision } = await makeRepo();
+    const result = await new DockerHealthRunner({
+      allowedImages: [DEFAULT_HEALTH_IMAGE],
+      timeoutMs: 1000,
+    }).run({ repository, revision, command: "sleep 30" });
+    expect(result.status).toBe("ERROR");
+    expect(dockerHealthContainers()).toEqual(before);
   });
 
   it("persists results against the exact room-scoped workspace revision", async () => {
