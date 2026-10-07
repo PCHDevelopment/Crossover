@@ -1645,7 +1645,122 @@ The MVP uses Git internally as a storage engine and externally as a compatibilit
 
 ---
 
-# 34. Open Questions (Product Calls)
+# 34. Lessons from Building Crossover with Agents
+
+Crossover itself is being built by a team shaped like the one it serves: a human owner (Peter), an agent lead (O1) and two agent engineers (S1, S2). They coordinate through a chat room, GitHub PRs and CI. Each kind of friction this team hit is a gap Crossover should close for its users. Each subsection says what happened, why it generalizes, and the design response, which either confirms a decision already in this document or proposes an extension. Extensions marked **(proposed)** become backlog tasks at the next lead review once the owner agrees.
+
+## 34.1 Silent agents: liveness is invisible
+
+**Observed.** S1 stopped responding for over two hours with three PRs waiting on it. The lead couldn't tell a crashed session from one deep in work. One of those PRs (#92) blocked S2's next task, so a silent agent stalled a second one.
+
+**Why it generalizes.** Agents run in sessions that end, restart or hang without saying so. A human team notices an empty desk; a room doesn't.
+
+**Design response.**
+- §8.4 claim leases and the T311 sweeper already handle this for tasks. A lapsed agent claim returns the task to `OPEN`.
+- **(proposed) Liveness for everything an agent holds, not just claims.** Presence records `last_command_at` and `last_heartbeat_at` per agent. Anything the agent owns that others wait on can go stale: an open ChangeSet with dependents, a conflict assigned to it, a review it was asked for. When one does, the lead gets an inbox item: "Agent S1 has been idle 45 min and holds 3 items that block 1 other participant."
+- **(proposed) Blocking graph.** The platform knows which waits depend on which work: task dependencies (§8.1), conflict ownership (§11.3), and pending reviews. `room.get_state` exposes a `blocked_by` section, so the lead sees *who is waiting on whom* instead of reconstructing it from chat.
+- **(proposed) Lead takeover.** For an idle agent, the lead can reassign its blocking items: release the claim, re-own the ChangeSet, or take over the conflict resolution. This is the same power as `participants.pause`, but targeted at work rather than the participant.
+
+## 34.2 Stacked work and merge churn
+
+**Observed.** S1 built nine dependent tasks as a chain of stacked PRs. Each squash merge of a parent rewrote history under its children, which then needed a manual `rebase --onto`. A child retargeted to `main` didn't even trigger CI, so the lead had to merge `main` in just to start a run. Two independent PRs (#91, #92) both appended a line to the same barrel file and migration test. That gave the second one a trivial conflict only its author could fix, and the author was the silent agent from §34.1.
+
+**Why it generalizes.** Agents decompose work finely and work in parallel. Git's branch-and-PR cadence was designed for humans landing one change at a time.
+
+**Design response.**
+- **Confirmed: ChangeSets with server-side merge (§10).** A ChangeSet names a base revision and the platform merges it against the current head. There are no branches to rebase and no retargeting, and a non-overlapping change merges cleanly whatever happened since its base. This is the single biggest friction Crossover removes.
+- **(proposed) Dependent ChangeSets.** A ChangeSet can declare `depends_on: [changeset_id]`. It's held as `PENDING` until its parents apply, then the platform merges it against the new head automatically and re-runs health. The submitter is only involved if that merge actually conflicts. This replaces stacked PRs.
+- **(proposed) Mechanical conflict auto-resolution.** When both sides only *add* entries to an append-only region (barrel `export * from` lines, a registration list, an array of test cases) and neither side deletes anything there, the merge engine resolves the conflict as the union. The ChangeSet is marked `auto_resolved: true` so reviewers can see it. Anything else stays a real conflict (§11). An auto-resolved result must pass the parse check (T520) and is then treated like any merge, with health re-run on it. While writing this section, the lead resolved exactly such a conflict by keeping both sides, and the union cut a test in half, leaving an unclosed block. Union without validation is not safe.
+- **Confirmed: optimistic concurrency everywhere.** The lead once passed a wrong commit ID to a merge, and the `expected` check refused it harmlessly. Crossover's `expected_version` on every mutation (§8.3) is the same protection, and it should stay universal.
+
+## 34.3 Review cost and environment drift
+
+**Observed.** For every PR, the lead fetched the branch, test-merged onto `main` and ran the full suite locally, duplicating what CI does. A test passed on the engineer's machine and the lead's but failed in CI, because it relied on a machine-level Git identity. Most first submissions from one engineer needed a second round for missing negative tests (cross-room isolation, invalid cursors, terminal states). The lead had to ask for the same categories each time.
+
+**Why it generalizes.** Reviewing agent output is the human bottleneck. Every round trip spent restating standards is review capacity lost.
+
+**Design response.**
+- **Confirmed: canonical health on the merged result (§12, T607–T610).** Health runs on the platform's merge of the change into head, in one configured image. That gives reviewers a single trustworthy signal and removes "works on my machine". `tasks.review` is gated on it (T309, T610).
+- **(proposed) Evidence on submit.** `tasks.submit` accepts `evidence`: for each task requirement (§8.1), the test or check that proves it, plus optional mutation checks ("removed X → test Y failed"). A requirement with no evidence is flagged in the reviewer's view. This makes the acceptance map, which the team found to be the strongest predictor of a clean review, a protocol field instead of a PR-body convention.
+- **(proposed) Room review checklists.** The lead can attach standing checklist items to task kinds, such as "every new read command: cross-room isolation test" or "every new list: invalid-cursor and last-page tests". They're shown to the agent at claim time and to the reviewer at review time. Standards are stated once instead of in every review.
+
+## 34.4 Contracts decided in chat
+
+**Observed.** Important contract decisions were made in chat messages and PR comments. Examples: who may see a `capability.denied` path, whether the health image is fixed or configurable, and what a failed conflict resolution does to escalation state. One engineer edited this architecture document to match its implementation without asking. The lead once stated a dispatcher behaviour wrongly and had to correct it on a PR and in the room separately, and nothing guaranteed the right agents saw the correction.
+
+**Why it generalizes.** An agent acts on what it last read. A decision that lives only in chat scrollback is invisible to the next agent, and a correction may never reach the one that acted on the original.
+
+**Design response.**
+- **Confirmed: decisions are first-class (§7).** A contract call is a decision (`decisions.propose` → `decide`), mirrored into memory under `decisions/` (§7.4). Agents query it instead of searching chat.
+- **(proposed) Decisions linked to work.** A decision can reference tasks, paths and other decisions. Superseding it (§7.1) sends an inbox item to every participant who claimed a linked task or touched a linked path since the original was decided. That makes corrections reach the agents that acted on them.
+- **(proposed) Protected spec paths.** Room settings list spec files (default: `docs/ARCHITECTURE.md`, `docs/BACKLOG.md`). A ChangeSet touching them goes through an approval gate (§22.2) for the lead or owner, using the circuit-breaker protected-pattern mechanism (§22.4). Agents can still propose spec changes; they just can't land them silently.
+
+## 34.5 One fix, many egress paths
+
+**Observed.** The same leak appeared in two PRs written at the same time by the same engineer. REST event reads (T702) and the WebSocket stream (T703) both sent raw `capability.denied` events, including denied paths, to every room member. Path leaks of the same class had already been fixed in workspace reads and conflict responses (T521, T601). Each fix was per-surface.
+
+**Why it generalizes.** Every new way of reading room data is a new chance to forget a visibility rule. Agents add surfaces quickly.
+
+**Design response (proposed, architectural rule).** **Visibility is decided in one layer, applied at egress.** Every path that sends stored data to a participant runs it through the participant-view functions in the kernel, starting with `redactEventFor` (T702). That covers REST reads, WebSocket streams, digests (§17.3), MCP tools (§15), webhooks (§17.4) and exports (§24). Command modules return the full record; gateways apply the view. A conformance test enumerates every registered read and stream surface and fails if one bypasses the view. Owner redaction tombstones (§19.6) are applied through the same layer.
+
+## 34.6 Agent identity and quality drift
+
+**Observed.** The owner changed one engineer's underlying model mid-project. Afterwards its first submissions needed noticeably more review rounds. One contained a correctness bug, others had thin tests or missing PR evidence, though its fixes stayed fast and good. The lead only caught the drift because the owner asked it to keep a manual quality log against a baseline.
+
+**Why it generalizes.** An agent's name stays the same while its model, version or configuration changes underneath. Trust earned by one configuration is silently carried over to another.
+
+**Design response.**
+- **Confirmed: manifests (§15.2).** Agents declare vendor, model and client version.
+- **(proposed) Manifest changes are events.** A changed manifest on reconnect (model, version, client) emits `participant.manifest_changed` and an inbox item to the lead and owner. Agents can't change their model without the room knowing.
+- **(proposed) Per-agent quality signals.** The platform already records the raw data: review verdicts (`task_reviews`), rejected and conflicted ChangeSets, health runs that turned RED on an agent's revision, and requests for changes. `room.get_state` shows the lead a per-agent summary over a rolling window, split by manifest version, so a drop after a change is visible without a manual log.
+- **(proposed) Autonomy follows quality.** Circuit-breaker thresholds (§22.4) and approval gates (§22.2) can be tightened per agent automatically after a manifest change, until N reviews pass cleanly. This extends §22's "pull back autonomy" from manual to signal-driven.
+
+## 34.7 Human approval is the scarcest resource
+
+**Observed.** The lead can't merge its own PRs, by design. The composition root (#67) waited about 20 hours for the owner's merge. Meanwhile every engineer PR deferred its registration "until #67 lands", and the backlog of unwired modules grew.
+
+**Why it generalizes.** Governance puts humans on the critical path, and an idle human queue stalls the whole room. The approval itself is cheap; noticing it's needed is the costly part.
+
+**Design response.**
+- **(proposed) Approval queue with blast radius.** Each pending approval shows how much work is waiting on it, from the §34.1 blocking graph: "approving this unblocks 6 items for 2 agents". The owner's inbox is ordered by that, not by age.
+- **(proposed) Delegated approval classes.** The owner can pre-approve classes of change for the lead, such as docs-only ChangeSets or wiring-only changes under an `apps/` path, with an audit trail. They keep the gate for everything else. This puts the "full autonomy, pull back later" principle of §22 into practice for approvals.
+
+## 34.8 Agents' working state doesn't survive restarts
+
+**Observed.** The lead's session container restarted several times. Each time its scheduled check-ins and local services were lost and had to be recreated by a backup schedule. Room messages were read by tailing the last N, so a long gap risked missing messages.
+
+**Why it generalizes.** Agent sessions are ephemeral (§14 sandboxes hibernate, and clients disconnect). Anything an agent schedules or remembers locally is lost with the session.
+
+**Design response.**
+- **Confirmed: cursors and inbox (§17).** An agent resumes from `subscribe { after: last_seen }` and its unacknowledged inbox, not from chat scrollback. T703's backfill guarantees no gaps.
+- **Confirmed: wake-up webhooks (§17.4).** The platform wakes an agent when something needs it, so the agent doesn't keep its own polling loop.
+- **(proposed) Server-side reminders.** `inbox.schedule { at, summary, ref }` lets an agent (or the lead for an agent) schedule a future inbox item, delivered through the wake webhook. Recurring check-ins become platform state that survives any session.
+
+## 34.9 Status noise
+
+**Observed.** Engineers posted frequent status messages restating PR state that was already visible on the PR: "CI is queued", "still open, not merged". Reading the room meant filtering narration from decisions and questions.
+
+**Design response.**
+- **Confirmed: state changes are events, not messages.** Task transitions, ChangeSet applies and health results are already ledger events. **Deterministic digests (§17.3)** summarize them per reader.
+- **(proposed) Message intents.** `messages.send` takes an optional `intent` (`question`, `decision_request`, `fyi`, `status`). Digests and the lead's inbox prioritize questions and decision requests, and collapse `status` into the event digest. Loop protection (§17.6) counts consecutive `status` messages with no state change as noise.
+
+## 34.10 Summary
+
+| Friction | Crossover response | Status |
+|---|---|---|
+| Silent agent blocks others | Liveness for all held work, blocking graph, lead takeover | Proposed (extends §8.4) |
+| Stacked PR churn, trivial conflicts | Server-side merge; dependent ChangeSets; additive auto-resolution | §10 confirmed; rest proposed |
+| Review cost, environment drift | Canonical health on the merged result; evidence on submit; review checklists | §12 confirmed; rest proposed |
+| Contracts lost in chat | Decisions linked to work, corrections delivered; protected spec paths | §7 confirmed; rest proposed |
+| Per-surface visibility leaks | One visibility layer at every egress, with a conformance test | Proposed rule (T702 started it) |
+| Model change, quality drift | `manifest_changed`; per-agent quality signals; autonomy follows quality | Proposed (extends §15.2, §22) |
+| Human approval bottleneck | Approval queue ordered by blast radius; delegated approval classes | Proposed (extends §22.2) |
+| Lost state on restart | Cursors, inbox, wake webhooks; server-side reminders | §17 confirmed; reminders proposed |
+| Status noise | Events over messages; digests; message intents | §17 confirmed; intents proposed |
+
+---
+
+# 35. Open Questions (Product Calls)
 
 These are not technical gaps; they need your decision:
 

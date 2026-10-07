@@ -11,9 +11,15 @@ import {
   registerInviteCommands,
   registerJoinCommand,
   registerLeadCommands,
+  registerMessageCommands,
   registerParticipantLifecycleCommands,
   registerParticipantRoleCommand,
   registerRoomCommands,
+  registerRoomEventsCommand,
+  registerRoomLifecycleCommands,
+  registerTaskCommands,
+  registerTaskLifecycleCommands,
+  registerTaskReadCommands,
   type Authorizer,
   type EventPublisher,
   type EventSubscriber,
@@ -137,9 +143,17 @@ function registerCommands(dispatcher: Dispatcher, config: ServerConfig): void {
   registerParticipantRoleCommand(dispatcher);
   registerParticipantLifecycleCommands(dispatcher);
   registerLeadCommands(dispatcher);
+  registerRoomLifecycleCommands(dispatcher);
+  registerRoomEventsCommand(dispatcher);
   registerInboxCommands(dispatcher);
   registerRoomEventsSubscribeCommand(dispatcher); // the WebSocket `subscribe` frame
 
-  // apply_changeset plus read, list, diff, history, blame and search.
+  // Tasks: create/update, list/get, and the claim → start → block lifecycle.
+  registerTaskCommands(dispatcher);
+  registerTaskReadCommands(dispatcher);
+  registerTaskLifecycleCommands(dispatcher);
+  registerMessageCommands(dispatcher);
+
+  // apply_changeset plus read, list, diff, history, blame, search, and conflict reads/abandon.
   registerWorkspaceCommands(dispatcher);
 }
