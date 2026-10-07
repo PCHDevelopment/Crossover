@@ -57,7 +57,14 @@ async function setup() {
     sent.push(request);
   };
   /** A node: its own service object, the same database. */
-  const node = (options: { batch?: number; sender?: WakeSender } = {}) =>
+  const node = (
+    options: {
+      batch?: number;
+      sender?: WakeSender;
+      concurrency?: number;
+      agentsPerTick?: number;
+    } = {},
+  ) =>
     new WakeWebhookService({
       pool,
       key: KEY,
@@ -65,6 +72,8 @@ async function setup() {
       sender: options.sender ?? ((request) => sender(request)),
       onError: () => {},
       ...(options.batch ? { batch: options.batch } : {}),
+      ...(options.concurrency ? { concurrency: options.concurrency } : {}),
+      ...(options.agentsPerTick ? { agentsPerTick: options.agentsPerTick } : {}),
     });
   const give = async (
     to: string,
@@ -256,6 +265,65 @@ describe("wake-up webhooks (§17.4, T706)", () => {
     expect(delivered).toEqual(["https://hooks.example/fast"]); // while the slow one is still open
     release();
     expect(await ticking).toBe(2);
+  });
+
+  it("agents in backoff don't crowd out the others: only agents whose window is open are taken up", async () => {
+    const s = await setup();
+    const sick: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      sick.push(await s.add("AGENT", { wake_webhook_url: `https://hooks.example/sick-${i}` }));
+    }
+    const well = await s.add("AGENT", { wake_webhook_url: "https://hooks.example/well" });
+    const node = s.node({ agentsPerTick: 2 });
+    for (const id of sick) await s.give(id);
+    s.fail(new Error("down"));
+    await node.tick();
+    await node.tick(); // all three have failed once: a 60 s window each
+    s.fail(undefined);
+    s.advance(20_000);
+    await s.give(well);
+    await s.node().tick(); // the healthy agent is served once (its window row now exists, newer than theirs)
+    expect(s.sent.map((r) => r.url)).toEqual(["https://hooks.example/well"]);
+    await s.give(well);
+    s.advance(31_000); // 51 s: theirs are still shut, the healthy one's is open
+    expect(await node.tick()).toBe(1);
+    expect(s.sent.map((r) => r.url)).toEqual([
+      "https://hooks.example/well",
+      "https://hooks.example/well",
+    ]);
+  });
+
+  it("an agent is claimed right before its send: a slow send ahead of it doesn't let another node take it and double-send", async () => {
+    const s = await setup();
+    const other = await s.add("AGENT", { wake_webhook_url: "https://hooks.example/agent-b" });
+    await s.give(s.hooked);
+    await s.give(other);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const counts = new Map<string, number>();
+    let heldUrl: string | undefined;
+    const sender: WakeSender = async (request) => {
+      counts.set(request.url, (counts.get(request.url) ?? 0) + 1);
+      heldUrl ??= request.url;
+      if (request.url === heldUrl && counts.get(request.url) === 1) await gate;
+    };
+    const slow = s.node({ concurrency: 1, sender });
+    const quick = s.node({ sender });
+    const running = slow.tick();
+    for (let i = 0; i < 100 && counts.size === 0; i++) await new Promise((r) => setTimeout(r, 20));
+    // Nothing is claimed ahead of its send: the one still waiting behind the slow send has no window yet.
+    const { rows: windows } = await pool.query(
+      "SELECT participant_id FROM wake_windows WHERE participant_id = ANY($1::text[]) AND last_sent_at > 'epoch'",
+      [[s.hooked, other]],
+    );
+    expect(windows).toHaveLength(1); // only the one being sent
+    s.advance(125_000); // the queue behind a slow send has waited longer than a window
+    await quick.tick();
+    release();
+    await running;
+    const unheld = [...counts.keys()].find((url) => url !== heldUrl)!;
+    expect(counts.get(unheld)).toBe(1); // sent by one node only
+    await new Promise((r) => setTimeout(r, 0));
   });
 
   it("a long backlog goes out in batches, one per window, with `more` saying so", async () => {

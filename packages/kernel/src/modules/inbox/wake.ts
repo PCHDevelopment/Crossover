@@ -117,28 +117,34 @@ export class WakeWebhookService {
 
   private async run(): Promise<number> {
     const { pool } = this.o;
-    // Agents with something waiting, whose room is active.
+    const window = this.o.windowMs ?? WAKE_WINDOW_MS;
+    const nowIso = new Date(this.now()).toISOString();
+    // Agents with something waiting, whose room is active, **and whose window is open** (one in
+    // backoff must not crowd out the rest), the longest-waiting first.
     const { rows: candidates } = await pool.query<{ participant_id: string }>(
-      `SELECT DISTINCT i.participant_id
+      `SELECT i.participant_id
        FROM inbox_items i
        JOIN participants p ON p.id = i.participant_id AND p.room_id = i.room_id
        JOIN rooms r ON r.id = i.room_id
+       LEFT JOIN wake_windows w ON w.participant_id = i.participant_id
        WHERE i.wake_notified_at IS NULL AND i.acked_at IS NULL
          AND p.kind = 'AGENT' AND p.status = 'ACTIVE' AND r.status = 'ACTIVE'
          AND p.agent_manifest ->> 'wake_webhook_url' IS NOT NULL
-       LIMIT $1`,
-      [this.o.agentsPerTick ?? 100],
+         AND (w.participant_id IS NULL
+              OR w.last_sent_at + make_interval(secs => ($1::float8 / 1000) * power(2, least(w.failures, $2))) <= $3::timestamptz)
+       GROUP BY i.participant_id, w.last_sent_at
+       ORDER BY w.last_sent_at NULLS FIRST, i.participant_id COLLATE "C"
+       LIMIT $4`,
+      [window, MAX_BACKOFF_STEPS, nowIso, this.o.agentsPerTick ?? 100],
     );
-    const claimed: Claim[] = [];
-    for (const { participant_id } of candidates) {
-      const claim = await this.claim(participant_id);
-      if (claim) claimed.push(claim);
-    }
     let delivered = 0;
-    const queue = [...claimed];
+    const queue = candidates.map((c) => c.participant_id);
+    // Each worker claims an agent right before sending to it, so a claim never waits behind other
+    // sends (and so never lapses into another node's hands before it is used).
     const worker = async () => {
-      for (let next = queue.shift(); next; next = queue.shift()) {
-        if (await this.deliver(next)) delivered += 1;
+      for (let next = queue.shift(); next !== undefined; next = queue.shift()) {
+        const claim = await this.claim(next);
+        if (claim && (await this.deliver(claim))) delivered += 1;
       }
     };
     await Promise.all(
