@@ -6,6 +6,7 @@ import asyncio
 import json
 import random
 import uuid
+import warnings
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Awaitable, Callable, Mapping
 
@@ -30,7 +31,7 @@ Connect = Callable[[str], Any]
 @dataclass
 class WsConfig:
     url: str
-    token: str
+    token: str = field(repr=False)
     client: str
     client_version: str
     get_token: Callable[[], str] | None = None
@@ -289,27 +290,40 @@ class Subscription:
         if self._session:
             await self._session.close()
         self._state("closed")
-        if error is not None and self._options.on_error:
-            self._options.on_error(error)
+        if error is not None:
+            self._callback(self._options.on_error, error)
         self._queue.put_nowait(_END)
 
     def _state(self, state: str) -> None:
-        if self._options.on_state:
-            self._options.on_state(state)
+        self._callback(self._options.on_state, state)
+
+    @staticmethod
+    def _callback(fn: Callable[[Any], None] | None, value: Any) -> None:
+        """A caller's callback that raises must not take the stream down with it."""
+        if fn is None:
+            return
+        try:
+            fn(value)
+        except Exception as error:  # noqa: BLE001 - the caller's bug, not the stream's
+            warnings.warn(f"crossover_sdk: a callback raised {error!r}", RuntimeWarning, stacklevel=2)
 
     def _deliver(self, event: dict[str, Any]) -> None:
         self.last_sequence = int(event["sequence"])
-        if self._options.on_event:
-            self._options.on_event(event)
-        self._queue.put_nowait(event)
+        self._queue.put_nowait(event)  # in the iterator first: a bad callback loses nothing
+        self._callback(self._options.on_event, event)
 
-    async def _renew(self, used: str) -> bool:
+    async def _renew(self, used: str) -> str:
+        """"renewed", "refused" (the token can't be renewed), or "later" (the refresh itself failed
+        in a way that may pass: the server busy, the network): wait and connect again."""
         if not self._config.refresh:
-            return False
+            return "refused"
         try:
-            return await self._config.refresh(used)
+            return "renewed" if await self._config.refresh(used) else "refused"
+        except CrossoverError as error:
+            self._retry_after = _retry_after(error)
+            return "later"
         except Exception:
-            return False
+            return "later"
 
     async def _run(self) -> None:
         o = self._options
@@ -390,11 +404,14 @@ class Subscription:
                     self._retry_after = _retry_after(error)
                 elif error.code == "UNAUTHENTICATED":
                     # The access token expired: renew it and connect again at once.
-                    if not renewed and await self._renew(used):
+                    outcome = "refused" if renewed else await self._renew(used)
+                    if outcome == "renewed":
                         renewed = True
                         continue
-                    await self._finish(error)
-                    return
+                    if outcome == "refused":
+                        await self._finish(error)
+                        return
+                    end = "dropped"  # "later": back off below
                 else:
                     await self._finish(error)
                     return
@@ -407,9 +424,13 @@ class Subscription:
             self._session = None
             if self._done:
                 return
-            if end == "expired" and not renewed and await self._renew(used):
-                renewed = True
-                continue
+            if end == "expired" and not renewed:
+                outcome = await self._renew(used)
+                if outcome == "renewed":
+                    renewed = True
+                    continue
+                if outcome == "later":
+                    end = "dropped"
             if end in ("fatal", "expired"):
                 await self._finish(CrossoverError("UNAUTHENTICATED", "The subscription can't continue"))
                 return

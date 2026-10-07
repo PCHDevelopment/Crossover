@@ -13,4 +13,4 @@ class CommandResult:
     #: True when an idempotent duplicate returned the stored result and nothing ran again.
     replayed: bool = False
     #: A secret handed over exactly once (an invite token, a join's tokens).
-    one_time: Any = None
+    one_time: Any = field(default=None, repr=False)

@@ -24,6 +24,9 @@ const ready =
     stdio: "ignore",
   }).status === 0;
 
+/** In CI the contract tests are the acceptance test: a Python that can't run them fails the build. */
+const inCi = Boolean(process.env["CI"]);
+
 let db: TestDatabase;
 let dir: string;
 let server: CrossoverServer;
@@ -31,7 +34,13 @@ let baseUrl: string;
 let control: Server;
 
 beforeAll(async () => {
-  if (!ready) return;
+  if (!ready) {
+    if (inCi)
+      throw new Error(
+        "Python 3.10+ with httpx and websockets is required in CI (pip install -r clients/python/requirements-test.txt)",
+      );
+    return;
+  }
   db = await createTestDatabase();
   dir = await mkdtemp(join(tmpdir(), "crossover-python-e2e-"));
   const config: ServerConfig = {
@@ -73,7 +82,7 @@ afterAll(async () => {
   if (dir) await rm(dir, { recursive: true, force: true });
 });
 
-describe.skipIf(!ready)("Python SDK contract", () => {
+describe.skipIf(!ready && !inCi)("Python SDK contract", () => {
   it("passes its contract tests against the real server", async () => {
     const env = {
       ...process.env,
@@ -89,7 +98,10 @@ describe.skipIf(!ready)("Python SDK contract", () => {
       throw new Error(`${error.stderr ?? ""}\n${error.stdout ?? ""}`);
     });
     const output = `${run.stdout}\n${run.stderr}`;
-    expect(output).toMatch(/\nOK/);
+    expect(output).toMatch(/\nOK( \(skipped=\d+\))?\n/);
     expect(output).not.toMatch(/FAILED|ERROR:/);
+    // The one skip allowed is the filtered-stream test against a server without T704.
+    const skipped = output.split("\n").filter((line) => / \.\.\. skipped /.test(line));
+    for (const line of skipped) expect(line, line).toContain("T704");
   }, 180_000);
 });

@@ -138,6 +138,42 @@ class Contract(unittest.IsolatedAsyncioTestCase):
         await dev.api.messages.send({"body": "later"})
         self.assertEqual(len(pairs), 2)
 
+    async def test_a_refresh_response_lost_on_the_way_back_is_not_retried_by_the_sdk(self) -> None:
+        spy = h.Spy()
+        client = CrossoverClient(h.BASE_URL, http=httpx.AsyncClient(transport=spy), retry=h.fast_retry())
+        r = await h.new_room(client)
+        dev = client.room(r["room_id"], r["dev_tokens"])
+        h.expire_agent_tokens(r["room_id"])
+        spy.lose_next = "/v1/auth/refresh|refresh_token"
+        with self.assertRaises((TransportError, CrossoverError)) as caught:
+            await dev.api.messages.send({"body": "one"})
+        self.assertEqual(spy.counts.get("/v1/auth/refresh"), 1)  # sent once, not re-sent
+        self.assertTrue(caught.exception.retryable)
+        self.assertNotEqual(getattr(caught.exception, "code", None), "UNAUTHENTICATED")
+        # (That the login then survives, because the server takes the spent token for a retry
+        # within its grace window, is the server's change in #151 and is tested there.)
+
+    async def test_a_callback_that_raises_does_not_take_the_stream_down(self) -> None:
+        r = await h.new_room(self.client)
+        seen: list[int] = []
+
+        def bad(event: dict) -> None:
+            seen.append(event["sequence"])
+            raise RuntimeError("the caller's bug")
+
+        with self.assertWarns(RuntimeWarning):
+            sub = r["owner"].subscribe(SubscribeOptions(after=0, on_event=bad))
+            await r["owner"].api.messages.send({"body": "x"})
+            target = await h.last_sequence(r["owner"])
+            await h.wait_until(lambda: sub.last_sequence >= target)
+        got: list[int] = []
+        async for event in sub:
+            got.append(event["sequence"])
+            if event["sequence"] >= target:
+                break
+        await sub.close()
+        self.assertEqual(got, list(range(1, target + 1)))  # the iterator lost nothing either
+
     async def test_without_a_refresh_token_the_expiry_is_the_callers_unauthenticated(self) -> None:
         r = await h.new_room(self.client)
         plain = self.client.room(r["room_id"], r["dev_tokens"]["access_token"])  # no refresh token held

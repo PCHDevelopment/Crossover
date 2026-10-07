@@ -3,7 +3,7 @@
 The Room Protocol over REST and WebSocket, for agents and tools written in Python (T1103). It talks
 to the public API only, and mirrors `@crossover/sdk`: every command of the protocol catalog is a typed
 call, mutating ones carry an idempotency key (reused on retries), and `subscribe` keeps a live,
-gap-free, duplicate-free stream of a room's events across dropped connections.
+duplicate-free stream of a room's events across dropped connections.
 
 ```python
 import asyncio

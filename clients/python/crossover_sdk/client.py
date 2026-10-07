@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from typing import TYPE_CHECKING, Any, Mapping
+from urllib.parse import quote
 
 import httpx
 
@@ -112,7 +113,7 @@ class CrossoverClient:
     async def room_session(self, session: str, room_id: str) -> dict[str, Any]:
         """Exchange a user session for a room access token (the user must be a participant)."""
         _, json = await post_json(
-            self.http, f"{self.base_url}/v1/rooms/{room_id}/session", session, {}, self.retry
+            self.http, f"{self.base_url}/v1/rooms/{quote(room_id, safe='')}/session", session, {}, self.retry
         )
         return json
 
@@ -121,7 +122,7 @@ class CrossoverClient:
         after a lost answer would be refused, so this isn't retried."""
         _, json = await post_json(
             self.http,
-            f"{self.base_url}/v1/rooms/{room_id}/join",
+            f"{self.base_url}/v1/rooms/{quote(room_id, safe='')}/join",
             None,
             {"token": token, "manifest": dict(manifest)},
             RetryOptions(attempts=1),
@@ -157,7 +158,7 @@ class RoomClient:
         if method not in METHODS:
             raise ValueError(f"{method!r} is not in the Room Protocol catalog")
         body = _envelope(method, params or {}, idempotency_key)  # one envelope: a retry keeps the key
-        url = f"{self.client.base_url}/v1/rooms/{self.room_id}/commands"
+        url = f"{self.client.base_url}/v1/rooms/{quote(self.room_id, safe='')}/commands"
         renewed = False
         while True:
             token = self._tokens.access
@@ -174,7 +175,7 @@ class RoomClient:
         scheme = "wss" if c.base_url.startswith("https") else "ws"
         host = c.base_url.split("://", 1)[1]
         return WsConfig(
-            url=f"{scheme}://{host}/v1/rooms/{self.room_id}/ws",
+            url=f"{scheme}://{host}/v1/rooms/{quote(self.room_id, safe='')}/ws",
             token=self._tokens.access,
             get_token=lambda: self._tokens.access,
             refresh=self._tokens.refresh_after,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from dataclasses import replace
 from typing import Any, Awaitable, Callable, Mapping, Union
 
 import httpx
@@ -67,8 +68,14 @@ class TokenStore:
         self._inflight = None
 
     async def _do_refresh(self) -> None:
+        # Exactly once: a refresh token is single-use, so sending it again after a lost response
+        # would look like a theft. A failure surfaces as a retryable error, not as "refused".
         _, pair = await post_json(
-            self._http, self._refresh_url, None, {"refresh_token": self._tokens["refresh_token"]}, self._retry
+            self._http,
+            self._refresh_url,
+            None,
+            {"refresh_token": self._tokens["refresh_token"]},
+            replace(self._retry, attempts=1),
         )
         self._tokens = dict(pair)
         if self._on_tokens is not None:
