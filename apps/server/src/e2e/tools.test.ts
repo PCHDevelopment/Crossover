@@ -580,7 +580,10 @@ describe("tools: keys, freezes and stale claims", () => {
         capability: "github.create_pull_request:acme/widgets",
       }),
     );
-    const retry = await ok(await send(r, request)); // the requester gets what happened
+    // Five retries at once (a client that gave up waiting, five times): one event, one result.
+    const retries = await Promise.all(Array.from({ length: 5 }, () => send(r, request)));
+    for (const res of retries) expect(res.statusCode, res.body).toBe(200);
+    const retry = retries[0]!.json();
     expect(retry.response.result).toMatchObject({ ok: true });
     expect(invoked.length).toBe(before + 1);
     expect((await r.events("tool.completed")).length).toBe(1); // logged once, whichever attempt got to

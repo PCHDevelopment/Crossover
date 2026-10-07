@@ -202,9 +202,9 @@ const markStarted = (pool: Pool, who: Claimant) =>
     [who.participant_id, who.key],
   );
 
-const markLogged = (pool: Pool, who: Claimant) =>
+const unmarkLogged = (pool: Pool, who: Claimant) =>
   pool.query(
-    "UPDATE tool_invocations SET events_logged = true WHERE participant_id = $1 AND idempotency_key = $2",
+    "UPDATE tool_invocations SET events_logged = false WHERE participant_id = $1 AND idempotency_key = $2",
     [who.participant_id, who.key],
   );
 
@@ -434,18 +434,38 @@ export function registerToolCommands(dispatcher: Dispatcher, options: ToolComman
         );
         return out.result;
       };
-      const logOutcome = async (outcome: Outcome, capability: string): Promise<void> => {
+      const logOutcome = async (
+        outcome: Outcome,
+        capability: string,
+        released = false,
+      ): Promise<void> => {
         if (def.tier < 2) return;
-        const logged = outcome.ok
-          ? await note("tool.completed", capability, {
-              duration_ms: outcome.duration_ms,
-              trust: "external",
-            })
-          : await note("tool.failed", capability, {
-              reason: outcome.error.code,
-              retryable: outcome.error.retryable,
-            });
-        if (logged) await markLogged(ctx.pool, who);
+        // Claim the right to log first, atomically: concurrent retries of the same key must append
+        // the event once. If the append doesn't happen (a frozen room, a failure), give the claim back.
+        const { rowCount } = await ctx.pool.query(
+          `UPDATE tool_invocations SET events_logged = true
+           WHERE participant_id = $1 AND idempotency_key = $2 AND events_logged = false
+           RETURNING 1`,
+          [who.participant_id, who.key],
+        );
+        const owned = (rowCount ?? 0) > 0;
+        // Someone else holds the right to log this run's events. (A run whose claim was released,
+        // a retryable failure, has no row at all and is logged by the one request that ran it.)
+        if (!owned && !released) return;
+        let logged = false;
+        try {
+          logged = outcome.ok
+            ? await note("tool.completed", capability, {
+                duration_ms: outcome.duration_ms,
+                trust: "external",
+              })
+            : await note("tool.failed", capability, {
+                reason: outcome.error.code,
+                retryable: outcome.error.retryable,
+              });
+        } finally {
+          if (owned && !logged) await unmarkLogged(ctx.pool, who).catch(() => undefined);
+        }
       };
 
       // A run that already has an outcome under this key belongs to its requester: they get what
@@ -461,7 +481,7 @@ export function registerToolCommands(dispatcher: Dispatcher, options: ToolComman
         } catch {
           // the outcome stands whatever the arguments look like now
         }
-        if (!recorded.logged) await logOutcome(recorded.outcome, capability).catch(() => undefined);
+        await logOutcome(recorded.outcome, capability).catch(() => undefined);
         return { outcome: recorded.outcome, capability, scope };
       }
 
@@ -515,7 +535,7 @@ export function registerToolCommands(dispatcher: Dispatcher, options: ToolComman
       try {
         if (!outcome.ok && outcome.error.retryable) {
           await releaseClaim(ctx.pool, who);
-          await logOutcome(outcome, capability).catch(() => undefined);
+          await logOutcome(outcome, capability, true).catch(() => undefined);
           return { outcome, capability, scope };
         }
         if (!(await recordOutcome(ctx.pool, who, outcome))) {
