@@ -36,6 +36,7 @@ export async function escalateOpenConflict(
     kind: "ESCALATION",
     ref: { kind: "conflict", id: conflict.id },
     summary: "Conflict requires your decision.",
+    author_id: "system",
   });
   return {
     type: "workspace.conflict.escalated",

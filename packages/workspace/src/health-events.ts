@@ -68,6 +68,7 @@ export async function publishHealthResult(
             kind: "HEALTH_RED",
             ref: { kind: "health_run", id: runId },
             summary: `Health check failed at workspace revision ${revision}; your ChangeSet is in the suspect range.`,
+            author_id: "system",
           });
           inboxCount += 1;
         }
