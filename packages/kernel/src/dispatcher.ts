@@ -1,5 +1,11 @@
 import { withTransaction, type Pool, type PoolClient } from "@crossover/db";
-import { appendEvents, hashRequest, withIdempotency, type NewEvent } from "@crossover/ledger";
+import {
+  appendEvents,
+  hashRequest,
+  IDEMPOTENCY_TTL_HOURS,
+  withIdempotency,
+  type NewEvent,
+} from "@crossover/ledger";
 import {
   commandEnvelopeSchema,
   CrossoverError,
@@ -12,6 +18,14 @@ import {
 } from "@crossover/protocol";
 import type { z } from "zod";
 import { RoomActorRegistry } from "./actor.js";
+import {
+  BUDGET_DEFAULTS,
+  budgetsOf,
+  limitFor,
+  readOverrides,
+  type BudgetLimiter,
+  type BudgetName,
+} from "./budgets.js";
 import { RoomLeases, type RoomLeasesOptions } from "./leases.js";
 import { queueApproval, type ApprovalRow } from "./modules/approvals/approvals.js";
 import type { Principal } from "./principal.js";
@@ -249,6 +263,13 @@ export interface DispatcherOptions {
     error: unknown,
     info: { method: string; command_id: string; room_id: string; action: string },
   ) => void;
+  /**
+   * Per-agent budgets (§22.3), counted before a command's transaction. Without one, nothing is
+   * limited.
+   */
+  budgets?: BudgetLimiter;
+  /** Called when the limiter fails (Redis down): the command goes ahead. Defaults to `console.warn`. */
+  onBudgetError?: (error: unknown, info: { method: string; room_id: string }) => void;
   /** Called when an `afterCommit` callback throws. Defaults to `console.error`. */
   onAfterCommitError?: (
     error: unknown,
@@ -292,6 +313,9 @@ export class Dispatcher {
   readonly actors: RoomActorRegistry;
   readonly leases: RoomLeases;
 
+  private readonly budgets: BudgetLimiter | undefined;
+  private readonly onBudgetError: NonNullable<DispatcherOptions["onBudgetError"]>;
+
   constructor(options: DispatcherOptions) {
     this.pool = options.pool;
     this.authorizer = options.authorize;
@@ -307,6 +331,20 @@ export class Dispatcher {
       options.onAfterCommitError ??
       ((error, info) =>
         console.error(`afterCommit callback failed for ${info.method}`, info, error));
+    this.budgets = options.budgets;
+    let lastBudgetWarning = 0;
+    this.onBudgetError =
+      options.onBudgetError ??
+      ((error, info) => {
+        // During an outage that is every agent command: say it once in a while.
+        if (Date.now() - lastBudgetWarning < 30_000) return;
+        lastBudgetWarning = Date.now();
+        console.warn(
+          `budget check failed for ${info.method}; letting commands through`,
+          info,
+          error,
+        );
+      });
     this.actors = options.actors ?? new RoomActorRegistry();
     this.leases =
       options.leases ??
@@ -441,6 +479,7 @@ export class Dispatcher {
     }
     const params: unknown = parsedParams.data;
 
+    await this.enforceBudgets(principal, envelope);
     return def.mutating
       ? this.runMutating(principal, envelope, def, action, params)
       : this.runRead(principal, envelope, def, action, params);
@@ -941,6 +980,163 @@ export class Dispatcher {
     }
     if (out.afterCommit) outer.afterCommit(out.afterCommit);
     return out;
+  }
+
+  /**
+   * Count the command against the agent's budgets (§22.3) and refuse it with `BUDGET_EXCEEDED`
+   * and `retry_after` (seconds) when one is used up. Agents only; the limits are the defaults
+   * unless the room's `settings.budgets` or the participant's `budgets` say otherwise. The first
+   * refusal of a window is also recorded as `budget.exceeded`, so a flood of refused calls
+   * writes one event, not one each. If the limiter or its overrides can't be read, the command
+   * goes ahead.
+   */
+  private async enforceBudgets(
+    principal: Principal,
+    envelope: {
+      method: string;
+      id: string;
+      idempotency_key?: string | undefined;
+      params?: unknown;
+    },
+  ) {
+    if (!this.budgets || principal.kind !== "AGENT") return;
+    const room_id = principal.room_id;
+    let refusal:
+      { budget: BudgetName; limit: number; retry_after_ms: number; first: boolean } | undefined;
+    try {
+      // A retry of a command that already ran gets its stored result and costs nothing.
+      if (await this.isReplay(principal, envelope)) return;
+      const { rows } = await this.pool.query<{ room: unknown; mine: unknown }>(
+        `SELECT r.settings -> 'budgets' AS room, p.budgets AS mine
+         FROM participants p JOIN rooms r ON r.id = p.room_id
+         WHERE p.id = $1 AND p.room_id = $2`,
+        [principal.participant_id, room_id],
+      );
+      const room = readOverrides(rows[0]?.room);
+      const mine = readOverrides(rows[0]?.mine);
+      const keyOf = (budget: BudgetName) => ({
+        room_id,
+        participant_id: principal.participant_id,
+        budget,
+      });
+      const applicable: { budget: BudgetName; limit: number }[] = [];
+      for (const budget of budgetsOf(envelope.method)) {
+        const limit = limitFor(budget, room, mine);
+        if (limit !== null) applicable.push({ budget, limit });
+      }
+      // Look at every budget first: a command refused for one spends none of the others, so an
+      // agent hammering a refused `messages.send` can still read.
+      let exhausted: { budget: BudgetName; limit: number } | undefined;
+      for (const item of applicable) {
+        const used = await this.budgets.peek(
+          keyOf(item.budget),
+          BUDGET_DEFAULTS[item.budget].windowMs,
+        );
+        if (used >= item.limit) {
+          exhausted = item;
+          break;
+        }
+      }
+      for (const item of exhausted ? [exhausted] : applicable) {
+        const decision = await this.budgets.consume(
+          keyOf(item.budget),
+          item.limit,
+          BUDGET_DEFAULTS[item.budget].windowMs,
+        );
+        if (!decision.allowed) {
+          refusal = { ...item, ...decision };
+          break;
+        }
+      }
+    } catch (error) {
+      try {
+        this.onBudgetError(error, { method: envelope.method, room_id });
+      } catch {
+        // A broken error handler must not change the command's outcome.
+      }
+      return;
+    }
+    if (!refusal) return;
+    const retryAfter = Math.max(1, Math.ceil(refusal.retry_after_ms / 1000));
+    const details = {
+      budget: refusal.budget,
+      limit: refusal.limit,
+      window_seconds: BUDGET_DEFAULTS[refusal.budget].windowMs / 1000,
+      retry_after: retryAfter,
+    };
+    if (refusal.first) await this.recordBudgetExceeded(principal, envelope, details);
+    throw new CrossoverError(
+      "BUDGET_EXCEEDED",
+      `The ${refusal.budget} budget (${refusal.limit} per ${details.window_seconds} s) is used up; retry in ${retryAfter} s`,
+      { details },
+    );
+  }
+
+  /** Whether this exact request (same participant, key and content) already ran and has a stored result. */
+  private async isReplay(
+    principal: Principal,
+    envelope: { method: string; idempotency_key?: string | undefined; params?: unknown },
+  ): Promise<boolean> {
+    if (envelope.idempotency_key === undefined) return false;
+    let requestHash: string;
+    try {
+      requestHash = hashRequest({
+        room_id: principal.room_id,
+        method: envelope.method,
+        params: envelope.params,
+      });
+    } catch {
+      return false; // the command itself will say the params are bad
+    }
+    const { rowCount } = await this.pool.query(
+      `SELECT 1 FROM idempotency_keys
+       WHERE participant_id = $1 AND idempotency_key = $2 AND request_hash = $3
+         AND response IS NOT NULL
+         AND created_at >= clock_timestamp() - make_interval(hours => $4)`,
+      [principal.participant_id, envelope.idempotency_key, requestHash, IDEMPOTENCY_TTL_HOURS],
+    );
+    return (rowCount ?? 0) > 0;
+  }
+
+  /** Append `budget.exceeded` in a transaction of its own. Never throws. */
+  private async recordBudgetExceeded(
+    principal: Principal,
+    envelope: { method: string; id: string },
+    details: Record<string, unknown>,
+  ): Promise<void> {
+    const room_id = principal.room_id;
+    try {
+      await this.actors.get(room_id).submit(async () => {
+        const token = await this.leases.ensure(room_id);
+        const events = await withTransaction(this.pool, (client) =>
+          appendEvents(
+            client,
+            room_id,
+            [
+              {
+                type: "budget.exceeded",
+                actor_id: principal.participant_id,
+                causation_id: envelope.id,
+                payload: { ...details, method: envelope.method },
+              },
+            ],
+            token,
+          ),
+        );
+        await this.afterCommitWork(room_id, envelope, [], {
+          response: undefined,
+          events,
+          replayed: false,
+        });
+      });
+    } catch (error) {
+      this.onDenialRecordError(error, {
+        method: envelope.method,
+        command_id: envelope.id,
+        room_id,
+        action: "budget.exceeded",
+      });
+    }
   }
 
   private async runRead(

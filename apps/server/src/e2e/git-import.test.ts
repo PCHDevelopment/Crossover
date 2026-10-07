@@ -238,3 +238,63 @@ describe("git.pull_upstream over HTTP", () => {
     expect(again.response.status).toBe("UP_TO_DATE");
   });
 });
+
+describe("checkpoints over HTTP", () => {
+  it("the owner marks the head; a developer can't, but can list; an override is the owner's alone", async () => {
+    const r = await newRoom();
+    const empty = await r.call(r.owner, "checkpoints.create", { message: "too early" });
+    expect(empty.statusCode).toBe(400);
+    expect(empty.json().error.details.reason).toBe("empty_workspace");
+    await ok(
+      await r.call(r.owner, "git.import", {
+        url: "https://github.com/acme/widgets",
+        branch: "main",
+      }),
+    );
+    const denied = await r.call(r.dev, "checkpoints.create", { message: "nope" });
+    expect(denied.statusCode).toBe(403);
+    const made = await ok(await r.call(r.owner, "checkpoints.create", { message: "imported" }));
+    expect(made.response).toMatchObject({ revision: 1, message: "imported", overridden: false });
+    const list = await ok(await r.call(r.dev, "checkpoints.list"));
+    expect(list.response.checkpoints).toHaveLength(1);
+    expect(list.response.checkpoints[0].provenance.author_kind).toBe("HUMAN");
+  });
+});
+
+describe("checkpoints when the owner isn't the lead", () => {
+  it("an owner who handed the lead to an agent still marks a checkpoint, and is the only one who can override", async () => {
+    const r = await newRoom();
+    await ok(
+      await r.call(r.owner, "git.import", {
+        url: "https://github.com/acme/widgets",
+        branch: "main",
+      }),
+    );
+    const devId = (
+      await db.pool.query("SELECT id FROM participants WHERE room_id = $1 AND kind = 'AGENT'", [
+        r.roomId,
+      ])
+    ).rows[0].id as string;
+    await ok(await r.call(r.owner, "room.set_lead", { participant_id: devId }));
+    // A red health run on the head.
+    await db.pool.query(
+      'UPDATE rooms SET settings = settings || \'{"health_command":"npm test"}\'::jsonb WHERE id = $1',
+      [r.roomId],
+    );
+    await db.pool.query(
+      `INSERT INTO health_runs (id, workspace_id, room_id, revision, status, duration_ms, log)
+       SELECT $1, workspace_id, room_id, revision, 'RED', 1, 'log' FROM workspace_revisions
+       WHERE room_id = $2 AND revision = 1`,
+      [newId("health"), r.roomId],
+    );
+    const blocked = await r.call(r.owner, "checkpoints.create", { message: "try" });
+    expect(blocked.statusCode).toBe(400);
+    expect(blocked.json().error.details.reason).toBe("health_red");
+    const lead = await r.call(r.dev, "checkpoints.create", { message: "lead", override: true });
+    expect(lead.statusCode).toBe(403);
+    const made = await ok(
+      await r.call(r.owner, "checkpoints.create", { message: "owner override", override: true }),
+    );
+    expect(made.response).toMatchObject({ health_status: "RED", overridden: true });
+  });
+});

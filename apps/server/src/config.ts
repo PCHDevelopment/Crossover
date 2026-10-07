@@ -36,6 +36,7 @@ const envSchema = z.object({
     .regex(/^[a-z0-9][a-z0-9_.-]*$/)
     .optional(),
   SANDBOX_EGRESS_PROXY_PORT: z.coerce.number().int().min(1).max(65_535).optional(),
+  SANDBOX_EGRESS_PROXY_SECRET: z.string().min(32).optional(),
 });
 
 export interface ServerConfig {
@@ -58,6 +59,8 @@ export interface ServerConfig {
   /** Operator-provisioned HTTP allowlist proxy; absent means network-none sandboxes. */
   sandboxEgressProxyContainer?: string;
   sandboxEgressProxyPort?: number;
+  /** Shared HMAC secret for per-sandbox egress proxy credentials. */
+  sandboxEgressProxySecret?: string;
 }
 
 /**
@@ -77,6 +80,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   if (e.SANDBOX_EGRESS_PROXY_PORT !== undefined && !e.SANDBOX_EGRESS_PROXY_CONTAINER)
     throw new Error(
       "Invalid server configuration:\n  SANDBOX_EGRESS_PROXY_PORT requires SANDBOX_EGRESS_PROXY_CONTAINER",
+    );
+  if (e.SANDBOX_EGRESS_PROXY_CONTAINER && !e.SANDBOX_EGRESS_PROXY_SECRET)
+    throw new Error(
+      "Invalid server configuration:\n  SANDBOX_EGRESS_PROXY_CONTAINER requires SANDBOX_EGRESS_PROXY_SECRET",
+    );
+  if (e.SANDBOX_EGRESS_PROXY_SECRET && !e.SANDBOX_EGRESS_PROXY_CONTAINER)
+    throw new Error(
+      "Invalid server configuration:\n  SANDBOX_EGRESS_PROXY_SECRET requires SANDBOX_EGRESS_PROXY_CONTAINER",
     );
   if (
     sandboxDiskEnforcement === "hard" &&
@@ -104,6 +115,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
       : {}),
     ...(e.SANDBOX_EGRESS_PROXY_PORT !== undefined
       ? { sandboxEgressProxyPort: e.SANDBOX_EGRESS_PROXY_PORT }
+      : {}),
+    ...(e.SANDBOX_EGRESS_PROXY_SECRET
+      ? { sandboxEgressProxySecret: e.SANDBOX_EGRESS_PROXY_SECRET }
       : {}),
   };
 }

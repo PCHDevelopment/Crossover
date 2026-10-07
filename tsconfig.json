@@ -3,12 +3,14 @@
   "references": [
     { "path": "packages/protocol" },
     { "path": "packages/db" },
+    { "path": "packages/security" },
     { "path": "packages/gateway" },
     { "path": "packages/kernel" },
     { "path": "packages/mcp" },
     { "path": "packages/ledger" },
     { "path": "packages/policy" },
     { "path": "packages/workspace" },
+    { "path": "apps/egress-proxy" },
     { "path": "apps/server" }
   ]
 }

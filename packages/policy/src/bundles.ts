@@ -249,13 +249,15 @@ const GOVERNING_TASK_CAPABILITIES = [
 ] as const satisfies readonly Capability[];
 
 /**
- * Importing and pulling the room's upstream repository (§24.1, §24.2) is for "lead or owner":
- * the lead has it in the role bundle, and an owner has it whatever their project role. Ordinary
+ * Importing and pulling the room's upstream repository (§24.1, §24.2) and marking checkpoints
+ * (§24.3) are for "lead or owner": the lead has them in the role bundle, and an owner has them
+ * whatever their project role (the owner who handed the lead to an agent still overrides). Ordinary
  * capabilities, so they stay grantable to others; admins don't get them from authority alone.
  */
 const OWNER_GIT_CAPABILITIES = [
   "git.import",
   "git.pull_upstream",
+  "checkpoints.create",
 ] as const satisfies readonly Capability[];
 
 /** Role bundle plus authority powers (and, for owners and admins, task management). */

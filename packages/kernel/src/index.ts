@@ -18,3 +18,4 @@ export * from "./modules/memory/index.js";
 export * from "./modules/decisions/index.js";
 export * from "./modules/provenance.js";
 export * from "./modules/approvals/approvals.js";
+export * from "./budgets.js";
