@@ -553,9 +553,10 @@ Limits: ≤ 500 operations and ≤ 25 MB of text per ChangeSet.
 6. Classify
      clean merge                    → step 7
      content or structural conflict → status CONFLICT, create Conflict (§11), stop
-7. Parse check     for languages with a tree-sitter grammar, if the merged result fails to
-                   parse in a file where neither side's version failed → treat as CONFLICT
-                   (source=EDITOR drafts that already fail to parse are allowed through)
+7. Parse check     for supported source files changed by the merge, if the merged result fails
+                   to parse in a file where neither side's version failed → treat as CONFLICT
+                   (source=EDITOR drafts that already fail to parse are allowed through);
+                   skip files over 1 MiB and stop after 8 MiB of unique source has been parsed
 8. Commit          commit-tree → PostgreSQL txn: workspace_revisions row, file_revisions rows,
                    ChangeSet APPLIED, event workspace.changeset.applied → update Git ref
 9. Respond         { status: APPLIED, applied_revision }

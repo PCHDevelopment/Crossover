@@ -25,6 +25,8 @@ export interface WorkspaceCommandDeps {
   refreshSearchTree?: (repo: string, commit: string, previousCommit?: string) => Promise<void>;
   /** Merge engine seam for deterministic conflict-policy checks. */
   merge?: typeof merge;
+  /** Parser seam for deterministic check-failure handling tests. */
+  parseConflicts?: typeof parseConflicts;
   /** Schedule health for an applied head after its transaction commits. */
   scheduleHealthCheck?: (roomId: string, revision: number) => void;
 }
@@ -190,20 +192,32 @@ async function apply(
     candidate,
   );
   if (result.clean) {
-    const paths = await parseConflicts(ws.repo_path, head.commit_sha, candidate, result);
-    if (paths.length) {
-      result = {
-        clean: false,
-        tree: result.tree,
-        conflicts: {
-          files: paths.map((path) => ({ path, stages: [] })),
-          messages: paths.map((path) => ({
-            paths: [path],
-            type: "CONFLICT (parse)",
-            message: "Merged source file does not parse",
-          })),
-        },
-      };
+    try {
+      const paths = await (deps.parseConflicts ?? parseConflicts)(
+        ws.repo_path,
+        head.commit_sha,
+        candidate,
+        result,
+      );
+      if (paths.length) {
+        result = {
+          clean: false,
+          tree: result.tree,
+          conflicts: {
+            files: paths.map((path) => ({ path, stages: [] })),
+            messages: paths.map((path) => ({
+              paths: [path],
+              type: "CONFLICT (parse)",
+              message: "Merged source file does not parse",
+            })),
+          },
+        };
+      }
+    } catch (error) {
+      console.error("Workspace syntax check failed; allowing the clean merge", {
+        room_id,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   }
   if (!result.clean) {

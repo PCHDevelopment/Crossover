@@ -4,7 +4,14 @@ import { git } from "./git.js";
 import type { MergeResult } from "./merge.js";
 import { treeChanges } from "./tree-changes.js";
 
-type SyntaxTree = { rootNode: { hasError: boolean }; delete(): void };
+type SyntaxTree = {
+  rootNode: {
+    hasError: boolean;
+    childCount: number;
+    child(index: number): { startPosition: { column: number } } | null;
+  };
+  delete(): void;
+};
 type Language = unknown;
 type ParserInstance = {
   setLanguage(language: Language): void;
@@ -24,7 +31,14 @@ const treeSitterModule = require("@vscode/tree-sitter-wasm") as TreeSitterModule
   Language: { load(path: string): Promise<Language> };
 };
 const TreeSitter = treeSitterModule.Parser;
-const parserReady = TreeSitter.init({ locateFile: (file) => join(wasmDirectory, file) });
+let parserReady: Promise<void> | undefined;
+function initializeParser(): Promise<void> {
+  parserReady ??= TreeSitter.init({ locateFile: (file) => join(wasmDirectory, file) });
+  return parserReady;
+}
+
+export const PARSE_FILE_MAX_BYTES = 1024 * 1024;
+export const PARSE_APPLY_BUDGET_BYTES = 8 * 1024 * 1024;
 const grammarFiles: Record<string, string> = {
   javascript: "tree-sitter-javascript.wasm",
   python: "tree-sitter-python.wasm",
@@ -43,7 +57,7 @@ function grammarFor(path: string): string | undefined {
 }
 
 async function languageFor(grammar: string): Promise<Language> {
-  await parserReady;
+  await initializeParser();
   let language = languages.get(grammar);
   if (!language) {
     language = treeSitterModule.Language.load(join(wasmDirectory, grammarFiles[grammar]!));
@@ -76,7 +90,7 @@ async function blobsAt(
   return result;
 }
 
-async function readBlobs(repo: string, oids: readonly string[]): Promise<Map<string, Buffer>> {
+async function blobSizes(repo: string, oids: readonly string[]): Promise<Map<string, number>> {
   const unique = [...new Set(oids)];
   const sizes = new Map<string, number>();
   if (unique.length) {
@@ -85,26 +99,42 @@ async function readBlobs(repo: string, oids: readonly string[]): Promise<Map<str
       timeoutMs: 10_000,
       input: `${unique.join("\n")}\n`,
     });
-    for (const line of stdout.trimEnd().split("\n")) {
+    const lines = stdout.trimEnd().split("\n");
+    if (lines.length !== unique.length) throw new Error("Malformed source blob size response");
+    for (const [index, line] of lines.entries()) {
       const [oid, type, sizeText] = line.split(" ");
       const size = Number(sizeText);
-      if (oid && type === "blob" && Number.isSafeInteger(size)) sizes.set(oid, size);
+      if (
+        oid === undefined ||
+        oid !== unique[index] ||
+        type !== "blob" ||
+        !Number.isSafeInteger(size)
+      )
+        throw new Error("Unexpected source blob size response");
+      sizes.set(oid, size);
     }
   }
+  return sizes;
+}
+
+async function readBlobs(
+  repo: string,
+  oids: readonly string[],
+  sizes: ReadonlyMap<string, number>,
+): Promise<Map<string, Buffer>> {
+  const unique = [...new Set(oids)];
   const contents = new Map<string, Buffer>();
-  // Workspace files are capped at 25 MiB; larger imported blobs are not parsed here.
-  const supported = unique.filter((oid) => (sizes.get(oid) ?? Infinity) <= 25 * 1024 * 1024);
-  for (let offset = 0; offset < supported.length;) {
+  for (let offset = 0; offset < unique.length;) {
     let end = offset;
     let bytes = 0;
     while (
-      end < supported.length &&
-      (end === offset || bytes + sizes.get(supported[end]!)! <= 24 * 1024 * 1024)
+      end < unique.length &&
+      (end === offset || bytes + sizes.get(unique[end]!)! <= 24 * 1024 * 1024)
     ) {
-      bytes += sizes.get(supported[end]!)! + 128;
+      bytes += sizes.get(unique[end]!)! + 128;
       end++;
     }
-    const batch = supported.slice(offset, end);
+    const batch = unique.slice(offset, end);
     const { stdout } = await git(["cat-file", "--batch"], {
       gitDir: repo,
       timeoutMs: 10_000,
@@ -139,12 +169,21 @@ async function failsToParse(content: Buffer | undefined, grammar: string): Promi
   } catch {
     return false;
   }
+  const language = await languageFor(grammar);
   const parser = new TreeSitter();
   try {
-    parser.setLanguage(await languageFor(grammar));
+    parser.setLanguage(language);
     const treeResult = parser.parse(source);
     try {
-      return treeResult.rootNode.hasError;
+      const root = treeResult.rootNode;
+      if (root.hasError) return true;
+      // The Python grammar accepts a top-level unexpected indent; Python rejects it.
+      return (
+        grammar === "python" &&
+        Array.from({ length: root.childCount }, (_, index) => root.child(index)).some(
+          (child) => child !== null && child.startPosition.column > 0,
+        )
+      );
     } finally {
       treeResult.delete();
     }
@@ -167,19 +206,58 @@ export async function parseConflicts(
     blobsAt(repo, candidateCommit, paths),
     blobsAt(repo, result.tree, paths),
   ]);
-  const contents = await readBlobs(repo, [
-    ...headBlobs.values(),
-    ...candidateBlobs.values(),
-    ...resultBlobs.values(),
-  ]);
+  const oidsByPath = new Map(
+    paths.map((path) => [
+      path,
+      [
+        ...new Set(
+          [headBlobs.get(path), candidateBlobs.get(path), resultBlobs.get(path)].filter(
+            (oid): oid is string => oid !== undefined,
+          ),
+        ),
+      ],
+    ]),
+  );
+  const allOids = [...oidsByPath.values()].flat();
+  const sizes = await blobSizes(repo, allOids);
+  const parseKeys = new Set<string>();
+  const parsePaths = new Set<string>();
+  let parseBudget = 0;
+  for (const path of paths.toSorted()) {
+    const oids = oidsByPath.get(path)!;
+    if (oids.some((oid) => sizes.get(oid)! > PARSE_FILE_MAX_BYTES)) continue;
+    const grammar = grammarFor(path)!;
+    const newKeys = oids.map((oid) => `${grammar}\0${oid}`).filter((key) => !parseKeys.has(key));
+    const addedBytes = newKeys.reduce((total, key) => {
+      const oid = key.slice(key.indexOf("\0") + 1);
+      return total + sizes.get(oid)!;
+    }, 0);
+    if (parseBudget + addedBytes > PARSE_APPLY_BUDGET_BYTES) continue;
+    parsePaths.add(path);
+    for (const key of newKeys) parseKeys.add(key);
+    parseBudget += addedBytes;
+  }
+  const allowedOids = [...new Set([...parsePaths].flatMap((path) => oidsByPath.get(path)!))];
+  const contents = await readBlobs(repo, allowedOids, sizes);
+  const parseResults = new Map<string, Promise<boolean>>();
+  const check = (path: string, oid: string | undefined): Promise<boolean> => {
+    if (!oid) return Promise.resolve(false); // A missing side is syntactically valid.
+    const key = `${grammarFor(path)}\0${oid}`;
+    let result = parseResults.get(key);
+    if (!result) {
+      result = failsToParse(contents.get(oid), grammarFor(path)!);
+      parseResults.set(key, result);
+    }
+    return result;
+  };
   const conflicts: string[] = [];
   for (const path of paths) {
-    const grammar = grammarFor(path)!;
-    const mergedFails = await failsToParse(contents.get(resultBlobs.get(path) ?? ""), grammar);
+    if (!parsePaths.has(path)) continue;
+    const mergedFails = await check(path, resultBlobs.get(path));
     if (!mergedFails) continue;
     const [headFails, candidateFails] = await Promise.all([
-      failsToParse(contents.get(headBlobs.get(path) ?? ""), grammar),
-      failsToParse(contents.get(candidateBlobs.get(path) ?? ""), grammar),
+      check(path, headBlobs.get(path)),
+      check(path, candidateBlobs.get(path)),
     ]);
     // A missing file is valid; a draft that was already malformed is allowed through (§10.3).
     if (!headFails && !candidateFails) conflicts.push(path);

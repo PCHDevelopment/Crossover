@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { git } from "./git.js";
 import { initRoomRepo } from "./repo.js";
 import { materialize } from "./materialize.js";
-import { parseConflicts } from "./parse-check.js";
+import { PARSE_APPLY_BUDGET_BYTES, PARSE_FILE_MAX_BYTES, parseConflicts } from "./parse-check.js";
 
 const roots: string[] = [];
 
@@ -77,6 +77,78 @@ describe("parseConflicts", () => {
     await expect(parseConflicts(f.repo, head, candidate, { clean: true, tree })).resolves.toEqual(
       [],
     );
+  });
+
+  it("checks a newly added file whose missing head version is valid", async () => {
+    const f = await fixture();
+    const head = f.base;
+    const candidate = await materialize(f.repo, f.base, [
+      { type: "create", path: "src/new.py", content: "value = 1\n" },
+    ]);
+    const malformed = await materialize(f.repo, candidate, [
+      { type: "modify", path: "src/new.py", content: "def broken(:\n" },
+    ]);
+    const tree = (await git(["rev-parse", `${malformed}^{tree}`], f.options)).stdout.trim();
+
+    await expect(parseConflicts(f.repo, head, candidate, { clean: true, tree })).resolves.toEqual([
+      "src/new.py",
+    ]);
+  });
+
+  it("uses TSX only for .tsx files, while JSX is a .ts syntax error", async () => {
+    const f = await fixture();
+    const malformed = await materialize(f.repo, f.base, [
+      { type: "modify", path: "src/main.tsx", content: "const view = <span />;\n" },
+      { type: "modify", path: "src/main.ts", content: "const view = <div />;\n" },
+    ]);
+    const tree = (await git(["rev-parse", `${malformed}^{tree}`], f.options)).stdout.trim();
+
+    await expect(parseConflicts(f.repo, f.base, f.base, { clean: true, tree })).resolves.toEqual([
+      "src/main.ts",
+    ]);
+  });
+
+  it("skips a source file version above the per-file byte cap", async () => {
+    const f = await fixture();
+    const tooLarge = `def broken(:\n#${"x".repeat(PARSE_FILE_MAX_BYTES)}\n`;
+    const malformed = await materialize(f.repo, f.base, [
+      { type: "modify", path: "src/main.py", content: tooLarge },
+    ]);
+    const tree = (await git(["rev-parse", `${malformed}^{tree}`], f.options)).stdout.trim();
+
+    await expect(parseConflicts(f.repo, f.base, f.base, { clean: true, tree })).resolves.toEqual(
+      [],
+    );
+  });
+
+  it("stops scheduling files when the per-apply byte budget is exhausted", async () => {
+    const f = await fixture();
+    const padding = "x".repeat(900_000);
+    const paths = Array.from({ length: 5 }, (_, index) => `src/budget-${index}.py`);
+    const base = await materialize(
+      f.repo,
+      f.base,
+      paths.map((path, index) => ({
+        type: "create" as const,
+        path,
+        content: `value_${index} = ${index}\n#${index}${padding}\n`,
+      })),
+    );
+    const malformed = await materialize(
+      f.repo,
+      base,
+      paths.map((path, index) => ({
+        type: "modify" as const,
+        path,
+        content: `def broken_${index}(:\n#${index}${padding}\n`,
+      })),
+    );
+    const tree = (await git(["rev-parse", `${malformed}^{tree}`], f.options)).stdout.trim();
+    expect(PARSE_APPLY_BUDGET_BYTES).toBe(8 * 1024 * 1024);
+
+    const conflicts = await parseConflicts(f.repo, base, base, { clean: true, tree });
+    expect(conflicts).toHaveLength(4);
+    expect(conflicts).not.toContain(paths[4]);
   });
 
   it("ignores files outside the supported source grammars", async () => {
