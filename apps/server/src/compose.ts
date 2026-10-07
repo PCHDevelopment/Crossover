@@ -133,6 +133,13 @@ export async function composeServer(
       new DockerExecutionDriver({
         ...(config.sandboxVolumeDriver ? { volumeDriver: config.sandboxVolumeDriver } : {}),
         volumeOptions: config.sandboxVolumeOptions ?? {},
+        ...(config.sandboxRuntime ? { runtime: config.sandboxRuntime } : {}),
+        ...(config.sandboxEgressProxyContainer
+          ? { egressProxyContainer: config.sandboxEgressProxyContainer }
+          : {}),
+        ...(config.sandboxEgressProxyPort !== undefined
+          ? { egressProxyPort: config.sandboxEgressProxyPort }
+          : {}),
       });
     executionService = new ExecutionService(pool, executionDriver, {
       diskEnforcement: config.sandboxDiskEnforcement ?? "soft",

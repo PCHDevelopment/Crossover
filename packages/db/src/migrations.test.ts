@@ -614,6 +614,7 @@ describe("0011_inbox_items", () => {
       kind: "MENTION",
       ref: JSON.stringify({ kind: "message", id: "msg_1" }),
       summary: "Look at this",
+      author_id: "system",
       ...extra,
     };
     const keys = Object.keys(cols);
@@ -882,6 +883,42 @@ describe("0024_task_evidence", () => {
     const big = (n: number) => JSON.stringify([{ note: "x".repeat(n) }]);
     await task(r, big(32_000));
     await expect(task(r, big(33_000))).rejects.toMatchObject({ code: "23514" });
+  });
+});
+
+describe("0025_inbox_item_authors", () => {
+  let n = 0;
+  const setup = async () => {
+    const room = `room_ia${++n}`;
+    await db.pool.query(
+      `INSERT INTO rooms (id, slug, name, objective, owner_id) VALUES ($1, $1, 'n', 'o', 'x')`,
+      [room],
+    );
+    const who = `part_ia${++n}`;
+    await db.pool.query(
+      `INSERT INTO participants (id, room_id, kind, display_name, role, status)
+       VALUES ($1, $2, 'AGENT', 'a', 'DEVELOPER', 'ACTIVE')`,
+      [who, room],
+    );
+    return { room, who };
+  };
+  const insert = (room: string, who: string, author?: string) =>
+    db.pool.query(
+      `INSERT INTO inbox_items (id, room_id, participant_id, kind, ref, summary${author === undefined ? "" : ", author_id"})
+       VALUES ($1, $2, $3, 'MENTION', '{}'::jsonb, 's'${author === undefined ? "" : ", $4"}) RETURNING author_id`,
+      [`inbox_ia${++n}`, room, who, ...(author === undefined ? [] : [author])],
+    );
+
+  it("is recorded as applied", async () => {
+    const { rows } = await db.pool.query("SELECT name FROM schema_migrations WHERE version = 25");
+    expect(rows).toEqual([{ name: "inbox_item_authors" }]);
+  });
+
+  it("a new item must say whose words it carries: there is no default", async () => {
+    const { room, who } = await setup();
+    await expect(insert(room, who)).rejects.toMatchObject({ code: "23502" });
+    expect((await insert(room, who, "system")).rows[0].author_id).toBe("system");
+    expect((await insert(room, who, who)).rows[0].author_id).toBe(who);
   });
 });
 

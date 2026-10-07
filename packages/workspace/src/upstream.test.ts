@@ -181,6 +181,7 @@ describe("HttpsGitFetcher", () => {
       expect.arrayContaining([
         "clone",
         "--depth=1",
+        "--bare",
         "--single-branch",
         "--no-tags",
         "--branch=main",
@@ -189,7 +190,15 @@ describe("HttpsGitFetcher", () => {
     );
     expect(clone.args).toContain("https://github.com/acme/widgets");
     expect(clone.env).toMatchObject({ GIT_TERMINAL_PROMPT: "0", GIT_ALLOW_PROTOCOL: "https" });
-    expect(clone.env).not.toHaveProperty("GIT_CONFIG_COUNT");
+    // The host's own Git config is out of it, and a redirect is never followed (the URL was
+    // vetted; where a redirect leads wasn't).
+    expect(clone.env).toMatchObject({
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "http.followRedirects",
+      GIT_CONFIG_VALUE_0: "false",
+    });
+    expect(clone.env).not.toHaveProperty("GIT_CONFIG_KEY_1");
     expect(out.sha).toBe("a".repeat(40));
     await out.cleanup();
     await out.cleanup(); // twice is fine
@@ -205,9 +214,11 @@ describe("HttpsGitFetcher", () => {
     });
     const clone = calls[0]!;
     expect(clone.env).toMatchObject({
-      GIT_CONFIG_COUNT: "1",
-      GIT_CONFIG_KEY_0: "http.extraHeader",
-      GIT_CONFIG_VALUE_0: "Authorization: Bearer tok_secret",
+      GIT_CONFIG_COUNT: "2",
+      GIT_CONFIG_KEY_0: "http.followRedirects",
+      GIT_CONFIG_VALUE_0: "false",
+      GIT_CONFIG_KEY_1: "http.extraHeader",
+      GIT_CONFIG_VALUE_1: "Authorization: Bearer tok_secret",
     });
     for (const call of calls) expect(call.args.join(" ")).not.toContain("tok_secret");
     await out.cleanup();
@@ -218,7 +229,7 @@ describe("HttpsGitFetcher", () => {
       branch: "main",
       credential: { type: "basic", username: "bob", password: "pw" },
     });
-    expect(basic.calls[0]!.env!["GIT_CONFIG_VALUE_0"]).toBe(
+    expect(basic.calls[0]!.env!["GIT_CONFIG_VALUE_1"]).toBe(
       `Authorization: Basic ${Buffer.from("bob:pw").toString("base64")}`,
     );
     await out2.cleanup();

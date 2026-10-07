@@ -122,6 +122,7 @@ export function registerTaskLifecycleCommands(
           kind: "ASSIGNMENT",
           ref: { kind: "task", id: task.id },
           summary: `Assigned to you: ${task.title}`,
+          author_id: task.created_by, // the title is the task creator's
         });
       }
       return taken;
@@ -549,5 +550,6 @@ async function requestReview(
       missingCount === 0
         ? `Review requested: ${task.title}`
         : `Review requested: ${task.title} (${missingCount} of ${task.requirements.length} requirements have no evidence)`,
+    author_id: task.created_by, // the title is the task creator's
   });
 }

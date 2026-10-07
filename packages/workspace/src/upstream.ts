@@ -188,7 +188,14 @@ export class HttpsGitFetcher implements UpstreamFetcher {
       GIT_TERMINAL_PROMPT: "0",
       GIT_ALLOW_PROTOCOL: "https",
       GIT_CONFIG_NOSYSTEM: "1",
+      // No user-level config of the host (a url.insteadOf, a credential helper) reaches the fetch.
+      GIT_CONFIG_GLOBAL: "/dev/null",
       GIT_ASKPASS: "true",
+      // A redirect could send a validated public URL to a private host, or carry the credential
+      // to another one: refuse them all.
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "http.followRedirects",
+      GIT_CONFIG_VALUE_0: "false",
     };
     const credential = request.credential;
     if (credential) {
@@ -196,9 +203,9 @@ export class HttpsGitFetcher implements UpstreamFetcher {
         credential.type === "bearer"
           ? `Bearer ${credential.token}`
           : `Basic ${Buffer.from(`${credential.username}:${credential.password}`).toString("base64")}`;
-      env["GIT_CONFIG_COUNT"] = "1";
-      env["GIT_CONFIG_KEY_0"] = "http.extraHeader";
-      env["GIT_CONFIG_VALUE_0"] = `Authorization: ${header}`;
+      env["GIT_CONFIG_COUNT"] = "2";
+      env["GIT_CONFIG_KEY_1"] = "http.extraHeader";
+      env["GIT_CONFIG_VALUE_1"] = `Authorization: ${header}`;
     }
     const timeoutMs = this.options.timeoutMs ?? 120_000;
     try {
@@ -206,6 +213,7 @@ export class HttpsGitFetcher implements UpstreamFetcher {
         [
           "clone",
           "--depth=1",
+          "--bare",
           "--single-branch",
           "--no-tags",
           "--template=",
@@ -217,10 +225,10 @@ export class HttpsGitFetcher implements UpstreamFetcher {
         { cwd: dir, env, timeoutMs },
       );
       const sha = (
-        await this.run(["rev-parse", "HEAD"], { gitDir: join(repo, ".git"), timeoutMs: 10_000 })
+        await this.run(["rev-parse", "HEAD"], { gitDir: repo, timeoutMs: 10_000 })
       ).stdout.trim();
       return {
-        repo: join(repo, ".git"),
+        repo,
         ref: "HEAD",
         sha,
         cleanup,

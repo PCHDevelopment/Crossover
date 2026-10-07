@@ -197,7 +197,7 @@ describe("git.import (§24.1, T801)", () => {
     expect(Number(cs.applied_revision)).toBe(1);
     const files = (
       await db.pool.query(
-        "SELECT path, revision, workspace_revision, actor_id, blob_sha FROM file_revisions WHERE room_id = $1 ORDER BY path",
+        'SELECT path, revision, workspace_revision, actor_id, blob_sha FROM file_revisions WHERE room_id = $1 ORDER BY path COLLATE "C"',
         [r.roomId],
       )
     ).rows;
