@@ -7,6 +7,7 @@ import {
   RedisEventPublisher,
   RedisEventSubscriber,
   registerInviteCommands,
+  registerLeadCommands,
   registerRoomCommands,
   registerRoomEventsSubscribeCommand,
   type EventSubscriber,
@@ -86,6 +87,7 @@ async function setup(
   });
   registerRoomCommands(dispatcher);
   registerInviteCommands(dispatcher);
+  registerLeadCommands(dispatcher);
   registerRoomEventsSubscribeCommand(dispatcher);
   const app = buildGateway({
     dispatcher,
@@ -538,6 +540,56 @@ describe("subscribe: ordered, exactly-once events", () => {
       "the owner's live denial",
     );
     expect(asOwner.events().at(-1)!.payload).not.toHaveProperty("resource_redacted");
+  });
+
+  it("a lead who is demoted stops seeing denials in full, once the token is revalidated", async () => {
+    const env = await setup({ revalidateIntervalMs: 50 }, true);
+    const owner = {
+      participant_id: env.ownerId,
+      room_id: env.room,
+      kind: "HUMAN" as const,
+      authority: "OWNER" as const,
+      role: "LEAD" as const,
+    };
+    const asOwner = (method: string, params: Frame) =>
+      env.dispatcher.dispatch(owner, {
+        id: newId("cmd"),
+        method,
+        params,
+        idempotency_key: `k-${++n}`,
+      });
+    const join = async () => newDeveloper(env, await asOwner("room.invite", { role: "DEVELOPER" }));
+    const [lead, other, offender] = [await join(), await join(), await join()];
+
+    const watcher = await ready(env, lead);
+    const leadId = (watcher.frames.find((f) => f.type === "hello_ok") as Frame).participant_id;
+    await asOwner("room.set_lead", { participant_id: leadId });
+    watcher.send({ type: "subscribe", after: 0 });
+    await watcher.frame("subscribed");
+
+    const deny = async () => {
+      const c = await ready(env, offender);
+      c.send(cmd("room.invite", { role: "DEVELOPER" }));
+      expect((await c.frame("error")).error.code).toBe("FORBIDDEN");
+      (c as unknown as { sock: { terminate(): void } }).sock.terminate();
+    };
+    const denials = () => watcher.events().filter((e) => e.type === "capability.denied");
+
+    await deny();
+    await watcher.until(() => denials().length === 1, "the first denial");
+    expect(denials()[0]!.payload).not.toHaveProperty("resource_redacted"); // the lead sees it
+
+    // Demote: someone else becomes the lead. Wait out several revalidation intervals.
+    const otherId = (await ready(env, other)).frames.find(
+      (f) => f.type === "hello_ok",
+    )!.participant_id;
+    await asOwner("room.set_lead", { participant_id: otherId });
+    await new Promise((r) => setTimeout(r, 400));
+
+    await deny();
+    await watcher.until(() => denials().length === 2, "the second denial");
+    expect(denials()[1]!.payload).toMatchObject({ resource_redacted: true });
+    expect(denials()[1]!.payload).not.toHaveProperty("resource");
   });
 
   it("is refused without room.read (a paused participant), with an error frame", async () => {
