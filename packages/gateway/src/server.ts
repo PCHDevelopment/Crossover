@@ -11,6 +11,7 @@ import { CrossoverError, newId } from "@crossover/protocol";
 import { z } from "zod";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import { toHttpError } from "./errors.js";
+import { attachWebSocket, type WebSocketOptions } from "./ws.js";
 
 export interface GatewayOptions {
   dispatcher: Dispatcher;
@@ -25,6 +26,8 @@ export interface GatewayOptions {
    * logins (later) plug into the same `users` table.
    */
   devLogin?: boolean;
+  /** Serve `GET /v1/rooms/:roomId/ws` (T703). Off unless given. */
+  ws?: Omit<WebSocketOptions, "dispatcher" | "pool">;
 }
 
 const devLoginBody = z.strictObject({
@@ -73,7 +76,10 @@ function expectObject(body: unknown): Record<string, unknown> {
  */
 export function buildGateway(options: GatewayOptions): FastifyInstance {
   const { dispatcher, pool } = options;
-  const app = Fastify({ logger: false, bodyLimit: options.bodyLimit ?? 1024 * 1024 });
+  const app = Fastify({
+    logger: false,
+    bodyLimit: options.bodyLimit ?? 1024 * 1024,
+  });
 
   app.setErrorHandler((error, request, reply) => {
     const mapped = toHttpError(normalize(error));
@@ -204,6 +210,8 @@ export function buildGateway(options: GatewayOptions): FastifyInstance {
       };
     });
   }
+
+  if (options.ws) attachWebSocket(app, { ...options.ws, dispatcher, pool });
 
   return app;
 }
