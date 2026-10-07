@@ -4,6 +4,7 @@
     { "path": "packages/protocol" },
     { "path": "packages/db" },
     { "path": "packages/security" },
+    { "path": "packages/sdk" },
     { "path": "packages/gateway" },
     { "path": "packages/kernel" },
     { "path": "packages/mcp" },

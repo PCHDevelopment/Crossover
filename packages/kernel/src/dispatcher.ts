@@ -49,6 +49,8 @@ export interface CommandContext {
   command_id: string;
   /** The envelope's idempotency key: always set for mutating commands, undefined for reads. */
   idempotency_key: string | undefined;
+  /** What the command's `prepare` returned (T807), if it has one and ran. */
+  prepared?: unknown;
   /**
    * Run the policy check again for a finer-grained resource (e.g. each path of a ChangeSet).
    * Same principal, same transaction; `room_id` is filled in. Throws `FORBIDDEN` to deny.
@@ -189,7 +191,29 @@ export interface CommandDefinition<S extends z.ZodType, R> {
    * `NOT_FOUND` for a placeholder id); one that rejects them fails the test.
    */
   view_probe?: Record<string, unknown>;
+  /**
+   * Slow work that needs no lock (T807): a network fetch, say. Runs **before** the command's
+   * transaction, off the room's actor, so it doesn't hold the room lease or any row lock and
+   * other commands for the room carry on meanwhile. Its result reaches `execute` as
+   * `ctx.prepared`. The principal was authorized first (a refusal skips `prepare`, and the
+   * command then fails in the usual way), and it isn't run for a replay of a command that
+   * already ran. **The room may change while it runs**: `execute` must re-check whatever
+   * `prepare` assumed, and refuse with `CONFLICT_VERSION` if that no longer holds. Mutating
+   * commands only.
+   */
+  prepare?(ctx: PrepareContext, params: z.infer<S>): Promise<unknown>;
+  /** Release what `prepare` made (a temporary directory), whatever `execute` did. Never throws into the command. */
+  disposePrepared?(prepared: unknown): Promise<void>;
   execute(ctx: CommandContext, params: z.infer<S>): Promise<CommandResult<R>>;
+}
+
+/** What {@link CommandDefinition.prepare} gets: no transaction, no lease, just the pool. */
+export interface PrepareContext {
+  pool: Pool;
+  principal: Principal;
+  room_id: string;
+  command_id: string;
+  idempotency_key: string;
 }
 
 /** How a read command applies the participant view (§34.5). */
@@ -884,15 +908,27 @@ export class Dispatcher {
     }
     // The authorization came first, ahead of the idempotency lookup, so a request that already ran
     // (approved earlier, the gate still on) would be queued again: replay its stored result.
-    const { rows: stored } = await this.pool.query<{
-      response: { response: unknown; events: RoomEvent[] };
+    const { rows: used } = await this.pool.query<{
+      request_hash: string;
+      response: { response: unknown; events: RoomEvent[] } | null;
     }>(
-      `SELECT response FROM idempotency_keys
-       WHERE participant_id = $1 AND idempotency_key = $2 AND request_hash = $3
-         AND response IS NOT NULL
-         AND created_at >= clock_timestamp() - make_interval(hours => $4)`,
-      [principal.participant_id, idempotency.key, idempotency.hash, IDEMPOTENCY_TTL_HOURS],
+      `SELECT request_hash, response FROM idempotency_keys
+       WHERE participant_id = $1 AND idempotency_key = $2
+         AND created_at >= clock_timestamp() - make_interval(hours => $3)`,
+      [principal.participant_id, idempotency.key, IDEMPOTENCY_TTL_HOURS],
     );
+    // The key stands for the request it first ran: reusing it for another, gated one is the usual
+    // key-reuse error, and must not leave an approval nobody could decide.
+    if (used[0] && used[0].request_hash !== idempotency.hash) {
+      return {
+        error: new CrossoverError(
+          "VALIDATION",
+          "Idempotency key was already used with a different request",
+          { details: { idempotency_key: idempotency.key } },
+        ),
+      };
+    }
+    const stored = used[0]?.response ? [{ response: used[0].response }] : [];
     if (stored[0]) {
       return {
         replay: {
@@ -1256,12 +1292,86 @@ export class Dispatcher {
     }
   }
 
-  private runMutating(
+  private async runMutating(
     principal: Principal,
     envelope: CommandEnvelope,
     def: CommandDefinition<z.ZodType, unknown>,
     action: string,
     params: unknown,
+  ): Promise<DispatchResult> {
+    if (!def.prepare)
+      return this.runMutatingIn(principal, envelope, def, action, params, undefined);
+    const key = envelope.idempotency_key;
+    let prepared: unknown;
+    let ran = false;
+    try {
+      // Only for a principal who may run it, and not for a replay of a request that already ran.
+      // A refusal here is left for the command's own authorization to report and record.
+      const allowed = await this.mayPrepare(principal, envelope, action, def, params);
+      if (allowed && key !== undefined && !(await this.isReplay(principal, envelope))) {
+        ran = true;
+        prepared = await def.prepare(
+          {
+            pool: this.pool,
+            principal,
+            room_id: principal.room_id,
+            command_id: envelope.id,
+            idempotency_key: key,
+          },
+          params,
+        );
+      }
+      return await this.runMutatingIn(principal, envelope, def, action, params, prepared);
+    } finally {
+      if (ran && prepared !== undefined && def.disposePrepared) {
+        await def.disposePrepared(prepared).catch(() => undefined);
+      }
+    }
+  }
+
+  /** Whether the principal passes the command's authorization now, without recording a denial. */
+  private async mayPrepare(
+    principal: Principal,
+    envelope: CommandEnvelope,
+    action: string,
+    def: CommandDefinition<z.ZodType, unknown>,
+    params: unknown,
+  ): Promise<boolean> {
+    const client = await this.pool.connect();
+    try {
+      await this.authorizer(
+        principal,
+        action,
+        { room_id: principal.room_id },
+        {
+          method: envelope.method,
+          params,
+          client,
+          ...(def.perPathAuthorize ? { perPath: true } : {}),
+        },
+      );
+      return true;
+    } catch (error) {
+      // A refusal is the command's own authorization to report (and record). Anything else (the
+      // database unreachable, say) is not a refusal: say to retry, not "internal error".
+      if (error instanceof CrossoverError) return false;
+      throw new CrossoverError("STALE_FENCE", "Couldn't check the request just now; retry it", {
+        retryable: true,
+        details: { reason: "prepare_unavailable" },
+        cause: error,
+      });
+    } finally {
+      client.release();
+    }
+  }
+
+  private runMutatingIn(
+    principal: Principal,
+    envelope: CommandEnvelope,
+    def: CommandDefinition<z.ZodType, unknown>,
+    action: string,
+    params: unknown,
+    prepared: unknown,
   ): Promise<DispatchResult> {
     const key = envelope.idempotency_key;
     if (key === undefined) {
@@ -1312,6 +1422,7 @@ export class Dispatcher {
                 room_id,
                 command_id: envelope.id,
                 idempotency_key: key,
+                ...(prepared === undefined ? {} : { prepared }),
                 authorize: (a, resource) =>
                   this.authorize(
                     principal,

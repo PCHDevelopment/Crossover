@@ -253,6 +253,16 @@ describe("approval gates (§22.2, T905)", () => {
     expect(await s.messages()).toEqual(["first"]);
   });
 
+  it("a key first used for an ungated command, then for a different gated one, is the key-reuse error and opens no approval", async () => {
+    const s = await setup();
+    await s.send(s.dev, "ungated", "reused-key");
+    await s.gate(s.dev);
+    await failsWith(s.send(s.dev, "now gated", "reused-key"), "VALIDATION");
+    const waiting = await pool.query("SELECT 1 FROM approvals WHERE room_id = $1", [s.room]);
+    expect(waiting.rowCount).toBe(0);
+    expect(await s.messages()).toEqual(["ungated"]);
+  });
+
   it("a command that returns a one-time secret can't wait for approval", async () => {
     const s = await setup();
     await s.gate(s.lead, "room.invite");

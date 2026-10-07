@@ -6,3 +6,5 @@ export {
   verifyHealthInstallProxyCredential,
   verifySandboxProxyCredential,
 } from "./proxy-credentials.js";
+export { postWebhook } from "./webhook.js";
+export type { PostWebhookOptions, WebhookRequest } from "./webhook.js";

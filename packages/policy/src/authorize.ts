@@ -42,7 +42,7 @@ export interface PolicyContext {
    */
   perPath?: boolean;
   /**
-   * Set only while a command that an owner or lead approved (T905) runs as its requester: the
+   * Set only while a command that an owner or admin approved (T905) runs as its requester: the
    * approval gate on a grant (§22.2) is what was approved, so it no longer stops the command.
    * Everything else (revocations, pauses, a frozen room, missing capabilities) still applies.
    */

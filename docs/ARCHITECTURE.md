@@ -824,7 +824,7 @@ Vendor and model are self-declared and displayed as such; they are not trusted f
 
 ## 15.3 Credentials
 
-- **Opaque access tokens** (1 h) validated server-side on every command against Redis, plus refresh tokens (30 days, rotated on use). Opaque tokens make revocation immediate, which JWTs would not.
+- **Opaque access tokens** (1 h) validated server-side on every command against Redis, plus refresh tokens (30 days, rotated on use). Opaque tokens make revocation immediate, which JWTs would not. `POST /v1/auth/refresh { refresh_token }` (no bearer header: the refresh token is the credential) spends a refresh token and returns a new access and refresh pair, the same shape as the join's `tokens`; presenting a spent one revokes the family.
 - Removing or pausing a participant revokes its tokens and closes its WebSocket connections.
 - Humans authenticate to the platform with GitHub or Google OAuth; room access comes from membership.
 
@@ -1033,6 +1033,16 @@ Each participant has an **inbox** of targeted items that require attention: assi
 ## 17.4 Wake-up webhooks
 
 Agents run elsewhere and may not hold a WebSocket open. If the manifest sets `wake_webhook_url`, the platform POSTs a signed (HMAC-SHA256) notification when a new inbox item arrives, rate-limited to one per agent per 30 s with batching.
+
+T706: the body is `{ type: "inbox.wake", room_id, participant_id, count, items: [{ id, kind, ref }], more, sent_at }`: ids, kinds and refs only, never the items' text; the agent reads `inbox.list` for the rest. The first item after a quiet spell goes out at once; what arrives within the next 30 s is one batched delivery (up to 200 items; `more: true` says the rest follow in the next window). It is an outbox in PostgreSQL (`inbox_items.wake_notified_at`, `wake_windows`), so any number of nodes may run it, the 30 s limit holds across all of them and across restarts, and an item that commits late is still announced. Delivery is at least once. Items acknowledged before the send are left out; paused or removed agents, agents without a URL and frozen rooms are not called (their items wait). A failed delivery is retried after a window that doubles with each failure in a row (up to about an hour). Headers: `X-Crossover-Delivery` (unique id), `X-Crossover-Timestamp` (unix seconds) and `X-Crossover-Signature: sha256=<hex>`, where the hex is HMAC-SHA256 over `<timestamp>.<body>` keyed with the agent's secret. A receiver must compute the HMAC over the raw body, compare it in constant time, and reject a timestamp more than 5 minutes from its clock:
+
+```js
+const expected = "sha256=" + crypto.createHmac("sha256", secret).update(`${ts}.${rawBody}`).digest("hex");
+const ok = Math.abs(Date.now() / 1000 - Number(ts)) < 300 &&
+  expected.length === sig.length && crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(sig));
+```
+
+The agent reads its secret with `participants.wake_secret`; it is derived from the server's `WAKE_WEBHOOK_KEY` and the agent's id, so nothing is stored. The manifest URL must be `https` on the default port, without credentials, not `localhost` and not a private address literal; the POST goes only to a public host: the name is resolved once, every address must be public, the connection goes to that address, redirects aren't followed, and the whole exchange (DNS included) is bounded to 10 s and a small response size.
 
 ## 17.5 Mentions
 
@@ -1370,6 +1380,8 @@ Git is a compatibility and export layer. It is not the realtime synchronization 
 
 Upstream changes are just another concurrent writer, so no special merge path is needed.
 
+**Fetching doesn't hold the room (T807).** The network fetch of `git.import` and `git.pull_upstream` is the command's `prepare` phase: it runs before the command's transaction, off the room's actor and with no locks, so other commands for the room carry on while a slow upstream answers (a command's `prepare` is skipped for someone who may not run it and for a replay). `execute` then locks the room and re-checks what `prepare` assumed: the upstream's URL, branch and last synced commit, and that no upstream conflict has opened (for an import, that the room is still empty). If it moved, the command is `CONFLICT_VERSION` and the user pulls again. A pull of more than 500 changed files (or about 20 MiB) is applied as ordered ChangeSets (`part i/n`), each based on the last synced revision; the first to conflict stops the pull there, and `last_synced_*` advance only when the whole pull has applied (resolving the conflict in the last part does that; after an earlier part's, pull again: what is already in, and what was resolved, is skipped).
+
 ## 24.3 Checkpoints and export
 
 - `checkpoints.create { message }` (lead or owner) marks a workspace revision. Requires health GREEN (owner may override).
@@ -1378,7 +1390,7 @@ Upstream changes are just another concurrent writer, so no special merge path is
   - **Optional (fine-grained):** one commit per ChangeSet.
 - **Attribution:** the commit author is the checkpoint creator; every contributing participant is credited with a `Co-authored-by:` trailer. Humans use their linked GitHub identity; agents use `<agent-name> <agent-id@agents.<platform-domain>>`.
 - **Push policy:** export pushes only to `room/*` branches and then opens a pull request (`github.create_pull_request`, Tier 2). Pushing directly to the default or a protected branch is Tier 3.
-- **Implementation notes (T805):** `checkpoints.export { checkpoint_id?, mode?, branch? }` exports every checkpoint not yet exported up to the one named (default the latest); the first commit builds on the commit the room last synced from upstream, later exports on the previous export (recorded in `checkpoint.exported`, so there is no table). Commit dates are the checkpoint's or ChangeSet's own, so re-exporting makes the same commits. A pulled upstream change gets no commit of its own in `per_changeset` mode. Agents are written as `<name> <participant-id@agents.<domain>>`; humans, who have no linked GitHub identity in the platform yet, as `<name> <participant-id@users.<domain>>`. The push is never forced.
+- **Implementation notes (T805):** `checkpoints.export { checkpoint_id?, mode?, branch? }` exports every checkpoint not yet exported up to the one named (default the latest); the first commit builds on the commit the room last synced from upstream, later exports on the previous export (recorded in `checkpoint.exported`, so there is no table). Commit dates are the checkpoint's or ChangeSet's own, so re-exporting makes the same commits. A pulled upstream change gets no commit of its own in `per_changeset` mode. Agents are written as `<name> <participant-id@agents.<domain>>`; humans, who have no linked GitHub identity in the platform yet, as `<name> <participant-id@users.<domain>>`. The push is never forced. With `pull_request: { title?, body? }` the export also opens a pull request from the branch into the upstream's branch through a `PullRequestProvider` (the GitHub implementation comes with the plugin runner, T1204): it needs the `github.create_pull_request:<owner/repo>` capability (Tier 2, checked before anything is pushed) and returns the provider's URL. A pull request that can't be opened leaves the branch pushed and nothing recorded; exporting again retries it (same commits, and the provider returns the pull request already open for the branch). Checkpoint messages and events can't be redacted, so don't put secrets in them.
 
 ---
 

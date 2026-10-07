@@ -37,6 +37,8 @@ const envSchema = z.object({
     .optional(),
   SANDBOX_EGRESS_PROXY_PORT: z.coerce.number().int().min(1).max(65_535).optional(),
   SANDBOX_EGRESS_PROXY_SECRET: z.string().min(32).optional(),
+  /** The key agents' wake-up webhooks are signed with (derived per agent, §17.4). Off without it. */
+  WAKE_WEBHOOK_KEY: z.string().min(32).optional(),
 });
 
 export interface ServerConfig {
@@ -61,6 +63,8 @@ export interface ServerConfig {
   sandboxEgressProxyPort?: number;
   /** Shared HMAC secret for sandbox and short-lived health-install proxy credentials. */
   sandboxEgressProxySecret?: string;
+  /** Platform key wake-up webhook secrets are derived from; no wake-ups without it. */
+  wakeWebhookKey?: string;
 }
 
 /**
@@ -119,6 +123,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     ...(e.SANDBOX_EGRESS_PROXY_SECRET
       ? { sandboxEgressProxySecret: e.SANDBOX_EGRESS_PROXY_SECRET }
       : {}),
+    ...(e.WAKE_WEBHOOK_KEY ? { wakeWebhookKey: e.WAKE_WEBHOOK_KEY } : {}),
   };
 }
 
