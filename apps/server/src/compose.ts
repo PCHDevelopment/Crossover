@@ -5,6 +5,7 @@ import {
   LeaseRenewer,
   RedisEventPublisher,
   registerCapabilityCommands,
+  registerInboxCommands,
   registerInviteCommands,
   registerJoinCommand,
   registerLeadCommands,
@@ -123,6 +124,7 @@ function registerCommands(dispatcher: Dispatcher, config: ServerConfig): void {
   registerLeadCommands(dispatcher);
   registerRoomLifecycleCommands(dispatcher);
   registerRoomEventsCommand(dispatcher);
+  registerInboxCommands(dispatcher);
 
   // Tasks: create/update, list/get, and the claim → start → block lifecycle.
   registerTaskCommands(dispatcher);
