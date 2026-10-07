@@ -25,7 +25,12 @@ import {
   type EventSubscriber,
 } from "@crossover/kernel";
 import { authorize } from "@crossover/policy";
-import { provisionWorkspace, reconcileRef, registerWorkspaceCommands } from "@crossover/workspace";
+import {
+  ConflictEscalationSweeper,
+  provisionWorkspace,
+  reconcileRef,
+  registerWorkspaceCommands,
+} from "@crossover/workspace";
 import type { ServerConfig } from "./config.js";
 
 export interface ComposeOverrides {
@@ -71,6 +76,7 @@ export async function composeServer(
   const pool = overrides.pool ?? createPool(config.databaseUrl);
   let publisher: EventPublisher;
   let redis: RedisEventPublisher | undefined;
+  let escalations: ConflictEscalationSweeper | undefined;
   if (overrides.publisher) {
     publisher = overrides.publisher;
   } else {
@@ -102,6 +108,8 @@ export async function composeServer(
 
     const renewer = new LeaseRenewer({ leases: dispatcher.leases, actors: dispatcher.actors });
     renewer.start();
+    escalations = new ConflictEscalationSweeper({ pool, dispatcher });
+    escalations.start();
 
     const app = buildGateway({
       dispatcher,
@@ -113,6 +121,7 @@ export async function composeServer(
     let closing: Promise<void> | undefined;
     const close = () =>
       (closing ??= (async () => {
+        await escalations?.stop();
         await renewer.stop();
         await app.close();
         await renewer.close(); // releases every lease once nothing can take a new one
@@ -123,6 +132,7 @@ export async function composeServer(
 
     return { app, dispatcher, pool, renewer, close };
   } catch (err) {
+    await escalations?.stop();
     await redis?.close();
     await redisSubscriber?.close();
     if (!overrides.pool) await pool.end();

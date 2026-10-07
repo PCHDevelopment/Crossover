@@ -8,6 +8,7 @@ import { CrossoverError, newId } from "@crossover/protocol";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { git } from "./git.js";
 import { registerWorkspaceCommands, type WorkspaceCommandDeps } from "./apply.js";
+import { ConflictEscalationSweeper } from "./conflict-escalation-sweeper.js";
 import { provisionWorkspace } from "./provision.js";
 import type { Operation } from "./operations.js";
 
@@ -64,23 +65,27 @@ async function fixture(authorize: Authorizer = allowAll, deps: WorkspaceCommandD
       input,
     );
   const dispatchAs =
-    (participantId: string, role: "DEVELOPER" | "LEAD" = "DEVELOPER") =>
+    (
+      participantId: string,
+      role: "DEVELOPER" | "LEAD" = "DEVELOPER",
+      kind: "HUMAN" | "AGENT" = "HUMAN",
+    ) =>
     (input: Parameters<Dispatcher["dispatch"]>[1]) =>
       dispatcher.dispatch(
         {
           room_id: room,
           participant_id: participantId,
-          kind: "HUMAN",
+          kind,
           authority: "MEMBER",
           role,
         },
         input,
       );
-  const addParticipant = async (id: string) =>
+  const addParticipant = async (id: string, kind: "HUMAN" | "AGENT" = "HUMAN") =>
     db.pool.query(
       `INSERT INTO participants (id, room_id, kind, display_name, authority, role, status)
-       VALUES ($2, $1, 'HUMAN', 'Member', 'MEMBER', 'DEVELOPER', 'ACTIVE')`,
-      [room, id],
+       VALUES ($2, $1, $3, 'Member', 'MEMBER', 'DEVELOPER', 'ACTIVE')`,
+      [room, id, kind],
     );
   const apply = (operations: Operation[], base = 0) => dispatch(request(operations, base));
   const rowsFor = async (
@@ -99,7 +104,23 @@ async function fixture(authorize: Authorizer = allowAll, deps: WorkspaceCommandD
     addParticipant,
     apply,
     rowsFor,
+    dispatcher,
   };
+}
+
+async function seedConflict(
+  f: Awaited<ReturnType<typeof fixture>>,
+  submitter = f.actor,
+  kind: "HUMAN" | "AGENT" = "HUMAN",
+) {
+  await f.apply([{ type: "create", path: "escalate.txt", content: "base\n" }]);
+  await f.apply([{ type: "modify", path: "escalate.txt", content: "head\n" }], 1);
+  const result = await f.dispatchAs(
+    submitter,
+    "DEVELOPER",
+    kind,
+  )(f.request([{ type: "modify", path: "escalate.txt", content: "submitted\n" }], 1));
+  return result.response as { conflict_id: string; changeset_id: string; status: string };
 }
 
 describe("workspace.apply_changeset", () => {
@@ -241,6 +262,185 @@ describe("workspace.apply_changeset", () => {
     });
     expect(await f.rowsFor("changesets")).toHaveLength(3);
     expect(await f.rowsFor("conflicts")).toMatchObject([{ id: conflictId, attempts: 0 }]);
+  });
+
+  it("lets only the submitter manually escalate and notifies the lead exactly once", async () => {
+    const f = await fixture();
+    const lead = newId("part");
+    const outsider = newId("part");
+    await f.addParticipant(lead);
+    await f.addParticipant(outsider);
+    await db.pool.query("UPDATE rooms SET lead_participant_id = $2 WHERE id = $1", [f.room, lead]);
+    const { conflict_id: conflictId } = await seedConflict(f);
+    const command = () => ({
+      id: newId("cmd"),
+      idempotency_key: newId("cmd"),
+      method: "conflicts.escalate",
+      params: { conflict_id: conflictId },
+    });
+
+    await expect(f.dispatchAs(outsider)(command())).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect((await f.rowsFor("conflicts"))[0]?.status).toBe("OPEN");
+    const escalated = await f.dispatchAs(f.actor)(command());
+    expect(escalated).toMatchObject({
+      response: { conflict_id: conflictId, status: "ESCALATED" },
+      events: [
+        {
+          type: "workspace.conflict.escalated",
+          payload: {
+            conflict_id: conflictId,
+            escalated_to: lead,
+            trigger: "manual",
+          },
+        },
+      ],
+    });
+    expect(Object.keys(escalated.events[0]!.payload).sort()).toEqual([
+      "changeset_id",
+      "conflict_id",
+      "escalated_to",
+      "submitter_id",
+      "trigger",
+    ]);
+    expect((await f.rowsFor("conflicts"))[0]?.escalated_at).toBeInstanceOf(Date);
+    await expect(f.dispatchAs(f.actor)(command())).resolves.toMatchObject({ events: [] });
+    const { rows: inbox } = await db.pool.query(
+      "SELECT participant_id, kind, ref FROM inbox_items WHERE room_id = $1",
+      [f.room],
+    );
+    expect(inbox).toEqual([
+      { participant_id: lead, kind: "ESCALATION", ref: { kind: "conflict", id: conflictId } },
+    ]);
+  });
+
+  it("sends escalation to the owner when the lead submitted the conflict", async () => {
+    const f = await fixture();
+    const owner = newId("part");
+    await f.addParticipant(owner);
+    await db.pool.query("UPDATE participants SET authority = 'OWNER' WHERE id = $1", [owner]);
+    await db.pool.query("UPDATE rooms SET owner_id = $2, lead_participant_id = $3 WHERE id = $1", [
+      f.room,
+      owner,
+      f.actor,
+    ]);
+    const { conflict_id: conflictId } = await seedConflict(f);
+    const result = await f.dispatchAs(
+      f.actor,
+      "LEAD",
+    )({
+      id: newId("cmd"),
+      idempotency_key: newId("cmd"),
+      method: "conflicts.escalate",
+      params: { conflict_id: conflictId },
+    });
+    expect(result.events[0]?.payload).toMatchObject({ escalated_to: owner, trigger: "manual" });
+    const { rows } = await db.pool.query(
+      "SELECT participant_id FROM inbox_items WHERE room_id = $1",
+      [f.room],
+    );
+    expect(rows).toEqual([{ participant_id: owner }]);
+  });
+
+  it("automatically escalates after the second failed resolution attempt", async () => {
+    const f = await fixture();
+    const lead = newId("part");
+    await f.addParticipant(lead);
+    await db.pool.query("UPDATE rooms SET lead_participant_id = $2 WHERE id = $1", [f.room, lead]);
+    const { conflict_id: conflictId } = await seedConflict(f);
+    const resolveAndFail = (base: number, content: string) => {
+      const request = f.request([{ type: "modify", path: "escalate.txt", content }], base);
+      return f.dispatch({
+        ...request,
+        params: { ...request.params, source: "RESOLUTION", conflict_id: conflictId },
+      });
+    };
+    await f.apply([{ type: "modify", path: "escalate.txt", content: "head 3\n" }], 2);
+    expect((await resolveAndFail(2, "resolution one\n")).response).toMatchObject({
+      status: "CONFLICT",
+    });
+    await f.apply([{ type: "modify", path: "escalate.txt", content: "head 4\n" }], 3);
+    const second = await resolveAndFail(3, "resolution two\n");
+    expect(second.response).toMatchObject({ status: "CONFLICT" });
+    expect(second.events).toMatchObject([
+      {
+        type: "workspace.conflict.escalated",
+        payload: { conflict_id: conflictId, escalated_to: lead, trigger: "attempts" },
+      },
+    ]);
+    expect((await f.rowsFor("conflicts"))[0]).toMatchObject({ status: "ESCALATED", attempts: 2 });
+    const { rows } = await db.pool.query(
+      "SELECT participant_id FROM inbox_items WHERE room_id = $1",
+      [f.room],
+    );
+    expect(rows).toEqual([{ participant_id: lead }]);
+  });
+
+  it("sweeps agent conflicts at the 10-minute boundary using its injected clock", async () => {
+    const f = await fixture();
+    const agent = newId("part");
+    const lead = newId("part");
+    await f.addParticipant(agent, "AGENT");
+    await f.addParticipant(lead);
+    await db.pool.query("UPDATE rooms SET lead_participant_id = $2 WHERE id = $1", [f.room, lead]);
+    const { conflict_id: conflictId } = await seedConflict(f, agent, "AGENT");
+    await db.pool.query("UPDATE participants SET status = 'PAUSED' WHERE id = $1", [agent]);
+    await db.pool.query(
+      "UPDATE conflicts SET created_at = clock_timestamp() - interval '11 minutes' WHERE id = $1",
+      [conflictId],
+    );
+    const created = (
+      await db.pool.query<{ created_at: Date }>("SELECT created_at FROM conflicts WHERE id = $1", [
+        conflictId,
+      ])
+    ).rows[0]!.created_at;
+    let now = new Date(created.getTime() + 10 * 60 * 1000 - 1);
+    const sweeper = new ConflictEscalationSweeper({
+      pool: db.pool,
+      dispatcher: f.dispatcher,
+      now: () => now,
+      rooms: [f.room],
+      onError: (error) => {
+        throw error;
+      },
+    });
+    expect(await sweeper.tick()).toBe(0);
+    expect((await f.rowsFor("conflicts"))[0]?.status).toBe("OPEN");
+
+    now = new Date(created.getTime() + 10 * 60 * 1000 + 1);
+    expect(await sweeper.tick()).toBe(1);
+    expect((await f.rowsFor("conflicts"))[0]?.status).toBe("ESCALATED");
+    expect((await f.rowsFor("events")).at(-1)).toMatchObject({
+      type: "workspace.conflict.escalated",
+      actor_id: "system",
+      payload: { conflict_id: conflictId, escalated_to: lead, trigger: "timeout" },
+    });
+    const { rows } = await db.pool.query(
+      "SELECT participant_id FROM inbox_items WHERE room_id = $1",
+      [f.room],
+    );
+    expect(rows).toEqual([{ participant_id: lead }]);
+  });
+
+  it("does not sweep conflicts in rooms this node does not hold", async () => {
+    const f = await fixture();
+    const agent = newId("part");
+    await f.addParticipant(agent, "AGENT");
+    const { conflict_id: conflictId } = await seedConflict(f, agent, "AGENT");
+    await db.pool.query(
+      "UPDATE conflicts SET created_at = clock_timestamp() - interval '11 minutes' WHERE id = $1",
+      [conflictId],
+    );
+    const sweeper = new ConflictEscalationSweeper({
+      pool: db.pool,
+      dispatcher: f.dispatcher,
+      rooms: [newId("room")],
+      onError: (error) => {
+        throw error;
+      },
+    });
+
+    expect(await sweeper.tick()).toBe(0);
+    expect((await f.rowsFor("conflicts"))[0]?.status).toBe("OPEN");
   });
 
   it("lets the submitter, lead, or owner abandon and rejects the original ChangeSet", async () => {
