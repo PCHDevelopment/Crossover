@@ -30,6 +30,22 @@ importers:
         specifier: ^5.0.3
         version: 5.0.3(@types/node@22.20.5)(vite@8.3.2(@types/node@22.20.5))
 
+  apps/egress-proxy:
+    dependencies:
+      '@crossover/db':
+        specifier: workspace:*
+        version: link:../../packages/db
+      '@crossover/security':
+        specifier: workspace:*
+        version: link:../../packages/security
+      zod:
+        specifier: ^4.6.5
+        version: 4.6.5
+    devDependencies:
+      '@crossover/workspace':
+        specifier: workspace:*
+        version: link:../../packages/workspace
+
   apps/server:
     dependencies:
       '@crossover/db':

@@ -141,6 +141,9 @@ export async function composeServer(
         ...(config.sandboxEgressProxyPort !== undefined
           ? { egressProxyPort: config.sandboxEgressProxyPort }
           : {}),
+        ...(config.sandboxEgressProxySecret
+          ? { egressProxySecret: config.sandboxEgressProxySecret }
+          : {}),
       });
     executionService = new ExecutionService(pool, executionDriver, {
       diskEnforcement: config.sandboxDiskEnforcement ?? "soft",
