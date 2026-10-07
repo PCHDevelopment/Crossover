@@ -37,8 +37,6 @@ beforeAll(async () => {
     nodeId: `egress-e2e-${process.pid}`,
     devLogin: true,
     healthImages: ["node:22-bookworm-slim"],
-    sandboxDiskEnforcement: "soft",
-    sandboxVolumeOptions: {},
   };
   server = await composeServer(config, { pool: db.pool });
 });

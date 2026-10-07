@@ -42,8 +42,6 @@ function config(extra: Partial<ServerConfig> = {}): ServerConfig {
     nodeId: `node-${++n}`,
     devLogin: true,
     healthImages: ["node:22-bookworm-slim"],
-    sandboxDiskEnforcement: "soft",
-    sandboxVolumeOptions: {},
     ...extra,
   };
 }

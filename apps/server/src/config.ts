@@ -43,9 +43,9 @@ export interface ServerConfig {
   /** Operator allowlist for room-selected health container images. */
   healthImages: readonly string[];
   /** Production defaults to hard; development and CI default to soft. */
-  sandboxDiskEnforcement: DiskEnforcementMode;
+  sandboxDiskEnforcement?: DiskEnforcementMode;
   sandboxVolumeDriver?: string;
-  sandboxVolumeOptions: Readonly<Record<string, string>>;
+  sandboxVolumeOptions?: Readonly<Record<string, string>>;
 }
 
 /**
