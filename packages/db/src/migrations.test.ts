@@ -884,3 +884,86 @@ describe("0024_task_evidence", () => {
     await expect(task(r, big(33_000))).rejects.toMatchObject({ code: "23514" });
   });
 });
+
+describe("0018_upstream", () => {
+  let n = 0;
+  const setup = async () => {
+    const room = `room_up${++n}`;
+    await db.pool.query(
+      `INSERT INTO rooms (id, slug, name, objective, owner_id) VALUES ($1, $1, 'n', 'o', 'x')`,
+      [room],
+    );
+    const who = `part_up${++n}`;
+    await db.pool.query(
+      `INSERT INTO participants (id, room_id, kind, display_name, role, status)
+       VALUES ($1, $2, 'HUMAN', 'a', 'LEAD', 'ACTIVE')`,
+      [who, room],
+    );
+    const ws = `ws_up${++n}`;
+    await db.pool.query(`INSERT INTO workspaces (id, room_id, repo_path) VALUES ($1, $2, '/x')`, [
+      ws,
+      room,
+    ]);
+    return { room, who, ws };
+  };
+  const upstream = (
+    c: { room: string; who: string; ws: string },
+    extra: Record<string, unknown> = {},
+  ) => {
+    const cols: Record<string, unknown> = {
+      room_id: c.room,
+      workspace_id: c.ws,
+      url: "https://github.com/acme/widgets",
+      branch: "main",
+      last_synced_sha: "a".repeat(40),
+      last_synced_room_revision: 1,
+      imported_by: c.who,
+      ...extra,
+    };
+    const keys = Object.keys(cols);
+    return db.pool.query(
+      `INSERT INTO upstreams (${keys.join(", ")}) VALUES (${keys.map((_, i) => `$${i + 1}`).join(", ")}) RETURNING *`,
+      Object.values(cols),
+    );
+  };
+
+  it("is recorded as applied", async () => {
+    const { rows } = await db.pool.query("SELECT name FROM schema_migrations WHERE version = 18");
+    expect(rows).toEqual([{ name: "upstream" }]);
+  });
+
+  it("one upstream per room, with a SHA-1 or SHA-256 commit id", async () => {
+    const c = await setup();
+    await upstream(c);
+    await expect(upstream(c)).rejects.toMatchObject({ code: "23505" });
+    const d = await setup();
+    await upstream(d, { last_synced_sha: "b".repeat(64) });
+    const e = await setup();
+    for (const sha of ["", "abc", "A".repeat(40), "g".repeat(40)]) {
+      await expect(upstream(e, { last_synced_sha: sha })).rejects.toMatchObject({ code: "23514" });
+    }
+  });
+
+  it("never stores a URL that carries credentials, or one that isn't https", async () => {
+    const c = await setup();
+    for (const url of [
+      "https://user:pw@github.com/a/b",
+      "https://token@github.com/a/b",
+      "http://github.com/a/b",
+      "ssh://github.com/a/b",
+      "",
+    ]) {
+      await expect(upstream(c, { url })).rejects.toMatchObject({ code: "23514" });
+    }
+    await upstream(c, { url: "https://gitlab.example.com/group/sub/repo.git" });
+  });
+
+  it("the room revision starts at 1, and the importer is a participant of the same room", async () => {
+    const c = await setup();
+    await expect(upstream(c, { last_synced_room_revision: 0 })).rejects.toMatchObject({
+      code: "23514",
+    });
+    const other = await setup();
+    await expect(upstream(c, { imported_by: other.who })).rejects.toMatchObject({ code: "23503" });
+  });
+});

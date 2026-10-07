@@ -65,6 +65,8 @@ export const CAPABILITIES = {
   "conflicts.resolve": { mutating: true },
   "decisions.decide": { mutating: true },
   "checkpoints.create": { mutating: true },
+  "git.import": { mutating: true },
+  "git.pull_upstream": { mutating: true },
   "room.transfer_lead": { mutating: true },
 
   // ---- authority powers (§6.2)
@@ -171,6 +173,8 @@ const LEAD = [
   "conflicts.resolve",
   "decisions.decide",
   "checkpoints.create",
+  "git.import",
+  "git.pull_upstream",
   "room.transfer_lead",
   // The commands (T211, T212) enforce the limits: an agent lead can't touch humans, and only
   // a human can un-pause what a human paused (§6.3, §22.1).
@@ -244,12 +248,23 @@ const GOVERNING_TASK_CAPABILITIES = [
   "tasks.reopen",
 ] as const satisfies readonly Capability[];
 
+/**
+ * Importing and pulling the room's upstream repository (§24.1, §24.2) is for "lead or owner":
+ * the lead has it in the role bundle, and an owner has it whatever their project role. Ordinary
+ * capabilities, so they stay grantable to others; admins don't get them from authority alone.
+ */
+const OWNER_GIT_CAPABILITIES = [
+  "git.import",
+  "git.pull_upstream",
+] as const satisfies readonly Capability[];
+
 /** Role bundle plus authority powers (and, for owners and admins, task management). */
 export function effectiveCapabilities(role: Role, authority: Authority): ReadonlySet<Capability> {
   return new Set<Capability>([
     ...ROLE_BUNDLES[role],
     ...AUTHORITY_POWERS[authority],
     ...(authority === "MEMBER" ? [] : GOVERNING_TASK_CAPABILITIES),
+    ...(authority === "OWNER" ? OWNER_GIT_CAPABILITIES : []),
   ]);
 }
 

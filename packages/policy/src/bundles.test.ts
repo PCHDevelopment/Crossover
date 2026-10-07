@@ -87,6 +87,8 @@ const EXPECTED: Record<(typeof ROLES)[number], Capability[]> = {
     "conflicts.resolve",
     "decisions.decide",
     "checkpoints.create",
+    "git.import",
+    "git.pull_upstream",
     "room.transfer_lead",
     // within the §6.3 / §22.1 limits, which the commands enforce
     "participants.pause",
@@ -199,6 +201,22 @@ describe("authority powers (§6.2)", () => {
     expect([...AUTHORITY_POWERS.OWNER].sort()).toEqual(
       [...ADMIN, ...OWNER_AUTHORITY_CAPABILITIES].sort(),
     );
+  });
+
+  it("owners can import and pull the upstream whatever their role (§24); admins and members only through the lead role", () => {
+    for (const role of ROLES) {
+      for (const c of ["git.import", "git.pull_upstream"] as const) {
+        expect(effectiveCapabilities(role, "OWNER").has(c), `OWNER/${role} ${c}`).toBe(true);
+        expect(effectiveCapabilities(role, "ADMIN").has(c), `ADMIN/${role} ${c}`).toBe(
+          role === "LEAD",
+        );
+        expect(effectiveCapabilities(role, "MEMBER").has(c), `MEMBER/${role} ${c}`).toBe(
+          role === "LEAD",
+        );
+      }
+    }
+    // Ordinary capabilities: they can still be granted (not an authority power).
+    expect(isAuthorityPower("git.import")).toBe(false);
   });
 
   it("authority adds to the role's bundle without removing from it", () => {

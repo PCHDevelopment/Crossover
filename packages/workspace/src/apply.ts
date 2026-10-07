@@ -17,6 +17,7 @@ import { registerWorkspaceConflictReads } from "./conflict-reads.js";
 import { escalateOpenConflict, registerWorkspaceConflictActions } from "./conflict-actions.js";
 import { registerWorkspaceHealthReads } from "./health-events.js";
 import { parseConflicts } from "./parse-check.js";
+import { registerGitImport, type UpstreamDeps } from "./upstream-import.js";
 
 export interface WorkspaceCommandDeps {
   /** Failure is reported after commit; startup reconcileRef restores the DB-authoritative head. */
@@ -29,6 +30,8 @@ export interface WorkspaceCommandDeps {
   parseConflicts?: typeof parseConflicts;
   /** Schedule health for an applied head after its transaction commits. */
   scheduleHealthCheck?: (roomId: string, revision: number) => void;
+  /** How `git.import` reaches an upstream: the fetcher, the credentials, the host check. */
+  upstream?: UpstreamDeps;
 }
 
 export type ApplyResponse =
@@ -65,6 +68,11 @@ export function registerWorkspaceCommands(
   registerWorkspaceConflictReads(dispatcher);
   registerWorkspaceConflictActions(dispatcher);
   registerWorkspaceHealthReads(dispatcher);
+  registerGitImport(dispatcher, deps.upstream, {
+    ...(deps.updateCanonicalRef ? { updateCanonicalRef: deps.updateCanonicalRef } : {}),
+    ...(deps.refreshSearchTree ? { refreshSearchTree: deps.refreshSearchTree } : {}),
+    ...(deps.scheduleHealthCheck ? { scheduleHealthCheck: deps.scheduleHealthCheck } : {}),
+  });
 }
 
 async function apply(
