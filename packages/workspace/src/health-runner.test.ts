@@ -179,7 +179,6 @@ describe("DockerHealthRunner", () => {
     "runs with a writable checkout as its unprivileged UID",
     async () => {
       const { repository, revision } = await makeRepo();
-      const uid = process.getuid?.() === 0 ? 1000 : (process.getuid?.() ?? 1000);
       const gid = process.getgid?.() === 0 ? 1000 : (process.getgid?.() ?? 1000);
       const result = await new DockerHealthRunner({ allowedImages: [DEFAULT_HEALTH_IMAGE] }).run({
         repository,
