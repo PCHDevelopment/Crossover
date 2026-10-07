@@ -472,6 +472,40 @@ describe("composeServer", () => {
     expect(updated.response).toMatchObject({ revision: 2 });
   });
 
+  it("serves decisions.veto over HTTP: the owner may, a developer may not", async () => {
+    const { server } = await start();
+    const { owner, agent, cmd } = await walkthrough(server.app);
+    const proposed = (
+      await ok(
+        await cmd(
+          envelope("decisions.propose", {
+            title: "Pick a database",
+            options: [{ summary: "PostgreSQL" }, { summary: "SQLite" }],
+          }),
+          agent.tokens.access_token,
+        ),
+      )
+    ).response;
+    // Decided by the lead in a real room; here, put it in the state a decision would be in.
+    await db.pool.query(
+      `UPDATE decisions SET status = 'ACCEPTED', outcome_option_id = 'opt_1', rationale = 'r',
+              decided_by = proposed_by, decided_at = now(), version = 2 WHERE id = $1`,
+      [proposed.id],
+    );
+    const veto = (token: string) =>
+      cmd(
+        envelope("decisions.veto", {
+          decision_id: proposed.id,
+          expected_version: 2,
+          rationale: "Too risky",
+        }),
+        token,
+      );
+    expect((await veto(agent.tokens.access_token)).statusCode).toBe(403);
+    const vetoed = await ok(await veto(owner.tokens.access_token));
+    expect(vetoed.response).toMatchObject({ status: "VETOED", version: 3 });
+  });
+
   it("enforces the real policy: an observer can't apply a ChangeSet", async () => {
     const { server } = await start();
     const { owner, cmd, roomId } = await walkthrough(server.app);
