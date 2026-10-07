@@ -383,6 +383,7 @@ describe("workspace.apply_changeset", () => {
     await f.addParticipant(lead);
     await db.pool.query("UPDATE rooms SET lead_participant_id = $2 WHERE id = $1", [f.room, lead]);
     const { conflict_id: conflictId } = await seedConflict(f, agent, "AGENT");
+    await db.pool.query("UPDATE participants SET status = 'PAUSED' WHERE id = $1", [agent]);
     await db.pool.query(
       "UPDATE conflicts SET created_at = clock_timestamp() - interval '11 minutes' WHERE id = $1",
       [conflictId],
@@ -397,6 +398,7 @@ describe("workspace.apply_changeset", () => {
       pool: db.pool,
       dispatcher: f.dispatcher,
       now: () => now,
+      rooms: [f.room],
       onError: (error) => {
         throw error;
       },
@@ -409,6 +411,7 @@ describe("workspace.apply_changeset", () => {
     expect((await f.rowsFor("conflicts"))[0]?.status).toBe("ESCALATED");
     expect((await f.rowsFor("events")).at(-1)).toMatchObject({
       type: "workspace.conflict.escalated",
+      actor_id: "system",
       payload: { conflict_id: conflictId, escalated_to: lead, trigger: "timeout" },
     });
     const { rows } = await db.pool.query(
@@ -416,6 +419,28 @@ describe("workspace.apply_changeset", () => {
       [f.room],
     );
     expect(rows).toEqual([{ participant_id: lead }]);
+  });
+
+  it("does not sweep conflicts in rooms this node does not hold", async () => {
+    const f = await fixture();
+    const agent = newId("part");
+    await f.addParticipant(agent, "AGENT");
+    const { conflict_id: conflictId } = await seedConflict(f, agent, "AGENT");
+    await db.pool.query(
+      "UPDATE conflicts SET created_at = clock_timestamp() - interval '11 minutes' WHERE id = $1",
+      [conflictId],
+    );
+    const sweeper = new ConflictEscalationSweeper({
+      pool: db.pool,
+      dispatcher: f.dispatcher,
+      rooms: [newId("room")],
+      onError: (error) => {
+        throw error;
+      },
+    });
+
+    expect(await sweeper.tick()).toBe(0);
+    expect((await f.rowsFor("conflicts"))[0]?.status).toBe("OPEN");
   });
 
   it("lets the submitter, lead, or owner abandon and rejects the original ChangeSet", async () => {
