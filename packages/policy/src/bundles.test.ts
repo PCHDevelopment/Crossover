@@ -45,6 +45,7 @@ const DEVELOPER_WORK: Capability[] = [
   "tasks.release",
   "tasks.heartbeat",
   "workspace.write",
+  "conflicts.abandon",
   "memory.write",
   "sandbox.exec",
   "decisions.propose",
@@ -65,6 +66,7 @@ const EXPECTED: Record<(typeof ROLES)[number], Capability[]> = {
     "messages.edit",
     "inbox.ack",
     "tasks.review",
+    "conflicts.abandon",
     "decisions.propose",
     "decisions.add_position",
     "decisions.withdraw",
@@ -136,14 +138,17 @@ describe("role bundles (§6.1)", () => {
     for (const role of ROLES) expect(ROLE_BUNDLES[role].has("presence.update")).toBe(true);
   });
 
-  it("no role bundle holds an authority power, except the lead's participant management", () => {
-    // Leads may pause, resume and set roles (T211/T212 enforce the §6.3 limits). Nobody gets
-    // an owner-only power from a role.
+  it("no role bundle holds an authority power, except documented shared capabilities", () => {
+    // Leads may pause, resume and set roles (T211/T212 enforce the §6.3 limits). The sole
+    // shared role/authority capability is conflicts.abandon: submitter-capable roles get it,
+    // while owner authority grants it regardless of project role.
     const leadOnly = ["participants.pause", "participants.resume", "participants.set_role"];
     const powers = new Set([...AUTHORITY_POWERS.OWNER, ...AUTHORITY_POWERS.ADMIN]);
     for (const role of ROLES) {
       for (const c of ROLE_BUNDLES[role]) {
-        const allowed = role === "LEAD" && leadOnly.includes(c);
+        const allowed =
+          (role === "LEAD" && leadOnly.includes(c)) ||
+          (c === "conflicts.abandon" && role !== "OBSERVER");
         expect(powers.has(c) && !allowed, `${role} ${c}`).toBe(false);
       }
     }
@@ -169,10 +174,11 @@ describe("authority powers (§6.2)", () => {
     "budgets.set",
     "egress.set",
   ];
-  const OWNER_ONLY = [
+  const OWNER_AUTHORITY_CAPABILITIES = [
     "room.freeze",
     "room.resume",
     "room.archive",
+    "conflicts.abandon",
     "capabilities.grant_tier3",
     "events.redact",
   ];
@@ -183,11 +189,14 @@ describe("authority powers (§6.2)", () => {
 
   it("admins have the shared powers but none of the owner-only ones", () => {
     expect([...AUTHORITY_POWERS.ADMIN].sort()).toEqual([...ADMIN].sort());
-    for (const c of OWNER_ONLY) expect(AUTHORITY_POWERS.ADMIN.has(c as Capability), c).toBe(false);
+    for (const c of OWNER_AUTHORITY_CAPABILITIES)
+      expect(AUTHORITY_POWERS.ADMIN.has(c as Capability), c).toBe(false);
   });
 
-  it("owners have the admin powers plus the owner-only ones (freeze, archive, Tier 3, redact)", () => {
-    expect([...AUTHORITY_POWERS.OWNER].sort()).toEqual([...ADMIN, ...OWNER_ONLY].sort());
+  it("owners have the admin powers plus owner authority capabilities", () => {
+    expect([...AUTHORITY_POWERS.OWNER].sort()).toEqual(
+      [...ADMIN, ...OWNER_AUTHORITY_CAPABILITIES].sort(),
+    );
   });
 
   it("authority adds to the role's bundle without removing from it", () => {
@@ -218,6 +227,7 @@ describe("authority powers (§6.2)", () => {
   it("an owner who is an observer still has owner powers (authority is separate from role)", () => {
     const effective = effectiveCapabilities("OBSERVER", "OWNER");
     expect(effective.has("room.archive")).toBe(true);
+    expect(effective.has("conflicts.abandon")).toBe(true);
     expect(effective.has("workspace.write")).toBe(false);
   });
 });

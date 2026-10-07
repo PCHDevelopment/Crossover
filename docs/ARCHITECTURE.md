@@ -254,8 +254,8 @@ Room
 | Role | Count | Default capability bundle |
 |---|---|---|
 | Lead | Exactly 1 | Developer bundle + task assign/cancel/reopen, conflict resolve, decision decide, review, checkpoint create |
-| Developer | 0..n | messages, tasks (claim/update own), workspace read/write, memory read/write, sandbox exec, decisions propose |
-| Reviewer | 0..n | Read everything, messages, tasks review, decisions propose, memory write |
+| Developer | 0..n | messages, tasks (claim/update own), workspace read/write, conflict abandon (submitter only), memory read/write, sandbox exec, decisions propose |
+| Reviewer | 0..n | Read everything, messages, tasks review, conflict abandon (submitter only), decisions propose, memory write |
 | Observer | 0..n | Read everything except sandbox output; no mutations other than presence |
 
 A participant has one authority level and one project role. Example: Peter = Owner + Developer while ArchitectAgent = Member + Lead.
@@ -270,6 +270,7 @@ The owner (and admins, except where noted) can:
 - pause, resume or remove any agent,
 - freeze, resume, archive the room (owner only),
 - override any lead decision (veto, §7.3),
+- abandon any workspace conflict as room owner, regardless of project role (§11.3),
 - set budgets and the sandbox egress allowlist,
 - redact events (§19.6).
 
