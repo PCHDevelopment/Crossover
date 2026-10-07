@@ -859,6 +859,7 @@ Profiles `relevant` (default for agents), `all`, `custom` per §17.1.
 - Relevance is decided from the event alone: task and workspace events carry the inputs (`owner_id`, `reviewer_id`, author) as of the event, so a replay with `after` delivers exactly what live delivery would have. Tested across an ownership change.
 - `relevant` includes `task.created` for unassigned tasks, review requests for the reviewer, and mentions in `message.sent` and `message.edited`.
 - Type patterns match per dotted segment without building a regex (no backtracking); a pathological pattern is tested with a time bound.
+- An event that lacks the inputs the matcher needs (for example, one written before these fields existed) is delivered: filters fail open, and redaction still applies.
 
 ### T705 · Backpressure — Q1
 
