@@ -293,6 +293,69 @@ export function registerTaskLifecycleCommands(
       });
     },
   });
+
+  dispatcher.registerCommand({
+    method: "tasks.release",
+    mutating: true,
+    params: taskVersionParams,
+    execute: async (ctx, p) => {
+      const { task } = await ownerOrLead(ctx, p);
+      if (task.status !== "CLAIMED" && task.status !== "IN_PROGRESS" && task.status !== "BLOCKED") {
+        throw new CrossoverError("VALIDATION", `Can't release a task that is ${task.status}`, {
+          details: { status: task.status },
+        });
+      }
+      // Back to the pool: nobody owns it, nothing to expire, any block is moot.
+      return transition(ctx, task, "OPEN", {
+        eventType: "task.released",
+        set: "owner_id = NULL, blocked_reason = NULL, lease_expires_at = NULL",
+        renewLease: false,
+        payload: { previous_owner_id: task.owner_id },
+      });
+    },
+  });
+
+  dispatcher.registerCommand({
+    method: "tasks.reopen",
+    mutating: true,
+    params: taskVersionParams,
+    execute: async (ctx, p) => {
+      const task = await loadTask(ctx.client, ctx.room_id, p.task_id, true);
+      if (task.version !== p.expected_version) throw versionConflict(task);
+      if (task.status !== "DONE") {
+        throw new CrossoverError(
+          "VALIDATION",
+          `Only a DONE task can be reopened, this one is ${task.status}`,
+          {
+            details: { status: task.status },
+          },
+        );
+      }
+      // The previous owner picks it up again, with a fresh lease if they are an agent.
+      return transition(ctx, task, "IN_PROGRESS", { eventType: "task.reopened", renewLease: true });
+    },
+  });
+
+  dispatcher.registerCommand({
+    method: "tasks.cancel",
+    mutating: true,
+    params: taskVersionParams,
+    execute: async (ctx, p) => {
+      const task = await loadTask(ctx.client, ctx.room_id, p.task_id, true);
+      if (task.version !== p.expected_version) throw versionConflict(task);
+      if (task.status === "DONE" || task.status === "CANCELLED") {
+        throw new CrossoverError("VALIDATION", `Can't cancel a task that is ${task.status}`, {
+          details: { status: task.status },
+        });
+      }
+      return transition(ctx, task, "CANCELLED", {
+        eventType: "task.cancelled",
+        set: "lease_expires_at = NULL",
+        renewLease: false,
+        payload: { previous_status: task.status },
+      });
+    },
+  });
 }
 
 /** Lock the task, require the caller to be its owner or the lead (owner/admin too), check the version. */
@@ -310,7 +373,14 @@ async function ownerOrLead(ctx: CommandContext, p: { task_id: string; expected_v
 
 interface TransitionOptions {
   eventType:
-    "task.started" | "task.blocked" | "task.unblocked" | "task.submitted" | "task.reviewed";
+    | "task.started"
+    | "task.blocked"
+    | "task.unblocked"
+    | "task.submitted"
+    | "task.reviewed"
+    | "task.released"
+    | "task.reopened"
+    | "task.cancelled";
   /** Extra `SET` assignments; their values are `$5, $6, …` in `values`. */
   set?: string;
   values?: unknown[];
