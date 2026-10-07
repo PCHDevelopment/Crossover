@@ -175,6 +175,7 @@ export async function composeServer(
     });
     const healthRunner = new DockerHealthRunner({
       allowedImages: config.healthImages,
+      nodeId: config.nodeId,
       ...(config.sandboxRuntime ? { runtime: config.sandboxRuntime } : {}),
       ...(config.sandboxEgressProxyContainer
         ? { egressProxyContainer: config.sandboxEgressProxyContainer }
