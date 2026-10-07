@@ -114,6 +114,7 @@ export class ExecutionService {
 
       const starting = await this.recordResources(sandbox.id, roomId, resources);
       if (!starting) {
+        await this.throwIfDestroyed(sandbox.id, roomId, resources);
         sandbox = await this.claimForStart(roomId, participantId);
         continue;
       }
@@ -123,6 +124,7 @@ export class ExecutionService {
       const running = await this.recordRunning(sandbox.id, roomId, resources);
       if (running) return running;
 
+      await this.throwIfDestroyed(sandbox.id, roomId, resources);
       sandbox = await this.claimForStart(roomId, participantId);
     }
   }
@@ -301,6 +303,23 @@ export class ExecutionService {
       );
       return rows[0] ?? null;
     });
+  }
+
+  /** Remove resources created by an ensure call after participant/room cleanup won the race. */
+  private async throwIfDestroyed(
+    id: string,
+    roomId: string,
+    resources: SandboxResources,
+  ): Promise<void> {
+    const { rows } = await this.pool.query<{ status: SandboxStatus }>(
+      "SELECT status FROM sandboxes WHERE id = $1 AND room_id = $2",
+      [id, roomId],
+    );
+    const status = rows[0]?.status;
+    if (status !== undefined && status !== "DESTROYING" && status !== "DESTROYED") return;
+
+    await this.driver.destroy({ sandbox_id: id, resources });
+    throw new CrossoverError("NOT_FOUND", "Participant sandbox has been destroyed");
   }
 
   private async hibernateOne(

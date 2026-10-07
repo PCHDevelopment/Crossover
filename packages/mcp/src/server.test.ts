@@ -6,6 +6,13 @@ import {
   findOrCreateUser,
   issueTokens,
   registerCapabilityCommands,
+  registerDecisionCommands,
+  registerDecisionDecideCommands,
+  registerInboxCommands,
+  registerMemoryAccessCommands,
+  registerMemoryCommands,
+  registerMessageCommands,
+  registerRoomDigestCommand,
   registerTaskCommands,
   registerTaskHeartbeat,
   registerTaskLifecycleCommands,
@@ -20,6 +27,12 @@ import {
   tasksReviewParams,
   tasksUpdateParams,
   taskVersionParams,
+  decisionsDecideParams,
+  decisionsProposeParams,
+  inboxAckParams,
+  memoryPutParams,
+  messagesSendParams,
+  roomDigestParams,
   type Dispatcher as KernelDispatcher,
   registerInviteCommands,
   registerJoinCommand,
@@ -28,7 +41,7 @@ import {
   type TokenPair,
 } from "@crossover/kernel";
 import { authorize } from "@crossover/policy";
-import { newId } from "@crossover/protocol";
+import { METHODS, newId } from "@crossover/protocol";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { z } from "zod";
@@ -38,7 +51,7 @@ import { join } from "node:path";
 import Fastify, { type FastifyInstance } from "fastify";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { registerMcp } from "./server.js";
-import { BASE_TOOLS, MCP_TOOLS, TASK_TOOLS } from "./tools.js";
+import { BASE_TOOLS, COLLABORATION_TOOLS, MCP_TOOLS, TASK_TOOLS } from "./tools.js";
 import { provisionWorkspace, registerWorkspaceCommands } from "@crossover/workspace";
 
 let db: TestDatabase;
@@ -81,6 +94,13 @@ async function setup(tools?: Parameters<typeof registerMcp>[1]["tools"]) {
   registerTaskReadCommands(dispatcher);
   registerTaskLifecycleCommands(dispatcher);
   registerTaskHeartbeat(dispatcher);
+  registerMessageCommands(dispatcher);
+  registerInboxCommands(dispatcher);
+  registerMemoryCommands(dispatcher);
+  registerMemoryAccessCommands(dispatcher);
+  registerDecisionCommands(dispatcher);
+  registerDecisionDecideCommands(dispatcher);
+  registerRoomDigestCommand(dispatcher);
   const app = Fastify();
   registerMcp(app, { dispatcher, pool, ...(tools ? { tools } : {}) });
   apps.push(app);
@@ -598,5 +618,167 @@ describe("MCP task tools (T708)", () => {
       [s.room],
     );
     expect(rows[0].n).toBe(1);
+  });
+});
+
+describe("MCP collaboration tools (T709)", () => {
+  const call = async (client: Client, name: string, args: Record<string, unknown> = {}) => {
+    const res = await client.callTool({ name, arguments: args });
+    const body = JSON.parse((res.content as { text: string }[])[0]!.text);
+    return { isError: Boolean(res.isError), body };
+  };
+
+  it("has a tool for every messages, inbox, memory, decisions and digest command", () => {
+    const methods: string[] = [];
+    const recorder = { registerCommand: (def: { method: string }) => methods.push(def.method) };
+    const d = recorder as unknown as KernelDispatcher;
+    registerMessageCommands(d);
+    registerInboxCommands(d);
+    registerMemoryCommands(d);
+    registerMemoryAccessCommands(d);
+    registerDecisionCommands(d);
+    registerDecisionDecideCommands(d);
+    registerRoomDigestCommand(d);
+    expect(methods.length).toBeGreaterThanOrEqual(18);
+    expect(COLLABORATION_TOOLS.map((t) => t.method).sort()).toEqual([...methods].sort());
+    expect(new Set(MCP_TOOLS.map((t) => t.name)).size).toBe(MCP_TOOLS.length);
+    for (const tool of COLLABORATION_TOOLS)
+      expect(tool.name).toBe(tool.method.replaceAll(".", "_"));
+  });
+
+  it("every tool's mutating flag is the catalog's flag for its command (reads take no idempotency key)", () => {
+    for (const tool of MCP_TOOLS) {
+      expect(tool.mutating, tool.name).toBe(METHODS[tool.method].mutating);
+    }
+  });
+
+  it("take their argument schemas from the commands' own zod schemas", () => {
+    const by = Object.fromEntries(COLLABORATION_TOOLS.map((t) => [t.method, t.input]));
+    expect(by["messages.send"]).toBe(messagesSendParams.shape);
+    expect(by["memory.put"]).toBe(memoryPutParams.shape);
+    expect(by["decisions.propose"]).toBe(decisionsProposeParams.shape);
+    expect(by["decisions.decide"]).toBe(decisionsDecideParams.shape);
+    expect(by["inbox.ack"]).toBe(inboxAckParams.shape);
+    expect(by["room.digest"]).toBe(roomDigestParams.shape);
+  });
+
+  it("advertise derived JSON schemas, with idempotency keys only on the ones that write", async () => {
+    const s = await setup();
+    const client = await connect(s.url, s.agent.access_token);
+    const { tools } = await client.listTools();
+    const put = tools.find((t) => t.name === "memory_put")!;
+    expect(put.inputSchema.required).toEqual(
+      expect.arrayContaining(["key", "value", "expected_revision"]),
+    );
+    expect(Object.keys(put.inputSchema.properties!)).toContain("idempotency_key");
+    const get = tools.find((t) => t.name === "memory_get")!;
+    expect(Object.keys(get.inputSchema.properties!)).toEqual(["key"]);
+  });
+
+  it("run a collaboration through the dispatcher, as the agent (messages, inbox, memory, decisions, digest)", async () => {
+    const s = await setup();
+    const agent = await connect(s.url, s.agent.access_token);
+    const owner = await connect(s.url, s.owner.access_token);
+
+    // Messages: the owner mentions the agent, who finds it in the inbox and answers.
+    const sent = await call(owner, "messages_send", {
+      body: "please look at the schema",
+      mentions: [s.agentId],
+    });
+    expect(sent.body.author_id).toBe(s.ownerId);
+    expect(sent.body.provenance).toEqual({
+      author_id: s.ownerId,
+      author_kind: "HUMAN",
+      trust: "participant",
+    });
+    const inbox = await call(agent, "inbox_list");
+    expect(inbox.body.items).toHaveLength(1);
+    expect(inbox.body.items[0]).toMatchObject({ kind: "MENTION" });
+    expect((await call(agent, "inbox_ack", { ids: [inbox.body.items[0].id] })).body.acked).toBe(1);
+    expect((await call(agent, "inbox_list")).body.items).toEqual([]);
+    await call(agent, "messages_send", { body: "on it", reply_to: sent.body.id });
+    const listed = await call(owner, "messages_list");
+    expect(listed.body.messages.map((m: { author_id: string }) => m.author_id)).toEqual([
+      s.ownerId,
+      s.agentId,
+    ]);
+    const put = await call(agent, "memory_put", {
+      key: "architecture/database",
+      value: "PostgreSQL",
+      expected_revision: 0,
+    });
+    expect(put.body).toMatchObject({
+      revision: 1,
+      author_id: s.agentId,
+      provenance: { author_id: s.agentId, author_kind: "AGENT", trust: "participant" },
+    });
+    const stale = await call(owner, "memory_put", {
+      key: "architecture/database",
+      value: "SQLite",
+      expected_revision: 0,
+    });
+    expect(stale.isError).toBe(true);
+    expect(stale.body.error.code).toBe("CONFLICT_VERSION");
+    expect(stale.body.error.details.current.provenance.author_id).toBe(s.agentId);
+    expect((await call(owner, "memory_get", { key: "architecture/database" })).body.value).toBe(
+      "PostgreSQL",
+    );
+    expect(
+      (await call(owner, "memory_list", { prefix: "architecture/" })).body.entries,
+    ).toHaveLength(1);
+    await call(agent, "memory_delete", { key: "architecture/database", expected_revision: 1 });
+    expect(
+      (await call(owner, "memory_history", { key: "architecture/database" })).body.revisions,
+    ).toHaveLength(2);
+
+    // Decisions: propose, take a position, read it back; the agent can't decide it.
+    const proposed = await call(agent, "decisions_propose", {
+      title: "Pick a database",
+      options: [{ summary: "PostgreSQL" }, { summary: "SQLite" }],
+    });
+    const id = proposed.body.id as string;
+    await call(owner, "decisions_add_position", {
+      decision_id: id,
+      option_id: "opt_1",
+      argument: "boring",
+    });
+    const got = await call(agent, "decisions_get", { decision_id: id });
+    expect(got.body.positions[0].participant_id).toBe(s.ownerId);
+    expect(got.body.positions[0].provenance).toMatchObject({
+      author_id: s.ownerId,
+      trust: "participant",
+    });
+    const refused = await call(agent, "decisions_decide", {
+      decision_id: id,
+      expected_version: 1,
+      outcome_option_id: "opt_1",
+      rationale: "me",
+    });
+    expect(refused.isError).toBe(true);
+    expect(refused.body.error.code).toBe("FORBIDDEN");
+    expect((await call(agent, "decisions_list")).body.decisions).toHaveLength(1);
+    expect(
+      (await call(agent, "decisions_withdraw", { decision_id: id, expected_version: 1 })).body
+        .status,
+    ).toBe("WITHDRAWN");
+
+    // The digest sees all of it.
+    const digest = await call(agent, "room_digest");
+    expect(digest.body.counts).toMatchObject({
+      "message.sent": 2,
+      "memory.updated": 1,
+      "memory.deleted": 1,
+      "decision.proposed": 1,
+    });
+  });
+
+  it("a retried write with the same idempotency_key writes once", async () => {
+    const s = await setup();
+    const agent = await connect(s.url, s.agent.access_token);
+    const args = { body: "once", idempotency_key: "say-once" };
+    const a = await call(agent, "messages_send", args);
+    const b = await call(agent, "messages_send", args);
+    expect(b.body.id).toBe(a.body.id);
+    expect((await call(agent, "messages_list")).body.messages).toHaveLength(1);
   });
 });

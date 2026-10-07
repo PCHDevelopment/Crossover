@@ -37,7 +37,9 @@ import {
 import { authorize } from "@crossover/policy";
 import {
   ConflictEscalationSweeper,
+  DockerExecutionDriver,
   DockerHealthRunner,
+  ExecutionService,
   HealthCheckQueue,
   workspaceHealthGate,
   provisionWorkspace,
@@ -46,6 +48,7 @@ import {
   runHealthCheck,
   publishHealthResult,
   normalizePath,
+  type ExecutionDriver,
 } from "@crossover/workspace";
 import type { ServerConfig } from "./config.js";
 
@@ -62,12 +65,15 @@ export interface ComposeOverrides {
   leaseTtlMs?: number;
   /** How often agents' lapsed task claims are swept back to OPEN. Default 30 s. */
   leaseSweepIntervalMs?: number;
+  /** Sandbox runtime seam for lifecycle tests; production uses the Docker driver. */
+  executionDriver?: ExecutionDriver;
 }
 
 export interface CrossoverServer {
   app: ReturnType<typeof buildGateway>;
   dispatcher: Dispatcher;
   pool: Pool;
+  execution: ExecutionService;
   renewer: LeaseRenewer;
   /** Graceful shutdown (§19): stop renewing, stop serving, release every lease, close what we opened. */
   close(): Promise<void>;
@@ -96,6 +102,7 @@ export async function composeServer(
   let redis: RedisEventPublisher | undefined;
   let escalations: ConflictEscalationSweeper | undefined;
   let leaseSweeper: LeaseSweeper | undefined;
+  let executionService: ExecutionService | undefined;
   if (overrides.publisher) {
     publisher = overrides.publisher;
   } else {
@@ -118,6 +125,17 @@ export async function composeServer(
     if (redis) await redis.ready();
     await intentStore.ready();
 
+    const executionDriver =
+      overrides.executionDriver ??
+      new DockerExecutionDriver({
+        ...(config.sandboxVolumeDriver ? { volumeDriver: config.sandboxVolumeDriver } : {}),
+        volumeOptions: config.sandboxVolumeOptions ?? {},
+      });
+    executionService = new ExecutionService(pool, executionDriver, {
+      diskEnforcement: config.sandboxDiskEnforcement ?? "soft",
+    });
+    executionService.startSweeper();
+
     const dispatcher = new Dispatcher({
       pool,
       authorize: overrides.authorize ?? authorize,
@@ -134,7 +152,7 @@ export async function composeServer(
           await publishHealthResult(pool, dispatcher, roomId, revision, outcome.id, outcome.result);
       },
     });
-    registerCommands(dispatcher, config, healthQueue, intentStore);
+    registerCommands(dispatcher, config, healthQueue, intentStore, executionService);
 
     const renewer = new LeaseRenewer({ leases: dispatcher.leases, actors: dispatcher.actors });
     renewer.start();
@@ -162,6 +180,7 @@ export async function composeServer(
       (closing ??= (async () => {
         await escalations?.stop();
         await leaseSweeper?.stop();
+        await executionService?.close();
         await renewer.stop();
         await app.close();
         await healthQueue.close();
@@ -172,10 +191,11 @@ export async function composeServer(
         if (!overrides.pool) await pool.end();
       })());
 
-    return { app, dispatcher, pool, renewer, close };
+    return { app, dispatcher, pool, execution: executionService, renewer, close };
   } catch (err) {
     await escalations?.stop();
     await leaseSweeper?.stop();
+    await executionService?.close();
     await redis?.close();
     await redisSubscriber?.close();
     await intentStore.close();
@@ -190,6 +210,7 @@ function registerCommands(
   config: ServerConfig,
   healthQueue: HealthCheckQueue,
   intentStore: RedisEditIntentStore,
+  execution: ExecutionService,
 ): void {
   registerRoomCommands(dispatcher, {
     provision: async ({ client, room_id }) => {
@@ -200,9 +221,17 @@ function registerCommands(
   registerJoinCommand(dispatcher);
   registerCapabilityCommands(dispatcher);
   registerParticipantRoleCommand(dispatcher);
-  registerParticipantLifecycleCommands(dispatcher);
+  registerParticipantLifecycleCommands(dispatcher, {
+    afterRemove: ({ room_id, participant_id }) =>
+      execution.destroyParticipant(room_id, participant_id),
+  });
   registerLeadCommands(dispatcher);
-  registerRoomLifecycleCommands(dispatcher);
+  registerRoomLifecycleCommands(dispatcher, {
+    afterChange: ({ room_id, to }) => {
+      if (to === "PAUSED") return execution.hibernateRoom(room_id, true);
+      if (to === "ARCHIVED") return execution.destroyRoom(room_id);
+    },
+  });
   registerRoomEventsCommand(dispatcher);
   registerRoomDigestCommand(dispatcher);
   registerInboxCommands(dispatcher);
