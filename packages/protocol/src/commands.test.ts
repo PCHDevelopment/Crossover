@@ -131,7 +131,7 @@ const valid = (extra: Record<string, unknown> = {}) => ({
 
 describe("METHODS", () => {
   it("contains every §16.1 method plus room.create, and nothing else", () => {
-    expect(catalog).toHaveLength(87);
+    expect(catalog).toHaveLength(88);
     expect([...METHOD_NAMES].sort()).toEqual([...catalog].sort());
   });
 
@@ -142,7 +142,7 @@ describe("METHODS", () => {
   it("marks exactly the documented methods read-only", () => {
     const readOnly = METHOD_NAMES.filter((m) => !isMutatingMethod(m));
     expect([...readOnly].sort()).toEqual([...READ_ONLY].sort());
-    expect(Object.keys(METHODS).length - readOnly.length).toBe(51);
+    expect(Object.keys(METHODS).length - readOnly.length).toBe(52);
   });
 
   it("isMutatingMethod takes any string and is false for unknown methods", () => {

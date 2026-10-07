@@ -24,6 +24,7 @@ import {
   registerPresenceIntentCommands,
   registerRoomCommands,
   registerRoomDigestCommand,
+  registerEventsRedactCommand,
   registerRoomEventsCommand,
   registerRoomLifecycleCommands,
   registerTaskCommands,
@@ -253,6 +254,7 @@ function registerCommands(
     },
   });
   registerRoomEventsCommand(dispatcher);
+  registerEventsRedactCommand(dispatcher);
   registerRoomDigestCommand(dispatcher);
   registerInboxCommands(dispatcher);
   registerPresenceIntentCommands(dispatcher, intentStore, normalizePath);

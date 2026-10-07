@@ -858,6 +858,7 @@ ROOM
   room.digest              since=sequence (§17.3)
   room.events.subscribe    filters (§17.1), after=sequence
   room.events.list         after, limit, types?
+  events.redact            sequence, reason (owner only; §19.6)
   room.set_lead            owner/admin
   room.transfer_lead / room.accept_lead
   room.freeze / room.resume / room.archive          owner
