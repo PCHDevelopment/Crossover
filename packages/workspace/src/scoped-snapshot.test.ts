@@ -42,6 +42,12 @@ async function fixture() {
     gitDir: referenceRepository,
     timeoutMs: 10_000,
     input: "",
+    env: {
+      GIT_AUTHOR_NAME: "Crossover test",
+      GIT_AUTHOR_EMAIL: "test@crossover.invalid",
+      GIT_COMMITTER_NAME: "Crossover test",
+      GIT_COMMITTER_EMAIL: "test@crossover.invalid",
+    },
   });
   return {
     referenceRepository,
