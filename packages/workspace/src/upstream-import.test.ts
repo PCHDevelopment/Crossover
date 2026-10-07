@@ -63,11 +63,14 @@ async function upstreamRepo(extra?: (dir: string) => Promise<void>) {
 
 /** Fetches from a local repository instead of the network, recording what it was asked. */
 class FixtureFetcher implements UpstreamFetcher {
+  /** Runs while a fetch is "on the network": something happening meanwhile. */
+  during: (() => Promise<void>) | undefined;
   requests: { url: string; branch: string; credential: GitCredential | null }[] = [];
   cleaned = 0;
   constructor(private readonly source: string) {}
   async fetch(request: { url: string; branch: string; credential: GitCredential | null }) {
     this.requests.push(request);
+    await this.during?.();
     const dir = await tmp("crossover-fetched-");
     await run(dir, ["clone", "-q", "--bare", this.source, "repo"]);
     const repo = join(dir, "repo");
@@ -282,6 +285,33 @@ describe("git.import (§24.1, T801)", () => {
     });
     const r2 = await room({ fetcher: new FixtureFetcher(bare.dir) });
     expect((await r2.importIt()).response).toMatchObject({ suggested_health_command: null });
+  });
+
+  it("the room changed while the upstream was fetched: CONFLICT_VERSION, nothing imported, nothing left behind", async () => {
+    const up = await upstreamRepo();
+    const fetcher = new FixtureFetcher(up.dir);
+    const r = await room({ fetcher });
+    fetcher.during = async () => {
+      await r.d.dispatch(r.principal, {
+        id: newId("cmd"),
+        method: "workspace.apply_changeset",
+        idempotency_key: newId("cmd"),
+        params: {
+          source: "EDITOR",
+          message: "someone got in first",
+          base_workspace_revision: 0,
+          operations: [{ type: "create", path: "first.txt", content: "hi\n" }],
+        },
+      });
+    };
+    await expect(r.importIt()).rejects.toMatchObject({
+      code: "CONFLICT_VERSION",
+      details: { reason: "workspace_not_empty" },
+    });
+    expect(
+      (await db.pool.query("SELECT 1 FROM upstreams WHERE room_id = $1", [r.roomId])).rowCount,
+    ).toBe(0);
+    expect(fetcher.cleaned).toBe(1);
   });
 
   it("a second import into the same room → VALIDATION", async () => {
