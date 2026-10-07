@@ -263,6 +263,7 @@ export async function composeServer(
       dispatcher,
       pool,
       devLogin: config.devLogin,
+      ...(config.webRoot ? { staticRoot: config.webRoot } : {}),
       ws: { subscriber },
     });
     gitApp = buildInternalGitServer({
