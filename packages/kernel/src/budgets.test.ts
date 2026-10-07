@@ -1,4 +1,5 @@
 import type { Pool } from "@crossover/db";
+import { Redis } from "ioredis";
 import { createTestDatabase, type TestDatabase } from "@crossover/db/testing";
 import { authorize } from "@crossover/policy";
 import { CrossoverError, newId } from "@crossover/protocol";
@@ -198,8 +199,47 @@ describe("budgets in the dispatcher (§22.3, T904)", () => {
     for (let i = 0; i < 12; i++) await s.send(unlimited);
   });
 
+  it("a retry of a command that already ran is replayed without being charged or refused", async () => {
+    const s = await setup({ settings: { budgets: { messages: 2 } } });
+    const a = await s.add("AGENT");
+    const first = cmd("messages.send", { body: "one" });
+    const last = cmd("messages.send", { body: "two" }); // the limit-th message
+    await s.d.dispatch(a, first);
+    const done = await s.d.dispatch(a, last);
+    expect(done.replayed).toBe(false);
+    // The response was lost; the agent retries with the same key.
+    const retry = await s.d.dispatch(a, last);
+    expect(retry.replayed).toBe(true);
+    expect(retry.response).toEqual(done.response);
+    expect(await s.events()).toEqual([]); // no budget.exceeded
+    // The retries cost nothing: a new message is what is refused, once.
+    await exceeded(s.send(a));
+    await s.d.dispatch(a, last);
+    expect(await s.events()).toHaveLength(1);
+  });
+
+  it("a request reusing a key with other content isn't a replay: it is charged", async () => {
+    const s = await setup({ settings: { budgets: { messages: 1 } } });
+    const a = await s.add("AGENT");
+    const first = cmd("messages.send", { body: "one" });
+    await s.d.dispatch(a, first);
+    await exceeded(s.d.dispatch(a, { ...first, id: newId("cmd"), params: { body: "different" } }));
+  });
+
+  it("a command refused for one budget spends none of the others", async () => {
+    const s = await setup({ settings: { budgets: { messages: 1, commands: 5 } } });
+    const a = await s.add("AGENT");
+    await s.send(a); // 1 command, 1 message
+    for (let i = 0; i < 20; i++) await exceeded(s.send(a)); // refused: costs no command
+    for (let i = 0; i < 4; i++) await s.d.dispatch(a, read("messages.list")); // commands 2..5
+    await exceeded(s.d.dispatch(a, read("messages.list")));
+  });
+
   it("with the limiter down the command goes ahead, and the failure is reported", async () => {
     const broken: BudgetLimiter = {
+      peek: async () => {
+        throw new Error("redis is down");
+      },
       consume: async () => {
         throw new Error("redis is down");
       },
@@ -227,8 +267,21 @@ describe("RedisBudgetLimiter", () => {
         participant_id: newId("part"),
         budget: "messages" as const,
       };
+      expect(await limiter.peek(key, 60_000)).toBe(0);
       expect(await limiter.consume(key, 2, 60_000)).toEqual({ allowed: true });
       expect(await limiter.consume(key, 2, 60_000)).toEqual({ allowed: true });
+      expect(await limiter.peek(key, 60_000)).toBe(2);
+      // The counter always carries its expiry (set in the same step as the first increment).
+      const probe = new Redis(process.env["REDIS_URL"] ?? "redis://localhost:6379");
+      try {
+        const ttl = await probe.pttl(
+          `budget:${key.room_id}:${key.participant_id}:messages:${Math.floor(now / 60_000)}`,
+        );
+        expect(ttl).toBeGreaterThan(0);
+        expect(ttl).toBeLessThanOrEqual(120_000);
+      } finally {
+        probe.disconnect();
+      }
       now += 15_000;
       expect(await limiter.consume(key, 2, 60_000)).toEqual({
         allowed: false,

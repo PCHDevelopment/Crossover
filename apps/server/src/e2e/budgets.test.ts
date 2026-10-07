@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTestDatabase, type TestDatabase } from "@crossover/db/testing";
-import type { EventPublisher } from "@crossover/kernel";
+import { RedisBudgetLimiter, type EventPublisher } from "@crossover/kernel";
 import { newId } from "@crossover/protocol";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { composeServer, type CrossoverServer } from "../compose.js";
@@ -14,6 +14,9 @@ let db: TestDatabase;
 let root: string;
 let server: CrossoverServer;
 let serial = 0;
+let limiter: RedisBudgetLimiter;
+// A clock held at the start of a window, so a run can't straddle a minute boundary.
+const NOW = 4_000_000 * 60_000;
 
 beforeAll(async () => {
   db = await createTestDatabase();
@@ -29,11 +32,14 @@ beforeAll(async () => {
     healthImages: ["node:22-bookworm-slim"],
   };
   const publisher: EventPublisher = { publish: async () => undefined };
-  server = await composeServer(config, { pool: db.pool, publisher });
+  limiter = new RedisBudgetLimiter(config.redisUrl, () => NOW);
+  await limiter.ready();
+  server = await composeServer(config, { pool: db.pool, publisher, budgets: limiter });
 });
 
 afterAll(async () => {
   await server?.close();
+  await limiter?.close();
   await db?.drop();
   await rm(root, { recursive: true, force: true });
 });
@@ -120,8 +126,7 @@ describe("agent budgets over HTTP", () => {
       retryable: true,
       details: { budget: "messages", limit: 2, window_seconds: 60 },
     });
-    expect(error.details.retry_after).toBeGreaterThanOrEqual(1);
-    expect(error.details.retry_after).toBeLessThanOrEqual(60);
+    expect(error.details.retry_after).toBe(60);
     expect(refused.headers["retry-after"]).toBe(String(error.details.retry_after));
     expect((await r.call(r.dev, "messages.send", { body: "four" })).statusCode).toBe(429);
 

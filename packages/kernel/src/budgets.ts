@@ -70,6 +70,8 @@ export type BudgetDecision =
     };
 
 export interface BudgetLimiter {
+  /** How many uses the current window has counted so far, without counting one. */
+  peek(key: BudgetKey, windowMs: number): Promise<number>;
   /** Count one use against `limit` per `windowMs`, and say whether it is within it. */
   consume(key: BudgetKey, limit: number, windowMs: number): Promise<BudgetDecision>;
   close(): Promise<void>;
@@ -87,10 +89,19 @@ const decide = (count: number, limit: number, windowMs: number, now: number): Bu
 const windowKey = (key: BudgetKey, windowMs: number, now: number) =>
   `budget:${key.room_id}:${key.participant_id}:${key.budget}:${Math.floor(now / windowMs)}`;
 
+const INCR_WITH_EXPIRY = `
+local n = redis.call('INCR', KEYS[1])
+if n == 1 then redis.call('PEXPIRE', KEYS[1], ARGV[1]) end
+return n`;
+
 /** Counters in memory, with a clock you can move; for tests and single-process use. */
 export class MemoryBudgetLimiter implements BudgetLimiter {
   private readonly counts = new Map<string, number>();
   constructor(private readonly now: () => number = Date.now) {}
+
+  async peek(key: BudgetKey, windowMs: number): Promise<number> {
+    return this.counts.get(windowKey(key, windowMs, this.now())) ?? 0;
+  }
 
   async consume(key: BudgetKey, limit: number, windowMs: number): Promise<BudgetDecision> {
     const now = this.now();
@@ -124,6 +135,8 @@ export class RedisBudgetLimiter implements BudgetLimiter {
         enableOfflineQueue: false,
         maxRetriesPerRequest: 1,
         connectTimeout: 1_000,
+        // A Redis that is connected but not answering must not hang every agent command.
+        commandTimeout: 500,
         retryStrategy: (times: number) => Math.min(times * 200, 2_000),
       } as never);
       this.redis.on("error", () => {});
@@ -150,11 +163,16 @@ export class RedisBudgetLimiter implements BudgetLimiter {
     });
   }
 
+  async peek(key: BudgetKey, windowMs: number): Promise<number> {
+    const value = await this.redis.get(windowKey(key, windowMs, this.now()));
+    return value === null ? 0 : Number(value);
+  }
+
   async consume(key: BudgetKey, limit: number, windowMs: number): Promise<BudgetDecision> {
     const now = this.now();
     const id = windowKey(key, windowMs, now);
-    const count = await this.redis.incr(id);
-    if (count === 1) await this.redis.pexpire(id, windowMs * 2);
+    // One round trip, so a counter can't be left without its expiry.
+    const count = Number(await this.redis.eval(INCR_WITH_EXPIRY, 1, id, String(windowMs * 2)));
     return decide(count, limit, windowMs, now);
   }
 
