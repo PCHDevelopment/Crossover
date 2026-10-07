@@ -3,6 +3,7 @@ import {
   authenticate,
   type Dispatcher,
   type EventSubscriber,
+  redactEventFor,
   type Principal,
 } from "@crossover/kernel";
 import { listEvents } from "@crossover/ledger";
@@ -136,6 +137,11 @@ class Connection {
     this.ws.on("error", () => void this.cleanup());
   }
 
+  /** What this connection's participant may see of `event` (denials are redacted, §22). */
+  private view(event: RoomEvent): RoomEvent {
+    return redactEventFor(this.principal!, event);
+  }
+
   private send(frame: Record<string, unknown>): void {
     if (this.ws.readyState !== this.ws.OPEN) return;
     this.ws.send(JSON.stringify(frame));
@@ -239,8 +245,11 @@ class Connection {
     }
     this.helloDone = true;
     this.revalidate = setInterval(() => {
-      void authenticate(this.o.pool, this.token!).catch((error: unknown) =>
-        this.fail(CLOSE.UNAUTHENTICATED, error),
+      authenticate(this.o.pool, this.token!).then(
+        (principal) => {
+          this.principal = principal; // a changed role changes what the stream shows
+        },
+        (error: unknown) => this.fail(CLOSE.UNAUTHENTICATED, error),
       );
     }, this.o.revalidateIntervalMs ?? 30_000);
     this.send({
@@ -268,7 +277,7 @@ class Connection {
         type: "result",
         id,
         response: result.response,
-        events: result.events,
+        events: result.events.map((e) => this.view(e)),
         replayed: result.replayed,
         ...(result.one_time === undefined ? {} : { one_time: result.one_time }),
       });
@@ -334,7 +343,7 @@ class Connection {
     if (event.sequence <= stream.lastSent) return; // already sent (backfill overlapped)
     if (event.sequence === stream.lastSent + 1) {
       stream.lastSent = event.sequence;
-      this.send({ type: "event", event });
+      this.send({ type: "event", event: this.view(event) });
       return;
     }
     void this.catchUp(); // a gap: some message was missed
@@ -359,7 +368,7 @@ class Connection {
       });
       for (const event of events) {
         stream.lastSent = event.sequence;
-        this.send({ type: "event", event });
+        this.send({ type: "event", event: this.view(event) });
       }
       if (events.length < pageSize) return;
     }

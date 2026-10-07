@@ -425,11 +425,16 @@ describe("command frames: the same semantics as REST", () => {
   });
 });
 
+const joinRegistered = new WeakSet<Dispatcher>();
+
 async function newDeveloper(env: Env, inv: { one_time?: unknown }): Promise<string> {
   const token = (inv.one_time as RoomInviteSecret).token;
   const joined = await (async () => {
     const { registerJoinCommand } = await import("@crossover/kernel");
-    registerJoinCommand(env.dispatcher);
+    if (!joinRegistered.has(env.dispatcher)) {
+      joinRegistered.add(env.dispatcher);
+      registerJoinCommand(env.dispatcher);
+    }
     return env.dispatcher.dispatchAnonymous(
       "room.join",
       {
@@ -469,6 +474,70 @@ describe("subscribe: ordered, exactly-once events", () => {
     await c.frame("subscribed");
     await c.until(() => c.sequences().length === 2, "events 5 and 6");
     expect(c.sequences()).toEqual([5, 6]);
+  });
+
+  it("redacts capability.denied for other participants, on the live stream and in the backfill", async () => {
+    const env = await setup({}, true);
+    const inviteResult = () =>
+      env.dispatcher.dispatch(
+        {
+          participant_id: env.ownerId,
+          room_id: env.room,
+          kind: "HUMAN",
+          authority: "OWNER",
+          role: "LEAD",
+        },
+        {
+          id: newId("cmd"),
+          method: "room.invite",
+          params: { role: "DEVELOPER" },
+          idempotency_key: `k-${++n}`,
+        },
+      );
+    const devA = await newDeveloper(env, await inviteResult());
+    const devB = await newDeveloper(env, await inviteResult());
+    const denied = async () => {
+      const c = await ready(env, devA);
+      c.send(cmd("room.invite", { role: "DEVELOPER" }));
+      expect((await c.frame("error")).error.code).toBe("FORBIDDEN");
+      (c as unknown as { sock: { terminate(): void } }).sock.terminate();
+    };
+    await denied(); // recorded before anyone subscribes: reaches them through the backfill
+
+    const watch = async (token: string) => {
+      const c = await ready(env, token);
+      c.send({ type: "subscribe", after: 0 });
+      await c.frame("subscribed");
+      await c.until(() => c.events().some((e) => e.type === "capability.denied"), "a denial");
+      return c;
+    };
+    const asOwner = await watch(env.owner.access_token);
+    const asA = await watch(devA);
+    const asB = await watch(devB);
+    const denial = (c: Client) => c.events().find((e) => e.type === "capability.denied")!;
+    expect(denial(asOwner).payload).not.toHaveProperty("resource_redacted");
+    expect(denial(asA).payload).not.toHaveProperty("resource_redacted"); // it is about them
+    expect(denial(asB).payload).toMatchObject({ resource_redacted: true });
+    expect(denial(asB).payload).not.toHaveProperty("resource");
+
+    // And live: a second denial after everyone is subscribed.
+    const before = asB.events().filter((e) => e.type === "capability.denied").length;
+    await denied();
+    await asB.until(
+      () => asB.events().filter((e) => e.type === "capability.denied").length === before + 1,
+      "a live denial",
+    );
+    const live = asB
+      .events()
+      .filter((e) => e.type === "capability.denied")
+      .at(-1)!;
+    expect(live.payload).toMatchObject({ resource_redacted: true });
+    expect(live.payload).not.toHaveProperty("resource");
+    await asOwner.until(
+      () => asOwner.events().filter((e) => e.type === "capability.denied").length === 2,
+      "the owner's live denial",
+    );
+    expect(asOwner.events().at(-1)!.payload).not.toHaveProperty("resource_redacted");
   });
 
   it("is refused without room.read (a paused participant), with an error frame", async () => {
