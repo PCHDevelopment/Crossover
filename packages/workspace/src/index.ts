@@ -3,6 +3,12 @@ export type { GitOptions, GitResult } from "./git.js";
 export { normalizePath, PathValidationError } from "./path.js";
 export { initRoomRepo } from "./repo.js";
 export { materialize } from "./materialize.js";
+export {
+  createScopedSnapshotRepository,
+  createUnscopedSnapshotRepository,
+  hashSnapshotScope,
+} from "./scoped-snapshot.js";
+export type { ScopedSnapshotRepository } from "./scoped-snapshot.js";
 export type { Operation, ContentEncoding } from "./operations.js";
 export { merge } from "./merge.js";
 export type { MergeResult, MergeFile, MergeStage, MergeMessage } from "./merge.js";
