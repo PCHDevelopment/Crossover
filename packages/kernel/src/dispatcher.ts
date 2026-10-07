@@ -13,6 +13,7 @@ import {
 import type { z } from "zod";
 import { RoomActorRegistry } from "./actor.js";
 import { RoomLeases, type RoomLeasesOptions } from "./leases.js";
+import { queueApproval, type ApprovalRow } from "./modules/approvals/approvals.js";
 import type { Principal } from "./principal.js";
 import type { EventPublisher } from "./publisher.js";
 
@@ -194,7 +195,13 @@ export type Authorizer = (
   principal: Principal,
   action: string,
   resource: { room_id: string; [key: string]: unknown },
-  context: { method: string; params: unknown; client: PoolClient; perPath?: boolean },
+  context: {
+    method: string;
+    params: unknown;
+    client: PoolClient;
+    perPath?: boolean;
+    approved?: boolean;
+  },
 ) => Promise<void>;
 
 /** Allows everything. For tests only; production wiring must pass the real policy. */
@@ -808,6 +815,134 @@ export class Dispatcher {
     }
   }
 
+  /**
+   * The command was stopped by an approval gate (§22.2) and rolled back: keep it for the owner
+   * or lead in a transaction of its own (`approval.requested`, inbox items), and return the
+   * error to throw, now naming the approval. If it can't be kept, the original error stands.
+   */
+  private async queueForApproval(
+    principal: Principal,
+    envelope: { method: string; id: string },
+    params: unknown,
+    idempotencyKey: string,
+    error: CrossoverError,
+    token: number,
+  ): Promise<CrossoverError> {
+    const capability =
+      typeof error.details?.["capability"] === "string"
+        ? error.details["capability"]
+        : envelope.method;
+    try {
+      const queued = await withTransaction(this.pool, async (client) => {
+        const { approval, created } = await queueApproval(client, principal, {
+          method: envelope.method,
+          params,
+          idempotency_key: idempotencyKey,
+          capability,
+        });
+        const events = created
+          ? await appendEvents(
+              client,
+              principal.room_id,
+              [
+                {
+                  type: "approval.requested",
+                  actor_id: principal.participant_id,
+                  causation_id: envelope.id,
+                  payload: {
+                    approval_id: approval.id,
+                    method: envelope.method,
+                    capability,
+                    expires_at: approval.expires_at,
+                  },
+                },
+              ],
+              token,
+            )
+          : [];
+        return { approval, events };
+      });
+      await this.afterCommitWork(principal.room_id, envelope, [], {
+        response: undefined,
+        events: queued.events,
+        replayed: false,
+      });
+      return new CrossoverError("APPROVAL_REQUIRED", error.message, {
+        details: {
+          ...error.details,
+          approval_id: queued.approval.id,
+          expires_at: queued.approval.expires_at,
+        },
+      });
+    } catch (queueError) {
+      if (queueError instanceof CrossoverError && queueError.code === "VALIDATION")
+        return queueError;
+      this.onDenialRecordError(queueError, {
+        method: envelope.method,
+        command_id: envelope.id,
+        room_id: principal.room_id,
+        action: "approval.requested",
+      });
+      return error;
+    }
+  }
+
+  /**
+   * Run the command an approval kept (T905), as its requester, inside the approver's
+   * transaction (`outer`). The approval gate is lifted for it; every other check still applies.
+   * Returns what the command returned, for the caller to append its events. A command that
+   * returns a one-time secret can't run this way (`VALIDATION`, `one_time_result`).
+   */
+  async runApproved(outer: CommandContext, approval: ApprovalRow): Promise<CommandResult<unknown>> {
+    const registered = this.commands.get(approval.method);
+    if (!registered || !registered.def.mutating) {
+      throw new CrossoverError("VALIDATION", `Approval is for a method that isn't available now`, {
+        details: { reason: "unknown_method", method: approval.method },
+      });
+    }
+    const { def, action } = registered;
+    const parsed = def.params.safeParse(approval.params);
+    if (!parsed.success)
+      throw validation(`Invalid params for ${approval.method}`, parsed.error.issues);
+    const params: unknown = parsed.data;
+    const { client, room_id } = outer;
+    const requester = await this.principalOf(client, room_id, approval.requester_id);
+    const check = (
+      principal: Principal,
+      a: string,
+      resource: Record<string, unknown>,
+      extra = {},
+    ) =>
+      this.authorize(
+        principal,
+        a,
+        { ...resource, room_id },
+        { method: approval.method, params, client, approved: true, ...extra },
+      );
+    await check(requester, action, {}, def.perPathAuthorize ? { perPath: true } : {});
+    const ctx: CommandContext = {
+      client,
+      principal: requester,
+      room_id,
+      command_id: outer.command_id,
+      idempotency_key: approval.idempotency_key,
+      authorize: (a, resource) => check(requester, a, resource ?? {}),
+      authorizeAs: async (participantId, a, resource) =>
+        check(await this.principalOf(client, room_id, participantId), a, resource ?? {}).catch(
+          (error: unknown) => this.onBehalfOf(error, participantId),
+        ),
+      afterCommit: outer.afterCommit,
+    };
+    const out = await def.execute(ctx, params);
+    if (out.oneTime !== undefined) {
+      throw new CrossoverError("VALIDATION", "That command returns a one-time secret", {
+        details: { reason: "one_time_result", method: approval.method },
+      });
+    }
+    if (out.afterCommit) outer.afterCommit(out.afterCommit);
+    return out;
+  }
+
   private async runRead(
     principal: Principal,
     envelope: CommandEnvelope,
@@ -972,6 +1107,13 @@ export class Dispatcher {
         if (err instanceof CrossoverError && err.code === "STALE_FENCE")
           this.leases.forget(room_id);
         await this.recordDenial(principal, envelope, err, token);
+        if (
+          err instanceof CrossoverError &&
+          err.code === "APPROVAL_REQUIRED" &&
+          err.details?.["approval_id"] === undefined
+        ) {
+          throw await this.queueForApproval(principal, envelope, params, key, err, token);
+        }
         throw err;
       }
 

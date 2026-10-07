@@ -1287,6 +1287,8 @@ You chose full autonomy and wanted to be able to pull it back later. These contr
 
 Any capability grant can carry `requires_approval: true`. Invocations then return `APPROVAL_REQUIRED` with an approval id, appear in the owner's and lead's inbox, and execute when approved (`approvals.decide`). Approvals expire after 24 h. Default: off for all capabilities.
 
+How it runs (T905): the refused command is kept whole (method, params, the requester's idempotency key) as an approval, `approval.requested` is appended, and every owner and the lead (except the requester) gets an `APPROVAL` inbox item; the requester's retry of the same request gets the same approval id. `approvals.decide { approval_id, decision: approve | reject, note? }` is the owner's or lead's, never on their own request. Approving runs the stored command once, as its requester, in the approver's transaction: only the approval gate is lifted (a revoked capability, a paused participant or a frozen room still stop it, and then the approval stays pending). Retrying an approved request is `VALIDATION` (`already_approved`). A command that returns a one-time secret can't be approved this way. Reads are not queued.
+
 ## 22.3 Budgets
 
 Per-agent defaults (owner can change per room or per agent):
