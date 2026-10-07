@@ -45,3 +45,11 @@ export { HealthCheckQueue } from "./health-queue.js";
 export type { HealthCheckQueueOptions } from "./health-queue.js";
 export { workspaceHealthGate } from "./health-gate.js";
 export { healthGetParamsSchema, publishHealthResult } from "./health-events.js";
+export { ExecutionService } from "./execution.js";
+export type {
+  ExecutionDriver,
+  ExecutionServiceOptions,
+  SandboxRecord,
+  SandboxResources,
+  SandboxStatus,
+} from "./execution.js";
