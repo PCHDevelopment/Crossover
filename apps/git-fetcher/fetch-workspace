@@ -1,0 +1,26 @@
+#!/bin/sh
+set -eu
+
+: "${GIT_REMOTE_URL:?GIT_REMOTE_URL is required}"
+
+workspace="${GIT_WORKSPACE_PATH:-/workspace}"
+reference="${GIT_REFERENCE_REPOSITORY:-/reference.git}"
+
+checkout="$(mktemp -d /tmp/crossover-git-fetch.XXXXXX)"
+trap 'rm -rf "$checkout"' EXIT HUP INT TERM
+
+git clone \
+  --quiet \
+  --no-tags \
+  --depth=1 \
+  --single-branch \
+  --branch main \
+  --reference="$reference" \
+  --dissociate \
+  "$GIT_REMOTE_URL" \
+  "$checkout/repo"
+
+# A failed prior fetch can leave a partial first checkout in the volume. The agent is still
+# stopped while this helper runs, so replace its contents from the complete staged clone.
+find "$workspace" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+cp -a "$checkout/repo"/. "$workspace"/

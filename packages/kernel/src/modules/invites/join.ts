@@ -1,3 +1,5 @@
+import { isIP } from "node:net";
+import { isPrivateAddress } from "@crossover/security";
 import { isAuthorityPower, parseCapability, tierOf } from "@crossover/policy";
 import { CrossoverError, newId } from "@crossover/protocol";
 import { z } from "zod";
@@ -9,16 +11,31 @@ export const AGENT_CLIENTS = ["mcp", "cli", "sdk-ts", "sdk-python", "rest", "a2a
 
 const text = (max: number) => z.string().trim().min(1).max(max);
 
+/**
+ * The rules `postWebhook` enforces when it sends (https, no userinfo, the default port, a public
+ * host), applied when the URL is set so a bad one is refused then instead of failing silently
+ * for good. (The name is resolved only at send time.)
+ */
 const httpsUrl = z
   .url()
   .max(2048)
   .refine((value) => {
     try {
-      return new URL(value).protocol === "https:";
+      const url = new URL(value);
+      const host = url.hostname.replace(/^\[|\]$/g, "");
+      return (
+        url.protocol === "https:" &&
+        url.username === "" &&
+        url.password === "" &&
+        (url.port === "" || url.port === "443") &&
+        host !== "localhost" &&
+        !host.endsWith(".localhost") &&
+        (isIP(host) === 0 || !isPrivateAddress(host))
+      );
     } catch {
       return false;
     }
-  }, "wake_webhook_url must be an https URL");
+  }, "wake_webhook_url must be an https URL on the default port, without credentials, at a public host");
 
 /** The §15.2 agent manifest. Strict: unknown fields are rejected, not stored. */
 export const agentManifestSchema = z.strictObject({
