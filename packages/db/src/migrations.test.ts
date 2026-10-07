@@ -505,3 +505,87 @@ describe("0009_tasks", () => {
     expect(rows[0].comments).toBe("");
   });
 });
+
+describe("0010_messages", () => {
+  let n = 0;
+  const setup = async () => {
+    const room = `room_m${++n}`;
+    await db.pool.query(
+      `INSERT INTO rooms (id, slug, name, objective, owner_id) VALUES ($1, $1, 'n', 'o', 'x')`,
+      [room],
+    );
+    const part = async () => {
+      const id = `part_m${++n}`;
+      await db.pool.query(
+        `INSERT INTO participants (id, room_id, kind, display_name, role, status)
+         VALUES ($1, $2, 'AGENT', 'a', 'DEVELOPER', 'ACTIVE')`,
+        [id, room],
+      );
+      return id;
+    };
+    return { room, author: await part() };
+  };
+  const send = (room: string, author: string, extra: Record<string, unknown> = {}) => {
+    const cols: Record<string, unknown> = {
+      id: `msg_${++n}`,
+      room_id: room,
+      author_id: author,
+      body: "hi",
+      ...extra,
+    };
+    const keys = Object.keys(cols);
+    return db.pool.query(
+      `INSERT INTO messages (${keys.join(", ")}) VALUES (${keys.map((_, i) => `$${i + 1}`).join(", ")}) RETURNING *`,
+      Object.values(cols),
+    );
+  };
+
+  it("is recorded as applied", async () => {
+    const { rows } = await db.pool.query("SELECT name FROM schema_migrations WHERE version = 10");
+    expect(rows).toEqual([{ name: "messages" }]);
+  });
+
+  it("defaults to no mentions, no refs, not edited", async () => {
+    const { room, author } = await setup();
+    const { rows } = await send(room, author);
+    expect(rows[0]).toMatchObject({ mentions: [], refs: [], reply_to: null, edited_at: null });
+    expect(rows[0].created_at).toBeInstanceOf(Date);
+  });
+
+  it("limits the body to 1..32768 bytes (bytes, not characters)", async () => {
+    const { room, author } = await setup();
+    await send(room, author, { body: "x".repeat(32768) });
+    await expect(send(room, author, { body: "x".repeat(32769) })).rejects.toMatchObject({
+      code: "23514",
+    });
+    await expect(send(room, author, { body: "" })).rejects.toMatchObject({ code: "23514" });
+    await send(room, author, { body: "é".repeat(16384) }); // 32768 bytes
+    await expect(send(room, author, { body: "é".repeat(16385) })).rejects.toMatchObject({
+      code: "23514",
+    });
+  });
+
+  it("only takes an author of the same room, and a reply to a message of the same room", async () => {
+    const a = await setup();
+    const b = await setup();
+    await expect(send(a.room, b.author)).rejects.toMatchObject({ code: "23503" });
+    const m = (await send(a.room, a.author)).rows[0];
+    await send(a.room, a.author, { reply_to: m.id });
+    await expect(send(b.room, b.author, { reply_to: m.id })).rejects.toMatchObject({
+      code: "23503",
+    });
+    await expect(send(a.room, a.author, { reply_to: "msg_nope" })).rejects.toMatchObject({
+      code: "23503",
+    });
+  });
+
+  it("refs must be a JSON array", async () => {
+    const { room, author } = await setup();
+    await send(room, author, { refs: JSON.stringify([{ kind: "task", id: "task_1" }]) });
+    await expect(
+      send(room, author, { refs: JSON.stringify({ kind: "task" }) }),
+    ).rejects.toMatchObject({
+      code: "23514",
+    });
+  });
+});
