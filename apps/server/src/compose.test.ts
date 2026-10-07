@@ -287,6 +287,21 @@ describe("composeServer", () => {
     expect(res.body).toContain("tasks_heartbeat");
   });
 
+  it("serves room.digest over HTTP: counts per type since a sequence, identical on repeat", async () => {
+    const { server } = await start();
+    const { owner, cmd } = await walkthrough(server.app);
+    const ask = async (params: Record<string, unknown>) =>
+      (await ok(await cmd(envelope("room.digest", params), owner.tokens.access_token))).response;
+    const all = await ask({});
+    expect(all.counts).toMatchObject({
+      "room.created": 1,
+      "participant.joined": 2, // the owner and the agent
+      "workspace.changeset.applied": 1,
+    });
+    expect(await ask({})).toEqual(all);
+    expect(await ask({ since: all.up_to })).toMatchObject({ event_count: 0, up_to: all.up_to });
+  });
+
   it("enforces the real policy: an observer can't apply a ChangeSet", async () => {
     const { server } = await start();
     const { owner, cmd, roomId } = await walkthrough(server.app);
