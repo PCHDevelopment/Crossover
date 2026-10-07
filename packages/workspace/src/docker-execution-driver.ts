@@ -1,10 +1,26 @@
 import { execFile } from "node:child_process";
-import { createSandboxProxyCredential } from "@crossover/security";
+import { isAbsolute } from "node:path";
+import {
+  createSandboxProxyCredential,
+  createSandboxReadToken,
+  SANDBOX_READ_TOKEN_MAX_TTL_MS,
+} from "@crossover/security";
 import type { ExecutionDriver, SandboxLimits, SandboxResources } from "./execution.js";
 
 const DEFAULT_IMAGE = "node:22-bookworm-slim";
+const DEFAULT_GIT_FETCHER_IMAGE = "crossover-git-fetcher:latest";
+const GIT_NETWORK = "crossover-git";
+const FETCH_TIMEOUT_MS = 4 * 60 * 1000;
 
-export type DockerInvoker = (args: readonly string[]) => Promise<{
+export interface DockerInvocationOptions {
+  timeoutMs?: number;
+  maxBuffer?: number;
+}
+
+export type DockerInvoker = (
+  args: readonly string[],
+  options?: DockerInvocationOptions,
+) => Promise<{
   code: number;
   stdout: string;
   stderr: string;
@@ -23,6 +39,12 @@ export interface DockerExecutionDriverOptions {
   egressProxyPort?: number;
   /** Shared HMAC secret used to mint a credential scoped to each sandbox ID. */
   egressProxySecret?: string;
+  /** Name of the server container attached to the private crossover-git network. */
+  gitInternalContainer?: string;
+  gitInternalPort?: number;
+  /** HMAC secret for five-minute, sandbox-scoped workspace fetch credentials. */
+  gitInternalTokenSecret?: string;
+  gitFetcherImage?: string;
   /** Test seam; production callers should use the Docker CLI. */
   invoke?: DockerInvoker;
 }
@@ -30,6 +52,7 @@ export interface DockerExecutionDriverOptions {
 function invokeDocker(
   binary: string,
   args: readonly string[],
+  options: DockerInvocationOptions = {},
 ): Promise<{
   code: number;
   stdout: string;
@@ -39,7 +62,11 @@ function invokeDocker(
     execFile(
       binary,
       [...args],
-      { encoding: "utf8", timeout: 20_000, maxBuffer: 1024 * 1024 },
+      {
+        encoding: "utf8",
+        timeout: options.timeoutMs ?? 20_000,
+        maxBuffer: options.maxBuffer ?? 1024 * 1024,
+      },
       (error, stdout, stderr) => {
         resolve({
           code: error ? (typeof error.code === "number" ? error.code : 1) : 0,
@@ -61,6 +88,10 @@ export class DockerExecutionDriver implements ExecutionDriver {
   private readonly egressProxyContainer: string | undefined;
   private readonly egressProxyPort: number;
   private readonly egressProxySecret: string | undefined;
+  private readonly gitInternalContainer: string | undefined;
+  private readonly gitInternalPort: number;
+  private readonly gitInternalTokenSecret: string | undefined;
+  private readonly gitFetcherImage: string;
   private readonly invoke: DockerInvoker;
 
   constructor(options: DockerExecutionDriverOptions = {}) {
@@ -101,6 +132,36 @@ export class DockerExecutionDriver implements ExecutionDriver {
       throw new Error("SANDBOX_EGRESS_PROXY_SECRET must be at least 32 bytes");
     this.egressProxySecret = options.egressProxySecret;
     this.egressProxyPort = options.egressProxyPort ?? 3128;
+    this.gitInternalContainer = options.gitInternalContainer?.trim() || undefined;
+    if (
+      this.gitInternalContainer !== undefined &&
+      !/^[a-z0-9][a-z0-9_.-]*$/.test(this.gitInternalContainer)
+    ) {
+      throw new Error("GIT_INTERNAL_CONTAINER must be a Docker container name");
+    }
+    if (
+      options.gitInternalPort !== undefined &&
+      (!Number.isSafeInteger(options.gitInternalPort) ||
+        options.gitInternalPort < 1 ||
+        options.gitInternalPort > 65_535)
+    ) {
+      throw new Error("GIT_INTERNAL_PORT must be a port from 1 to 65535");
+    }
+    this.gitInternalPort = options.gitInternalPort ?? 8081;
+    this.gitInternalTokenSecret = options.gitInternalTokenSecret;
+    if (this.gitInternalContainer && !this.gitInternalTokenSecret)
+      throw new Error("GIT_INTERNAL_TOKEN_SECRET is required with GIT_INTERNAL_CONTAINER");
+    if (!this.gitInternalContainer && this.gitInternalTokenSecret)
+      throw new Error("GIT_INTERNAL_CONTAINER is required with GIT_INTERNAL_TOKEN_SECRET");
+    if (
+      this.gitInternalTokenSecret !== undefined &&
+      Buffer.byteLength(this.gitInternalTokenSecret) < 32
+    ) {
+      throw new Error("GIT_INTERNAL_TOKEN_SECRET must be at least 32 bytes");
+    }
+    this.gitFetcherImage = options.gitFetcherImage?.trim() || DEFAULT_GIT_FETCHER_IMAGE;
+    if (/\s|\0/.test(this.gitFetcherImage))
+      throw new Error("GIT_FETCHER_IMAGE must be a nonempty Docker image reference");
     if (
       Object.entries(this.volumeOptions).some(
         ([key, value]) =>
@@ -109,7 +170,9 @@ export class DockerExecutionDriver implements ExecutionDriver {
     ) {
       throw new Error("SANDBOX_VOLUME_OPTS must contain nonempty Docker option keys and values");
     }
-    this.invoke = options.invoke ?? ((args) => invokeDocker(this.dockerBinary, args));
+    this.invoke =
+      options.invoke ??
+      ((args, invokeOptions) => invokeDocker(this.dockerBinary, args, invokeOptions));
   }
 
   async create(input: {
@@ -146,6 +209,100 @@ export class DockerExecutionDriver implements ExecutionDriver {
       );
     } catch (error) {
       if (!(await this.inspectContainer(input.resources.container_ref))?.running) throw error;
+    }
+  }
+
+  /** Fetch one scoped shallow checkout through a short-lived, isolated Git fetcher. */
+  async materialize(input: {
+    sandbox_id: string;
+    room_id: string;
+    participant_id: string;
+    resources: SandboxResources;
+    workspace: { repo_path: string; revision: number };
+  }): Promise<void> {
+    if (!this.gitInternalContainer || !this.gitInternalTokenSecret)
+      throw new Error("Internal Git fetch is not configured");
+    this.assertResources(input.sandbox_id, input.resources);
+    if (!isAbsolute(input.workspace.repo_path) || input.workspace.repo_path.includes("\0"))
+      throw new Error("Workspace reference repository path must be absolute");
+    if (!Number.isSafeInteger(input.workspace.revision) || input.workspace.revision < 0)
+      throw new Error("Workspace revision must be a nonnegative safe integer");
+
+    await this.ensureGitNetwork();
+    const now = Date.now();
+    const token = createSandboxReadToken(
+      {
+        room_id: input.room_id,
+        participant_id: input.participant_id,
+        sandbox_id: input.sandbox_id,
+        expires_at: now + SANDBOX_READ_TOKEN_MAX_TTL_MS,
+      },
+      this.gitInternalTokenSecret,
+      now,
+    );
+    const containerName = gitFetcherName(input.sandbox_id);
+    const remote = `http://${this.gitInternalContainer}:${this.gitInternalPort}/git/${encodeURIComponent(input.room_id)}/${encodeURIComponent(input.sandbox_id)}/${input.workspace.revision}`;
+    const args = [
+      "run",
+      "--rm",
+      "--init",
+      "--name",
+      containerName,
+      "--label",
+      "crossover.git.fetch=true",
+      "--label",
+      `crossover.room=${input.room_id}`,
+      "--label",
+      `crossover.sandbox=${input.sandbox_id}`,
+      `--network=${GIT_NETWORK}`,
+      "--read-only",
+      "--user=1000:1000",
+      "--cap-drop=ALL",
+      "--security-opt=no-new-privileges",
+      "--memory=1g",
+      "--cpus=1",
+      "--pids-limit=64",
+      "--tmpfs",
+      "/tmp:rw,nosuid,size=512m",
+      "--env",
+      "HOME=/tmp",
+      "--env",
+      `GIT_REMOTE_URL=${remote}`,
+      "--env",
+      "GIT_TERMINAL_PROMPT=0",
+      "--env",
+      "GIT_CONFIG_NOSYSTEM=1",
+      "--env",
+      "GIT_CONFIG_GLOBAL=/dev/null",
+      "--env",
+      "GIT_CONFIG_COUNT=1",
+      "--env",
+      "GIT_CONFIG_KEY_0=http.extraHeader",
+      "--env",
+      `GIT_CONFIG_VALUE_0=Authorization: Bearer ${token}`,
+      "--mount",
+      `type=volume,source=${input.resources.volume_ref},target=/workspace,volume-nocopy`,
+      "--mount",
+      `type=bind,source=${input.workspace.repo_path},target=/reference.git,readonly`,
+    ];
+    if (this.runtime) args.push("--runtime", this.runtime);
+    args.push(this.gitFetcherImage);
+
+    await this.removeFetcher(containerName);
+    try {
+      const result = await this.invoke(args, {
+        timeoutMs: FETCH_TIMEOUT_MS,
+        maxBuffer: 1024 * 1024,
+      });
+      if (result.code !== 0) {
+        throw new Error(
+          `ERROR: workspace fetch failed: ${result.stderr.replaceAll(token, "[REDACTED]").trim()}`,
+        );
+      }
+    } finally {
+      await this.removeFetcher(containerName).catch((error: unknown) =>
+        console.error("[execution] failed to remove Git fetcher container", error),
+      );
     }
   }
 
@@ -382,6 +539,74 @@ export class DockerExecutionDriver implements ExecutionDriver {
     }
   }
 
+  /** Attach only the trusted Git server and one-shot fetchers to the private network. */
+  private async ensureGitNetwork(): Promise<void> {
+    let inspected = await this.inspectGitNetwork();
+    if (!inspected) {
+      try {
+        await this.mustSucceed(
+          ["network", "create", "--internal", "--label", "crossover.git=true", GIT_NETWORK],
+          "ERROR: internal Git network creation failed",
+        );
+      } catch (error) {
+        if (!(await this.inspectGitNetwork())) throw error;
+      }
+      inspected = await this.inspectGitNetwork();
+    }
+    if (!inspected?.internal)
+      throw new Error(`ERROR: Docker network ${GIT_NETWORK} is not internal`);
+    if (inspected.serverConnected) return;
+    try {
+      await this.mustSucceed(
+        ["network", "connect", GIT_NETWORK, this.gitInternalContainer!],
+        "ERROR: internal Git server network connection failed",
+      );
+    } catch (error) {
+      if (!(await this.inspectGitNetwork())?.serverConnected) throw error;
+    }
+  }
+
+  private async inspectGitNetwork(): Promise<{
+    internal: boolean;
+    serverConnected: boolean;
+  } | null> {
+    const inspected = await this.invoke([
+      "network",
+      "inspect",
+      "--format",
+      "{{.Internal}}|{{json .Containers}}",
+      GIT_NETWORK,
+    ]);
+    if (inspected.code !== 0) {
+      const message = inspected.stderr.toLowerCase();
+      if (message.includes("no such network") || message.includes("not found")) return null;
+      throw new Error(`ERROR: internal Git network inspect failed: ${inspected.stderr.trim()}`);
+    }
+    const separator = inspected.stdout.indexOf("|");
+    if (separator < 0) throw new Error("ERROR: Docker returned invalid Git network data");
+    let containers: unknown;
+    try {
+      containers = JSON.parse(inspected.stdout.slice(separator + 1).trim()) as unknown;
+    } catch {
+      throw new Error("ERROR: Docker returned invalid Git network data");
+    }
+    if (containers === null) containers = {};
+    if (!containers || typeof containers !== "object" || Array.isArray(containers))
+      throw new Error("ERROR: Docker returned invalid Git network data");
+    const serverConnected = Object.values(containers as Record<string, { Name?: unknown }>).some(
+      (container) => container?.Name === this.gitInternalContainer,
+    );
+    return { internal: inspected.stdout.slice(0, separator).trim() === "true", serverConnected };
+  }
+
+  private async removeFetcher(name: string): Promise<void> {
+    const removed = await this.invoke(["container", "rm", "--force", name]);
+    if (removed.code === 0) return;
+    const message = removed.stderr.toLowerCase();
+    if (message.includes("no such container") || message.includes("no such object")) return;
+    throw new Error(`ERROR: Git fetcher cleanup failed: ${removed.stderr.trim()}`);
+  }
+
   private async inspectProxyNetwork(
     name: string,
   ): Promise<{ internal: boolean; proxyConnected: boolean } | null> {
@@ -521,6 +746,10 @@ function sandboxResources(sandboxId: string): SandboxResources {
 
 function sandboxNetworkName(sandboxId: string): string {
   return `crossover-net-${safeSandboxId(sandboxId)}`;
+}
+
+function gitFetcherName(sandboxId: string): string {
+  return `crossover-git-fetch-${safeSandboxId(sandboxId)}`;
 }
 
 function safeSandboxId(sandboxId: string): string {

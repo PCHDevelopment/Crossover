@@ -162,6 +162,14 @@ export async function composeServer(
         ...(config.sandboxEgressProxySecret
           ? { egressProxySecret: config.sandboxEgressProxySecret }
           : {}),
+        ...(config.gitInternalContainer
+          ? { gitInternalContainer: config.gitInternalContainer }
+          : {}),
+        gitInternalPort: config.gitInternalPort ?? 8081,
+        ...(config.gitInternalTokenSecret
+          ? { gitInternalTokenSecret: config.gitInternalTokenSecret }
+          : {}),
+        gitFetcherImage: config.gitFetcherImage ?? "crossover-git-fetcher:latest",
       });
     executionService = new ExecutionService(pool, executionDriver, {
       diskEnforcement: config.sandboxDiskEnforcement ?? "soft",
