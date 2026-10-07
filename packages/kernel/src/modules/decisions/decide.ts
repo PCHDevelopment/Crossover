@@ -9,6 +9,7 @@ import {
   loadPositions,
   type DecisionRow,
 } from "./decisions.js";
+import { mirrorDecision } from "./mirror.js";
 
 export const DEFAULT_DECISION_PAGE = 50;
 export const MAX_DECISION_PAGE = 100;
@@ -112,6 +113,8 @@ export function registerDecisionDecideCommands(dispatcher: Dispatcher): void {
       const updated = rows[0];
       if (!updated) throw await decisionConflict(ctx.client, ctx.room_id, row.id);
       const decision = decisionView(updated, await loadPositions(ctx.client, ctx.room_id, row.id));
+      // An accepted decision is mirrored into memory in this same transaction (§7.4, T407).
+      const mirrored = await mirrorDecision(ctx.client, ctx.room_id, updated);
       return {
         response: decision,
         events: [
@@ -127,6 +130,7 @@ export function registerDecisionDecideCommands(dispatcher: Dispatcher): void {
               version: updated.version,
             },
           },
+          ...(mirrored ? [mirrored] : []),
         ],
       };
     },
