@@ -103,13 +103,12 @@ function fakeInstallDocker(
   installOutput?: string | ((args: readonly string[]) => string),
 ) {
   const volumes = new Map<string, { room: string; key: string; install: string }>();
+  const unlabeledVolumes = new Set<string>();
   let installs = 0;
   let healthRuns = 0;
   let failVolumeList = false;
   let failContainerList = false;
   const failVolumeRemovals = new Set<string>();
-  const volumeInspectCounts = new Map<string, number>();
-  const dropVolumeOnInspect = new Map<string, number>();
   const calls: string[][] = [];
   const invoke = vi.fn(async (_binary: string, args: readonly string[]) => {
     calls.push([...args]);
@@ -125,18 +124,8 @@ function fakeInstallDocker(
       const name = args.at(-1)!;
       const labels = volumes.get(name);
       if (args.includes("--format")) {
-        const inspected = (volumeInspectCounts.get(name) ?? 0) + 1;
-        volumeInspectCounts.set(name, inspected);
-        if (dropVolumeOnInspect.get(name) === inspected) {
-          volumes.delete(name);
-          return {
-            code: 1,
-            timedOut: false,
-            output: `Error response from daemon: get ${name}: no such volume`,
-          };
-        }
         return {
-          code: labels ? 0 : 1,
+          code: labels || unlabeledVolumes.has(name) ? 0 : 1,
           timedOut: false,
           output: labels
             ? JSON.stringify({
@@ -145,10 +134,12 @@ function fakeInstallDocker(
                 "crossover.health.cache_key": labels.key,
                 "crossover.health.cache_install": labels.install,
               })
-            : `Error response from daemon: get ${name}: no such volume`,
+            : unlabeledVolumes.has(name)
+              ? "{}"
+              : `Error response from daemon: get ${name}: no such volume`,
         };
       }
-      const exists = volumes.has(name);
+      const exists = volumes.has(name) || unlabeledVolumes.has(name);
       return {
         code: exists ? 0 : 1,
         timedOut: false,
@@ -164,6 +155,7 @@ function fakeInstallDocker(
       const install = args
         .find((arg) => arg.startsWith("crossover.health.cache_install="))
         ?.split("=")[1];
+      unlabeledVolumes.delete(name);
       volumes.set(name, { room: room!, key: key!, install: install! });
       return { code: 0, timedOut: false, output: name };
     }
@@ -171,7 +163,7 @@ function fakeInstallDocker(
       const name = args[2]!;
       if (failVolumeRemovals.has(name))
         return { code: 1, timedOut: false, output: "volume is in use" };
-      const removed = volumes.delete(name);
+      const removed = volumes.delete(name) || unlabeledVolumes.delete(name);
       return {
         code: removed ? 0 : 1,
         timedOut: false,
@@ -223,8 +215,9 @@ function fakeInstallDocker(
     failVolumeRemoval: (name: string) => {
       failVolumeRemovals.add(name);
     },
-    dropVolumeOnLabeledInspect: (name: string, inspectNumber: number) => {
-      dropVolumeOnInspect.set(name, inspectNumber);
+    makeVolumeUnlabeled: (name: string) => {
+      volumes.delete(name);
+      unlabeledVolumes.add(name);
     },
     failNextContainerList: () => {
       failContainerList = true;
@@ -503,7 +496,7 @@ describe("DockerHealthRunner", () => {
     expect(rows.map((row) => row.status)).toEqual(["SUCCEEDED", "SUCCEEDED", "SUCCEEDED"]);
   });
 
-  it("reinstalls when the selected cache volume disappears before the health run", async () => {
+  it("reinstalls when the selected cache volume exists without labels", async () => {
     await db.pool.query("DELETE FROM health_install_runs WHERE room_id = $1", ["room_health"]);
     const { repository } = await makeRepo();
     await writeFile(join(repository, "package-lock.json"), '{"lock":1}\n');
@@ -513,8 +506,8 @@ describe("DockerHealthRunner", () => {
 
     expect((await run(repository, revision)).status).toBe("GREEN");
     const priorVolume = docker.cacheVolumes()[0]!;
-    // The cache-hit validation succeeds, then the volume disappears before docker run.
-    docker.dropVolumeOnLabeledInspect(priorVolume, 3);
+    // Docker can recreate a missing named volume without its original cache labels.
+    docker.makeVolumeUnlabeled(priorVolume);
     expect((await run(repository, revision)).status).toBe("GREEN");
 
     expect(docker.installCount()).toBe(2);
@@ -523,6 +516,7 @@ describe("DockerHealthRunner", () => {
       args.includes("crossover.health.runner=true"),
     );
     expect(healthCalls.at(-1)?.some((arg) => arg.includes(`source=${priorVolume},`))).toBe(false);
+    expect(docker.cacheVolumes()).not.toContain(priorVolume);
     expect(docker.cacheVolumes()).toHaveLength(1);
   });
 
@@ -917,12 +911,12 @@ describe("DockerHealthRunner", () => {
     expect(docker.healthCount()).toBe(1);
   });
 
-  it("removes an expired install container before its network", async () => {
+  it("expires a run from another node and removes its container before its network", async () => {
     await db.pool.query("DELETE FROM health_install_runs WHERE room_id = $1", ["room_health"]);
     const installId = newId("hinstall");
     await db.pool.query(
       `INSERT INTO health_install_runs (id, room_id, node_id, cache_key, status, started_at, expires_at)
-       VALUES ($1, 'room_health', 'node-a', $2, 'RUNNING', clock_timestamp() - interval '3 minutes',
+       VALUES ($1, 'room_health', 'node-old', $2, 'RUNNING', clock_timestamp() - interval '3 minutes',
                clock_timestamp() - interval '1 second')`,
       [installId, "d".repeat(64)],
     );
@@ -946,7 +940,7 @@ describe("DockerHealthRunner", () => {
     });
     const runner = new DockerHealthRunner(
       {
-        nodeId: "node-a",
+        nodeId: "node-new",
         egressProxyContainer: "egress-proxy",
         egressProxySecret: "0123456789abcdef0123456789abcdef",
       },
@@ -954,6 +948,10 @@ describe("DockerHealthRunner", () => {
     );
 
     await runner.sweepExpiredInstallRuns(db.pool);
+    expect(
+      (await db.pool.query("SELECT status FROM health_install_runs WHERE id = $1", [installId]))
+        .rows,
+    ).toEqual([{ status: "FAILED" }]);
 
     const containerRemoval = calls.findIndex(
       (args) => args[0] === "container" && args[1] === "rm" && args[2] === "--force",

@@ -528,9 +528,7 @@ export class DockerHealthRunner implements HealthRunner {
     await pool.query(
       `UPDATE health_install_runs
        SET status = 'FAILED', finished_at = clock_timestamp()
-       WHERE status = 'RUNNING' AND expires_at <= clock_timestamp()
-         AND (node_id = $1 OR node_id = 'legacy')`,
-      [this.nodeId],
+       WHERE status = 'RUNNING' AND expires_at <= clock_timestamp()`,
     );
     const active = await pool.query<{ id: string }>(
       `SELECT id FROM health_install_runs
@@ -603,6 +601,8 @@ export class DockerHealthRunner implements HealthRunner {
         );
         return cached;
       }
+      if (await this.dependencyVolumeExists(successfulVolume))
+        await this.removeDependencyVolumeForGc(successfulVolume);
     }
     const running = await install.pool.query<{ id: string }>(
       `SELECT id FROM health_install_runs WHERE room_id = $1 AND status = 'RUNNING' LIMIT 1`,
