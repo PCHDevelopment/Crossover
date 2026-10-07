@@ -31,14 +31,21 @@ function chromiumPath(): string | undefined {
   const candidates = [
     process.env["CHROMIUM_PATH"],
     chromium.executablePath(),
-    "/opt/pw-browsers/chromium",
+    process.env["PLAYWRIGHT_BROWSERS_PATH"] &&
+      `${process.env["PLAYWRIGHT_BROWSERS_PATH"]}/chromium`,
   ];
   return candidates.find((p): p is string => !!p && existsSync(p));
 }
 const executablePath = chromiumPath();
+/** In CI the browser test is the acceptance test: a missing browser fails it instead of skipping it. */
+const inCi = Boolean(process.env["CI"]);
 
 beforeAll(async () => {
-  if (!executablePath) return;
+  if (!executablePath) {
+    if (inCi)
+      throw new Error("No Chromium found in CI (install it: playwright-core install chromium)");
+    return;
+  }
   db = await createTestDatabase();
   dir = await mkdtemp(join(tmpdir(), "crossover-web-e2e-"));
   const webRoot = join(dir, "web");
@@ -83,7 +90,7 @@ const manifest = (name: string) => ({
   description: `${name} works here`,
 });
 
-describe.skipIf(!executablePath)("web app in a browser", () => {
+describe.skipIf(!executablePath && !inCi)("web app in a browser", () => {
   it("login, create a room, agents join and a lead is appointed, tasks appear on the board, a denial shows in Activity, pause and resume work", async () => {
     const page: Page = await browser!.newPage();
     const problems: string[] = [];
@@ -152,7 +159,6 @@ describe.skipIf(!executablePath)("web app in a browser", () => {
       .toContain("lead");
 
     // 6. The lead creates tasks and assigns them; two agents claim theirs. The board follows.
-    await architect.room.api.room.accept_lead({}).catch(() => undefined);
     const created: { id: string; version: number }[] = [];
     for (const title of ["Session tokens", "API routes", "Docs", "Rate limits"]) {
       const res = await architect.room.api.tasks.create<{ id: string; version: number }>({
@@ -178,7 +184,9 @@ describe.skipIf(!executablePath)("web app in a browser", () => {
     expect(await page.getByTestId("board").textContent()).toContain("Session tokens");
 
     // 14. AgentB tries something it may not do; Peter sees the denial, live.
-    await agentB.room.api.events.redact({ sequence: 1, reason: "tidy" }).catch(() => undefined);
+    await expect(
+      agentB.room.api.events.redact({ sequence: 1, reason: "tidy" }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
     await page.getByTestId("tab-activity").click();
     await expect
       .poll(async () => page.locator('[data-type="capability.denied"]').count())

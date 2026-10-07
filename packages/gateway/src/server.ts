@@ -120,7 +120,7 @@ export function buildGateway(options: GatewayOptions): FastifyInstance {
         .header("Referrer-Policy", "no-referrer")
         .header(
           "Content-Security-Policy",
-          "default-src 'self'; connect-src 'self' ws: wss:; img-src 'self' data:; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'",
+          "default-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'",
         )
         .send(file.body);
     }
