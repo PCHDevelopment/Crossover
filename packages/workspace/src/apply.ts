@@ -14,6 +14,7 @@ import { registerWorkspaceBlame } from "./blame.js";
 import { registerWorkspaceSearch } from "./search.js";
 import { refreshSearchTree } from "./search-tree.js";
 import { registerWorkspaceConflictReads } from "./conflict-reads.js";
+import { registerWorkspaceConflictActions } from "./conflict-actions.js";
 
 export interface WorkspaceCommandDeps {
   /** Failure is reported after commit; startup reconcileRef restores the DB-authoritative head. */
@@ -56,6 +57,7 @@ export function registerWorkspaceCommands(
   registerWorkspaceBlame(dispatcher);
   registerWorkspaceSearch(dispatcher);
   registerWorkspaceConflictReads(dispatcher);
+  registerWorkspaceConflictActions(dispatcher);
 }
 
 async function apply(

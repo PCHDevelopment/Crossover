@@ -19,6 +19,7 @@ export {
   conflictsListParamsSchema,
   registerWorkspaceConflictReads,
 } from "./conflict-reads.js";
+export { registerWorkspaceConflictActions } from "./conflict-actions.js";
 export { workspaceReadParamsSchema, workspaceListParamsSchema } from "./reads.js";
 export { workspaceSearchParamsSchema } from "./search.js";
 export { workspaceDiffParamsSchema } from "./history.js";

@@ -52,7 +52,7 @@ async function fixture(authorize: Authorizer = allowAll, deps: WorkspaceCommandD
     idempotency_key: key,
     params: { source: "API", message: "Edit", base_workspace_revision: base, operations },
   });
-  const dispatch = (input: ReturnType<typeof request>) =>
+  const dispatch = (input: Parameters<Dispatcher["dispatch"]>[1]) =>
     dispatcher.dispatch(
       {
         room_id: room,
@@ -65,7 +65,7 @@ async function fixture(authorize: Authorizer = allowAll, deps: WorkspaceCommandD
     );
   const dispatchAs =
     (participantId: string, role: "DEVELOPER" | "LEAD" = "DEVELOPER") =>
-    (input: ReturnType<typeof request>) =>
+    (input: Parameters<Dispatcher["dispatch"]>[1]) =>
       dispatcher.dispatch(
         {
           room_id: room,
@@ -241,6 +241,116 @@ describe("workspace.apply_changeset", () => {
     });
     expect(await f.rowsFor("changesets")).toHaveLength(3);
     expect(await f.rowsFor("conflicts")).toMatchObject([{ id: conflictId, attempts: 0 }]);
+  });
+
+  it("lets the submitter, lead, or owner abandon and rejects the original ChangeSet", async () => {
+    for (const resolver of ["submitter", "lead", "owner"] as const) {
+      const f = await fixture();
+      const submitter = newId("part");
+      await f.addParticipant(submitter);
+      const lead = newId("part");
+      if (resolver === "lead") {
+        await f.addParticipant(lead);
+        await db.pool.query("UPDATE rooms SET lead_participant_id = $2 WHERE id = $1", [
+          f.room,
+          lead,
+        ]);
+      }
+      await f.apply([{ type: "create", path: "file", content: "base\n" }]);
+      await f.apply([{ type: "modify", path: "file", content: "head\n" }], 1);
+      const submitted = f.request([{ type: "modify", path: "file", content: "candidate\n" }], 1);
+      const conflictResult = await f.dispatchAs(submitter)(submitted);
+      const conflictId = (conflictResult.response as { conflict_id: string }).conflict_id;
+      const originalId = (conflictResult.response as { changeset_id: string }).changeset_id;
+      if (resolver === "lead")
+        await db.pool.query("UPDATE conflicts SET status = 'ESCALATED' WHERE id = $1", [
+          conflictId,
+        ]);
+      const who = resolver === "submitter" ? submitter : resolver === "lead" ? lead : f.actor;
+      const role = resolver === "lead" ? "LEAD" : "DEVELOPER";
+      const abandonRequest = {
+        id: newId("cmd"),
+        idempotency_key: newId("cmd"),
+        method: "conflicts.abandon",
+        params: { conflict_id: conflictId },
+      };
+      const abandon = await f.dispatchAs(who, role)(abandonRequest);
+      expect(abandon.response).toEqual({
+        conflict_id: conflictId,
+        changeset_id: originalId,
+        status: "ABANDONED",
+      });
+      expect(abandon.events).toMatchObject([
+        {
+          type: "workspace.conflict.abandoned",
+          payload: {
+            conflict_id: conflictId,
+            changeset_id: originalId,
+            submitter_id: submitter,
+            abandoned_by: who,
+          },
+        },
+      ]);
+      expect((await f.rowsFor("conflicts"))[0]).toMatchObject({
+        id: conflictId,
+        status: "ABANDONED",
+      });
+      expect((await f.rowsFor("changesets")).find((row) => row.id === originalId)).toMatchObject({
+        status: "REJECTED",
+        rejection_reason: "ABANDONED",
+      });
+      const eventCount = (await f.rowsFor("events")).length;
+      expect(await f.dispatchAs(who, role)({ ...abandonRequest, id: newId("cmd") })).toEqual({
+        ...abandon,
+        replayed: true,
+      });
+      expect((await f.rowsFor("events")).length).toBe(eventCount);
+    }
+  });
+
+  it("rejects abandoning missing, foreign-room, and terminal conflicts", async () => {
+    const f = await fixture();
+    const other = await fixture();
+    const outsider = newId("part");
+    await f.addParticipant(outsider);
+    const abandon = (
+      who: ReturnType<typeof f.dispatchAs>,
+      conflictId: string,
+      key = newId("cmd"),
+    ) =>
+      who({
+        id: newId("cmd"),
+        idempotency_key: key,
+        method: "conflicts.abandon",
+        params: { conflict_id: conflictId },
+      });
+    await expect(abandon(f.dispatch, "conf_missing")).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await f.apply([{ type: "create", path: "file", content: "base\n" }]);
+    await f.apply([{ type: "modify", path: "file", content: "head\n" }], 1);
+    const conflictResult = await f.apply(
+      [{ type: "modify", path: "file", content: "candidate\n" }],
+      1,
+    );
+    const conflictId = (conflictResult.response as { conflict_id: string }).conflict_id;
+    await expect(abandon(other.dispatch, conflictId)).rejects.toMatchObject({ code: "NOT_FOUND" });
+    const eventsBefore = await f.rowsFor("events");
+    await expect(abandon(f.dispatchAs(outsider), conflictId)).rejects.toMatchObject({
+      code: "FORBIDDEN",
+    });
+    expect((await f.rowsFor("conflicts"))[0]).toMatchObject({
+      id: conflictId,
+      status: "OPEN",
+    });
+    expect(await f.rowsFor("events")).toEqual(eventsBefore);
+    await db.pool.query("UPDATE conflicts SET status = 'RESOLVED' WHERE id = $1", [conflictId]);
+    const changesetsBefore = await other.rowsFor("changesets");
+    await expect(abandon(f.dispatch, conflictId)).rejects.toMatchObject({
+      code: "CONFLICT_VERSION",
+      details: { status: "RESOLVED" },
+    });
+    expect(await f.rowsFor("changesets")).toHaveLength(3);
+    expect(await f.rowsFor("events")).toEqual(eventsBefore);
+    expect(await other.rowsFor("changesets")).toEqual(changesetsBefore);
   });
 
   it("allows the original submitter and room owner to resolve", async () => {
