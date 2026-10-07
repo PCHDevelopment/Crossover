@@ -1649,7 +1649,7 @@ The MVP uses Git internally as a storage engine and externally as a compatibilit
 
 # 34. Lessons from Building Crossover with Agents
 
-Crossover itself is being built by a team shaped like the one it serves: a human owner (Peter), an agent lead (O1) and two agent engineers (S1, S2). They coordinate through a chat room, GitHub PRs and CI. Each kind of friction this team hit is a gap Crossover should close for its users. Each subsection says what happened, why it generalizes, and the design response, which either confirms a decision already in this document or proposes an extension. Extensions marked **(proposed)** become backlog tasks at the next lead review once the owner agrees.
+Crossover itself is being built by a team shaped like the one it serves: a human owner (Peter), an agent lead (O1) and two agent engineers (S1, S2). They coordinate through a chat room, GitHub PRs and CI. Each kind of friction this team hit is a gap Crossover should close for its users. Each subsection says what happened, why it generalizes, and the design response, which either confirms a decision already in this document or proposes an extension. Extensions marked **(proposed)** become backlog tasks at the next lead review once the owner agrees; **(adopted, Txxxx)** marks the ones that already have.
 
 ## 34.1 Silent agents: liveness is invisible
 
@@ -1683,7 +1683,7 @@ Crossover itself is being built by a team shaped like the one it serves: a human
 
 **Design response.**
 - **Confirmed: canonical health on the merged result (§12, T607–T610).** Health runs on the platform's merge of the change into head, in one configured image. That gives reviewers a single trustworthy signal and removes "works on my machine". `tasks.review` is gated on it (T309, T610).
-- **(proposed) Evidence on submit.** `tasks.submit` accepts `evidence`: for each task requirement (§8.1), the test or check that proves it, plus optional mutation checks ("removed X → test Y failed"). A requirement with no evidence is flagged in the reviewer's view. This makes the acceptance map, which the team found to be the strongest predictor of a clean review, a protocol field instead of a PR-body convention.
+- **(adopted, T1302) Evidence on submit.** `tasks.submit` accepts `evidence`: for each task requirement (§8.1), the test or check that proves it, plus optional mutation checks ("removed X → test Y failed"). A requirement with no evidence is flagged in the reviewer's view. This makes the acceptance map, which the team found to be the strongest predictor of a clean review, a protocol field instead of a PR-body convention.
 - **(proposed) Room review checklists.** The lead can attach standing checklist items to task kinds, such as "every new read command: cross-room isolation test" or "every new list: invalid-cursor and last-page tests". They're shown to the agent at claim time and to the reviewer at review time. Standards are stated once instead of in every review.
 
 ## 34.4 Contracts decided in chat
@@ -1703,7 +1703,7 @@ Crossover itself is being built by a team shaped like the one it serves: a human
 
 **Why it generalizes.** Every new way of reading room data is a new chance to forget a visibility rule. Agents add surfaces quickly.
 
-**Design response (proposed, architectural rule).** **Visibility is decided in one layer, applied at egress.** Every path that sends stored data to a participant runs it through the participant-view functions in the kernel, starting with `redactEventFor` (T702). That covers REST reads, WebSocket streams, digests (§17.3), MCP tools (§15), webhooks (§17.4) and exports (§24). Command modules return the full record; gateways apply the view. A conformance test enumerates every registered read and stream surface and fails if one bypasses the view. Owner redaction tombstones (§19.6) are applied through the same layer.
+**Design response (adopted, architectural rule; enforced by T1301).** **Visibility is decided in one layer, applied at egress.** Every path that sends stored data to a participant runs it through the participant-view functions in the kernel, starting with `redactEventFor` (T702). That covers REST reads, WebSocket streams, digests (§17.3), MCP tools (§15), webhooks (§17.4) and exports (§24). Command modules return the full record; gateways apply the view. A conformance test enumerates every registered read and stream surface and fails if one bypasses the view. Owner redaction tombstones (§19.6) are applied through the same layer.
 
 ## 34.6 Agent identity and quality drift
 
@@ -1713,7 +1713,7 @@ Crossover itself is being built by a team shaped like the one it serves: a human
 
 **Design response.**
 - **Confirmed: manifests (§15.2).** Agents declare vendor, model and client version.
-- **(proposed) Manifest changes are events.** A changed manifest on reconnect (model, version, client) emits `participant.manifest_changed` and an inbox item to the lead and owner. Agents can't change their model without the room knowing.
+- **(adopted, T1303) Manifest changes are events.** A changed manifest on reconnect (model, version, client) emits `participant.manifest_changed` and an inbox item to the lead and owner. Agents can't change their model without the room knowing.
 - **(proposed) Per-agent quality signals.** The platform already records the raw data: review verdicts (`task_reviews`), rejected and conflicted ChangeSets, health runs that turned RED on an agent's revision, and requests for changes. `room.get_state` shows the lead a per-agent summary over a rolling window, split by manifest version, so a drop after a change is visible without a manual log.
 - **(proposed) Autonomy follows quality.** Circuit-breaker thresholds (§22.4) and approval gates (§22.2) can be tightened per agent automatically after a manifest change, until N reviews pass cleanly. This extends §22's "pull back autonomy" from manual to signal-driven.
 
@@ -1752,10 +1752,10 @@ Crossover itself is being built by a team shaped like the one it serves: a human
 |---|---|---|
 | Silent agent blocks others | Liveness for all held work, blocking graph, lead takeover | Proposed (extends §8.4) |
 | Stacked PR churn, trivial conflicts | Server-side merge; dependent ChangeSets; additive auto-resolution | §10 confirmed; rest proposed |
-| Review cost, environment drift | Canonical health on the merged result; evidence on submit; review checklists | §12 confirmed; rest proposed |
+| Review cost, environment drift | Canonical health on the merged result; evidence on submit; review checklists | §12 confirmed; evidence adopted (T1302); checklists proposed |
 | Contracts lost in chat | Decisions linked to work, corrections delivered; protected spec paths | §7 confirmed; rest proposed |
-| Per-surface visibility leaks | One visibility layer at every egress, with a conformance test | Proposed rule (T702 started it) |
-| Model change, quality drift | `manifest_changed`; per-agent quality signals; autonomy follows quality | Proposed (extends §15.2, §22) |
+| Per-surface visibility leaks | One visibility layer at every egress, with a conformance test | Adopted rule (T702 started it; T1301 enforces it) |
+| Model change, quality drift | `manifest_changed`; per-agent quality signals; autonomy follows quality | `manifest_changed` adopted (T1303); rest proposed (extends §15.2, §22) |
 | Human approval bottleneck | Approval queue ordered by blast radius; delegated approval classes | Proposed (extends §22.2) |
 | Lost state on restart | Cursors, inbox, wake webhooks; server-side reminders | §17 confirmed; reminders proposed |
 | Status noise | Events over messages; digests; message intents | §17 confirmed; intents proposed |
