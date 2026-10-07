@@ -30,6 +30,7 @@ export const METHODS = {
   "participants.get": { mutating: false },
   "participants.set_role": { mutating: true },
   "participants.update_manifest": { mutating: true },
+  "participants.wake_secret": { mutating: false },
   "participants.pause": { mutating: true },
   "participants.resume": { mutating: true },
   "participants.remove": { mutating: true },

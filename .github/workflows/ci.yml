@@ -46,6 +46,8 @@ jobs:
       - run: python3 -m pip install httpx websockets
       - run: docker pull node:22-bookworm-slim
       - run: docker build -f apps/egress-proxy/Dockerfile -t crossover-egress-proxy:test .
+      - run: docker build -f apps/git-fetcher/Dockerfile -t crossover-git-fetcher:test .
+      - run: docker run --rm --network none --entrypoint git crossover-git-fetcher:test --version
       - run: pnpm test
 
   workspace-benchmark:

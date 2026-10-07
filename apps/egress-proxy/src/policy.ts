@@ -2,6 +2,7 @@ import { isIP } from "node:net";
 import type { Pool } from "@crossover/db";
 import {
   resolvePublicAddresses,
+  verifyHealthInstallProxyCredential,
   verifySandboxProxyCredential,
   type HostResolver,
 } from "@crossover/security";
@@ -22,6 +23,16 @@ const ACTIVE_SANDBOX_SQL = `
     AND p.status = 'ACTIVE'
 `;
 
+const ACTIVE_HEALTH_INSTALL_SQL = `
+  SELECT run.room_id, room.settings
+  FROM health_install_runs run
+  JOIN rooms room ON room.id = run.room_id
+  WHERE run.id = $1
+    AND run.status = 'RUNNING'
+    AND run.expires_at > clock_timestamp()
+    AND room.status = 'ACTIVE'
+`;
+
 export interface EgressPolicyOptions {
   pool: Pool;
   secret: string;
@@ -31,7 +42,10 @@ export interface EgressPolicyOptions {
 export type ConnectPolicy =
   | {
       allowed: true;
-      sandboxId: string;
+      identityId: string;
+      identityType: "sandbox" | "health_install";
+      sandboxId?: string;
+      healthInstallId?: string;
       roomId: string;
       host: string;
       addresses: string[];
@@ -40,7 +54,10 @@ export type ConnectPolicy =
   | {
       allowed: false;
       status: number;
+      identityId?: string;
+      identityType?: "sandbox" | "health_install";
       sandboxId?: string;
+      healthInstallId?: string;
       roomId?: string;
       host: string;
       reason: string;
@@ -57,7 +74,8 @@ interface ConnectTarget {
 }
 
 interface ProxyIdentity {
-  sandboxId: string;
+  id: string;
+  type: "sandbox" | "health_install";
   credential: string;
 }
 
@@ -82,7 +100,9 @@ export async function authorizeConnect(
   const identity = parseProxyIdentity(authorization);
   if (
     !identity ||
-    !verifySandboxProxyCredential(identity.sandboxId, identity.credential, options.secret)
+    !(identity.type === "sandbox"
+      ? verifySandboxProxyCredential(identity.id, identity.credential, options.secret)
+      : verifyHealthInstallProxyCredential(identity.id, identity.credential, options.secret))
   ) {
     return {
       allowed: false,
@@ -92,34 +112,35 @@ export async function authorizeConnect(
     };
   }
 
-  let sandbox: ActiveSandbox | undefined;
+  let active: ActiveSandbox | undefined;
   try {
-    const { rows } = await options.pool.query<ActiveSandbox>(ACTIVE_SANDBOX_SQL, [
-      identity.sandboxId,
-    ]);
-    sandbox = rows[0];
+    const { rows } = await options.pool.query<ActiveSandbox>(
+      identity.type === "sandbox" ? ACTIVE_SANDBOX_SQL : ACTIVE_HEALTH_INSTALL_SQL,
+      [identity.id],
+    );
+    active = rows[0];
   } catch {
     return {
       allowed: false,
       status: 503,
-      sandboxId: identity.sandboxId,
+      ...identityFields(identity),
       host: target.host,
       reason: "policy_unavailable",
     };
   }
-  if (!sandbox) {
+  if (!active) {
     return {
       allowed: false,
       status: 403,
-      sandboxId: identity.sandboxId,
+      ...identityFields(identity),
       host: target.host,
-      reason: "sandbox_inactive",
+      reason: identity.type === "sandbox" ? "sandbox_inactive" : "health_install_inactive",
     };
   }
 
   let roomAllowlist: string[];
   try {
-    const settings = sandbox.settings;
+    const settings = active.settings;
     const roomSettings =
       settings && typeof settings === "object" && !Array.isArray(settings)
         ? (settings as Record<string, unknown>)
@@ -129,8 +150,8 @@ export async function authorizeConnect(
     return {
       allowed: false,
       status: 403,
-      sandboxId: identity.sandboxId,
-      roomId: sandbox.room_id,
+      ...identityFields(identity),
+      roomId: active.room_id,
       host: target.host,
       reason: "invalid_room_allowlist",
     };
@@ -139,8 +160,8 @@ export async function authorizeConnect(
     return {
       allowed: false,
       status: 403,
-      sandboxId: identity.sandboxId,
-      roomId: sandbox.room_id,
+      ...identityFields(identity),
+      roomId: active.room_id,
       host: target.host,
       reason: "host_not_allowlisted",
     };
@@ -153,16 +174,16 @@ export async function authorizeConnect(
     return {
       allowed: false,
       status: 403,
-      sandboxId: identity.sandboxId,
-      roomId: sandbox.room_id,
+      ...identityFields(identity),
+      roomId: active.room_id,
       host: target.host,
       reason: "unsafe_or_unresolved_address",
     };
   }
   return {
     allowed: true,
-    sandboxId: identity.sandboxId,
-    roomId: sandbox.room_id,
+    ...identityFields(identity),
+    roomId: active.room_id,
     host: target.host,
     addresses,
     port: target.port,
@@ -191,15 +212,36 @@ function parseProxyIdentity(value: string | string[] | undefined): ProxyIdentity
   if (decoded.toString("base64") !== encoded) return null;
   const separator = decoded.indexOf(0x3a);
   if (separator <= 0) return null;
-  let sandboxId: string;
+  let id: string;
   let credential: string;
   try {
     const utf8 = new TextDecoder("utf-8", { fatal: true });
-    sandboxId = utf8.decode(decoded.subarray(0, separator));
+    id = utf8.decode(decoded.subarray(0, separator));
     credential = utf8.decode(decoded.subarray(separator + 1));
   } catch {
     return null;
   }
-  if (!/^sandbox_[A-Za-z0-9_-]{8,128}$/.test(sandboxId)) return null;
-  return { sandboxId, credential };
+  if (/^sandbox_[A-Za-z0-9_-]{8,128}$/.test(id)) return { id, type: "sandbox", credential };
+  if (/^hinstall_[0-7][0-9A-HJKMNP-TV-Z]{25}$/.test(id))
+    return { id, type: "health_install", credential };
+  return null;
+}
+
+function identityFields(identity: ProxyIdentity): {
+  identityId: string;
+  identityType: "sandbox" | "health_install";
+  sandboxId?: string;
+  healthInstallId?: string;
+} {
+  return identity.type === "sandbox"
+    ? {
+        identityId: identity.id,
+        identityType: identity.type,
+        sandboxId: identity.id,
+      }
+    : {
+        identityId: identity.id,
+        identityType: identity.type,
+        healthInstallId: identity.id,
+      };
 }

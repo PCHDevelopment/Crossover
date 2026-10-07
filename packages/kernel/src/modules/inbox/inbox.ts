@@ -65,8 +65,12 @@ export async function deliverInbox(
 ): Promise<string> {
   const id = newId("inbox");
   await client.query(
-    `INSERT INTO inbox_items (id, room_id, participant_id, kind, ref, summary, author_id)
-     VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)`,
+    `INSERT INTO inbox_items (id, room_id, participant_id, kind, ref, summary, author_id, wake_notified_at)
+     VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7,
+             CASE WHEN EXISTS (SELECT 1 FROM participants
+                               WHERE id = $3 AND room_id = $2 AND kind = 'AGENT'
+                                 AND agent_manifest ->> 'wake_webhook_url' IS NOT NULL)
+                  THEN NULL ELSE clock_timestamp() END)`,
     [
       id,
       roomId,
