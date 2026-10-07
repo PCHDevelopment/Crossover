@@ -150,6 +150,7 @@ describe("git.import (§24.1, T801)", () => {
     expect(out.response).toMatchObject({
       applied_revision: 1,
       file_count: 6,
+      suggested_health_command: { command: "npm test", source: "package.json" },
       upstream: {
         url: URL_OK,
         branch: "main",
@@ -261,6 +262,26 @@ describe("git.import (§24.1, T801)", () => {
     const err = await rejects(r.importIt(), "workspace_not_empty");
     expect(err.details).toMatchObject({ head_revision: 1 });
     expect(fetcher.requests).toEqual([]);
+  });
+
+  it("suggests a health command from the repository, never applies it, and says null when there is none", async () => {
+    const up = await upstreamRepo(async (dir) => {
+      await rm(join(dir, "package.json"));
+      await writeFile(join(dir, "Makefile"), "test:\n\tgo test ./...\n");
+    });
+    const r = await room({ fetcher: new FixtureFetcher(up.dir) });
+    const out = await r.importIt();
+    expect(out.response).toMatchObject({
+      suggested_health_command: { command: "make test", source: "Makefile" },
+    });
+    const { rows } = await db.pool.query("SELECT settings FROM rooms WHERE id = $1", [r.roomId]);
+    expect(JSON.stringify(rows[0].settings)).not.toContain("make test");
+
+    const bare = await upstreamRepo(async (dir) => {
+      await rm(join(dir, "package.json"));
+    });
+    const r2 = await room({ fetcher: new FixtureFetcher(bare.dir) });
+    expect((await r2.importIt()).response).toMatchObject({ suggested_health_command: null });
   });
 
   it("a second import into the same room → VALIDATION", async () => {
