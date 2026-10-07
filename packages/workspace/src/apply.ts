@@ -1,4 +1,4 @@
-import type { CommandContext, CommandResult, Dispatcher } from "@crossover/kernel";
+import type { CommandContext, CommandResult, Dispatcher, EmittedEvent } from "@crossover/kernel";
 import { CrossoverError, newId } from "@crossover/protocol";
 import { changesetParamsSchema, type ChangesetParams } from "./changeset.js";
 import { classifyConflicts, type ClassifiedConflict } from "./conflicts.js";
@@ -14,7 +14,7 @@ import { registerWorkspaceBlame } from "./blame.js";
 import { registerWorkspaceSearch } from "./search.js";
 import { refreshSearchTree } from "./search-tree.js";
 import { registerWorkspaceConflictReads } from "./conflict-reads.js";
-import { registerWorkspaceConflictActions } from "./conflict-actions.js";
+import { escalateOpenConflict, registerWorkspaceConflictActions } from "./conflict-actions.js";
 
 export interface WorkspaceCommandDeps {
   /** Failure is reported after commit; startup reconcileRef restores the DB-authoritative head. */
@@ -87,17 +87,29 @@ async function apply(
   );
   const ws = workspace.rows[0];
   if (!ws) throw new CrossoverError("NOT_FOUND", "Workspace not provisioned");
-  let resolution: { conflictId: string; originalChangesetId: string } | undefined;
+  let resolution:
+    | {
+        conflictId: string;
+        originalChangesetId: string;
+        status: string;
+        submitterId: string;
+        attempts: number;
+        ownerId: string;
+        leadParticipantId: string | null;
+      }
+    | undefined;
+  let escalationEvent: EmittedEvent | undefined;
   if (params.conflict_id) {
     const { rows } = await client.query<{
       id: string;
       status: string;
+      attempts: number;
       submitter_id: string;
       changeset_id: string;
       owner_id: string;
       lead_participant_id: string | null;
     }>(
-      `SELECT c.id, c.status, c.submitter_id, c.changeset_id,
+      `SELECT c.id, c.status, c.attempts, c.submitter_id, c.changeset_id,
               r.owner_id, r.lead_participant_id
        FROM conflicts c JOIN rooms r ON r.id = c.room_id
        WHERE c.id = $1 AND c.room_id = $2 AND c.workspace_id = $3
@@ -119,7 +131,15 @@ async function apply(
         "FORBIDDEN",
         "Only the submitter, lead, or owner may resolve a conflict",
       );
-    resolution = { conflictId: conflict.id, originalChangesetId: conflict.changeset_id };
+    resolution = {
+      conflictId: conflict.id,
+      originalChangesetId: conflict.changeset_id,
+      status: conflict.status,
+      submitterId: conflict.submitter_id,
+      attempts: conflict.attempts,
+      ownerId: conflict.owner_id,
+      leadParticipantId: conflict.lead_participant_id,
+    };
   }
   const headRow = await client.query<{ revision: string; commit_sha: string }>(
     `SELECT revision, commit_sha FROM workspace_revisions
@@ -216,10 +236,11 @@ async function apply(
     const counterpartyChangesets = counterparties.map(({ id: counterpartyId }) => counterpartyId);
     const conflictId = resolution?.conflictId ?? newId("conf");
     if (resolution) {
-      await client.query(
+      const { rows: updatedConflicts } = await client.query<{ attempts: number }>(
         `UPDATE conflicts SET attempts = attempts + 1,
          head_revision_at_detection = $3, files = $4, counterparty_changesets = $5
-         WHERE id = $1 AND room_id = $2`,
+         WHERE id = $1 AND room_id = $2
+         RETURNING attempts`,
         [
           conflictId,
           room_id,
@@ -228,6 +249,23 @@ async function apply(
           JSON.stringify(counterpartyChangesets),
         ],
       );
+      const attempts = updatedConflicts[0]?.attempts ?? resolution.attempts + 1;
+      if (attempts >= 2) {
+        escalationEvent = await escalateOpenConflict(
+          client,
+          room_id,
+          {
+            id: resolution.conflictId,
+            status: resolution.status,
+            changeset_id: resolution.originalChangesetId,
+            submitter_id: resolution.submitterId,
+            attempts,
+            owner_id: resolution.ownerId,
+            lead_participant_id: resolution.leadParticipantId,
+          },
+          "attempts",
+        );
+      }
     } else {
       await client.query(
         `INSERT INTO conflicts (id, workspace_id, room_id, changeset_id, submitter_id,
@@ -263,7 +301,9 @@ async function apply(
         counterparty_changesets: allConflictsAuthorized ? counterpartyChangesets : [],
       },
       events: resolution
-        ? []
+        ? escalationEvent
+          ? [escalationEvent]
+          : []
         : [
             {
               type: "workspace.conflict.created" as const,

@@ -20,6 +20,11 @@ export {
   registerWorkspaceConflictReads,
 } from "./conflict-reads.js";
 export { registerWorkspaceConflictActions } from "./conflict-actions.js";
+export {
+  ConflictEscalationSweeper,
+  sweepConflictEscalations,
+} from "./conflict-escalation-sweeper.js";
+export type { ConflictEscalationSweeperOptions } from "./conflict-escalation-sweeper.js";
 export { workspaceReadParamsSchema, workspaceListParamsSchema } from "./reads.js";
 export { workspaceSearchParamsSchema } from "./search.js";
 export { workspaceDiffParamsSchema } from "./history.js";
