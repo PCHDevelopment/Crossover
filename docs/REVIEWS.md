@@ -2,6 +2,61 @@
 
 Periodic big-picture reviews by O1: is the merged code building the product in ARCHITECTURE.md, in the right order? Newest first.
 
+## 2026-10-07 · Review 4 (86 of 127 backlog tasks merged, about 20 since Review 3)
+
+**State.**
+
+- **Milestones:** M1, M2 and M3 are complete (tasks, including a 539-case state-machine conformance test). M5 is at 19/20. M6 is at 7/10: conflict reads, resolution, escalation, abandon, the health runner and coalescing. M7 is at 8/13: REST reads, WebSocket and MCP task tools. M4 is at 6/12: messages, inbox and producers, the digest, decision proposals and memory put. M8–M12 haven't started.
+- **Runnable product:** `apps/server` (#67, #95) composes everything merged and serves REST, WebSocket and `POST /mcp`. An agent can join, take a task through its whole lifecycle over MCP, apply ChangeSets, resolve and escalate conflicts, and have health checks run in an isolated container. There are about 2170 tests; CI is green, with real-Docker tests in CI.
+
+**Against the §30 demo flow.**
+
+- **Working end to end:** steps 1, 3–4, 6, 10–12, 14 and 15.
+- **Partial:** step 5 (proposals and positions; decide and the memory mirror are T405/T407) and step 13 (the runner and queue exist; events, suspects and the review gate are T609/T610).
+- **Missing:** steps 2 and 17 (M8 Git import/export), 7 and 9 (edit intents T606 plus the editor, M11), 8 (sandboxes, M10) and 16 (the health-gated approve, T610).
+
+**On track.**
+
+- **The §34 visibility rule is real:** `redactEventFor` covers REST, WebSocket and the digest; conflict reads redact per viewer; platform work runs as `system` through `Dispatcher.runSystem`, which skips frozen rooms (#100).
+- **Review keeps catching what tests miss:** the `capability.denied` path leak (T702/T703), conflict de-escalation (T603), the Docker timeout and checkout ownership (T607), submitter impersonation in the escalation sweeper (T604), and lease expiry for paused agents (T311). All were fixed before release.
+- **Evidence is now standard in PR bodies:** acceptance map, sabotage checks and the CI run.
+
+**Course corrections.**
+
+1. **S2's queue is the critical path.** S2 owns all of M6's remainder, M10 and M8, about 25 tasks, while S1 will finish M4 soon. **Decision:** M8 (Git import/export, demo steps 2 and 17) moves to **S1**, after M4 and T709. S2 keeps M6 → T611 → M10 → M12, which all build on its Docker and egress work.
+2. **Scope breakdown, as committed in Review 3:**
+   - **M12 Plugins** (§21.4–21.5, T1201–T1206, S2): the tool registry with `tools.invoke`, runner isolation, integrations plus the credential broker, and the GitHub, Browser and AWS plugins (§29's MVP set).
+   - **T611:** a per-room dependency cache filled by an egress-proxied install step, so offline health runs can test real projects.
+3. **Shared-file churn.** Four PRs in an hour conflicted in `apps/server/src/compose.test.ts`. **Decision:** split the per-module end-to-end tests into `apps/server/src/e2e/<module>.test.ts` (S1, in #100), so new modules add files instead of editing a shared one. This is §34.2 applied to our own repo.
+4. **Order.**
+   - **S1:** #100 → T405 (plus `decisions.get/list`) → T407 → T406 → T409 → T411 → T412 → T709 → M8 → T704–T706 → M9 (S1 parts) → M11.
+   - **S2:** T609 → T610 → T606 → T520 → T611 → M10 → M12 → T711, T901, T903.
+5. **§34 proposals:** still waiting for Peter's selection. O1 recommends three first: the egress visibility conformance test (§34.5), evidence on submit (§34.3) and `participant.manifest_changed` (§34.6).
+
+**Tech-debt register.**
+
+- **Resolved since Review 3:** the composition root is on main; event-stream path leaks; health-run cancellation on shutdown; frozen rooms and paused agents in platform sweeps (#100, in review).
+- **New:**
+  - When the §17.3 digest gains workspace sections, paths must be filtered per viewer. The guarantee becomes "identical for the same viewer and range".
+  - `memory.delete` (T409) must call `assertMemoryWritable` itself, because `putMemory` deliberately doesn't check namespaces.
+  - Inbox summaries slice by UTF-16 units, so slice by code point once, inside `deliverInbox`.
+  - `apply` schedules health for every applied revision on the room's node. Fine for one node per room; T609 events must go through `runSystem`.
+- **Carried over:**
+  - the T703 per-socket 2 s poll (gate it on a cached `last_sequence` before load tests);
+  - the gateway's `"INTERNAL"` code is outside `ErrorCode`;
+  - the kernel imports `@crossover/policy` helpers;
+  - there's no index for the event-type and JSONB lookups;
+  - `tasks.heartbeat` is a catalog read that writes;
+  - non-strict zod in `room.create`/`get_state`.
+
+**Lead process (O1's own slips, so the team can hold me to them).**
+
+- I merged #84 having assumed T310 was already reviewed. I reviewed it after the fact and posted a correction.
+- I posted "merged" for #99 before the merge succeeded.
+- I passed guessed abbreviated SHAs to merge calls twice.
+
+**Rule from now on:** O1 reviews a diff before approving it, even when it's "patch-identical"; announces a merge only after the API confirms it; and passes full SHAs from `git rev-parse`.
+
 ## 2026-10-07 · Review 3 (66 of 114 backlog tasks merged, 17 since Review 2)
 
 **State.**
