@@ -330,6 +330,24 @@ describe("composeServer", () => {
     expect(await ask({ since: all.up_to })).toMatchObject({ event_count: 0, up_to: all.up_to });
   });
 
+  it("serves memory.put over HTTP with compare-and-set", async () => {
+    const { server } = await start();
+    const { owner, agent, cmd } = await walkthrough(server.app);
+    const put = (token: string, params: Record<string, unknown>) =>
+      cmd(envelope("memory.put", { key: "architecture/database", ...params }), token);
+    const created = await ok(
+      await put(owner.tokens.access_token, { value: "PostgreSQL", expected_revision: 0 }),
+    );
+    expect(created.response).toMatchObject({ revision: 1, value: "PostgreSQL" });
+    const stale = await put(agent.tokens.access_token, { value: "SQLite", expected_revision: 0 });
+    expect(stale.statusCode).toBe(409);
+    expect(stale.json().error.details.current).toMatchObject({ revision: 1 });
+    const updated = await ok(
+      await put(agent.tokens.access_token, { value: "Postgres 16", expected_revision: 1 }),
+    );
+    expect(updated.response).toMatchObject({ revision: 2 });
+  });
+
   it("enforces the real policy: an observer can't apply a ChangeSet", async () => {
     const { server } = await start();
     const { owner, cmd, roomId } = await walkthrough(server.app);
