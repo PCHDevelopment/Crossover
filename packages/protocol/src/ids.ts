@@ -1,5 +1,3 @@
-import { randomFillSync } from "node:crypto";
-
 /** Entity ID prefixes (ENGINEERING.md, T105). */
 export const ID_PREFIXES = [
   "room",
@@ -40,7 +38,7 @@ let lastRandom: number[] = [];
 
 function randomChars(): number[] {
   const bytes = new Uint8Array(RANDOM_LEN);
-  randomFillSync(bytes);
+  globalThis.crypto.getRandomValues(bytes);
   return Array.from(bytes, (b) => b % 32);
 }
 
