@@ -13,6 +13,7 @@ export const EVENT_TYPES = [
   "participant.joined",
   "participant.left",
   "participant.role_changed",
+  "participant.manifest_changed",
   "participant.paused",
   "participant.resumed",
   "participant.removed",

@@ -159,8 +159,8 @@ async function setup(tools?: Parameters<typeof registerMcp>[1]["tools"]) {
   };
 }
 
-async function connect(url: string, token: string): Promise<Client> {
-  const client = new Client({ name: "test-agent", version: "1" });
+async function connect(url: string, token: string, version = "1"): Promise<Client> {
+  const client = new Client({ name: "test-agent", version });
   await client.connect(
     new StreamableHTTPClientTransport(new URL(url), {
       requestInit: { headers: { Authorization: `Bearer ${token}` } },
@@ -778,5 +778,73 @@ describe("MCP collaboration tools (T709)", () => {
     const b = await call(agent, "messages_send", args);
     expect(b.body.id).toBe(a.body.id);
     expect((await call(agent, "messages_list")).body.messages).toHaveLength(1);
+  });
+});
+
+describe("MCP reconnect and participant.manifest_changed (T1303)", () => {
+  const events = async (room: string) =>
+    (
+      await pool.query(
+        "SELECT actor_id, payload FROM events WHERE room_id = $1 AND type = 'participant.manifest_changed' ORDER BY sequence",
+        [room],
+      )
+    ).rows as { actor_id: string; payload: Record<string, unknown> }[];
+  const inboxFor = async (room: string, participant: string) =>
+    (
+      await pool.query(
+        "SELECT kind FROM inbox_items WHERE room_id = $1 AND participant_id = $2 AND kind = 'MANIFEST_CHANGED'",
+        [room, participant],
+      )
+    ).rows;
+
+  it("connecting with the version the agent joined with changes nothing", async () => {
+    const s = await setup();
+    await connect(s.url, s.agent.access_token, "1");
+    await connect(s.url, s.agent.access_token, "1");
+    expect(await events(s.room)).toEqual([]);
+  });
+
+  it("a reconnect with a new clientInfo.version is exactly one event and one inbox item for the owner; the same version again is none", async () => {
+    const s = await setup();
+    await connect(s.url, s.agent.access_token, "2.0.0");
+    const first = await events(s.room);
+    expect(first).toHaveLength(1);
+    expect(first[0]).toMatchObject({
+      actor_id: "system",
+      payload: {
+        participant_id: s.agentId,
+        changes: { client_version: { before: "1", after: "2.0.0" } },
+      },
+    });
+    expect(await inboxFor(s.room, s.ownerId)).toHaveLength(1);
+    await connect(s.url, s.agent.access_token, "2.0.0");
+    await connect(s.url, s.agent.access_token, "2.0.0");
+    expect(await events(s.room)).toHaveLength(1);
+    expect(await inboxFor(s.room, s.ownerId)).toHaveLength(1);
+    // Moving on again is another change.
+    await connect(s.url, s.agent.access_token, "2.1.0");
+    expect(await events(s.room)).toHaveLength(2);
+  });
+
+  it("only the initialize request counts: a tool call doesn't re-sync, and the owner's own connection changes nothing", async () => {
+    const s = await setup();
+    const client = await connect(s.url, s.agent.access_token, "1");
+    await client.listTools();
+    await connect(s.url, s.owner.access_token, "9.9.9");
+    expect(await events(s.room)).toEqual([]);
+  });
+
+  it("the event never carries the wake webhook", async () => {
+    const s = await setup();
+    await pool.query(
+      "UPDATE participants SET agent_manifest = agent_manifest || $2::jsonb WHERE id = $1",
+      [s.agentId, JSON.stringify({ wake_webhook_url: "https://hooks.example.com/w?token=s3cret" })],
+    );
+    await connect(s.url, s.agent.access_token, "3.0.0");
+    const everything = JSON.stringify(
+      (await pool.query("SELECT payload FROM events WHERE room_id = $1", [s.room])).rows,
+    );
+    expect(everything).toContain("client_version");
+    expect(everything).not.toContain("hooks.example.com");
   });
 });

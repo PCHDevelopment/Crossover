@@ -7,7 +7,7 @@ room.created / room.paused / room.resumed / room.archived
 lead.changed / lead.transfer_offered
 
 participant.invited / participant.joined / participant.left
-participant.role_changed / participant.paused / participant.resumed / participant.removed
+participant.role_changed / participant.manifest_changed / participant.paused / participant.resumed / participant.removed
 
 capability.granted / capability.revoked / capability.denied
 approval.requested / approval.decided
@@ -57,7 +57,7 @@ const valid = {
 
 describe("EVENT_TYPES", () => {
   it("contains every type in the §19.5 catalog, and nothing else", () => {
-    expect(catalogTypes).toHaveLength(63);
+    expect(catalogTypes).toHaveLength(64);
     expect([...EVENT_TYPES].sort()).toEqual([...catalogTypes].sort());
   });
 
