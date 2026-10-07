@@ -2,7 +2,13 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTestDatabase, type TestDatabase } from "@crossover/db/testing";
-import { CrossoverClient, CrossoverError, type SdkEvent, type WebSocketCtor } from "@crossover/sdk";
+import {
+  CrossoverClient,
+  CrossoverError,
+  type RoomTokens,
+  type SdkEvent,
+  type WebSocketCtor,
+} from "@crossover/sdk";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { composeServer, type CrossoverServer } from "../compose.js";
 import type { ServerConfig } from "../config.js";
@@ -79,7 +85,14 @@ async function newRoom(client = new CrossoverClient({ baseUrl, WebSocket: Tracke
     },
   });
   const dev = client.room(roomId, joined.tokens.access_token);
-  return { client, roomId, owner, dev };
+  return {
+    client,
+    roomId,
+    owner,
+    dev,
+    devTokens: joined.tokens,
+    devId: joined.participant_id as string | undefined,
+  };
 }
 
 const lastSequence = async (room: ReturnType<CrossoverClient["room"]>) => {
@@ -202,5 +215,122 @@ describe("SDK against a real server", () => {
         for await (const e of bad) void e;
       })(),
     ).rejects.toMatchObject({ code: "UNAUTHENTICATED" });
+  });
+});
+
+/** Token renewal (T1106): an expired access token is renewed with the refresh token, once. */
+describe("SDK token refresh against a real server", () => {
+  const expireAccessTokens = (roomId: string) =>
+    db.pool.query(
+      `UPDATE auth_tokens SET expires_at = now() - interval '1 minute'
+       WHERE room_id = $1 AND kind = 'ACCESS'
+         AND participant_id IN (SELECT id FROM participants WHERE room_id = $1 AND kind = 'AGENT')`,
+      [roomId],
+    );
+  /** A client that counts the refresh requests it makes. */
+  const counting = () => {
+    const refreshes = { n: 0 };
+    const client = new CrossoverClient({
+      baseUrl,
+      WebSocket: TrackedWebSocket,
+      fetch: async (input, init) => {
+        if (String(input).endsWith("/v1/auth/refresh")) refreshes.n += 1;
+        return fetch(input, init);
+      },
+    });
+    return { client, refreshes };
+  };
+
+  it("an expired access token is renewed and the call retried with the same key; many calls at once refresh once; onTokens gets each pair", async () => {
+    const { client, refreshes } = counting();
+    const r = await newRoom(client);
+    const pairs: RoomTokens[] = [];
+    const dev = client.room(r.roomId, r.devTokens, { onTokens: (t) => void pairs.push(t) });
+    await dev.api.messages.send({ body: "before" });
+    await expireAccessTokens(r.roomId);
+    const sent = await Promise.all(
+      Array.from({ length: 5 }, (_, i) =>
+        dev.api.messages.send({ body: `after-${i}` }, { idempotencyKey: `renew-${i}` }),
+      ),
+    );
+    expect(sent.every((x) => !x.replayed)).toBe(true);
+    expect(refreshes.n).toBe(1);
+    expect(pairs).toHaveLength(1);
+    expect(pairs[0]!.access_token).not.toBe(r.devTokens.access_token);
+    const listed = await r.owner.api.messages.list<{ messages: { body: string }[] }>();
+    expect(listed.response.messages.map((m) => m.body).sort()).toEqual([
+      "after-0",
+      "after-1",
+      "after-2",
+      "after-3",
+      "after-4",
+      "before",
+    ]);
+    // The new pair keeps working, and renews again later from its own refresh token.
+    await expireAccessTokens(r.roomId);
+    await dev.api.messages.send({ body: "later" });
+    expect(pairs).toHaveLength(2);
+  });
+
+  it("without a refresh token, or when it can't be spent, the expiry is the caller's UNAUTHENTICATED", async () => {
+    const r = await newRoom();
+    await expireAccessTokens(r.roomId);
+    await expect(r.dev.api.messages.send({ body: "x" })).rejects.toMatchObject({
+      code: "UNAUTHENTICATED",
+    });
+    // A refresh token someone else already spent: refused, and the original error stands.
+    const { client } = counting();
+    const spent = await newRoom(client);
+    await client.room(spent.roomId, spent.devTokens).api.messages.list(); // fresh
+    const pair = await fetch(`${baseUrl}/v1/auth/refresh`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ refresh_token: spent.devTokens.refresh_token }),
+    });
+    expect(pair.status).toBe(200);
+    await expireAccessTokens(spent.roomId);
+    const stale = client.room(spent.roomId, spent.devTokens);
+    await expect(stale.api.messages.list()).rejects.toMatchObject({ code: "UNAUTHENTICATED" });
+  });
+
+  it("a subscription outlives its access token: after it expires and the connection drops, it renews and carries on without losing or repeating an event", async () => {
+    const { client, refreshes } = counting();
+    const r = await newRoom(client);
+    const pairs: RoomTokens[] = [];
+    const dev = client.room(r.roomId, r.devTokens, { onTokens: (t) => void pairs.push(t) });
+    const received: number[] = [];
+    const sub = dev.subscribe({
+      after: 0,
+      reconnect: { minMs: 20, maxMs: 60 },
+      onEvent: (e) => received.push(e.sequence),
+    });
+    await r.owner.api.messages.send({ body: "one" });
+    for (let i = 0; i < 100 && received.length < 3; i++)
+      await new Promise((res) => setTimeout(res, 50));
+    const before = received.length;
+    expect(before).toBeGreaterThan(0);
+
+    await expireAccessTokens(r.roomId);
+    sockets.at(-1)?.close(); // the connection goes with it
+    await r.owner.api.messages.send({ body: "two" });
+    await r.owner.api.messages.send({ body: "three" });
+    const target = await lastSequence(r.owner);
+    for (let i = 0; i < 200 && sub.lastSequence < target; i++)
+      await new Promise((res) => setTimeout(res, 50));
+    sub.close();
+    expect(sub.lastSequence).toBe(target);
+    expect(received).toEqual(Array.from({ length: target }, (_, i) => i + 1));
+    expect(refreshes.n).toBe(1);
+    expect(pairs).toHaveLength(1);
+  }, 60_000);
+
+  it("a command socket renews the same way when it connects with an expired token", async () => {
+    const r = await newRoom();
+    const dev = r.client.room(r.roomId, r.devTokens);
+    await expireAccessTokens(r.roomId);
+    const socket = dev.socket();
+    const sent = await socket.api.messages.send({ body: "over a renewed socket" });
+    expect(sent.replayed).toBe(false);
+    socket.close();
   });
 });

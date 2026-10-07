@@ -792,6 +792,15 @@ describe("loadConfig", () => {
     expect(c.workspaceRoot.startsWith("/")).toBe(true);
   });
 
+  it("reads the proxy and refresh-limit settings", () => {
+    expect(loadConfig(env)).toMatchObject({ trustProxy: false, refreshPerMinute: 30 });
+    expect(loadConfig({ ...env, TRUST_PROXY: "true", REFRESH_PER_MINUTE: "5" })).toMatchObject({
+      trustProxy: true,
+      refreshPerMinute: 5,
+    });
+    expect(() => loadConfig({ ...env, REFRESH_PER_MINUTE: "0" })).toThrow(/REFRESH_PER_MINUTE/);
+  });
+
   it("turns dev login on only for an explicit true", () => {
     expect(loadConfig({ ...env, DEV_LOGIN: "true" }).devLogin).toBe(true);
     expect(loadConfig({ ...env, DEV_LOGIN: "0" }).devLogin).toBe(false);

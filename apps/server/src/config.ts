@@ -18,6 +18,10 @@ const envSchema = z.object({
   NODE_ID: z.string().min(1).max(200).optional(),
   /** Serve `POST /v1/auth/dev-login`. Development only; off unless set. */
   DEV_LOGIN: flag,
+  /** Behind a reverse proxy: take the client address from `X-Forwarded-For` (per-IP limits). */
+  TRUST_PROXY: flag,
+  /** Refresh attempts per client address per minute (`POST /v1/auth/refresh`). Default 30. */
+  REFRESH_PER_MINUTE: z.coerce.number().int().min(1).max(100_000).default(30),
   /** Comma-separated operator-approved images usable by room health checks. */
   HEALTH_IMAGES: z
     .string()
@@ -48,6 +52,8 @@ export interface ServerConfig {
   port: number;
   nodeId: string;
   devLogin: boolean;
+  trustProxy?: boolean;
+  refreshPerMinute?: number;
   /** Operator allowlist for room-selected health container images. */
   healthImages: readonly string[];
   /** Production defaults to hard; development and CI default to soft. */
@@ -105,6 +111,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     port: e.PORT,
     nodeId: e.NODE_ID ?? `${hostname()}-${process.pid}`,
     devLogin: e.DEV_LOGIN,
+    trustProxy: e.TRUST_PROXY,
+    refreshPerMinute: e.REFRESH_PER_MINUTE,
     healthImages: e.HEALTH_IMAGES,
     sandboxDiskEnforcement,
     ...(e.SANDBOX_VOLUME_DRIVER ? { sandboxVolumeDriver: e.SANDBOX_VOLUME_DRIVER } : {}),

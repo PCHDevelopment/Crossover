@@ -14,6 +14,15 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest }
 import { toHttpError } from "./errors.js";
 import { attachWebSocket, type WebSocketOptions } from "./ws.js";
 
+/** Counts hits per key in fixed windows (Redis in production). */
+export interface RouteRateLimiter {
+  hit(
+    key: string,
+    limit: number,
+    windowMs: number,
+  ): Promise<{ allowed: true } | { allowed: false; retry_after_ms: number }>;
+}
+
 export interface GatewayOptions {
   dispatcher: Dispatcher;
   pool: Pool;
@@ -27,6 +36,14 @@ export interface GatewayOptions {
    * logins (later) plug into the same `users` table.
    */
   devLogin?: boolean;
+  /** Take the client address from `X-Forwarded-For` (behind a reverse proxy you trust). Default off. */
+  trustProxy?: boolean;
+  /**
+   * Limit `POST /v1/auth/refresh` per client address (a stolen or guessed token can't be ground
+   * through at wire speed): `perMinute` attempts (default 30) then `RATE_LIMITED` with
+   * `Retry-After`. If the limiter fails, requests go ahead. Off unless given.
+   */
+  refreshLimit?: { limiter: RouteRateLimiter; perMinute?: number };
   /** Serve `GET /v1/rooms/:roomId/ws` (T703). Off unless given. */
   ws?: Omit<WebSocketOptions, "dispatcher" | "pool">;
 }
@@ -85,6 +102,7 @@ export function buildGateway(options: GatewayOptions): FastifyInstance {
   const app = Fastify({
     logger: false,
     bodyLimit: options.bodyLimit ?? 1024 * 1024,
+    trustProxy: options.trustProxy ?? false,
   });
 
   app.setErrorHandler((error, request, reply) => {
@@ -188,6 +206,17 @@ export function buildGateway(options: GatewayOptions): FastifyInstance {
   });
 
   app.post("/v1/auth/refresh", async (request, reply) => {
+    const limit = options.refreshLimit;
+    if (limit) {
+      const decision = await limit.limiter
+        .hit(`refresh:${request.ip}`, limit.perMinute ?? 30, 60_000)
+        .catch(() => ({ allowed: true as const }));
+      if (!decision.allowed) {
+        throw new CrossoverError("RATE_LIMITED", "Too many refresh attempts", {
+          details: { retry_after: Math.max(1, Math.ceil(decision.retry_after_ms / 1000)) },
+        });
+      }
+    }
     const parsed = refreshBody.safeParse(expectObject(request.body));
     if (!parsed.success) {
       throw new CrossoverError("VALIDATION", "Invalid refresh request", {

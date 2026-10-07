@@ -56,7 +56,11 @@ const manifest = (extra: Record<string, unknown> = {}) => ({
   ...extra,
 });
 
-async function setup(onInternalError?: (e: unknown) => void, devLogin = false) {
+async function setup(
+  onInternalError?: (e: unknown) => void,
+  devLogin = false,
+  gateway: Partial<Parameters<typeof buildGateway>[0]> = {},
+) {
   const dispatcher = new Dispatcher({ pool, authorize, nodeId: `node-${++n}` });
   registerRoomCommands(dispatcher);
   registerRoomEventsCommand(dispatcher);
@@ -85,6 +89,7 @@ async function setup(onInternalError?: (e: unknown) => void, devLogin = false) {
     pool,
     devLogin,
     ...(onInternalError ? { onInternalError } : {}),
+    ...gateway,
   });
   apps.push(app);
 
@@ -726,5 +731,66 @@ describe("POST /v1/auth/refresh", () => {
     errorShape(access.json(), "UNAUTHENTICATED", 401, access);
     const bad = await post(s, "/v1/auth/refresh", { nope: 1 });
     errorShape(bad.json(), "VALIDATION", 400, bad);
+  });
+});
+
+describe("POST /v1/auth/refresh rate limit", () => {
+  /** Fixed-window counter per key, in memory. */
+  const counter = () => {
+    const counts = new Map<string, number>();
+    return {
+      hit: async (key: string, limit: number) => {
+        const next = (counts.get(key) ?? 0) + 1;
+        counts.set(key, next);
+        return next <= limit
+          ? { allowed: true as const }
+          : { allowed: false as const, retry_after_ms: 12_500 };
+      },
+    };
+  };
+  const junk = { refresh_token: "rt_nonsense" };
+
+  it("refuses attempts over the limit per client address with RATE_LIMITED and Retry-After, junk or not", async () => {
+    const s = await setup(undefined, false, { refreshLimit: { limiter: counter(), perMinute: 3 } });
+    for (let i = 0; i < 3; i++) {
+      const res = await post(s, "/v1/auth/refresh", junk);
+      expect(res.statusCode).toBe(401);
+    }
+    const limited = await post(s, "/v1/auth/refresh", { refresh_token: s.owner.refresh_token });
+    errorShape(limited.json(), "RATE_LIMITED", 429, limited);
+    expect(limited.headers["retry-after"]).toBe("13");
+    // Only this route is limited.
+    const read = await command(s, { id: newId("cmd"), method: "room.get_state", params: {} });
+    expect(read.statusCode).toBe(200);
+  });
+
+  it("is per address: X-Forwarded-For counts only behind a trusted proxy", async () => {
+    const via = (ip: string) => ({ "x-forwarded-for": ip });
+    const trusted = await setup(undefined, false, {
+      trustProxy: true,
+      refreshLimit: { limiter: counter(), perMinute: 1 },
+    });
+    expect((await post(trusted, "/v1/auth/refresh", junk, via("203.0.113.1"))).statusCode).toBe(
+      401,
+    );
+    expect((await post(trusted, "/v1/auth/refresh", junk, via("203.0.113.1"))).statusCode).toBe(
+      429,
+    );
+    expect((await post(trusted, "/v1/auth/refresh", junk, via("203.0.113.2"))).statusCode).toBe(
+      401,
+    );
+    const direct = await setup(undefined, false, {
+      refreshLimit: { limiter: counter(), perMinute: 1 },
+    });
+    expect((await post(direct, "/v1/auth/refresh", junk, via("203.0.113.1"))).statusCode).toBe(401);
+    // A spoofed header doesn't get a fresh allowance.
+    expect((await post(direct, "/v1/auth/refresh", junk, via("203.0.113.9"))).statusCode).toBe(429);
+  });
+
+  it("a limiter that fails doesn't take refreshing down", async () => {
+    const broken = { hit: async () => Promise.reject(new Error("redis is down")) };
+    const s = await setup(undefined, false, { refreshLimit: { limiter: broken, perMinute: 1 } });
+    const res = await post(s, "/v1/auth/refresh", { refresh_token: s.owner.refresh_token });
+    expect(res.statusCode).toBe(200);
   });
 });
