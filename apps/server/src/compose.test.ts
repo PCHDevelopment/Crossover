@@ -78,7 +78,7 @@ async function ok(res: Awaited<ReturnType<typeof post>>, status = 200) {
 }
 
 /** The skeleton flow over HTTP, as a person and an agent would drive it. */
-async function walkthrough(app: App) {
+async function walkthrough(app: App, withAppliedChange = true) {
   const login = await ok(
     await post(app, "/v1/auth/dev-login", { subject: `peter-${++n}`, display_name: "Peter" }),
   );
@@ -114,17 +114,19 @@ async function walkthrough(app: App) {
     201,
   );
 
-  const applied = await ok(
-    await cmd(
-      envelope("workspace.apply_changeset", {
-        source: "API",
-        message: "Add README",
-        base_workspace_revision: 0,
-        operations: [{ type: "create", path: "README.md", content: "# Alpha\n" }],
-      }),
-      agent.tokens.access_token,
-    ),
-  );
+  const applied = withAppliedChange
+    ? await ok(
+        await cmd(
+          envelope("workspace.apply_changeset", {
+            source: "API",
+            message: "Add README",
+            base_workspace_revision: 0,
+            operations: [{ type: "create", path: "README.md", content: "# Alpha\n" }],
+          }),
+          agent.tokens.access_token,
+        ),
+      )
+    : { response: { applied_revision: 0 } };
   return { roomId, owner, agent, applied, cmd };
 }
 
@@ -211,6 +213,80 @@ describe("composeServer", () => {
     expect(refused.json().error.code).toBe("ROOM_PAUSED");
     await ok(await cmd(envelope("room.resume"), ownerToken));
     await ok(await cmd(envelope("messages.send", { body: "Back" }), agentToken));
+  });
+
+  it("blocks task approval until the configured health run covers the submission revision", async () => {
+    const { server } = await start();
+    const { roomId, owner, agent, applied, cmd } = await walkthrough(server.app, false);
+    const ownerToken = owner.tokens.access_token as string;
+    const agentToken = agent.tokens.access_token as string;
+    await db.pool.query(
+      "UPDATE rooms SET settings = jsonb_set(settings, '{health_command}', to_jsonb('pnpm test'::text)) WHERE id = $1",
+      [roomId],
+    );
+
+    const created = await ok(
+      await cmd(
+        envelope("tasks.create", { title: "Review health gate", requirements: ["Build passes"] }),
+        ownerToken,
+      ),
+    );
+    const claimed = await ok(
+      await cmd(
+        envelope("tasks.claim", {
+          task_id: created.response.id,
+          expected_version: created.response.version,
+        }),
+        agentToken,
+      ),
+    );
+    const started = await ok(
+      await cmd(
+        envelope("tasks.start", {
+          task_id: created.response.id,
+          expected_version: claimed.response.version,
+        }),
+        agentToken,
+      ),
+    );
+    const submitted = await ok(
+      await cmd(
+        envelope("tasks.submit", {
+          task_id: created.response.id,
+          expected_version: started.response.version,
+        }),
+        agentToken,
+      ),
+    );
+
+    const approval = () =>
+      cmd(
+        envelope("tasks.review", {
+          task_id: created.response.id,
+          expected_version: submitted.response.version,
+          verdict: "approve",
+        }),
+        ownerToken,
+      );
+    const blocked = await approval();
+    expect(blocked.statusCode).toBe(400);
+    expect(blocked.json().error.details).toMatchObject({
+      reason: "health_gate_pending",
+      required_revision: 0,
+      latest_run: null,
+    });
+
+    const { rows: workspaces } = await db.pool.query<{ id: string }>(
+      "SELECT id FROM workspaces WHERE room_id = $1",
+      [roomId],
+    );
+    await db.pool.query(
+      `INSERT INTO health_runs (id, workspace_id, room_id, revision, status, duration_ms, log)
+       VALUES ($1, $2, $3, $4, 'GREEN', 10, 'private health output')`,
+      [newId("health"), workspaces[0]!.id, roomId, applied.response.applied_revision],
+    );
+    const approved = await ok(await approval());
+    expect(approved.response).toMatchObject({ status: "DONE" });
   });
 
   it("serves the inbox over HTTP: an empty list, and NOT_FOUND for an id that isn't theirs", async () => {

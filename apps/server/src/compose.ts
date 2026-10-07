@@ -33,6 +33,7 @@ import {
   ConflictEscalationSweeper,
   DockerHealthRunner,
   HealthCheckQueue,
+  workspaceHealthGate,
   provisionWorkspace,
   reconcileRef,
   registerWorkspaceCommands,
@@ -184,7 +185,7 @@ function registerCommands(
   // Tasks: create/update, list/get, and the claim → start → block lifecycle.
   registerTaskCommands(dispatcher);
   registerTaskReadCommands(dispatcher);
-  registerTaskLifecycleCommands(dispatcher);
+  registerTaskLifecycleCommands(dispatcher, { healthGate: workspaceHealthGate });
   registerMessageCommands(dispatcher);
   registerMemoryCommands(dispatcher);
   registerDecisionCommands(dispatcher);
