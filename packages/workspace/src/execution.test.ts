@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Pool } from "@crossover/db";
 import { createTestDatabase, type TestDatabase } from "@crossover/db/testing";
 import { newId } from "@crossover/protocol";
@@ -28,6 +28,7 @@ class FakeExecutionDriver implements ExecutionDriver {
   readonly provisioned = new Map<string, SandboxResources>();
   readonly running = new Set<string>();
   failCreateAfterProvision = false;
+  failDestroyOnce = false;
   stopGate: { entered: Deferred; release: Deferred } | undefined;
 
   async create(input: { sandbox_id: string; limits: SandboxLimits }): Promise<SandboxResources> {
@@ -69,6 +70,10 @@ class FakeExecutionDriver implements ExecutionDriver {
     if (resources) this.destroyed.push(resources);
     this.provisioned.delete(input.sandbox_id);
     this.running.delete(input.sandbox_id);
+    if (this.failDestroyOnce) {
+      this.failDestroyOnce = false;
+      throw new Error("injected Docker destroy failure after removal");
+    }
   }
 }
 
@@ -309,6 +314,60 @@ describe("ExecutionService", () => {
     expect(driver.destroyed.map(({ container_ref }) => container_ref).sort()).toEqual(
       [first!.container_ref, second!.container_ref].sort(),
     );
+  });
+
+  it("sweeps stale destroys, removed participants, and archived rooms", async () => {
+    const driver = new FakeExecutionDriver();
+    const execution = new ExecutionService(db.pool, driver);
+    const logFailure = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const stale = await makeParticipants();
+      const staleSandbox = await execution.ensure(stale.roomId, stale.participantIds[0]!);
+      driver.failDestroyOnce = true;
+      await expect(
+        execution.destroyParticipant(stale.roomId, stale.participantIds[0]!),
+      ).rejects.toThrow("injected Docker destroy failure after removal");
+      await db.pool.query(
+        "UPDATE sandboxes SET updated_at = clock_timestamp() - interval '2 minutes' WHERE id = $1",
+        [staleSandbox.id],
+      );
+      expect(await execution.sweepCleanup()).toBe(1);
+      expect(await execution.get(stale.roomId, stale.participantIds[0]!)).toMatchObject({
+        status: "DESTROYED",
+      });
+
+      const removed = await makeParticipants();
+      const removedSandbox = await execution.ensure(removed.roomId, removed.participantIds[0]!);
+      await db.pool.query("UPDATE participants SET status = 'REMOVED' WHERE id = $1", [
+        removed.participantIds[0],
+      ]);
+      driver.failDestroyOnce = true;
+      expect(await execution.sweepCleanup()).toBe(0);
+      expect(await execution.get(removed.roomId, removed.participantIds[0]!)).toMatchObject({
+        status: "DESTROYING",
+      });
+      expect(await execution.sweepCleanup()).toBe(1);
+      expect(await execution.get(removed.roomId, removed.participantIds[0]!)).toMatchObject({
+        status: "DESTROYED",
+      });
+
+      const archived = await makeParticipants();
+      const archivedSandbox = await execution.ensure(archived.roomId, archived.participantIds[0]!);
+      await db.pool.query("UPDATE rooms SET status = 'ARCHIVED' WHERE id = $1", [archived.roomId]);
+      expect(await execution.sweepCleanup()).toBe(1);
+      expect(await execution.get(archived.roomId, archived.participantIds[0]!)).toMatchObject({
+        status: "DESTROYED",
+      });
+      expect(driver.destroyCalls).toEqual([
+        staleSandbox.id,
+        staleSandbox.id,
+        removedSandbox.id,
+        removedSandbox.id,
+        archivedSandbox.id,
+      ]);
+    } finally {
+      logFailure.mockRestore();
+    }
   });
 
   it("does not create sandboxes for removed or paused participants or paused rooms", async () => {
