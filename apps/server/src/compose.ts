@@ -14,6 +14,7 @@ import {
   registerInviteCommands,
   registerJoinCommand,
   registerLeadCommands,
+  registerMemoryCommands,
   registerMessageCommands,
   registerParticipantLifecycleCommands,
   registerParticipantRoleCommand,
@@ -31,9 +32,13 @@ import {
 import { authorize } from "@crossover/policy";
 import {
   ConflictEscalationSweeper,
+  DockerHealthRunner,
+  HealthCheckQueue,
   provisionWorkspace,
   reconcileRef,
   registerWorkspaceCommands,
+  runHealthCheck,
+  publishHealthResult,
 } from "@crossover/workspace";
 import type { ServerConfig } from "./config.js";
 
@@ -108,7 +113,15 @@ export async function composeServer(
       onLeaseAcquire: (roomId) => reconcileRef(pool, roomId),
       ...(overrides.leaseTtlMs !== undefined ? { leaseTtlMs: overrides.leaseTtlMs } : {}),
     });
-    registerCommands(dispatcher, config);
+    const healthRunner = new DockerHealthRunner({ allowedImages: config.healthImages });
+    const healthQueue = new HealthCheckQueue({
+      run: async (roomId, revision, signal) => {
+        const outcome = await runHealthCheck(pool, healthRunner, roomId, revision, signal);
+        if (outcome && !signal.aborted)
+          await publishHealthResult(pool, dispatcher, roomId, revision, outcome.id, outcome.result);
+      },
+    });
+    registerCommands(dispatcher, config, healthQueue);
 
     const renewer = new LeaseRenewer({ leases: dispatcher.leases, actors: dispatcher.actors });
     renewer.start();
@@ -129,6 +142,7 @@ export async function composeServer(
         await escalations?.stop();
         await renewer.stop();
         await app.close();
+        await healthQueue.close();
         await renewer.close(); // releases every lease once nothing can take a new one
         await redis?.close();
         await redisSubscriber?.close();
@@ -146,7 +160,11 @@ export async function composeServer(
 }
 
 /** Every command module merged so far. Each new module is registered here, once. */
-function registerCommands(dispatcher: Dispatcher, config: ServerConfig): void {
+function registerCommands(
+  dispatcher: Dispatcher,
+  config: ServerConfig,
+  healthQueue: HealthCheckQueue,
+): void {
   registerRoomCommands(dispatcher, {
     provision: async ({ client, room_id }) => {
       await provisionWorkspace(client, room_id, config.workspaceRoot);
@@ -169,9 +187,12 @@ function registerCommands(dispatcher: Dispatcher, config: ServerConfig): void {
   registerTaskReadCommands(dispatcher);
   registerTaskLifecycleCommands(dispatcher);
   registerMessageCommands(dispatcher);
+  registerMemoryCommands(dispatcher);
   registerDecisionCommands(dispatcher);
   registerDecisionDecideCommands(dispatcher);
 
-  // apply_changeset plus read, list, diff, history, blame, search, and conflict reads/abandon.
-  registerWorkspaceCommands(dispatcher);
+  // apply_changeset plus reads; schedule health for every committed revision.
+  registerWorkspaceCommands(dispatcher, {
+    scheduleHealthCheck: (roomId, revision) => healthQueue.enqueue(roomId, revision),
+  });
 }

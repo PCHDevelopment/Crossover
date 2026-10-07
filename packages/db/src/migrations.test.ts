@@ -765,3 +765,73 @@ describe("0012_decisions", () => {
     ).rejects.toBeDefined();
   });
 });
+
+describe("0013_memory", () => {
+  let n = 0;
+  const room = async () => {
+    const id = `room_mem${++n}`;
+    await db.pool.query(
+      `INSERT INTO rooms (id, slug, name, objective, owner_id) VALUES ($1, $1, 'n', 'o', 'x')`,
+      [id],
+    );
+    return id;
+  };
+  const entry = (roomId: string, extra: Record<string, unknown> = {}) => {
+    const cols: Record<string, unknown> = {
+      room_id: roomId,
+      key: `k${++n}`,
+      value: "v",
+      content_type: "text/markdown",
+      author_id: "part_x",
+      revision: 1,
+      ...extra,
+    };
+    const keys = Object.keys(cols);
+    return db.pool.query(
+      `INSERT INTO memory_entries (${keys.join(", ")}) VALUES (${keys.map((_, i) => `$${i + 1}`).join(", ")}) RETURNING *`,
+      Object.values(cols),
+    );
+  };
+
+  it("is recorded as applied", async () => {
+    const { rows } = await db.pool.query("SELECT name FROM schema_migrations WHERE version = 13");
+    expect(rows).toEqual([{ name: "memory" }]);
+  });
+
+  it("an entry is live at revision 1 with no source refs", async () => {
+    const { rows } = await entry(await room());
+    expect(rows[0]).toMatchObject({ revision: 1, deleted: false, source_refs: [] });
+  });
+
+  it("a key is unique within a room but may repeat across rooms", async () => {
+    const a = await room();
+    const b = await room();
+    await entry(a, { key: "same" });
+    await expect(entry(a, { key: "same" })).rejects.toMatchObject({ code: "23505" });
+    await entry(b, { key: "same" });
+  });
+
+  it("checks the key, the content type, the revision and the 64 KiB value limit", async () => {
+    const r = await room();
+    await expect(entry(r, { key: "" })).rejects.toMatchObject({ code: "23514" });
+    await expect(entry(r, { content_type: "text/plain" })).rejects.toMatchObject({ code: "23514" });
+    await expect(entry(r, { revision: 0 })).rejects.toMatchObject({ code: "23514" });
+    await entry(r, { value: "x".repeat(65536) });
+    await expect(entry(r, { value: "x".repeat(65537) })).rejects.toMatchObject({ code: "23514" });
+  });
+
+  it("revisions belong to an entry and are unique per revision number", async () => {
+    const r = await room();
+    const { rows } = await entry(r);
+    const key = rows[0].key as string;
+    const rev = (k: string, revision: number) =>
+      db.pool.query(
+        `INSERT INTO memory_revisions (room_id, key, revision, value, content_type, author_id)
+         VALUES ($1, $2, $3, 'v', 'text/markdown', 'part_x')`,
+        [r, k, revision],
+      );
+    await rev(key, 1);
+    await expect(rev(key, 1)).rejects.toMatchObject({ code: "23505" });
+    await expect(rev("missing", 1)).rejects.toMatchObject({ code: "23503" });
+  });
+});

@@ -41,3 +41,6 @@ export type {
   HealthStatus,
   DockerHealthRunnerOptions,
 } from "./health-runner.js";
+export { HealthCheckQueue } from "./health-queue.js";
+export type { HealthCheckQueueOptions } from "./health-queue.js";
+export { healthGetParamsSchema, publishHealthResult } from "./health-events.js";
