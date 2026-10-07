@@ -31,7 +31,7 @@ describe("describeEvent", () => {
     const hidden = event({
       type: "capability.denied",
       redacted: true,
-      payload: { redacted: true },
+      payload: { missing_capability: "events.redact" }, // an event marked redacted is described by nothing in it
     });
     expect(describeEvent(hidden, who)).toBe("AgentB was denied an action (details hidden)");
     expect(describeEvent(hidden, who)).not.toContain("events.redact");
