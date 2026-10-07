@@ -739,7 +739,8 @@ Per §11.1. A `CONFLICT` result creates a conflict with `counterparty_changesets
 
 Deps: T601 · Migration: —
 
-- Filters by status and submitter.
+- Room-scoped, cursor-paginated listing with optional status and submitter filters; lookup by conflict ID.
+- Each viewer is authorized for every conflict path and every path in its merge messages. Redact a conflict entry to `{ path: null, kind, reason: "unauthorized" }` if any of its paths is denied; omit counterparty IDs if any entry is redacted.
 
 ### T603 · Resolution
 

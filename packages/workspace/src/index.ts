@@ -14,6 +14,11 @@ export type { ChangesetParams } from "./changeset.js";
 export { provisionWorkspace } from "./provision.js";
 export { registerWorkspaceCommands } from "./apply.js";
 export type { WorkspaceCommandDeps, ApplyResponse } from "./apply.js";
+export {
+  conflictsGetParamsSchema,
+  conflictsListParamsSchema,
+  registerWorkspaceConflictReads,
+} from "./conflict-reads.js";
 export { workspaceReadParamsSchema, workspaceListParamsSchema } from "./reads.js";
 export { workspaceSearchParamsSchema } from "./search.js";
 export { workspaceDiffParamsSchema } from "./history.js";

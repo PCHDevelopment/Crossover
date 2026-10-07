@@ -99,6 +99,67 @@ async function fixture(deps: WorkspaceCommandDeps = {}) {
   return { room, dispatcher, owner, reviewer, apply, revision, gates, pathChecks };
 }
 
+async function conflictReadFixture() {
+  let mergeCalls = 0;
+  const f = await fixture({
+    merge: async (...args) => {
+      if (mergeCalls++ === 0) return mergeWorkspace(...args);
+      return {
+        clean: false,
+        tree: "",
+        conflicts: {
+          files: [{ path: "docs/file.txt", stages: [] }],
+          messages: [
+            {
+              paths: ["docs/file.txt", "secrets/file.txt"],
+              type: "DETAIL",
+              message: "details mention secrets/file.txt and private conflicting content",
+            },
+          ],
+        },
+      };
+    },
+  });
+  const seeded = await f.apply(
+    f.owner,
+    [
+      { type: "create", path: "docs/file.txt", content: "base" },
+      { type: "create", path: "secrets/file.txt", content: "TOPSECRET" },
+    ],
+    0,
+  );
+  const seededChangesetId = (seeded.response as { changeset_id: string }).changeset_id;
+  const first = await f.apply(
+    f.reviewer,
+    [{ type: "create", path: "docs/file.txt", content: "private conflicting content" }],
+    0,
+  );
+  const conflictId = (first.response as { conflict_id: string }).conflict_id;
+  const second = await f.apply(
+    f.reviewer,
+    [{ type: "create", path: "docs/second.txt", content: "second private conflict" }],
+    0,
+  );
+  const secondConflictId = (second.response as { conflict_id: string }).conflict_id;
+  return { f, conflictId, secondConflictId, seededChangesetId };
+}
+
+function getConflict(f: Awaited<ReturnType<typeof fixture>>, who: Who, conflictId: string) {
+  return f.dispatcher.dispatch(who, {
+    id: newId("cmd"),
+    method: "conflicts.get",
+    params: { conflict_id: conflictId },
+  });
+}
+
+function listConflicts(
+  f: Awaited<ReturnType<typeof fixture>>,
+  who: Who,
+  params: Record<string, unknown> = {},
+) {
+  return f.dispatcher.dispatch(who, { id: newId("cmd"), method: "conflicts.list", params });
+}
+
 it("a reviewer with workspace.write:docs/** applies a ChangeSet touching docs/ only", async () => {
   const f = await fixture();
   await f.apply(f.owner, [{ type: "create", path: "src/a.ts", content: "a" }], 0);
@@ -301,4 +362,87 @@ it("redacts unauthorized conflict paths and content", async () => {
   ]);
   expect(durable.rows[0]?.counterparty_changesets).toEqual([seededChangesetId]);
   expect(conflict.response).toMatchObject({ counterparty_changesets: [] });
+});
+
+it("conflicts.get redacts every message path and omits counterparties for the submitter", async () => {
+  const { f, conflictId, seededChangesetId } = await conflictReadFixture();
+  const ownerView = await getConflict(f, f.owner, conflictId);
+  expect(ownerView.response).toMatchObject({
+    id: conflictId,
+    files: [
+      { path: "docs/file.txt", messages: [{ paths: ["docs/file.txt", "secrets/file.txt"] }] },
+    ],
+    counterparty_changesets: [seededChangesetId],
+  });
+
+  const submitterView = await getConflict(f, f.reviewer, conflictId);
+  expect(submitterView.response).toMatchObject({
+    id: conflictId,
+    files: [{ path: null, kind: "MODIFY_DELETE", reason: "unauthorized" }],
+  });
+  expect(submitterView.response).not.toHaveProperty("counterparty_changesets");
+  expect(JSON.stringify(submitterView.response)).not.toContain("secrets/file.txt");
+  expect(JSON.stringify(submitterView.response)).not.toContain("private conflicting content");
+});
+
+it("conflicts.list filters status arrays and submitter, paginates to a null last cursor", async () => {
+  const { f, conflictId, secondConflictId } = await conflictReadFixture();
+  const firstPage = await listConflicts(f, f.reviewer, {
+    status: ["OPEN", "ESCALATED"],
+    submitter_id: f.reviewer.participant_id,
+    limit: 1,
+  });
+  const firstPageBody = firstPage.response as {
+    conflicts: { id: string; files: { path: string | null; reason?: string }[] }[];
+    next_cursor: string | null;
+  };
+  expect(firstPageBody.conflicts).toHaveLength(1);
+  expect(firstPageBody.conflicts[0]!.files).toContainEqual(
+    expect.objectContaining({ path: null, reason: "unauthorized" }),
+  );
+  expect(firstPageBody.next_cursor).toBeTruthy();
+
+  const lastPage = await listConflicts(f, f.reviewer, {
+    status: ["OPEN"],
+    submitter_id: f.reviewer.participant_id,
+    limit: 1,
+    cursor: firstPageBody.next_cursor!,
+  });
+  const lastPageBody = lastPage.response as {
+    conflicts: { id: string }[];
+    next_cursor: string | null;
+  };
+  expect(lastPageBody.conflicts).toHaveLength(1);
+  expect(lastPageBody.conflicts[0]!.id).not.toBe(firstPageBody.conflicts[0]!.id);
+  expect([conflictId, secondConflictId]).toContain(lastPageBody.conflicts[0]!.id);
+  expect(lastPageBody.next_cursor).toBeNull();
+
+  await db.pool.query("UPDATE conflicts SET status = 'RESOLVED' WHERE id = $1", [secondConflictId]);
+  const resolved = await listConflicts(f, f.owner, {
+    status: ["RESOLVED", "ABANDONED"],
+    submitter_id: f.reviewer.participant_id,
+  });
+  expect(resolved.response).toMatchObject({ conflicts: [{ id: secondConflictId }] });
+});
+
+it("conflicts.list and conflicts.get do not cross room boundaries", async () => {
+  const { f: roomA, conflictId } = await conflictReadFixture();
+  const roomB = await fixture();
+  await expect(getConflict(roomB, roomB.owner, conflictId)).rejects.toMatchObject({
+    code: "NOT_FOUND",
+  });
+  await expect(listConflicts(roomB, roomB.owner)).resolves.toMatchObject({
+    response: { conflicts: [], next_cursor: null },
+  });
+  expect(roomA.room).not.toBe(roomB.room);
+});
+
+it("conflicts.list rejects garbage and malformed base64 cursors", async () => {
+  const f = await fixture();
+  for (const cursor of ["garbage", Buffer.from("no pipe").toString("base64url")]) {
+    await expect(listConflicts(f, f.owner, { cursor })).rejects.toMatchObject({
+      code: "VALIDATION",
+      details: { reason: "invalid_cursor" },
+    });
+  }
 });
