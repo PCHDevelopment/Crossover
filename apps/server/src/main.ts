@@ -23,7 +23,7 @@ async function main(): Promise<void> {
   const server = await composeServer(config);
   if (config.gitInternalTokenSecret) {
     const address = await server.gitApp.listen({
-      host: config.gitInternalHost ?? "0.0.0.0",
+      host: config.gitInternalHost!,
       port: config.gitInternalPort ?? 8081,
     });
     console.warn(`Internal Git listener bound on ${address}; do not publish this port`);

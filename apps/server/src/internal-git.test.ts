@@ -112,6 +112,7 @@ beforeAll(async () => {
       room_id: roomId,
       participant_id: participantId,
       sandbox_id: sandboxId,
+      revision: 1,
       expires_at: Date.now() + 120_000,
     },
     TOKEN_SECRET,
@@ -171,6 +172,39 @@ describe("internal Git workspace reads", () => {
     });
   });
 
+  it.each([
+    { protocol: "0", description: "canonical commit", object: () => canonicalCommit },
+    { protocol: "0", description: "out-of-scope blob", object: () => secretBlob },
+    { protocol: "2", description: "canonical commit", object: () => canonicalCommit },
+    { protocol: "2", description: "out-of-scope blob", object: () => secretBlob },
+  ])(
+    "does not serve a $description by object ID over protocol v$protocol",
+    async ({ protocol, object }) => {
+      const target = join(root, `want-${protocol}-${object()}`);
+      await mkdir(target, { recursive: true });
+      await git(["init", "--quiet"], { cwd: target, timeoutMs: 10_000 });
+      const remote = `${new URL(remoteBase).origin}/git/${roomId}/${sandboxId}/1`;
+
+      await expect(
+        git(["-c", `protocol.version=${protocol}`, "fetch", "--depth=1", remote, object()], {
+          cwd: target,
+          timeoutMs: 20_000,
+          env: {
+            GIT_CONFIG_COUNT: "1",
+            GIT_CONFIG_KEY_0: "http.extraHeader",
+            GIT_CONFIG_VALUE_0: `Authorization: Bearer ${token}`,
+            GIT_CONFIG_GLOBAL: "/dev/null",
+            GIT_CONFIG_NOSYSTEM: "1",
+            GIT_TERMINAL_PROMPT: "0",
+          },
+        }),
+      ).rejects.toThrow();
+      await expect(
+        git(["cat-file", "-e", object()], { cwd: target, timeoutMs: 10_000 }),
+      ).rejects.toThrow();
+    },
+  );
+
   it("gives an unscoped reader the real canonical commit with shallow history", async () => {
     const unscopedGit = buildInternalGitServer({
       pool: db.pool,
@@ -210,6 +244,7 @@ describe("internal Git workspace reads", () => {
         room_id: newId("room"),
         participant_id: participantId,
         sandbox_id: sandboxId,
+        revision: 1,
         expires_at: Date.now() + 120_000,
       },
       TOKEN_SECRET,
@@ -218,6 +253,15 @@ describe("internal Git workspace reads", () => {
       method: "GET",
       url: `/git/${roomId}/${sandboxId}/1/info/refs?service=git-upload-pack`,
       headers: { authorization: `Bearer ${otherRoomToken}` },
+    });
+    expect(response.statusCode).toBe(401);
+  });
+
+  it("rejects a token when the URL requests a different workspace revision", async () => {
+    const response = await internalGit.inject({
+      method: "GET",
+      url: `/git/${roomId}/${sandboxId}/2/info/refs?service=git-upload-pack`,
+      headers: { authorization: `Bearer ${token}` },
     });
     expect(response.statusCode).toBe(401);
   });

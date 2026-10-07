@@ -129,7 +129,8 @@ async function prepareSnapshot(
   if (
     !claims ||
     claims.room_id !== request.params.roomId ||
-    claims.sandbox_id !== request.params.sandboxId
+    claims.sandbox_id !== request.params.sandboxId ||
+    claims.revision !== revision
   ) {
     throw new CrossoverError("UNAUTHENTICATED", "Invalid sandbox read token");
   }
@@ -276,9 +277,9 @@ function streamUploadPack(
 }
 
 function alternateEnvironment(snapshot: ScopedSnapshotRepository): NodeJS.ProcessEnv {
-  return {
-    GIT_ALTERNATE_OBJECT_DIRECTORIES: join(snapshot.reference_repository, "objects"),
-  };
+  return snapshot.reference_repository
+    ? { GIT_ALTERNATE_OBJECT_DIRECTORIES: join(snapshot.reference_repository, "objects") }
+    : {};
 }
 
 function gitProcessEnvironment(extra: NodeJS.ProcessEnv): NodeJS.ProcessEnv {

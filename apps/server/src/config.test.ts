@@ -87,21 +87,20 @@ describe("sandbox disk enforcement configuration", () => {
 describe("internal Git listener configuration", () => {
   it("uses a private default address and port and accepts the paired fetcher settings", () => {
     expect(loadConfig(env)).toMatchObject({
-      gitInternalHost: "0.0.0.0",
       gitInternalPort: 8081,
       gitFetcherImage: "crossover-git-fetcher:latest",
     });
     expect(
       loadConfig({
         ...env,
-        GIT_INTERNAL_HOST: "0.0.0.0",
+        GIT_INTERNAL_HOST: "172.30.0.2",
         GIT_INTERNAL_PORT: "8082",
         GIT_INTERNAL_CONTAINER: "crossover-server",
         GIT_INTERNAL_TOKEN_SECRET: "0123456789abcdef0123456789abcdef",
         GIT_FETCHER_IMAGE: "crossover-git-fetcher:test",
       }),
     ).toMatchObject({
-      gitInternalHost: "0.0.0.0",
+      gitInternalHost: "172.30.0.2",
       gitInternalPort: 8082,
       gitInternalContainer: "crossover-server",
       gitInternalTokenSecret: "0123456789abcdef0123456789abcdef",
@@ -119,5 +118,20 @@ describe("internal Git listener configuration", () => {
         GIT_INTERNAL_TOKEN_SECRET: "0123456789abcdef0123456789abcdef",
       }),
     ).toThrow(/GIT_INTERNAL_TOKEN_SECRET requires GIT_INTERNAL_CONTAINER/);
+    expect(() =>
+      loadConfig({
+        ...env,
+        GIT_INTERNAL_CONTAINER: "crossover-server",
+        GIT_INTERNAL_TOKEN_SECRET: "0123456789abcdef0123456789abcdef",
+      }),
+    ).toThrow(/GIT_INTERNAL_HOST is required/);
+    expect(() =>
+      loadConfig({
+        ...env,
+        GIT_INTERNAL_HOST: "0.0.0.0",
+        GIT_INTERNAL_CONTAINER: "crossover-server",
+        GIT_INTERNAL_TOKEN_SECRET: "0123456789abcdef0123456789abcdef",
+      }),
+    ).toThrow(/specific private-network address/);
   });
 });

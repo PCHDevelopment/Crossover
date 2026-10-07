@@ -37,7 +37,7 @@ const envSchema = z.object({
     .optional(),
   SANDBOX_EGRESS_PROXY_PORT: z.coerce.number().int().min(1).max(65_535).optional(),
   SANDBOX_EGRESS_PROXY_SECRET: z.string().min(32).optional(),
-  GIT_INTERNAL_HOST: z.string().trim().min(1).default("0.0.0.0"),
+  GIT_INTERNAL_HOST: z.string().trim().min(1).optional(),
   GIT_INTERNAL_PORT: z.coerce.number().int().min(1).max(65_535).default(8081),
   GIT_INTERNAL_CONTAINER: z
     .string()
@@ -118,6 +118,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     throw new Error(
       "Invalid server configuration:\n  GIT_INTERNAL_TOKEN_SECRET requires GIT_INTERNAL_CONTAINER",
     );
+  if (e.GIT_INTERNAL_TOKEN_SECRET && !e.GIT_INTERNAL_HOST)
+    throw new Error(
+      "Invalid server configuration:\n  GIT_INTERNAL_HOST is required when the internal Git listener is enabled",
+    );
+  if (e.GIT_INTERNAL_HOST === "0.0.0.0" || e.GIT_INTERNAL_HOST === "::")
+    throw new Error(
+      "Invalid server configuration:\n  GIT_INTERNAL_HOST must be a specific private-network address, not a wildcard",
+    );
   if (
     sandboxDiskEnforcement === "hard" &&
     (!e.SANDBOX_VOLUME_DRIVER || Object.keys(sandboxVolumeOptions).length === 0)
@@ -148,7 +156,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     ...(e.SANDBOX_EGRESS_PROXY_SECRET
       ? { sandboxEgressProxySecret: e.SANDBOX_EGRESS_PROXY_SECRET }
       : {}),
-    gitInternalHost: e.GIT_INTERNAL_HOST,
+    ...(e.GIT_INTERNAL_HOST ? { gitInternalHost: e.GIT_INTERNAL_HOST } : {}),
     gitInternalPort: e.GIT_INTERNAL_PORT,
     ...(e.GIT_INTERNAL_CONTAINER ? { gitInternalContainer: e.GIT_INTERNAL_CONTAINER } : {}),
     ...(e.GIT_INTERNAL_TOKEN_SECRET ? { gitInternalTokenSecret: e.GIT_INTERNAL_TOKEN_SECRET } : {}),
