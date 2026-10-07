@@ -15,12 +15,27 @@ export const checkpointsExportParams = z.strictObject({
   mode: z.enum(["squashed", "per_changeset"]).default("squashed"),
   /** Default `room/<room-slug>`. Only `room/*` branches are ever pushed to. */
   branch: z.string().min(1).max(200).optional(),
+  /**
+   * Also open a pull request from the branch into the upstream's own branch. Needs the
+   * `github.create_pull_request` capability (Tier 2) for the repository.
+   */
+  pull_request: z
+    .strictObject({
+      title: z.string().trim().min(1).max(200).optional(),
+      body: z.string().max(4000).optional(),
+    })
+    .optional(),
 });
 
 interface Contributor {
   id: string;
   kind: string;
   display_name: string;
+}
+
+/** `owner/repo` of a repository URL, the scope of `github.create_pull_request`. */
+function repoOf(url: string): string {
+  return new URL(url).pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
 }
 
 /** A line a Git trailer parser would take for a trailer (`Token: value`). */
@@ -88,6 +103,7 @@ export function registerCheckpointExport(dispatcher: Dispatcher, deps: UpstreamD
   const pusher = deps.pusher ?? new HttpsGitPusher(deps.resolve ? { resolve: deps.resolve } : {});
   const credentials = deps.credentials ?? noCredentials;
   const domain = deps.platformDomain ?? DEFAULT_PLATFORM_DOMAIN;
+  const pullRequests = deps.pullRequests;
   dispatcher.registerCommand({
     method: "checkpoints.export",
     mutating: true,
@@ -111,12 +127,20 @@ export function registerCheckpointExport(dispatcher: Dispatcher, deps: UpstreamD
       );
       const ws = workspaces[0];
       if (!ws) throw new CrossoverError("NOT_FOUND", "Workspace not provisioned");
-      const { rows: ups } = await client.query<{ url: string; last_synced_sha: string }>(
-        "SELECT url, last_synced_sha FROM upstreams WHERE room_id = $1",
-        [room_id],
-      );
+      const { rows: ups } = await client.query<{
+        url: string;
+        branch: string;
+        last_synced_sha: string;
+      }>("SELECT url, branch, last_synced_sha FROM upstreams WHERE room_id = $1", [room_id]);
       const upstream = ups[0];
       if (!upstream) throw refuse("no_upstream", "This room has no upstream repository to push to");
+      if (p.pull_request) {
+        // Before anything is pushed: no capability, nothing happens.
+        if (!pullRequests) {
+          throw refuse("no_pull_request_provider", "No pull request provider is configured");
+        }
+        await ctx.authorize(`github.create_pull_request:${repoOf(upstream.url)}`);
+      }
 
       const { rows: checkpoints } = await client.query<{
         id: string;
@@ -288,6 +312,29 @@ export function registerCheckpointExport(dispatcher: Dispatcher, deps: UpstreamD
       const credential = await credentials.credentialFor(url, "write");
       await pusher.push({ url: url.href, branch, credential, repo: ws.repo_path, commit: parent });
 
+      let pullRequest: { url: string; number: number } | undefined;
+      if (p.pull_request && pullRequests) {
+        try {
+          pullRequest = await pullRequests.create({
+            url: url.href,
+            head: branch,
+            base: upstream.branch,
+            title: p.pull_request.title ?? target.message,
+            body:
+              p.pull_request.body ??
+              `Exported from room ${roomRows[0]?.slug ?? room_id}:\n\n${pendingCheckpoints
+                .map((c) => `- ${c.message}`)
+                .join("\n")}`,
+            credential,
+          });
+        } catch (error) {
+          // The branch is pushed and the commits are deterministic: exporting again retries this.
+          if (error instanceof CrossoverError) throw error;
+          throw refuse("pull_request_failed", "The pull request couldn't be opened", {
+            message: (error instanceof Error ? error.message : String(error)).slice(0, 300),
+          });
+        }
+      }
       const payload = {
         checkpoint_id: target.id,
         checkpoint_ids: pendingCheckpoints.map((c) => c.id),
@@ -298,6 +345,7 @@ export function registerCheckpointExport(dispatcher: Dispatcher, deps: UpstreamD
         commit_count: made.length,
         commits: made.slice(-MAX_LISTED_COMMITS),
         exported_by: ctx.principal.participant_id,
+        ...(pullRequest ? { pull_request: pullRequest } : {}),
       };
       return {
         response: { ...payload, url: url.href },

@@ -15,6 +15,7 @@ import {
   validBranch,
   type GitCredentialProvider,
   type UpstreamFetcher,
+  type PullRequestProvider,
   type UpstreamPusher,
 } from "./upstream.js";
 
@@ -34,6 +35,8 @@ export interface UpstreamDeps {
   fetcher?: UpstreamFetcher;
   /** How `checkpoints.export` pushes (tests push to a local repository). */
   pusher?: UpstreamPusher;
+  /** How `checkpoints.export` opens a pull request; without one, asking for a pull request is refused. */
+  pullRequests?: PullRequestProvider;
   /** The domain of the e-mail addresses given to participants in exported commits. Default `crossover.local`. */
   platformDomain?: string;
   credentials?: GitCredentialProvider;
