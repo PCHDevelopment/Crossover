@@ -971,6 +971,7 @@ Idempotency keys are stored for 24 hours per participant. A duplicate returns th
 | `PARTICIPANT_PAUSED` / `ROOM_PAUSED` | Participant or room frozen |
 | `RATE_LIMITED` / `BUDGET_EXCEEDED` | Throttled (§22.3); details carry retry-after |
 | `CIRCUIT_BREAKER` | ChangeSet held for review (§22.4) |
+| `PROVIDER_UNAVAILABLE` | A plugin's provider is down or timed out (§21.4); retryable unless the runner says not; the platform never retries a tool itself |
 
 ## 16.4 Versioning
 

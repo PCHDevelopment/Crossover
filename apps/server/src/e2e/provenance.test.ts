@@ -301,6 +301,8 @@ describe("provenance labels (§16.5)", () => {
       "presence.list_intents": "paths announced by participants; no free text",
       "capabilities.list": "platform permission records",
       "tasks.heartbeat": "the caller's own lease",
+      "tools.list":
+        "tool descriptions the platform registered, filtered to what the caller may use",
     };
     const reads = server.dispatcher
       .commandInfo()

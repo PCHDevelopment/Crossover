@@ -54,8 +54,14 @@ export interface CommandContext {
   /**
    * Run the policy check again for a finer-grained resource (e.g. each path of a ChangeSet).
    * Same principal, same transaction; `room_id` is filled in. Throws `FORBIDDEN` to deny.
+   * With `anyScope`, holding a grant of the capability for *some* scope is enough (to list what
+   * someone may use at all, say); the specific scope is checked on use.
    */
-  authorize(action: string, resource?: Record<string, unknown>): Promise<void>;
+  authorize(
+    action: string,
+    resource?: Record<string, unknown>,
+    options?: { anyScope?: boolean },
+  ): Promise<void>;
   /**
    * Like {@link authorize}, but asks whether *another participant of this room* could do
    * `action` (say, whether someone offered the lead can accept it). It goes through the same
@@ -214,6 +220,16 @@ export interface PrepareContext {
   room_id: string;
   command_id: string;
   idempotency_key: string;
+  /**
+   * Whether the principal may do `action` on `resource` right now, for a check `prepare` needs
+   * before something slow or external. A refusal is just `false`: nothing is recorded, and
+   * `execute` runs the real check in the transaction. `anyScope` as in `CommandContext.authorize`.
+   */
+  isAllowed(
+    action: string,
+    resource?: Record<string, unknown>,
+    options?: { anyScope?: boolean },
+  ): Promise<boolean>;
 }
 
 /** How a read command applies the participant view (§34.5). */
@@ -1047,7 +1063,8 @@ export class Dispatcher {
       room_id,
       command_id: outer.command_id,
       idempotency_key: approval.idempotency_key,
-      authorize: (a, resource) => check(requester, a, resource ?? {}),
+      authorize: (a, resource, options) =>
+        check(requester, a, resource ?? {}, options?.anyScope ? { perPath: true } : {}),
       authorizeAs: async (participantId, a, resource) =>
         check(await this.principalOf(client, room_id, participantId), a, resource ?? {}).catch(
           (error: unknown) => this.onBehalfOf(error, participantId),
@@ -1248,12 +1265,17 @@ export class Dispatcher {
         room_id,
         command_id: envelope.id,
         idempotency_key: envelope.idempotency_key,
-        authorize: (a, resource) =>
+        authorize: (a, resource, options) =>
           this.authorize(
             principal,
             a,
             { ...resource, room_id },
-            { method: envelope.method, params, client },
+            {
+              method: envelope.method,
+              params,
+              client,
+              ...(options?.anyScope ? { perPath: true } : {}),
+            },
           ),
         authorizeAs: async (participantId, a, resource) =>
           this.authorize(
@@ -1317,6 +1339,8 @@ export class Dispatcher {
             room_id: principal.room_id,
             command_id: envelope.id,
             idempotency_key: key,
+            isAllowed: (a, resource, options) =>
+              this.isAllowed(principal, envelope.method, params, a, resource, options?.anyScope),
           },
           params,
         );
@@ -1326,6 +1350,36 @@ export class Dispatcher {
       if (ran && prepared !== undefined && def.disposePrepared) {
         await def.disposePrepared(prepared).catch(() => undefined);
       }
+    }
+  }
+
+  /** Whether `principal` may do `action` now, without recording a denial; a failure that isn't a refusal is thrown. */
+  private async isAllowed(
+    principal: Principal,
+    method: string,
+    params: unknown,
+    action: string,
+    resource: Record<string, unknown> = {},
+    anyScope = false,
+  ): Promise<boolean> {
+    const client = await this.pool.connect();
+    try {
+      await this.authorizer(
+        principal,
+        action,
+        { ...resource, room_id: principal.room_id },
+        { method, params, client, ...(anyScope ? { perPath: true } : {}) },
+      );
+      return true;
+    } catch (error) {
+      if (error instanceof CrossoverError) return false;
+      throw new CrossoverError("STALE_FENCE", "Couldn't check the request just now; retry it", {
+        retryable: true,
+        details: { reason: "prepare_unavailable" },
+        cause: error,
+      });
+    } finally {
+      client.release();
     }
   }
 
@@ -1423,12 +1477,17 @@ export class Dispatcher {
                 command_id: envelope.id,
                 idempotency_key: key,
                 ...(prepared === undefined ? {} : { prepared }),
-                authorize: (a, resource) =>
+                authorize: (a, resource, options) =>
                   this.authorize(
                     principal,
                     a,
                     { ...resource, room_id },
-                    { method: envelope.method, params, client },
+                    {
+                      method: envelope.method,
+                      params,
+                      client,
+                      ...(options?.anyScope ? { perPath: true } : {}),
+                    },
                   ),
                 authorizeAs: async (participantId, a, resource) =>
                   this.authorize(
