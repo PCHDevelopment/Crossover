@@ -1368,6 +1368,8 @@ Git is a compatibility and export layer. It is not the realtime synchronization 
 
 Upstream changes are just another concurrent writer, so no special merge path is needed.
 
+**Fetching doesn't hold the room (T807).** The network fetch of `git.import` and `git.pull_upstream` is the command's `prepare` phase: it runs before the command's transaction, off the room's actor and with no locks, so other commands for the room carry on while a slow upstream answers (a command's `prepare` is skipped for someone who may not run it and for a replay). `execute` then locks the room and re-checks what `prepare` assumed: the upstream's URL, branch and last synced commit, and that no upstream conflict has opened (for an import, that the room is still empty). If it moved, the command is `CONFLICT_VERSION` and the user pulls again. A pull of more than 500 changed files (or about 20 MiB) is applied as ordered ChangeSets (`part i/n`), each based on the last synced revision; the first to conflict stops the pull there, and `last_synced_*` advance only when the whole pull has applied (resolving the conflict in the last part does that; after an earlier part's, pull again: what is already in, and what was resolved, is skipped).
+
 ## 24.3 Checkpoints and export
 
 - `checkpoints.create { message }` (lead or owner) marks a workspace revision. Requires health GREEN (owner may override).
