@@ -80,4 +80,5 @@ pnpm install
 docker compose up -d   # PostgreSQL 16 + Redis 7
 cp .env.example .env
 pnpm check             # format, lint, typecheck, test
+pnpm build && DEV_LOGIN=true pnpm --filter @crossover/server start   # migrate and serve on :8080
 ```

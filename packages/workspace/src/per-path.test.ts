@@ -216,6 +216,33 @@ it("enforces the conflict submitter's real path grant on resolution ChangeSets",
   expect(await f.revision()).toBe(2);
 });
 
+it("lets a reviewer abandon their own conflict through the conflict capability", async () => {
+  const f = await fixture();
+  await f.apply(f.owner, [{ type: "create", path: "docs/file.txt", content: "base\n" }], 0);
+  await f.apply(f.owner, [{ type: "modify", path: "docs/file.txt", content: "head\n" }], 1);
+  const conflictResult = await f.apply(
+    f.reviewer,
+    [{ type: "modify", path: "docs/file.txt", content: "candidate\n" }],
+    1,
+  );
+  const { conflict_id: conflictId, changeset_id: originalId } = conflictResult.response as {
+    conflict_id: string;
+    changeset_id: string;
+  };
+  const result = await f.dispatcher.dispatch(f.reviewer, {
+    id: newId("cmd"),
+    idempotency_key: newId("cmd"),
+    method: "conflicts.abandon",
+    params: { conflict_id: conflictId },
+  });
+  expect(result.response).toEqual({
+    conflict_id: conflictId,
+    changeset_id: originalId,
+    status: "ABANDONED",
+  });
+  expect(result.events.map((event) => event.type)).toEqual(["workspace.conflict.abandoned"]);
+});
+
 it("declares per-path authorization on the commands that authorize every path, and only those", async () => {
   const f = await fixture();
   await f.apply(f.owner, [{ type: "create", path: "a.txt", content: "x" }], 0);

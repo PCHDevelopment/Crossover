@@ -1,6 +1,6 @@
 # Backlog — Phase 1 core
 
-Tasks for the Phase 1 backend core: ledger, governance, tasks, collaboration state, workspace engine, conflicts, health, gateway and MCP. Sandboxes (§14), plugins (§21.4), the web UI (§27), the Go CLI and SDKs are later milestones; they'll be broken down the same way once this core is in.
+Tasks for the Phase 1 backend core: ledger, governance, tasks, collaboration state, workspace engine, conflicts, health, gateway and MCP. Sandboxes (§14) are M10 and the clients (SDKs, CLI, web app; §27, §29) are M11. The plugin runner (§21.4) will be broken down at Review 4.
 
 Conventions are in `docs/ENGINEERING.md`. Section references (§) point to `docs/ARCHITECTURE.md`.
 
@@ -10,18 +10,20 @@ Conventions are in `docs/ENGINEERING.md`. Section references (§) point to `docs
 
 ## Ownership at a glance
 
-| Milestone                             | Tasks     | Owner                                           |
-| ------------------------------------- | --------- | ----------------------------------------------- |
-| M0 Foundation                         | T000      | O1                                              |
-| M1 Persistence, ledger, commands      | T101–T118 | S1                                              |
-| M2 Rooms, participants, auth, policy  | T201–T215 | S1                                              |
-| M3 Tasks                              | T301–T312 | S1                                              |
-| M4 Messages, inbox, decisions, memory | T401–T412 | S1 (T401–T403, T410), S2 (T404–T409, T411–T412) |
-| M5 Workspace engine                   | T501–T520 | S2                                              |
-| M6 Conflicts and health               | T601–T610 | S2                                              |
-| M7 Gateway, MCP, end-to-end           | T701–T713 | S1 (T701–T706, T713), S2 (T707–T711), O1 (T712) |
-| M8 Git interoperability (§24)         | T801–T806 | S2                                              |
-| M9 Safety controls (§22–23)           | T901–T906 | S1 (T902, T904–T906), S2 (T901, T903)           |
+| Milestone                             | Tasks       | Owner                                                   |
+| ------------------------------------- | ----------- | ------------------------------------------------------- |
+| M0 Foundation                         | T000        | O1                                                      |
+| M1 Persistence, ledger, commands      | T101–T118   | S1                                                      |
+| M2 Rooms, participants, auth, policy  | T201–T215   | S1                                                      |
+| M3 Tasks                              | T301–T312   | S1                                                      |
+| M4 Messages, inbox, decisions, memory | T401–T412   | S1 (moved from S2 for T404–T409, T411–T412 in Review 3) |
+| M5 Workspace engine                   | T501–T520   | S2                                                      |
+| M6 Conflicts and health               | T601–T610   | S2                                                      |
+| M7 Gateway, MCP, end-to-end           | T701–T713   | S1 (T701–T709, T713), S2 (T710–T711), O1 (T712)         |
+| M8 Git interoperability (§24)         | T801–T806   | S2                                                      |
+| M9 Safety controls (§22–23)           | T901–T906   | S1 (T902, T904–T906), S2 (T901, T903)                   |
+| M10 Execution sandboxes (§14)         | T1001–T1008 | S2                                                      |
+| M11 Clients (§27, §29)                | T1101–T1105 | S1                                                      |
 
 **Start here:** S1 → T101, T105, T114 (independent). S2 → T501, T505 (only need the scaffold).
 
@@ -481,7 +483,7 @@ Deliver inbox items for: mentions, task assignment, review requested (on submit,
 
 - Each producer has a test asserting the exact recipient.
 
-### T404 · Decisions: propose and positions — S2
+### T404 · Decisions: propose and positions — S1
 
 Deps: T208 · Migration: `0012_decisions`
 
@@ -489,7 +491,7 @@ Per §7.1–7.2: `decisions.propose { title, context, options[≥2], decide_by? 
 
 - Position on a non-PROPOSED decision → `VALIDATION`.
 
-### T405 · Decisions: decide and withdraw — S2
+### T405 · Decisions: decide and withdraw — S1
 
 Deps: T404 · Migration: —
 
@@ -497,7 +499,7 @@ Deps: T404 · Migration: —
 
 - Non-lead decide → `FORBIDDEN`.
 
-### T406 · Decisions: veto and supersede — S2
+### T406 · Decisions: veto and supersede — S1
 
 Deps: T405 · Migration: —
 
@@ -505,7 +507,7 @@ Deps: T405 · Migration: —
 
 - Veto after 24 h → `VALIDATION`; agent veto → `FORBIDDEN`.
 
-### T407 · Decision → memory mirror — S2
+### T407 · Decision → memory mirror — S1
 
 Deps: T405, T408 · Migration: —
 
@@ -513,7 +515,7 @@ On ACCEPTED, write memory `decisions/<id>` (system actor) in the same transactio
 
 - Participants can't write under `decisions/*`.
 
-### T408 · Memory: put with compare-and-set — S2
+### T408 · Memory: put with compare-and-set — S1
 
 Deps: T208 · Migration: `0013_memory`
 
@@ -521,7 +523,7 @@ Tables `memory_entries` and `memory_revisions` (§18.1). `memory.put { key, valu
 
 - Concurrent puts with the same expected revision → exactly one wins (racing test).
 
-### T409 · Memory: read, history, delete, namespaces — S2
+### T409 · Memory: read, history, delete, namespaces — S1
 
 Deps: T408 · Migration: —
 
@@ -538,7 +540,7 @@ Deterministic summary since a sequence (§17.3) from the ledger alone: counts pe
 
 - Same ledger range → byte-identical output.
 
-### T411 · Loop protection — S2
+### T411 · Loop protection — S1
 
 Deps: T401 · Migration: —
 
@@ -546,7 +548,7 @@ Per §17.6: > 20 consecutive agent messages with no non-message mutation in betw
 
 - Counter reset by a task update is tested.
 
-### T412 · Provenance labels — S2
+### T412 · Provenance labels — S1
 
 Deps: T401, T409 · Migration: —
 
@@ -854,7 +856,7 @@ POST to the manifest's `wake_webhook_url` on new inbox items, HMAC-SHA256 signed
 
 - Signature verifiable with a documented algorithm; rate limit tested with a fake clock.
 
-### T707 · MCP server skeleton — S2
+### T707 · MCP server skeleton — S1
 
 Deps: T701 · Migration: —
 
@@ -862,13 +864,13 @@ Create `packages/mcp` with `@modelcontextprotocol/sdk`, Streamable HTTP transpor
 
 - `tools/list` works for an authenticated agent; unauthenticated → 401.
 
-### T708 · MCP task tools — S2
+### T708 · MCP task tools — S1
 
 Deps: T707, T312 · Migration: —
 
 Tools wrapping every `tasks.*` command, with JSON schemas derived from the zod schemas (no hand-copied schemas).
 
-### T709 · MCP collaboration tools — S2
+### T709 · MCP collaboration tools — S1
 
 Deps: T707, T403, T409, T406 · Migration: —
 
@@ -1017,4 +1019,115 @@ Deps: T208 · Migration: —
 
 ---
 
-**Not yet broken down** (next planning pass): sandboxes and execution (§14, needed for real health checks and agent coding tools), the plugin runner (§21.4), the web UI (§27), the Go CLI and the TypeScript/Python SDKs.
+## M10 Execution sandboxes (§14) — S2
+
+Added in Review 3. The first driver is local Docker with the gVisor runtime when available. The `ExecutionDriver` interface keeps dedicated sandbox hosts a later swap. Log storage sits behind an interface (local disk first, S3 later).
+
+### T1001 · Execution service and sandbox lifecycle — S2
+
+Deps: T512, T207 · Migration: `0022_sandboxes`
+
+`ExecutionDriver` interface plus a Docker driver. One sandbox per participant, created lazily on first `sandbox.*` call. Limits from §14.6: CPU, memory and disk; hibernate after 30 min idle (container stopped, volume kept; background processes killed); volume removed when the participant leaves or the room is archived. A `sandboxes` row tracks status, `base_revision` and the volume ref.
+
+- Lazy creation, hibernate and resume, and cleanup on leave and archive are each tested with a fake driver. One Docker-backed smoke test is skipped when Docker is unavailable.
+- Two participants never share a sandbox, and one can't address the other's.
+
+### T1002 · Materialize the canonical workspace — S2
+
+Deps: T1001, T514 · Migration: —
+
+Internal read-only Git endpoint on the workspace node, authenticated with a sandbox-scoped read token (room, participant, expiry; never valid on the public API). The sandbox fetches the canonical head into an ordinary clone, and `base_revision` is set. Per-room reference repository so new sandboxes fetch only missing objects (§14.3).
+
+- The token can't read another room or call any command. Paths outside the participant's read scope are not materialized (T521 rules).
+
+### T1003 · Working-copy status — S2
+
+Deps: T1002 · Migration: —
+
+`sandbox.status` → `{ base_revision, head_revision, behind_by, modified, added, deleted }`, computed with `git status` inside the sandbox. Ignored and generated files are never reported or submitted.
+
+- Fixtures for modified, new, deleted, ignored and renamed files.
+
+### T1004 · Staying current: behind, auto-sync, `sandbox.sync` — S2
+
+Deps: T1003 · Migration: —
+
+When canonical advances, the owner gets `sandbox.behind { behind_by, changed_paths, overlaps_local_changes, intents }`, filtered to paths the owner may read. Auto-sync (fast-forward plus `sandbox.synced`) runs only when no process is running and no changed path overlaps a local modification. Human sandboxes always follow head. `sandbox.sync` stashes local changes as a temporary commit, fetches and rebases. Clean → `{ synced_to }`; conflicts leave markers and return the conflicted paths (§14.4).
+
+- Never changes files under a running process. Each overlap case and the conflict-marker case are tested.
+
+### T1005 · `changes.submit` — S2
+
+Deps: T1003 · Migration: —
+
+`changes.submit { paths?, message, task_id? }` diffs `base_revision` against the working tree (tracked plus new non-ignored files, optional path filter), packages a ChangeSet with `source = SANDBOX`, and runs the apply pipeline (§10). APPLIED → the base fast-forwards. CONFLICT → the Conflict is returned (§14.5).
+
+- Same per-path authorization as `workspace.apply_changeset` (a scoped agent can't submit outside scope). Binary and symlink files round-trip.
+
+### T1006 · `sandbox.exec` and output — S2
+
+Deps: T1001, T703 · Migration: —
+
+`sandbox.exec { command, cwd?, timeout_s? }`: 10 min default timeout (owner may raise it to 60); background processes allowed. stdout and stderr stream on a dedicated `sandbox.output` WebSocket channel, never the ledger. Output is stored as chunked log objects behind a `LogStore` interface (30-day retention). The ledger records only `sandbox.exec.started` and `sandbox.exec.finished { exit_code, duration_ms, log_ref }` (§14.8).
+
+- Timeout kills the process tree. Output is visible only to the sandbox owner, lead, owner and admins. The ledger events carry no output.
+
+### T1007 · Isolation and egress — S2
+
+Deps: T1001 · Migration: —
+
+gVisor (`runsc`) runtime when configured. Default-deny network egress except through an allowlist proxy: package registries, GitHub read-only, and per-room owner additions. Cloud metadata endpoints (IMDS) are blocked. No platform or plugin credentials in the sandbox environment or filesystem (§14.7, §21.4).
+
+- Tests: a non-allowlisted host and IMDS are refused; an allowlisted registry works; the sandbox environment contains no platform secrets.
+
+### T1008 · MCP coding tools — S2
+
+Deps: T1004, T1005, T1006, T707 · Migration: —
+
+`sandbox.status`, `sandbox.sync`, `sandbox.exec`, `changes.submit` and file read/write inside the working copy, as MCP tools with the same authorization as their commands.
+
+- An agent can go through status → edit → exec tests → submit → handle a conflict via `sandbox.sync`, end to end through MCP.
+
+---
+
+## M11 Clients (§27, §29) — S1
+
+Added in Review 3. Every client goes through the public REST and WebSocket API only.
+
+### T1101 · TypeScript SDK — S1
+
+Deps: T702, T703 · Migration: —
+
+`@crossover/sdk`: typed command calls generated from the protocol catalog, REST and WebSocket transports, `subscribe({ after })` with automatic reconnect from the last seen sequence (handles `resync_required`), and idempotency keys.
+
+- Contract tests against a real `apps/server`. A reconnect after a dropped socket loses no event and duplicates none.
+
+### T1102 · CLI (`room`, Go) — S1
+
+Deps: T702, T703 · Migration: —
+
+A single static Go binary per D12 and §15.4: login and join, tasks, events tail with reconnect from the last sequence, workspace read and apply. It talks to the public REST and WebSocket API directly, against T1101's contract test fixtures.
+
+- Golden-output tests for each command; exit codes follow the §16.3 error categories. Cross-compiled release builds for linux, darwin and windows in CI.
+
+### T1103 · Python SDK — S1
+
+Deps: T1101 · Migration: —
+
+The same surface as T1101, typed from the same catalog.
+
+- Shares T1101's contract test fixtures.
+
+### T1104 · Web app shell — S1
+
+Deps: T1101, T216, T217 · Migration: —
+
+Login, room list and create, room view with participants, tasks board, Activity feed (live via WebSocket, including `capability.denied` as redacted for the viewer), pause/resume controls.
+
+- Covers §30 steps 1, 3–4, 6, 14 and 15 in a browser test.
+
+### T1105 · Workspace editor, drafts and merge view — S1
+
+Deps: T1104, T606 · Migration: —
+
+Editor with live intents, draft flush, live cursors and merge view (§27; demo steps 7, 9 and 10). To be broken down into smaller tasks once T1104 lands.
