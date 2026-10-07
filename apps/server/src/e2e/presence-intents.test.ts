@@ -26,6 +26,8 @@ beforeAll(async () => {
     nodeId: `presence-e2e-${process.pid}`,
     devLogin: true,
     healthImages: ["node:22-bookworm-slim"],
+    sandboxDiskEnforcement: "soft",
+    sandboxVolumeOptions: {},
   };
   const publisher: EventPublisher = { publish: async (_room, _events) => undefined };
   server = await composeServer(config, { pool: db.pool, publisher });
