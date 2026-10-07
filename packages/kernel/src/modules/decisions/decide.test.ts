@@ -121,7 +121,8 @@ describe("decisions.decide", () => {
       positions: [{ participant_id: s.dev2.participant_id, option_id: "opt_2" }],
     });
     expect((out.response as DecisionView).decided_at).toEqual(expect.any(String));
-    expect(out.events.map((e) => e.type)).toEqual(["decision.decided"]);
+    // An accepted decision is also mirrored into memory (T407), as the system.
+    expect(out.events.map((e) => e.type)).toEqual(["decision.decided", "memory.updated"]);
     expect(out.events[0]!.payload).toMatchObject({
       decision_id: d.id,
       status: "ACCEPTED",

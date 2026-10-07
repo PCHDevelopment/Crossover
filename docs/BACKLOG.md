@@ -1,6 +1,6 @@
 # Backlog — Phase 1 core
 
-Tasks for the Phase 1 backend core: ledger, governance, tasks, collaboration state, workspace engine, conflicts, health, gateway and MCP. Sandboxes (§14) are M10 and the clients (SDKs, CLI, web app; §27, §29) are M11. The plugin runner (§21.4) will be broken down at Review 4.
+Tasks for the Phase 1 backend core: ledger, governance, tasks, collaboration state, workspace engine, conflicts, health, gateway and MCP. Sandboxes (§14) are M10 and the clients (SDKs, CLI, web app; §27, §29) are M11. The plugin runner (§21.4) is M12.
 
 Conventions are in `docs/ENGINEERING.md`. Section references (§) point to `docs/ARCHITECTURE.md`.
 
@@ -20,10 +20,11 @@ Conventions are in `docs/ENGINEERING.md`. Section references (§) point to `docs
 | M5 Workspace engine                   | T501–T520   | S2                                                      |
 | M6 Conflicts and health               | T601–T610   | S2                                                      |
 | M7 Gateway, MCP, end-to-end           | T701–T713   | S1 (T701–T709, T713), S2 (T710–T711), O1 (T712)         |
-| M8 Git interoperability (§24)         | T801–T806   | S2                                                      |
+| M8 Git interoperability (§24)         | T801–T806   | S1 (moved from S2 in Review 4)                          |
 | M9 Safety controls (§22–23)           | T901–T906   | S1 (T902, T904–T906), S2 (T901, T903)                   |
 | M10 Execution sandboxes (§14)         | T1001–T1008 | S2                                                      |
 | M11 Clients (§27, §29)                | T1101–T1105 | S1                                                      |
+| M12 Plugins (§21.4–21.5)              | T1201–T1206 | S2                                                      |
 
 **Start here:** S1 → T101, T105, T114 (independent). S2 → T501, T505 (only need the scaffold).
 
@@ -806,6 +807,16 @@ Implement `HealthGate` for T309: GREEN at a revision including the task's artifa
 
 - Approval blocked while RED, allowed once GREEN.
 
+### T611 · Health dependency cache — S2
+
+Deps: T607, T1007 · Migration: —
+
+Added in Review 4. Health runs have no network (T607), so a project's dependencies can't be installed in the run itself. Each room gets a dependency-cache volume. A separate **install step** fills it: the room setting `health_install_command`, e.g. `npm ci`, runs in the same image with egress only through the T1007 allowlist proxy (package registries), whenever the lockfile at the target revision differs from the one the cache was built from. Health runs mount the cache read-only, with no network.
+
+- The cache key is the lockfile hash (configurable path list, default `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `poetry.lock`, `go.sum`); an unchanged lockfile means no install.
+- An install failure records the health run as `ERROR` with the install log, never as `RED`.
+- Tests: a non-allowlisted host is refused during install; the health run itself still has no network; a changed lockfile triggers exactly one reinstall.
+
 ---
 
 ## M7 Gateway, MCP, end-to-end
@@ -911,9 +922,9 @@ A per-node loop that renews every lease in `RoomLeases.heldRooms()` at a third o
 
 ---
 
-## M8 Git interoperability (§24) — S2
+## M8 Git interoperability (§24) — S1
 
-### T801 · `git.import`
+### T801 · `git.import` — S1
 
 Deps: T202, T512 · Migration: `0018_upstream`
 
@@ -923,7 +934,7 @@ Deps: T202, T512 · Migration: `0018_upstream`
 - Importing into a room whose workspace already has revisions beyond 0 → `VALIDATION`.
 - No credential ever appears in events, responses or logs.
 
-### T802 · Health command suggestion
+### T802 · Health command suggestion — S1
 
 Deps: T801 · Migration: —
 
@@ -931,7 +942,7 @@ After import, suggest a `health_command` (§24.1) from `package.json` scripts (`
 
 - Fixture repos for each ecosystem produce the expected suggestion; a repo with none yields `null`.
 
-### T803 · `git.pull_upstream`
+### T803 · `git.pull_upstream` — S1
 
 Deps: T801 · Migration: —
 
@@ -940,7 +951,7 @@ Fetch the upstream branch, diff `last_synced_sha → new tip`, and submit it as 
 - Non-overlapping upstream and room edits merge; overlapping ones create a conflict.
 - `upstream.last_synced_*` advance only when the ChangeSet applies.
 
-### T804 · Checkpoints
+### T804 · Checkpoints — S1
 
 Deps: T512, T609 · Migration: `0019_checkpoints`
 
@@ -948,7 +959,7 @@ Deps: T512, T609 · Migration: `0019_checkpoints`
 
 - RED health blocks creation without override.
 
-### T805 · Checkpoint export
+### T805 · Checkpoint export — S1
 
 Deps: T804, T801 · Migration: —
 
@@ -957,7 +968,7 @@ Deps: T804, T801 · Migration: —
 - Squashed export: one commit per checkpoint with the right tree and trailers.
 - Push target outside `room/*` is refused.
 
-### T806 · Pull request on export
+### T806 · Pull request on export — S1
 
 Deps: T805 · Migration: —
 
@@ -1131,3 +1142,59 @@ Login, room list and create, room view with participants, tasks board, Activity 
 Deps: T1104, T606 · Migration: —
 
 Editor with live intents, draft flush, live cursors and merge view (§27; demo steps 7, 9 and 10). To be broken down into smaller tasks once T1104 lands.
+
+---
+
+## M12 Plugins (§21.4–21.5) — S2
+
+Added in Review 4. Plugins run server-side and agents never receive credentials (§21.4, D10). The first plugins are the §29 MVP set: GitHub, Browser and AWS (read plus staging deploy). The runner reuses M10's container isolation and egress proxy.
+
+### T1201 · Tool registry, `tools.list` and `tools.invoke` — S2
+
+Deps: T208, T215 · Migration: —
+
+A plugin declares tools as `{ name, capability, tier, input schema }`. `tools.list` returns the tools the caller holds the capability for. `tools.invoke { tool, args, idempotency_key }` authorizes `<capability>:<scope>`, with the scope derived from the args by the tool (e.g. `org/repo`, a function ARN), and runs it through the runner. Tier 2 and 3 invocations log `tool.invoked`; denials log `capability.denied` (T215). Results that contain outside content are labeled `trust: external`.
+
+- A tool whose capability isn't held → `FORBIDDEN`; a scope outside the grant → `FORBIDDEN` naming the capability; tier 3 is never in a role bundle.
+- A non-idempotent tool is never retried by the platform (§26); a provider outage → a retryable error code.
+
+### T1202 · Plugin runner isolation — S2
+
+Deps: T1201, T1007 · Migration: —
+
+Each invocation runs in a short-lived container or child process with a timeout, CPU and memory limits, egress only to that plugin's declared hosts (through the T1007 proxy), and no ambient credentials or environment. Output is size-bounded.
+
+- Tests: an undeclared host is refused; a hung invocation is killed at its timeout; the environment holds only the per-invocation credential.
+
+### T1203 · Integrations and credential broker — S2
+
+Deps: T1201 · Migration: `0023_integrations`
+
+The owner connects an integration per room (GitHub App installation, AWS role ARN plus external ID, OAuth token). Long-lived secrets are stored encrypted behind a `SecretStore` interface: envelope encryption with a per-room data key, a KMS-backed implementation for production and a config-keyed one for development. Per invocation the broker mints a short-lived credential (an STS session ≤ 15 min, a GitHub installation token ≤ 1 h) and hands it only to the runner.
+
+- No secret or minted credential ever appears in a response, event, log or `tool.invoked` payload (a test scans them all for each).
+- Only the owner can connect or disconnect an integration.
+
+### T1204 · GitHub plugin — S2
+
+Deps: T1202, T1203 · Migration: —
+
+`github.read_repository` (tier 0), `github.create_pull_request:org/repo` (tier 2), using the room's GitHub App installation token. Shared with M8's PR-on-export (T806) so there is one GitHub client.
+
+- Contract tests against a recorded GitHub API, plus scope enforcement per repository.
+
+### T1205 · Browser plugin — S2
+
+Deps: T1202 · Migration: —
+
+`browser.navigate` / `browser.read_page` in a sandboxed headless browser (tier 2), egress through the proxy allowlist plus room-added domains. It returns text and an optional screenshot reference, labeled `trust: external`.
+
+- Cloud metadata and private address ranges are unreachable; page content never runs in the platform process.
+
+### T1206 · AWS plugin — S2
+
+Deps: T1202, T1203 · Migration: —
+
+`aws.read_logs:<arn>` (tier 0) and `aws.deploy_lambda:<function>` (tier 2 for `staging-*`, tier 3 for anything else, owner-granted with ≤ 24 h expiry, §21.2), via STS assume-role with the external ID.
+
+- The demo step 14 path: `aws.deploy_lambda:prod-api` without a tier 3 grant → `FORBIDDEN` and `capability.denied` visible in Activity.
