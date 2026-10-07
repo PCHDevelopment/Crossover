@@ -307,34 +307,6 @@ describe("workspace.apply_changeset", () => {
     expect(await otherRoom.rowsFor("changesets")).toEqual([]);
   });
 
-  it("enforces the resolver's path scope on resolution operations", async () => {
-    const scoped: Authorizer = async (_principal, _action, resource) => {
-      if (resource.path && !String(resource.path).startsWith("docs/"))
-        throw new CrossoverError("FORBIDDEN", "Path is outside the grant");
-    };
-    const f = await fixture(scoped);
-    await f.apply([{ type: "create", path: "docs/file", content: "base\n" }]);
-    await f.apply([{ type: "modify", path: "docs/file", content: "head\n" }], 1);
-    const conflictResult = await f.apply(
-      [{ type: "modify", path: "docs/file", content: "candidate\n" }],
-      1,
-    );
-    const conflictId = (conflictResult.response as { conflict_id: string }).conflict_id;
-    const resolution = f.request([{ type: "create", path: "outside/file", content: "x" }], 2);
-    await expect(
-      f.dispatch({
-        ...resolution,
-        params: {
-          ...resolution.params,
-          source: "RESOLUTION",
-          conflict_id: conflictId,
-        } as typeof resolution.params & { conflict_id: string },
-      }),
-    ).rejects.toMatchObject({ code: "FORBIDDEN" });
-    expect(await f.rowsFor("conflicts")).toMatchObject([{ id: conflictId, attempts: 0 }]);
-    expect(await f.rowsFor("changesets")).toHaveLength(3);
-  });
-
   it("commits revision, file history and event together, then replays the original result", async () => {
     const f = await fixture();
     const input = f.request([{ type: "create", path: "file", content: "one" }]);

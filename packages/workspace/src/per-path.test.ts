@@ -182,6 +182,40 @@ it("a reviewer with workspace.write:docs/** applies a ChangeSet touching docs/ o
   expect(await f.revision()).toBe(2); // nothing was applied
 });
 
+it("enforces the conflict submitter's real path grant on resolution ChangeSets", async () => {
+  const f = await fixture();
+  await f.apply(f.owner, [{ type: "create", path: "docs/file.txt", content: "base\n" }], 0);
+  await f.apply(f.owner, [{ type: "modify", path: "docs/file.txt", content: "head\n" }], 1);
+  const conflictResult = await f.apply(
+    f.reviewer,
+    [{ type: "modify", path: "docs/file.txt", content: "submitter\n" }],
+    1,
+  );
+  const conflictId = (conflictResult.response as { conflict_id: string }).conflict_id;
+  await expect(
+    f.dispatcher.dispatch(f.reviewer, {
+      id: newId("cmd"),
+      method: "workspace.apply_changeset",
+      idempotency_key: newId("cmd"),
+      params: {
+        source: "RESOLUTION",
+        conflict_id: conflictId,
+        message: "Resolve outside granted path",
+        base_workspace_revision: 2,
+        operations: [{ type: "create", path: "src/unauthorized.txt", content: "no" }],
+      },
+    }),
+  ).rejects.toMatchObject({ code: "FORBIDDEN" });
+  expect(
+    (await db.pool.query("SELECT attempts, status FROM conflicts WHERE room_id = $1", [f.room]))
+      .rows,
+  ).toEqual([{ attempts: 0, status: "OPEN" }]);
+  expect(
+    (await db.pool.query("SELECT id FROM changesets WHERE room_id = $1", [f.room])).rows,
+  ).toHaveLength(3);
+  expect(await f.revision()).toBe(2);
+});
+
 it("declares per-path authorization on the commands that authorize every path, and only those", async () => {
   const f = await fixture();
   await f.apply(f.owner, [{ type: "create", path: "a.txt", content: "x" }], 0);
