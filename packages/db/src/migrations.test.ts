@@ -589,3 +589,71 @@ describe("0010_messages", () => {
     });
   });
 });
+
+describe("0011_inbox_items", () => {
+  let n = 0;
+  const setup = async () => {
+    const room = `room_i${++n}`;
+    await db.pool.query(
+      `INSERT INTO rooms (id, slug, name, objective, owner_id) VALUES ($1, $1, 'n', 'o', 'x')`,
+      [room],
+    );
+    const id = `part_i${++n}`;
+    await db.pool.query(
+      `INSERT INTO participants (id, room_id, kind, display_name, role, status)
+       VALUES ($1, $2, 'AGENT', 'a', 'DEVELOPER', 'ACTIVE')`,
+      [id, room],
+    );
+    return { room, who: id };
+  };
+  const item = (room: string, who: string, extra: Record<string, unknown> = {}) => {
+    const cols: Record<string, unknown> = {
+      id: `inbox_${++n}`,
+      room_id: room,
+      participant_id: who,
+      kind: "MENTION",
+      ref: JSON.stringify({ kind: "message", id: "msg_1" }),
+      summary: "Look at this",
+      ...extra,
+    };
+    const keys = Object.keys(cols);
+    return db.pool.query(
+      `INSERT INTO inbox_items (${keys.join(", ")}) VALUES (${keys.map((_, i) => `$${i + 1}`).join(", ")}) RETURNING *`,
+      Object.values(cols),
+    );
+  };
+
+  it("is recorded as applied", async () => {
+    const { rows } = await db.pool.query("SELECT name FROM schema_migrations WHERE version = 11");
+    expect(rows).toEqual([{ name: "inbox_items" }]);
+  });
+
+  it("starts unacknowledged", async () => {
+    const { room, who } = await setup();
+    const { rows } = await item(room, who);
+    expect(rows[0]).toMatchObject({ acked_at: null, kind: "MENTION" });
+    expect(rows[0].created_at).toBeInstanceOf(Date);
+  });
+
+  it("belongs to a participant of the same room", async () => {
+    const a = await setup();
+    const b = await setup();
+    await expect(item(a.room, b.who)).rejects.toMatchObject({ code: "23503" });
+    await expect(item("room_missing", a.who)).rejects.toMatchObject({ code: "23503" });
+  });
+
+  it("checks the kind's shape, that ref is an object, and the summary's length", async () => {
+    const { room, who } = await setup();
+    for (const kind of ["mention", "", "MENTION!", "A".repeat(41)]) {
+      await expect(item(room, who, { kind })).rejects.toMatchObject({ code: "23514" });
+    }
+    await expect(item(room, who, { ref: JSON.stringify(["x"]) })).rejects.toMatchObject({
+      code: "23514",
+    });
+    await expect(item(room, who, { summary: "" })).rejects.toMatchObject({ code: "23514" });
+    await expect(item(room, who, { summary: "x".repeat(501) })).rejects.toMatchObject({
+      code: "23514",
+    });
+    await item(room, who, { summary: "x".repeat(500) });
+  });
+});
