@@ -178,6 +178,7 @@ export function registerMessageCommands(dispatcher: Dispatcher): void {
           kind: "MENTION",
           ref: { kind: "message", id: message.id },
           summary: p.body.slice(0, 200),
+          author_id: ctx.principal.participant_id, // the message text is theirs
         });
       }
       return {

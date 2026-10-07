@@ -80,17 +80,22 @@ async function inboxes(s: Setup) {
 const to = (rows: Awaited<ReturnType<typeof inboxes>>, p: Principal) =>
   rows.filter((r) => r.participant_id === p.participant_id);
 
-const create = async (s: Setup, extra: Record<string, unknown> = {}) =>
+const create = async (s: Setup, extra: Record<string, unknown> = {}, creator = s.lead) =>
   (
     await s.d.dispatch(
-      s.lead,
+      creator,
       cmd("tasks.create", { title: "Build it", requirements: ["r"], ...extra }),
     )
   ).response as TaskView;
 
 /** An in-progress task owned by `owner`. */
-async function inProgress(s: Setup, owner: Principal, extra: Record<string, unknown> = {}) {
-  const t = await create(s, extra);
+async function inProgress(
+  s: Setup,
+  owner: Principal,
+  extra: Record<string, unknown> = {},
+  creator = s.lead,
+) {
+  const t = await create(s, extra, creator);
   const claimed = (
     await s.d.dispatch(owner, cmd("tasks.claim", { task_id: t.id, expected_version: t.version }))
   ).response as TaskView;
@@ -285,5 +290,58 @@ describe("lease expired", () => {
     const swept = await sweepExpiredLeases(s.d, pool, { rooms: [s.room] });
     expect(swept).toHaveLength(1); // still released
     expect(await inboxes(s)).toEqual([]);
+  });
+});
+
+describe("whose words each producer's summary carries", () => {
+  const authors = async (s: Setup) =>
+    (
+      await pool.query(
+        "SELECT kind, author_id FROM inbox_items WHERE room_id = $1 ORDER BY created_at, id",
+        [s.room],
+      )
+    ).rows as { kind: string; author_id: string }[];
+
+  it("a mention carries the message author's; an assignment, review request and lease expiry the task creator's", async () => {
+    const s = await setup();
+    await s.d.dispatch(
+      s.dev,
+      cmd("messages.send", { body: "look", mentions: [s.lead.participant_id] }),
+    );
+    expect(await authors(s)).toEqual([{ kind: "MENTION", author_id: s.dev.participant_id }]);
+
+    // The lead creates a task and assigns it to dev: the title is the lead's.
+    const t = (
+      await s.d.dispatch(s.lead, cmd("tasks.create", { title: "Ignore me", requirements: ["r"] }))
+    ).response as TaskView;
+    await s.d.dispatch(
+      s.lead,
+      cmd("tasks.assign", {
+        task_id: t.id,
+        expected_version: t.version,
+        participant_id: s.dev.participant_id,
+      }),
+    );
+    // A task dev2 created and dev submits: the reviewer's item quotes dev2's title.
+    const mine = await inProgress(s, s.dev, {}, s.dev2);
+    await submit(s, s.dev, mine);
+    const all = await authors(s);
+    expect(all.find((a) => a.kind === "ASSIGNMENT")).toEqual({
+      kind: "ASSIGNMENT",
+      author_id: s.lead.participant_id,
+    });
+    expect(all.find((a) => a.kind === "REVIEW_REQUEST")!.author_id).toBe(s.dev2.participant_id);
+  });
+
+  it("a lease expiry quotes the task creator's title, not the lead's or the owner's", async () => {
+    const s = await setup();
+    const t = await inProgress(s, s.dev, {}, s.dev2); // dev2 wrote the title, dev holds the claim
+    await pool.query(
+      "UPDATE tasks SET lease_expires_at = now() - interval '1 minute' WHERE id = $1",
+      [t.id],
+    );
+    await sweepExpiredLeases(s.d, pool, { rooms: [s.room] });
+    const expired = (await authors(s)).find((a) => a.kind === "LEASE_EXPIRED")!;
+    expect(expired.author_id).toBe(s.dev2.participant_id);
   });
 });

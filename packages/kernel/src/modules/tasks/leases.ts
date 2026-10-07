@@ -101,8 +101,9 @@ export async function sweepExpiredLeases(
     id: string;
     owner_id: string;
     title: string;
+    created_by: string;
   }>(
-    `SELECT t.room_id, t.id, t.owner_id, t.title
+    `SELECT t.room_id, t.id, t.owner_id, t.title, t.created_by
      FROM tasks t JOIN participants p ON p.id = t.owner_id AND p.room_id = t.room_id
                   JOIN rooms r ON r.id = t.room_id AND r.status = 'ACTIVE'
      WHERE t.status IN ('CLAIMED', 'IN_PROGRESS', 'BLOCKED')
@@ -150,6 +151,7 @@ export async function sweepExpiredLeases(
               kind: "LEASE_EXPIRED",
               ref: { kind: "task", id: c.id },
               summary: `${c.owner_id}'s claim expired; the task is open again: ${c.title}`,
+              author_id: c.created_by, // the title is the task creator's
             });
           }
           events.push({
