@@ -1,5 +1,6 @@
 import { createPool, type Pool } from "@crossover/db";
 import { buildGateway } from "@crossover/gateway";
+import { registerMcp } from "@crossover/mcp";
 import {
   Dispatcher,
   LeaseRenewer,
@@ -16,6 +17,7 @@ import {
   registerParticipantLifecycleCommands,
   registerParticipantRoleCommand,
   registerRoomCommands,
+  registerRoomDigestCommand,
   registerRoomEventsCommand,
   registerRoomLifecycleCommands,
   registerTaskCommands,
@@ -118,6 +120,7 @@ export async function composeServer(
       devLogin: config.devLogin,
       ws: { subscriber },
     });
+    registerMcp(app, { dispatcher, pool }); // POST /mcp, the agents' tool surface
 
     let closing: Promise<void> | undefined;
     const close = () =>
@@ -156,6 +159,7 @@ function registerCommands(dispatcher: Dispatcher, config: ServerConfig): void {
   registerLeadCommands(dispatcher);
   registerRoomLifecycleCommands(dispatcher);
   registerRoomEventsCommand(dispatcher);
+  registerRoomDigestCommand(dispatcher);
   registerInboxCommands(dispatcher);
   registerRoomEventsSubscribeCommand(dispatcher); // the WebSocket `subscribe` frame
 

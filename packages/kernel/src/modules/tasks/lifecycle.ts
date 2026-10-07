@@ -1,6 +1,7 @@
 import { CrossoverError, newId } from "@crossover/protocol";
 import { z } from "zod";
 import type { CommandContext, Dispatcher } from "../../dispatcher.js";
+import { currentLeadId, deliverInbox } from "../inbox/inbox.js";
 import { loadActor, manages } from "./create-update.js";
 import {
   leaseSql,
@@ -32,6 +33,21 @@ export const taskVersionParams = z.strictObject({
   expected_version: z.number().int().min(1),
 });
 
+export const tasksAssignParams = taskVersionParams.extend({
+  participant_id: z.string().min(1).max(100),
+});
+
+export const tasksBlockParams = taskVersionParams.extend({
+  reason: z.string().trim().min(1).max(2000),
+});
+
+export const tasksReviewParams = taskVersionParams.extend({
+  verdict: z.enum(["approve", "request_changes"]),
+  comments: z.string().max(10_000).default(""),
+  /** Lead only: approve although the health gate says the workspace is red. */
+  override_health: z.boolean().optional(),
+});
+
 /**
  * Register the task lifecycle commands (T304 onwards, §8.2, §8.3). Each is one conditional
  * `UPDATE … WHERE version = $expected AND status = …` after the task row is locked, so exactly
@@ -60,7 +76,7 @@ export function registerTaskLifecycleCommands(
   dispatcher.registerCommand({
     method: "tasks.assign",
     mutating: true,
-    params: taskVersionParams.extend({ participant_id: z.string().min(1).max(100) }),
+    params: tasksAssignParams,
     execute: async (ctx, p) => {
       const task = await loadTask(ctx.client, ctx.room_id, p.task_id, true);
       if (task.status !== "OPEN" || task.version !== p.expected_version)
@@ -82,9 +98,18 @@ export function registerTaskLifecycleCommands(
           },
         );
       }
-      return takeTask(ctx, task, p.participant_id, "task.assigned", {
+      const taken = await takeTask(ctx, task, p.participant_id, "task.assigned", {
         assigned_by: ctx.principal.participant_id,
       });
+      // Being handed work is news; assigning it to yourself is not.
+      if (p.participant_id !== ctx.principal.participant_id) {
+        await deliverInbox(ctx.client, ctx.room_id, p.participant_id, {
+          kind: "ASSIGNMENT",
+          ref: { kind: "task", id: task.id },
+          summary: `Assigned to you: ${task.title}`,
+        });
+      }
+      return taken;
     },
   });
 
@@ -131,7 +156,7 @@ export function registerTaskLifecycleCommands(
   dispatcher.registerCommand({
     method: "tasks.block",
     mutating: true,
-    params: taskVersionParams.extend({ reason: z.string().trim().min(1).max(2000) }),
+    params: tasksBlockParams,
     execute: async (ctx, p) => {
       const { task, actor } = await ownerOrLead(ctx, p);
       if (task.status !== "IN_PROGRESS") {
@@ -189,6 +214,7 @@ export function registerTaskLifecycleCommands(
       // With review required it waits for a reviewer; otherwise it is done (§8.2). Either way
       // the claim no longer needs a lease: only CLAIMED, IN_PROGRESS and BLOCKED expire.
       const to = task.review_required ? "REVIEW" : "DONE";
+      if (to === "REVIEW") await requestReview(ctx, task, actor.id);
       return transition(ctx, task, to, {
         eventType: "task.submitted",
         set: "lease_expires_at = NULL",
@@ -201,12 +227,7 @@ export function registerTaskLifecycleCommands(
   dispatcher.registerCommand({
     method: "tasks.review",
     mutating: true,
-    params: taskVersionParams.extend({
-      verdict: z.enum(["approve", "request_changes"]),
-      comments: z.string().max(10_000).default(""),
-      /** Lead only: approve although the health gate says the workspace is red. */
-      override_health: z.boolean().optional(),
-    }),
+    params: tasksReviewParams,
     execute: async (ctx, p) => {
       const task = await loadTask(ctx.client, ctx.room_id, p.task_id, true);
       const actor = await loadActor(ctx);
@@ -467,4 +488,26 @@ export async function takeTask(
       },
     ],
   };
+}
+
+/**
+ * Tell whoever should review a submitted task (T403): its named reviewer if they are still in
+ * the room, otherwise the lead. Nobody is told about their own submission.
+ */
+async function requestReview(ctx: CommandContext, task: TaskRow, submitterId: string) {
+  let recipient: string | null = null;
+  if (task.reviewer_id) {
+    const { rows } = await ctx.client.query(
+      "SELECT 1 FROM participants WHERE id = $1 AND room_id = $2 AND status <> 'REMOVED'",
+      [task.reviewer_id, ctx.room_id],
+    );
+    if (rows.length > 0) recipient = task.reviewer_id;
+  }
+  recipient ??= await currentLeadId(ctx.client, ctx.room_id);
+  if (recipient === null || recipient === submitterId) return;
+  await deliverInbox(ctx.client, ctx.room_id, recipient, {
+    kind: "REVIEW_REQUEST",
+    ref: { kind: "task", id: task.id },
+    summary: `Review requested: ${task.title}`,
+  });
 }

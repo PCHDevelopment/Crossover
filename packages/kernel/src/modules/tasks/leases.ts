@@ -2,11 +2,14 @@ import type { Pool } from "@crossover/db";
 import { CrossoverError } from "@crossover/protocol";
 import { z } from "zod";
 import type { Dispatcher } from "../../dispatcher.js";
+import { currentLeadId, deliverInbox } from "../inbox/inbox.js";
 import { loadActor } from "./create-update.js";
 import { leaseSql, loadTask } from "./task.js";
 
 /** Who is making these changes in the ledger when nobody is: the platform. */
 export const SYSTEM_ACTOR = "system";
+
+export const tasksHeartbeatParams = z.strictObject({ task_id: z.string().min(1).max(100) });
 
 /**
  * Register `tasks.heartbeat { task_id }` (T311, §8.4): the task's owner says "still working",
@@ -21,7 +24,7 @@ export function registerTaskHeartbeat(dispatcher: Dispatcher): void {
     // The catalog (§16.1) lists it as a read: no events, no version, no idempotency key. It
     // still writes the lease, in one atomic UPDATE, which is all a repeat needs.
     mutating: false,
-    params: z.strictObject({ task_id: z.string().min(1).max(100) }),
+    params: tasksHeartbeatParams,
     execute: async (ctx, p) => {
       const task = await loadTask(ctx.client, ctx.room_id, p.task_id);
       const actor = await loadActor(ctx);
@@ -77,7 +80,7 @@ export interface SweptTask {
  * waiting in `REVIEW` or finished tasks. Each room is swept on its own actor in its own
  * transaction, rechecking every condition under the row lock, so a heartbeat that lands first
  * wins. Only rooms this node owns are swept (`options.rooms` to choose), because only the
- * owner node may write to a room's ledger. (The lead's inbox notification arrives with T403.)
+ * owner node may write to a room's ledger. The lead gets a `LEASE_EXPIRED` inbox item for each (T403).
  */
 export async function sweepExpiredLeases(
   dispatcher: Dispatcher,
@@ -89,8 +92,13 @@ export async function sweepExpiredLeases(
   const rooms = options.rooms ?? dispatcher.leases.heldRooms();
   if (rooms.length === 0) return [];
 
-  const { rows: candidates } = await pool.query<{ room_id: string; id: string; owner_id: string }>(
-    `SELECT t.room_id, t.id, t.owner_id
+  const { rows: candidates } = await pool.query<{
+    room_id: string;
+    id: string;
+    owner_id: string;
+    title: string;
+  }>(
+    `SELECT t.room_id, t.id, t.owner_id, t.title
      FROM tasks t JOIN participants p ON p.id = t.owner_id AND p.room_id = t.room_id
      WHERE t.status IN ('CLAIMED', 'IN_PROGRESS', 'BLOCKED')
        AND p.kind = 'AGENT' AND t.lease_expires_at IS NOT NULL AND t.lease_expires_at <= $1
@@ -110,6 +118,7 @@ export async function sweepExpiredLeases(
     const { result } = await dispatcher.runSystem(roomId, "tasks.sweep_leases", async (ctx) => {
       const released: SweptTask[] = [];
       const events = [];
+      const lead = await currentLeadId(ctx.client, roomId);
       for (const c of tasks) {
         // Re-check under the lock: the owner may have heartbeated or released it meanwhile.
         const { rows } = await ctx.client.query<{ version: number }>(
@@ -125,6 +134,13 @@ export async function sweepExpiredLeases(
         const row = rows[0];
         if (!row) continue;
         released.push({ room_id: roomId, task_id: c.id, previous_owner_id: c.owner_id });
+        if (lead !== null) {
+          await deliverInbox(ctx.client, roomId, lead, {
+            kind: "LEASE_EXPIRED",
+            ref: { kind: "task", id: c.id },
+            summary: `${c.owner_id}'s claim expired; the task is open again: ${c.title}`,
+          });
+        }
         events.push({
           type: "task.lease_expired" as const,
           actor_id: SYSTEM_ACTOR,
