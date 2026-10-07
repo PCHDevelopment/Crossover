@@ -9,11 +9,21 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { git } from "./git.js";
 import { registerWorkspaceCommands, type WorkspaceCommandDeps } from "./apply.js";
 import { ConflictEscalationSweeper } from "./conflict-escalation-sweeper.js";
+import { HealthCheckQueue } from "./health-queue.js";
 import { provisionWorkspace } from "./provision.js";
 import type { Operation } from "./operations.js";
 
 let db: TestDatabase;
 const dirs: string[] = [];
+
+function deferred<T = void>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 beforeAll(async () => {
   db = await createTestDatabase();
 });
@@ -124,6 +134,40 @@ async function seedConflict(
 }
 
 describe("workspace.apply_changeset", () => {
+  it("coalesces ten rapid applied revisions into the active and latest health checks", async () => {
+    const firstGate = deferred();
+    const secondGate = deferred();
+    const secondStarted = deferred();
+    const started: number[] = [];
+    const queue = new HealthCheckQueue({
+      run: async (_roomId, revision) => {
+        started.push(revision);
+        if (revision === 1) await firstGate.promise;
+        else {
+          secondStarted.resolve();
+          await secondGate.promise;
+        }
+      },
+    });
+    const f = await fixture(allowAll, {
+      scheduleHealthCheck: (roomId, revision) => queue.enqueue(roomId, revision),
+    });
+
+    for (let revision = 0; revision < 10; revision += 1) {
+      await f.apply(
+        [{ type: "create", path: `rapid-${revision}.txt`, content: `${revision}\n` }],
+        revision,
+      );
+    }
+    expect(started).toEqual([1]);
+
+    firstGate.resolve();
+    await secondStarted.promise;
+    expect(started).toEqual([1, 10]);
+    secondGate.resolve();
+    await queue.close();
+  });
+
   it("requires RESOLUTION and conflict_id together", async () => {
     const f = await fixture();
     const base = f.request([{ type: "create", path: "file", content: "x" }]);
