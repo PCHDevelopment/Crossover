@@ -54,6 +54,8 @@ interface EntryRow {
   revision: number;
   source_refs: { kind: string; id: string }[];
   deleted: boolean;
+  /** The owner redacted the value (§19.6): `value` is empty. */
+  redacted: boolean;
   created_at: Date;
   updated_at: Date;
 }
@@ -64,7 +66,7 @@ export interface MemoryEntryView extends Omit<EntryRow, "created_at" | "updated_
 }
 
 export const MEMORY_COLUMNS =
-  "key, value, content_type, author_id, revision, source_refs, deleted, created_at, updated_at";
+  "key, value, content_type, author_id, revision, source_refs, deleted, redacted, created_at, updated_at";
 
 export function memoryEntryView(row: EntryRow): MemoryEntryView {
   return {
