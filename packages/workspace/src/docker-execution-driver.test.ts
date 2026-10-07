@@ -23,7 +23,7 @@ function missingResources(args: readonly string[]) {
 
 describe("DockerExecutionDriver", () => {
   it("runs the fetcher on crossover-git with a short-lived token and hardening", async () => {
-    const calls: Array<{ args: string[]; timeoutMs?: number }> = [];
+    const calls: Array<{ args: string[]; timeoutMs?: number; env?: NodeJS.ProcessEnv }> = [];
     const secret = "a sufficiently long internal Git signing secret";
     let networkExists = false;
     let serverConnected = false;
@@ -32,6 +32,7 @@ describe("DockerExecutionDriver", () => {
       calls.push({
         args,
         ...(options?.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+        ...(options?.env ? { env: options.env } : {}),
       });
       if (args[0] === "network" && args[1] === "inspect") {
         return networkExists
@@ -81,12 +82,12 @@ describe("DockerExecutionDriver", () => {
     const run = calls.find(({ args }) => args[0] === "run")!;
     const connect = calls.find(({ args }) => args[0] === "network" && args[1] === "connect")!;
     const runArgs = run.args;
-    const credential = runArgs
-      .find((arg) => arg.startsWith("GIT_CONFIG_VALUE_0=Authorization: Bearer "))
-      ?.split("Bearer ")[1];
+    const credential = run.env?.GIT_CONFIG_VALUE_0?.split("Bearer ")[1];
     expect(connect.args).toEqual(["network", "connect", "crossover-git", "crossover-server"]);
     expect(runArgs).toContain("--network=crossover-git");
     expect(runArgs).toContain("--read-only");
+    expect(runArgs).toContain("GIT_CONFIG_VALUE_0");
+    expect(runArgs.some((arg) => arg.includes(credential!))).toBe(false);
     expect(runArgs).toContain("--user=1000:1000");
     expect(runArgs).toContain("--cap-drop=ALL");
     expect(runArgs).toContain("--security-opt=no-new-privileges");
@@ -103,6 +104,7 @@ describe("DockerExecutionDriver", () => {
       room_id: roomId,
       participant_id: participantId,
       sandbox_id: sandboxId,
+      revision: 5,
     });
     expect(run.timeoutMs).toBeLessThanOrEqual(5 * 60 * 1000);
     expect(runArgs.at(-1)).toBe("crossover-git-fetcher:test");

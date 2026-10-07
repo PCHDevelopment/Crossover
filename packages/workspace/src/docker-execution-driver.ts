@@ -15,6 +15,7 @@ const FETCH_TIMEOUT_MS = 4 * 60 * 1000;
 export interface DockerInvocationOptions {
   timeoutMs?: number;
   maxBuffer?: number;
+  env?: NodeJS.ProcessEnv;
 }
 
 export type DockerInvoker = (
@@ -66,6 +67,7 @@ function invokeDocker(
         encoding: "utf8",
         timeout: options.timeoutMs ?? 20_000,
         maxBuffer: options.maxBuffer ?? 1024 * 1024,
+        ...(options.env ? { env: { ...process.env, ...options.env } } : {}),
       },
       (error, stdout, stderr) => {
         resolve({
@@ -235,6 +237,7 @@ export class DockerExecutionDriver implements ExecutionDriver {
         room_id: input.room_id,
         participant_id: input.participant_id,
         sandbox_id: input.sandbox_id,
+        revision: input.workspace.revision,
         expires_at: now + SANDBOX_READ_TOKEN_MAX_TTL_MS,
       },
       this.gitInternalTokenSecret,
@@ -279,7 +282,7 @@ export class DockerExecutionDriver implements ExecutionDriver {
       "--env",
       "GIT_CONFIG_KEY_0=http.extraHeader",
       "--env",
-      `GIT_CONFIG_VALUE_0=Authorization: Bearer ${token}`,
+      "GIT_CONFIG_VALUE_0",
       "--mount",
       `type=volume,source=${input.resources.volume_ref},target=/workspace,volume-nocopy`,
       "--mount",
@@ -293,6 +296,7 @@ export class DockerExecutionDriver implements ExecutionDriver {
       const result = await this.invoke(args, {
         timeoutMs: FETCH_TIMEOUT_MS,
         maxBuffer: 1024 * 1024,
+        env: { GIT_CONFIG_VALUE_0: `Authorization: Bearer ${token}` },
       });
       if (result.code !== 0) {
         throw new Error(

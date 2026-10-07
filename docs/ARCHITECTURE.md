@@ -730,8 +730,9 @@ Each sandbox tracks:
 
 ## 14.3 Materialization
 
-- On first use (`sandbox.*` or a coding tool call through MCP), the Execution Service starts a container and fetches the canonical head from the workspace node over an internal Git endpoint, authenticated with a sandbox-scoped read token.
-- Sandbox hosts keep a per-room reference repository so new sandboxes fetch only missing objects.
+- On first use (`sandbox.*` or a coding tool call through MCP), the Execution Service starts a container and materializes the workspace through a short-lived fetcher container. The fetcher alone joins the unpublished `crossover-git` Docker network, mounts the sandbox workspace, and reads from a separate internal Git listener on the workspace node. The server binds `GIT_INTERNAL_HOST` to its configured address on that private network; the deployment connects the server to the network before startup and never publishes `GIT_INTERNAL_PORT`.
+- Each fetch carries an HMAC read token bound to the room, participant, sandbox, canonical workspace revision, and an expiry no more than five minutes away. The agent container never joins `crossover-git` and never receives the token. The listener accepts upload-pack only. For path-scoped readers it creates a deterministic synthetic root commit, packs only that commit's reachable objects, and serves it without canonical object alternates; for unscoped readers it serves the real canonical commit shallowly.
+- The fetcher uses the canonical per-room repository as a read-only clone reference. Its `repo_path` must be visible at the same source path to the Docker daemon that runs the fetcher. The clone is dissociated before it is copied into the sandbox volume, so the sandbox never retains that alternate.
 
 ## 14.4 Staying current
 
@@ -739,7 +740,7 @@ The sandbox never changes files underneath a running agent without warning.
 
 - When canonical advances, the sandbox owner receives `sandbox.behind { behind_by, changed_paths, overlaps_local_changes, intents }`.
 - **Auto-sync:** if the sandbox has no running process and none of the changed paths overlap local modifications, it fast-forwards automatically and emits `sandbox.synced`.
-- **Explicit sync:** otherwise the agent calls `sandbox.sync`. The sandbox stashes local modifications as a temporary commit, fetches head, and rebases.
+- **Explicit sync:** otherwise the agent calls `sandbox.sync`. The execution service runs a short-lived fetcher with a fresh revision-bound token, stashes local modifications as a temporary commit, fetches the new scoped or canonical snapshot, and rebases onto it.
   - Clean → returns `{ synced_to: r42 }`.
   - Conflicts → conflict markers are left in the affected files (the format coding agents already understand), and the call returns the conflicted paths. The agent fixes them and continues.
 - **Human sandboxes** run in follow-head mode: they always auto-sync, because humans edit through the editor, not the sandbox.
