@@ -149,6 +149,36 @@ export function registerTaskLifecycleCommands(dispatcher: Dispatcher): void {
       });
     },
   });
+
+  dispatcher.registerCommand({
+    method: "tasks.submit",
+    mutating: true,
+    params: taskVersionParams,
+    execute: async (ctx, p) => {
+      const task = await loadTask(ctx.client, ctx.room_id, p.task_id, true);
+      const actor = await loadActor(ctx);
+      if (task.owner_id !== actor.id) {
+        throw new CrossoverError("FORBIDDEN", "Only the task's owner can submit it", {
+          details: { reason: "not_task_owner" },
+        });
+      }
+      if (task.version !== p.expected_version) throw versionConflict(task);
+      if (task.status !== "IN_PROGRESS") {
+        throw new CrossoverError("VALIDATION", `Can't submit a task that is ${task.status}`, {
+          details: { status: task.status },
+        });
+      }
+      // With review required it waits for a reviewer; otherwise it is done (§8.2). Either way
+      // the claim no longer needs a lease: only CLAIMED, IN_PROGRESS and BLOCKED expire.
+      const to = task.review_required ? "REVIEW" : "DONE";
+      return transition(ctx, task, to, {
+        eventType: "task.submitted",
+        set: "lease_expires_at = NULL",
+        renewLease: false,
+        payload: { status: to, review_required: task.review_required },
+      });
+    },
+  });
 }
 
 /** Lock the task, require the caller to be its owner or the lead (owner/admin too), check the version. */
@@ -165,7 +195,7 @@ async function ownerOrLead(ctx: CommandContext, p: { task_id: string; expected_v
 }
 
 interface TransitionOptions {
-  eventType: "task.started" | "task.blocked" | "task.unblocked";
+  eventType: "task.started" | "task.blocked" | "task.unblocked" | "task.submitted";
   /** Extra `SET` assignments; their values are `$5, $6, …` in `values`. */
   set?: string;
   values?: unknown[];
