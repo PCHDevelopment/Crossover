@@ -3,6 +3,12 @@ export type { GitOptions, GitResult } from "./git.js";
 export { normalizePath, PathValidationError } from "./path.js";
 export { initRoomRepo } from "./repo.js";
 export { materialize } from "./materialize.js";
+export {
+  createScopedSnapshotRepository,
+  createUnscopedSnapshotRepository,
+  hashSnapshotScope,
+} from "./scoped-snapshot.js";
+export type { ScopedSnapshotRepository } from "./scoped-snapshot.js";
 export type { Operation, ContentEncoding } from "./operations.js";
 export { merge } from "./merge.js";
 export type { MergeResult, MergeFile, MergeStage, MergeMessage } from "./merge.js";
@@ -30,8 +36,11 @@ export { workspaceSearchParamsSchema } from "./search.js";
 export { workspaceDiffParamsSchema } from "./history.js";
 export { updateCanonicalRef, reconcileRef } from "./reconcile.js";
 export {
+  DEFAULT_HEALTH_LOCKFILE_PATHS,
   DEFAULT_HEALTH_IMAGE,
   DockerHealthRunner,
+  hashHealthLockfiles,
+  normalizeHealthLockfilePaths,
   runHealthCheck,
   storeHealthRun,
 } from "./health-runner.js";
@@ -54,9 +63,14 @@ export type {
   SandboxRecord,
   SandboxResources,
   SandboxStatus,
+  SandboxWorkspaceHead,
 } from "./execution.js";
 export { DockerExecutionDriver } from "./docker-execution-driver.js";
-export type { DockerExecutionDriverOptions, DockerInvoker } from "./docker-execution-driver.js";
+export type {
+  DockerExecutionDriverOptions,
+  DockerInvocationOptions,
+  DockerInvoker,
+} from "./docker-execution-driver.js";
 export * from "./upstream.js";
 export * from "./upstream-import.js";
 export * from "./health-suggestion.js";

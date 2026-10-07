@@ -21,6 +21,13 @@ async function main(): Promise<void> {
   }
 
   const server = await composeServer(config);
+  if (config.gitInternalTokenSecret) {
+    const address = await server.gitApp.listen({
+      host: config.gitInternalHost!,
+      port: config.gitInternalPort ?? 8081,
+    });
+    console.warn(`Internal Git listener bound on ${address}; do not publish this port`);
+  }
   const address = await server.app.listen({ host: config.host, port: config.port });
   console.warn(`Crossover ${config.nodeId} listening on ${address}`);
 

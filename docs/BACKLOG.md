@@ -811,11 +811,13 @@ Implement `HealthGate` for T309: GREEN at a revision including the task's artifa
 
 ### T611 · Health dependency cache — S2
 
-Deps: T607, T1007 · Migration: —
+Deps: T607, T1007 · Migration: 0028
 
-Added in Review 4. Health runs have no network (T607), so a project's dependencies can't be installed in the run itself. Each room gets a dependency-cache volume. A separate **install step** fills it: the room setting `health_install_command`, e.g. `npm ci`, runs in the same image with egress only through the T1007 allowlist proxy (package registries), whenever the lockfile at the target revision differs from the one the cache was built from. Health runs mount the cache read-only, with no network.
+Added in Review 4. Health runs have no network (T607), so a project's dependencies can't be installed in the run itself. Each room gets a dependency-cache volume per cache key. A separate **install step** fills it: the room setting `health_install_command`, e.g. `npm ci`, runs in the same image with egress only through the T1007 allowlist proxy (package registries), whenever the lockfile at the target revision differs from the one the cache was built from. Health runs mount the cache read-only, with no network.
 
-- The cache key is the lockfile hash (configurable path list, default `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `poetry.lock`, `go.sum`); an unchanged lockfile means no install.
+- `health_lockfile_paths` is a validated list of up to 10 normalized relative paths, defaulting to `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `poetry.lock`, and `go.sum`. Missing files are ignored. An unchanged lockfile, image, install command, and runtime means no install.
+- Each install gets a fresh Docker volume named and labeled with its install id. Health runs mount only the volume from the newest successful install for that cache key, so a failed or concurrent install volume is never reused. Cache collection keeps the two most recently successful generations per room and removes older or incomplete volumes. The volume persists root `node_modules` and files explicitly written under `HEALTH_DEPENDENCY_CACHE`; package-manager download caches use `/tmp`, and workspace-local links, virtualenvs, and Plug'n'Play layouts are not persisted.
+- The install proxy identity is `hinstall_<run id>` and works only while its database row is `RUNNING` and the room is active. Install networks are internal, per-run, and swept when stale.
 - An install failure records the health run as `ERROR` with the install log, never as `RED`.
 - Tests: a non-allowlisted host is refused during install; the health run itself still has no network; a changed lockfile triggers exactly one reinstall.
 
@@ -1061,9 +1063,12 @@ Deps: T512, T207 · Migration: `0022_sandboxes`
 
 Deps: T1001, T514 · Migration: —
 
-Internal read-only Git endpoint on the workspace node, authenticated with a sandbox-scoped read token (room, participant, expiry; never valid on the public API). The sandbox fetches the canonical head into an ordinary clone, and `base_revision` is set. Per-room reference repository so new sandboxes fetch only missing objects (§14.3).
+An internal read-only Git listener on a configured `GIT_INTERNAL_HOST:GIT_INTERNAL_PORT` address on the private `crossover-git` Docker network, never published; it is a separate server from the public gateway and serves `git-upload-pack` only. A hardened, short-lived fetcher container joins that network, mounts the sandbox workspace and the canonical per-room repository read-only as a clone reference, and runs each fetch with a sandbox-scoped HMAC token (room, participant, sandbox, canonical revision, expiry ≤5 minutes). The Docker daemon must see the canonical repository at the same source path recorded in `repo_path`. The agent container never joins `crossover-git` or receives the token. The fetcher materializes the requested canonical revision into an ordinary shallow clone and `base_revision` stores that canonical revision. For a scoped reader, the endpoint serves a deterministic synthetic root commit packed without canonical alternates, so arbitrary canonical object IDs cannot be fetched; for an unscoped reader, it serves the real canonical commit shallowly.
 
-- The token can't read another room or call any command. Paths outside the participant's read scope are not materialized (T521 rules).
+- The token can't read another room or call a public command; the internal listener rejects receive-pack and all non-Git routes. Paths outside the participant's read scope are absent from the sandbox object store (T521 rules), verified with `git cat-file`.
+- Synthetic commits use fixed author/committer identities, the canonical commit timestamp, a fixed message, no parent/history, and map their SHA to the canonical revision and scope hash. Identical revision/scope inputs produce identical SHAs.
+- Fetcher hardening matches the T611 installer, and a new sandbox reuses the canonical per-room repository as a read-only reference without retaining it as an object alternate in the sandbox clone.
+- Tests reject a token used for another room, verify the public API does not accept it, verify read-only Git transport, and prove out-of-scope blobs are absent after materialization.
 
 ### T1003 · Working-copy status — S2
 
