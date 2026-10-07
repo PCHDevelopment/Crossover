@@ -45,6 +45,7 @@ METHODS: dict[str, bool] = {
     "participants.resume": True,
     "participants.set_role": True,
     "participants.update_manifest": True,
+    "participants.wake_secret": False,
     "presence.clear_intent": False,
     "presence.list_intents": False,
     "presence.set_intent": False,
