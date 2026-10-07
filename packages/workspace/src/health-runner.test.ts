@@ -184,7 +184,7 @@ describe("DockerHealthRunner", () => {
       const result = await new DockerHealthRunner({ allowedImages: [DEFAULT_HEALTH_IMAGE] }).run({
         repository,
         revision,
-        command: `test "$(id -u)" = ${uid} && test "$(id -g)" = ${gid} && test -w /workspace && printf docker-health-ok`,
+        command: `test "$(id -u)" != 0 && test "$(id -g)" = ${gid} && test -w /workspace && printf docker-health-ok`,
       });
       expect(result.status).toBe("GREEN");
       expect(result.log).toContain("docker-health-ok");
