@@ -45,20 +45,25 @@ export const changesetInputSchema = z.strictObject({
   conflict_id: text.min(1).optional(),
 });
 
-export const changesetParamsSchema = changesetInputSchema.refine(
-  (value) =>
-    value.operations.reduce(
-      (total, op) =>
-        total +
-        ("content" in op && op.content !== undefined
-          ? contentSize(op.content, op.encoding)
-          : "patch" in op
-            ? Buffer.byteLength(op.patch)
-            : 0),
-      0,
-    ) <=
-    25 * 1024 * 1024,
-  "ChangeSet text exceeds 25 MiB",
-);
+export const changesetParamsSchema = changesetInputSchema
+  .refine((value) => (value.source === "RESOLUTION") === (value.conflict_id !== undefined), {
+    message: "conflict_id is required only for RESOLUTION ChangeSets",
+    path: ["conflict_id"],
+  })
+  .refine(
+    (value) =>
+      value.operations.reduce(
+        (total, op) =>
+          total +
+          ("content" in op && op.content !== undefined
+            ? contentSize(op.content, op.encoding)
+            : "patch" in op
+              ? Buffer.byteLength(op.patch)
+              : 0),
+        0,
+      ) <=
+      25 * 1024 * 1024,
+    "ChangeSet text exceeds 25 MiB",
+  );
 
 export type ChangesetParams = z.infer<typeof changesetParamsSchema>;

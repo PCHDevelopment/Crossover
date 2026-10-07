@@ -85,6 +85,40 @@ async function apply(
   );
   const ws = workspace.rows[0];
   if (!ws) throw new CrossoverError("NOT_FOUND", "Workspace not provisioned");
+  let resolution: { conflictId: string; originalChangesetId: string } | undefined;
+  if (params.conflict_id) {
+    const { rows } = await client.query<{
+      id: string;
+      status: string;
+      submitter_id: string;
+      changeset_id: string;
+      owner_id: string;
+      lead_participant_id: string | null;
+    }>(
+      `SELECT c.id, c.status, c.submitter_id, c.changeset_id,
+              r.owner_id, r.lead_participant_id
+       FROM conflicts c JOIN rooms r ON r.id = c.room_id
+       WHERE c.id = $1 AND c.room_id = $2 AND c.workspace_id = $3
+       FOR UPDATE OF c`,
+      [params.conflict_id, room_id, ws.id],
+    );
+    const conflict = rows[0];
+    if (!conflict) throw new CrossoverError("NOT_FOUND", "Conflict not found");
+    if (conflict.status !== "OPEN" && conflict.status !== "ESCALATED")
+      throw new CrossoverError("CONFLICT_VERSION", "Conflict is no longer open", {
+        details: { status: conflict.status },
+      });
+    if (
+      ctx.principal.participant_id !== conflict.submitter_id &&
+      ctx.principal.participant_id !== conflict.lead_participant_id &&
+      ctx.principal.participant_id !== conflict.owner_id
+    )
+      throw new CrossoverError(
+        "FORBIDDEN",
+        "Only the submitter, lead, or owner may resolve a conflict",
+      );
+    resolution = { conflictId: conflict.id, originalChangesetId: conflict.changeset_id };
+  }
   const headRow = await client.query<{ revision: string; commit_sha: string }>(
     `SELECT revision, commit_sha FROM workspace_revisions
      WHERE room_id = $1 AND workspace_id = $2 ORDER BY revision DESC LIMIT 1`,
@@ -152,7 +186,6 @@ async function apply(
         conflicts.push({ path: null, kind: conflict.kind, reason: "unauthorized" });
       }
     }
-    const conflictId = newId("conf");
     const { rows: counterparties } = await client.query<{ id: string }>(
       `SELECT cs.id FROM changesets cs
        WHERE cs.room_id = $1 AND cs.workspace_id = $2 AND cs.status = 'APPLIED'
@@ -179,22 +212,38 @@ async function apply(
       ],
     );
     const counterpartyChangesets = counterparties.map(({ id: counterpartyId }) => counterpartyId);
-    await client.query(
-      `INSERT INTO conflicts (id, workspace_id, room_id, changeset_id, submitter_id,
-       base_revision, head_revision_at_detection, files, counterparty_changesets)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-      [
-        conflictId,
-        ws.id,
-        room_id,
-        id,
-        ctx.principal.participant_id,
-        params.base_workspace_revision,
-        head.revision,
-        JSON.stringify(classified),
-        JSON.stringify(counterpartyChangesets),
-      ],
-    );
+    const conflictId = resolution?.conflictId ?? newId("conf");
+    if (resolution) {
+      await client.query(
+        `UPDATE conflicts SET attempts = attempts + 1,
+         head_revision_at_detection = $3, files = $4, counterparty_changesets = $5
+         WHERE id = $1 AND room_id = $2`,
+        [
+          conflictId,
+          room_id,
+          head.revision,
+          JSON.stringify(classified),
+          JSON.stringify(counterpartyChangesets),
+        ],
+      );
+    } else {
+      await client.query(
+        `INSERT INTO conflicts (id, workspace_id, room_id, changeset_id, submitter_id,
+         base_revision, head_revision_at_detection, files, counterparty_changesets)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        [
+          conflictId,
+          ws.id,
+          room_id,
+          id,
+          ctx.principal.participant_id,
+          params.base_workspace_revision,
+          head.revision,
+          JSON.stringify(classified),
+          JSON.stringify(counterpartyChangesets),
+        ],
+      );
+    }
     await client.query(
       `UPDATE changesets SET status = 'CONFLICT', conflict_id = $3,
        payload = payload || jsonb_build_object(
@@ -211,19 +260,21 @@ async function apply(
         conflicts,
         counterparty_changesets: allConflictsAuthorized ? counterpartyChangesets : [],
       },
-      events: [
-        {
-          type: "workspace.conflict.created" as const,
-          payload: {
-            conflict_id: conflictId,
-            changeset_id: id,
-            submitter_id: ctx.principal.participant_id,
-            file_count: classified.length,
-            kinds: classified.map(({ kind }) => kind),
-            counterparty_count: counterpartyChangesets.length,
-          },
-        },
-      ],
+      events: resolution
+        ? []
+        : [
+            {
+              type: "workspace.conflict.created" as const,
+              payload: {
+                conflict_id: conflictId,
+                changeset_id: id,
+                submitter_id: ctx.principal.participant_id,
+                file_count: classified.length,
+                kinds: classified.map(({ kind }) => kind),
+                counterparty_count: counterpartyChangesets.length,
+              },
+            },
+          ],
     };
   }
   const changedFiles = await treeChanges(ws.repo_path, head.commit_sha, result.tree);
@@ -261,6 +312,19 @@ async function apply(
      WHERE room_id = $1 AND id = $2`,
     [room_id, id, revision],
   );
+  if (resolution) {
+    await client.query(
+      `UPDATE conflicts SET status = 'RESOLVED', resolver_id = $3,
+       resolution_changeset_id = $4, resolved_at = clock_timestamp()
+       WHERE id = $1 AND room_id = $2`,
+      [resolution.conflictId, room_id, ctx.principal.participant_id, id],
+    );
+    await client.query(
+      `UPDATE changesets SET status = 'REJECTED', rejection_reason = 'SUPERSEDED'
+       WHERE room_id = $1 AND id = $2`,
+      [room_id, resolution.originalChangesetId],
+    );
+  }
   ctx.afterCommit(async () => {
     await (deps.updateCanonicalRef ?? updateCanonicalRef)(ws.repo_path, commit, head.commit_sha);
   });
@@ -275,6 +339,19 @@ async function apply(
         type: "workspace.changeset.applied" as const,
         payload: { changeset_id: id, applied_revision: revision },
       },
+      ...(resolution
+        ? [
+            {
+              type: "workspace.conflict.resolved" as const,
+              payload: {
+                conflict_id: resolution.conflictId,
+                changeset_id: resolution.originalChangesetId,
+                resolution_changeset_id: id,
+                resolver_id: ctx.principal.participant_id,
+              },
+            },
+          ]
+        : []),
     ],
   };
 }
