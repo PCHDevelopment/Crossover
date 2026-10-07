@@ -8,6 +8,7 @@ export interface SandboxReadTokenClaims {
   room_id: string;
   participant_id: string;
   sandbox_id: string;
+  revision: number;
   expires_at: number;
 }
 
@@ -51,7 +52,12 @@ export function verifySandboxReadToken(
   } catch {
     return null;
   }
-  if (!isClaims(decoded) || decoded.expires_at <= now) return null;
+  if (
+    !isClaims(decoded) ||
+    decoded.expires_at <= now ||
+    decoded.expires_at > now + SANDBOX_READ_TOKEN_MAX_TTL_MS
+  )
+    return null;
   return decoded;
 }
 
@@ -74,7 +80,7 @@ function isClaims(value: unknown): value is SandboxReadTokenClaims {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const claims = value as Record<string, unknown>;
   return (
-    Object.keys(claims).length === 4 &&
+    Object.keys(claims).length === 5 &&
     typeof claims.room_id === "string" &&
     claims.room_id.length > 0 &&
     claims.room_id.length <= 200 &&
@@ -84,6 +90,9 @@ function isClaims(value: unknown): value is SandboxReadTokenClaims {
     typeof claims.sandbox_id === "string" &&
     claims.sandbox_id.length > 0 &&
     claims.sandbox_id.length <= 200 &&
+    typeof claims.revision === "number" &&
+    Number.isSafeInteger(claims.revision) &&
+    claims.revision >= 0 &&
     typeof claims.expires_at === "number" &&
     Number.isSafeInteger(claims.expires_at) &&
     claims.expires_at > 0
