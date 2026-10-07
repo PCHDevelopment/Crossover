@@ -1301,6 +1301,8 @@ Per-agent defaults (owner can change per room or per agent):
 
 Exceeding a budget returns `BUDGET_EXCEEDED` with `retry_after` and emits `budget.exceeded`.
 
+Budgets apply to agents (humans have none) and are counted per participant in fixed windows (a count resets when the next window starts), before the command's transaction. Every command counts as a command; `messages.send` also as a message, `workspace.apply_changeset` and `changes.submit` as a ChangeSet, `tools.invoke` as a tool invocation. The owner overrides a limit with `settings.budgets` (the room) or `participants.budgets` (one agent), keyed `commands`, `messages`, `changesets`, `tool_invocations`; a count of at least 1, or `null` for no limit; the participant's setting wins. `retry_after` is in seconds (also the HTTP `Retry-After` header), and `budget.exceeded` is appended for the first refusal of a window only. If Redis is down, commands go ahead and a warning is logged.
+
 ## 22.4 Circuit breakers
 
 A ChangeSet is held (`CIRCUIT_BREAKER`) and sent to the lead's and owner's inbox for approval when it:

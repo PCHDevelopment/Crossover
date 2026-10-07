@@ -1,0 +1,143 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createTestDatabase, type TestDatabase } from "@crossover/db/testing";
+import type { EventPublisher } from "@crossover/kernel";
+import { newId } from "@crossover/protocol";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { composeServer, type CrossoverServer } from "../compose.js";
+import type { ServerConfig } from "../config.js";
+
+/** Agent budgets (§22.3) through the real server: Redis counters, the HTTP error and the ledger. */
+
+let db: TestDatabase;
+let root: string;
+let server: CrossoverServer;
+let serial = 0;
+
+beforeAll(async () => {
+  db = await createTestDatabase();
+  root = await mkdtemp(join(tmpdir(), "crossover-budgets-e2e-"));
+  const config: ServerConfig = {
+    databaseUrl: "unused: test pool is injected",
+    redisUrl: process.env["REDIS_URL"] ?? "redis://localhost:6379",
+    workspaceRoot: root,
+    host: "127.0.0.1",
+    port: 0,
+    nodeId: `budgets-e2e-${process.pid}`,
+    devLogin: true,
+    healthImages: ["node:22-bookworm-slim"],
+  };
+  const publisher: EventPublisher = { publish: async () => undefined };
+  server = await composeServer(config, { pool: db.pool, publisher });
+});
+
+afterAll(async () => {
+  await server?.close();
+  await db?.drop();
+  await rm(root, { recursive: true, force: true });
+});
+
+const envelope = (method: string, params: Record<string, unknown> = {}) => ({
+  id: newId("cmd"),
+  method,
+  params,
+  idempotency_key: `budgets-e2e-${++serial}`,
+});
+const post = (url: string, payload: unknown, token?: string) =>
+  server.app.inject({
+    method: "POST",
+    url,
+    headers: {
+      "content-type": "application/json",
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
+    },
+    payload: JSON.stringify(payload),
+  });
+async function ok(res: Awaited<ReturnType<typeof post>>, status = 200) {
+  expect(res.statusCode, res.body).toBe(status);
+  return res.json();
+}
+
+async function newRoom(settings: Record<string, unknown>) {
+  const login = await ok(
+    await post("/v1/auth/dev-login", { subject: `bud-${newId("usr")}`, display_name: "Owner" }),
+  );
+  const created = await ok(
+    await post(
+      "/v1/commands",
+      envelope("room.create", {
+        slug: `bud-${++serial}`,
+        name: "Budgets",
+        objective: "Stay in budget",
+        settings,
+      }),
+      login.session_token,
+    ),
+  );
+  const roomId = created.response.room.id as string;
+  const owner = (await ok(await post(`/v1/rooms/${roomId}/session`, {}, login.session_token)))
+    .tokens.access_token as string;
+  const invite = await ok(
+    await post(
+      `/v1/rooms/${roomId}/commands`,
+      envelope("room.invite", { role: "DEVELOPER" }),
+      owner,
+    ),
+  );
+  const dev = (
+    await ok(
+      await post(`/v1/rooms/${roomId}/join`, {
+        token: invite.one_time.token,
+        manifest: {
+          name: "Dev",
+          operator: { name: "P", contact: "p@example.com" },
+          vendor: "Anthropic",
+          model: "m",
+          client: "mcp",
+          client_version: "1",
+          description: "d",
+        },
+      }),
+      201,
+    )
+  ).tokens.access_token as string;
+  const call = (token: string, method: string, params: Record<string, unknown> = {}) =>
+    post(`/v1/rooms/${roomId}/commands`, envelope(method, params), token);
+  return { roomId, owner, dev, call };
+}
+
+describe("agent budgets over HTTP", () => {
+  it("an agent over its message budget gets 429 with Retry-After, the room sees one budget.exceeded, and the owner is unaffected", async () => {
+    const r = await newRoom({ budgets: { messages: 2 } });
+    await ok(await r.call(r.dev, "messages.send", { body: "one" }));
+    await ok(await r.call(r.dev, "messages.send", { body: "two" }));
+    const refused = await r.call(r.dev, "messages.send", { body: "three" });
+    expect(refused.statusCode).toBe(429);
+    const error = refused.json().error;
+    expect(error).toMatchObject({
+      code: "BUDGET_EXCEEDED",
+      retryable: true,
+      details: { budget: "messages", limit: 2, window_seconds: 60 },
+    });
+    expect(error.details.retry_after).toBeGreaterThanOrEqual(1);
+    expect(error.details.retry_after).toBeLessThanOrEqual(60);
+    expect(refused.headers["retry-after"]).toBe(String(error.details.retry_after));
+    expect((await r.call(r.dev, "messages.send", { body: "four" })).statusCode).toBe(429);
+
+    for (let i = 0; i < 4; i++) await ok(await r.call(r.owner, "messages.send", { body: `h${i}` }));
+    const events = (await ok(await r.call(r.owner, "room.events.list", { limit: 500 }))).response
+      .events as { type: string; payload: Record<string, unknown> }[];
+    const exceeded = events.filter((e) => e.type === "budget.exceeded");
+    expect(exceeded).toHaveLength(1);
+    expect(exceeded[0]!.payload).toMatchObject({ budget: "messages", limit: 2 });
+    // Reads are still within the command budget.
+    await ok(await r.call(r.dev, "messages.list"));
+  });
+
+  it("the defaults apply when nobody overrode them: ten messages a minute", async () => {
+    const r = await newRoom({});
+    for (let i = 0; i < 10; i++) await ok(await r.call(r.dev, "messages.send", { body: `m${i}` }));
+    expect((await r.call(r.dev, "messages.send", { body: "eleventh" })).statusCode).toBe(429);
+  });
+});

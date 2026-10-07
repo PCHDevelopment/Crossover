@@ -85,6 +85,10 @@ export function buildGateway(options: GatewayOptions): FastifyInstance {
     const mapped = toHttpError(normalize(error));
     if (mapped.status === 500) options.onInternalError?.(error, request);
     if (mapped.status === 401) void reply.header("WWW-Authenticate", "Bearer");
+    const retryAfter = mapped.body.error.details?.["retry_after"];
+    if (mapped.status === 429 && typeof retryAfter === "number") {
+      void reply.header("Retry-After", String(retryAfter));
+    }
     return reply.status(mapped.status).header("Cache-Control", "no-store").send(mapped.body);
   });
   app.setNotFoundHandler((_request, reply) =>
