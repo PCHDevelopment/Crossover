@@ -301,4 +301,82 @@ it("redacts unauthorized conflict paths and content", async () => {
   ]);
   expect(durable.rows[0]?.counterparty_changesets).toEqual([seededChangesetId]);
   expect(conflict.response).toMatchObject({ counterparty_changesets: [] });
+
+  const conflictId = (conflict.response as { conflict_id: string }).conflict_id;
+  const secondConflict = await f.apply(
+    f.reviewer,
+    [{ type: "create", path: "docs/second.txt", content: "second private conflict" }],
+    0,
+  );
+  const secondConflictId = (secondConflict.response as { conflict_id: string }).conflict_id;
+
+  const ownerView = await f.dispatcher.dispatch(f.owner, {
+    id: newId("cmd"),
+    method: "conflicts.get",
+    params: { conflict_id: conflictId },
+  });
+  expect(ownerView.response).toMatchObject({
+    id: conflictId,
+    files: [
+      { path: "docs/file.txt", messages: [{ paths: ["docs/file.txt", "secrets/file.txt"] }] },
+    ],
+    counterparty_changesets: [seededChangesetId],
+  });
+
+  const submitterView = await f.dispatcher.dispatch(f.reviewer, {
+    id: newId("cmd"),
+    method: "conflicts.get",
+    params: { conflict_id: conflictId },
+  });
+  expect(submitterView.response).toMatchObject({
+    id: conflictId,
+    files: [{ path: null, kind: "MODIFY_DELETE", reason: "unauthorized" }],
+  });
+  expect(submitterView.response).not.toHaveProperty("counterparty_changesets");
+  expect(JSON.stringify(submitterView.response)).not.toContain("secrets/file.txt");
+  expect(JSON.stringify(submitterView.response)).not.toContain("private conflicting content");
+
+  const firstPage = await f.dispatcher.dispatch(f.reviewer, {
+    id: newId("cmd"),
+    method: "conflicts.list",
+    params: { status: "OPEN", submitter_id: f.reviewer.participant_id, limit: 1 },
+  });
+  const firstPageBody = firstPage.response as {
+    conflicts: { id: string; files: { path: string | null; reason?: string }[] }[];
+    next_cursor: string | null;
+  };
+  expect(firstPageBody.conflicts).toHaveLength(1);
+  expect(firstPageBody.conflicts[0]!.files).toContainEqual(
+    expect.objectContaining({ path: null, reason: "unauthorized" }),
+  );
+  expect(firstPageBody.next_cursor).toBeTruthy();
+  const nextPage = await f.dispatcher.dispatch(f.reviewer, {
+    id: newId("cmd"),
+    method: "conflicts.list",
+    params: {
+      status: "OPEN",
+      submitter_id: f.reviewer.participant_id,
+      limit: 1,
+      cursor: firstPageBody.next_cursor,
+    },
+  });
+  const nextPageBody = nextPage.response as { conflicts: { id: string }[] };
+  expect(nextPageBody.conflicts).toHaveLength(1);
+  expect(nextPageBody.conflicts[0]!.id).not.toBe(firstPageBody.conflicts[0]!.id);
+  expect([conflictId, secondConflictId]).toContain(nextPageBody.conflicts[0]!.id);
+
+  await db.pool.query("UPDATE conflicts SET status = 'RESOLVED' WHERE id = $1", [secondConflictId]);
+  const resolved = await f.dispatcher.dispatch(f.owner, {
+    id: newId("cmd"),
+    method: "conflicts.list",
+    params: { status: "RESOLVED", submitter_id: f.reviewer.participant_id },
+  });
+  expect(resolved.response).toMatchObject({ conflicts: [{ id: secondConflictId }] });
+  await expect(
+    f.dispatcher.dispatch(f.reviewer, {
+      id: newId("cmd"),
+      method: "conflicts.get",
+      params: { conflict_id: newId("conf") },
+    }),
+  ).rejects.toMatchObject({ code: "NOT_FOUND" });
 });
