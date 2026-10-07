@@ -184,6 +184,16 @@ export class WakeWebhookService {
     });
   }
 
+  private report(error: unknown, participantId: string): void {
+    try {
+      (this.o.onError ?? ((e: unknown) => console.warn("wake webhook failed", e)))(error, {
+        participant_id: participantId,
+      });
+    } catch {
+      // a broken handler changes nothing
+    }
+  }
+
   /** Send what is waiting for a claimed agent; true if the receiver accepted it. */
   private async deliver(claim: Claim): Promise<boolean> {
     const { pool } = this.o;
@@ -245,14 +255,20 @@ export class WakeWebhookService {
           "user-agent": "Crossover-Webhook/1",
         },
       });
-      await pool.query(
-        "UPDATE inbox_items SET wake_notified_at = clock_timestamp() WHERE id = ANY($1::text[])",
-        [items.map((i) => i.id)],
-      );
-      if (claim.failures > 0) {
-        await pool.query("UPDATE wake_windows SET failures = 0 WHERE participant_id = $1", [
-          participantId,
-        ]);
+      // The receiver has it. A failure to record that is the database's, not the endpoint's: no
+      // backoff for the agent; the items are announced again next window (at least once).
+      try {
+        await pool.query(
+          "UPDATE inbox_items SET wake_notified_at = clock_timestamp() WHERE id = ANY($1::text[])",
+          [items.map((i) => i.id)],
+        );
+        if (claim.failures > 0) {
+          await pool.query("UPDATE wake_windows SET failures = 0 WHERE participant_id = $1", [
+            participantId,
+          ]);
+        }
+      } catch (markError) {
+        this.report(markError, participantId);
       }
       return true;
     } catch (error) {
@@ -262,13 +278,7 @@ export class WakeWebhookService {
           participantId,
         ])
         .catch(() => undefined);
-      try {
-        (this.o.onError ?? ((e: unknown) => console.warn("wake webhook failed", e)))(error, {
-          participant_id: participantId,
-        });
-      } catch {
-        // a broken handler changes nothing
-      }
+      this.report(error, participantId);
       return false;
     }
   }

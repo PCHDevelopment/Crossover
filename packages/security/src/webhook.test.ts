@@ -109,4 +109,72 @@ describe("postWebhook", () => {
       server.close();
     }
   });
+
+  it("gives up at the overall deadline on a receiver that never answers, and on one that trickles", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "webhook-slow-"));
+    execFileSync(
+      "openssl",
+      [
+        "req",
+        "-x509",
+        "-newkey",
+        "rsa:2048",
+        "-nodes",
+        "-days",
+        "1",
+        "-keyout",
+        join(dir, "k.pem"),
+        "-out",
+        join(dir, "c.pem"),
+        "-subj",
+        "/CN=hooks.example",
+        "-addext",
+        "subjectAltName=DNS:hooks.example",
+      ],
+      { stdio: "ignore" },
+    );
+    const cert = readFileSync(join(dir, "c.pem"));
+    let mode: "silent" | "trickle" = "silent";
+    const timers: NodeJS.Timeout[] = [];
+    const server = createServer({ key: readFileSync(join(dir, "k.pem")), cert }, (req, res) => {
+      req.resume();
+      req.on("end", () => {
+        if (mode === "silent") return; // never answers
+        res.writeHead(200, { "content-type": "text/plain" });
+        const timer = setInterval(() => res.write("x"), 50); // a byte every 50 ms, for ever
+        timers.push(timer);
+        res.on("close", () => clearInterval(timer));
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const port = (server.address() as AddressInfo).port;
+    const seam = {
+      port,
+      ca: cert,
+      connectTo: "127.0.0.1",
+      resolve: async () => ["93.184.216.34"],
+      deadlineMs: 400,
+    };
+    try {
+      for (const next of ["silent", "trickle"] as const) {
+        mode = next;
+        const started = Date.now();
+        await expect(postWebhook(request("https://hooks.example/x"), seam), next).rejects.toThrow();
+        expect(Date.now() - started, next).toBeLessThan(2_000);
+      }
+      // A name lookup that never finishes is cut off by the same deadline.
+      const started = Date.now();
+      await expect(
+        postWebhook(request("https://hooks.example/x"), {
+          ...seam,
+          resolve: () => new Promise<string[]>(() => undefined),
+        }),
+      ).rejects.toThrow(/timed out/);
+      expect(Date.now() - started).toBeLessThan(2_000);
+    } finally {
+      for (const t of timers) clearInterval(t);
+      server.closeAllConnections();
+      server.close();
+    }
+  });
 });
