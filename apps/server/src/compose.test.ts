@@ -82,7 +82,7 @@ async function ok(res: Awaited<ReturnType<typeof post>>, status = 200) {
 }
 
 /** The skeleton flow over HTTP, as a person and an agent would drive it. */
-async function walkthrough(app: App) {
+async function walkthrough(app: App, withAppliedChange = true) {
   const login = await ok(
     await post(app, "/v1/auth/dev-login", { subject: `peter-${++n}`, display_name: "Peter" }),
   );
@@ -118,17 +118,19 @@ async function walkthrough(app: App) {
     201,
   );
 
-  const applied = await ok(
-    await cmd(
-      envelope("workspace.apply_changeset", {
-        source: "API",
-        message: "Add README",
-        base_workspace_revision: 0,
-        operations: [{ type: "create", path: "README.md", content: "# Alpha\n" }],
-      }),
-      agent.tokens.access_token,
-    ),
-  );
+  const applied = withAppliedChange
+    ? await ok(
+        await cmd(
+          envelope("workspace.apply_changeset", {
+            source: "API",
+            message: "Add README",
+            base_workspace_revision: 0,
+            operations: [{ type: "create", path: "README.md", content: "# Alpha\n" }],
+          }),
+          agent.tokens.access_token,
+        ),
+      )
+    : { response: { applied_revision: 0 } };
   return { roomId, owner, agent, applied, cmd };
 }
 
@@ -215,6 +217,80 @@ describe("composeServer", () => {
     expect(refused.json().error.code).toBe("ROOM_PAUSED");
     await ok(await cmd(envelope("room.resume"), ownerToken));
     await ok(await cmd(envelope("messages.send", { body: "Back" }), agentToken));
+  });
+
+  it("blocks task approval until the configured health run covers the submission revision", async () => {
+    const { server } = await start();
+    const { roomId, owner, agent, applied, cmd } = await walkthrough(server.app, false);
+    const ownerToken = owner.tokens.access_token as string;
+    const agentToken = agent.tokens.access_token as string;
+    await db.pool.query(
+      "UPDATE rooms SET settings = jsonb_set(settings, '{health_command}', to_jsonb('pnpm test'::text)) WHERE id = $1",
+      [roomId],
+    );
+
+    const created = await ok(
+      await cmd(
+        envelope("tasks.create", { title: "Review health gate", requirements: ["Build passes"] }),
+        ownerToken,
+      ),
+    );
+    const claimed = await ok(
+      await cmd(
+        envelope("tasks.claim", {
+          task_id: created.response.id,
+          expected_version: created.response.version,
+        }),
+        agentToken,
+      ),
+    );
+    const started = await ok(
+      await cmd(
+        envelope("tasks.start", {
+          task_id: created.response.id,
+          expected_version: claimed.response.version,
+        }),
+        agentToken,
+      ),
+    );
+    const submitted = await ok(
+      await cmd(
+        envelope("tasks.submit", {
+          task_id: created.response.id,
+          expected_version: started.response.version,
+        }),
+        agentToken,
+      ),
+    );
+
+    const approval = () =>
+      cmd(
+        envelope("tasks.review", {
+          task_id: created.response.id,
+          expected_version: submitted.response.version,
+          verdict: "approve",
+        }),
+        ownerToken,
+      );
+    const blocked = await approval();
+    expect(blocked.statusCode).toBe(400);
+    expect(blocked.json().error.details).toMatchObject({
+      reason: "health_gate_pending",
+      required_revision: 0,
+      latest_run: null,
+    });
+
+    const { rows: workspaces } = await db.pool.query<{ id: string }>(
+      "SELECT id FROM workspaces WHERE room_id = $1",
+      [roomId],
+    );
+    await db.pool.query(
+      `INSERT INTO health_runs (id, workspace_id, room_id, revision, status, duration_ms, log)
+       VALUES ($1, $2, $3, $4, 'GREEN', 10, 'private health output')`,
+      [newId("health"), workspaces[0]!.id, roomId, applied.response.applied_revision],
+    );
+    const approved = await ok(await approval());
+    expect(approved.response).toMatchObject({ status: "DONE" });
   });
 
   it("serves the inbox over HTTP: an empty list, and NOT_FOUND for an id that isn't theirs", async () => {
@@ -309,6 +385,61 @@ describe("composeServer", () => {
     void roomId;
   });
 
+  it("serves decisions over HTTP: propose, then a position, which a second one replaces", async () => {
+    const { server } = await start();
+    const { owner, agent, cmd } = await walkthrough(server.app);
+    const proposed = await ok(
+      await cmd(
+        envelope("decisions.propose", {
+          title: "Pick a database",
+          options: [{ summary: "PostgreSQL" }, { summary: "SQLite" }],
+        }),
+        owner.tokens.access_token,
+      ),
+    );
+    expect(proposed.response).toMatchObject({ status: "PROPOSED", version: 1 });
+    const position = (option: string) =>
+      cmd(
+        envelope("decisions.add_position", {
+          decision_id: proposed.response.id,
+          option_id: option,
+          argument: "because",
+        }),
+        agent.tokens.access_token,
+      );
+    expect((await ok(await position("opt_1"))).response).toMatchObject({ replaced: false });
+    expect((await ok(await position("opt_2"))).response).toMatchObject({ replaced: true });
+    const bad = await position("opt_9");
+    expect(bad.statusCode).toBe(400);
+  });
+
+  it("serves MCP at /mcp with the task tools, authenticated by the room token", async () => {
+    const { server } = await start();
+    const { agent } = await walkthrough(server.app);
+    const rpc = (token: string | undefined, body: unknown) =>
+      server.app.inject({
+        method: "POST",
+        url: "/mcp",
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+          ...(token ? { authorization: `Bearer ${token}` } : {}),
+        },
+        payload: JSON.stringify(body),
+      });
+    expect((await rpc(undefined, { jsonrpc: "2.0", id: 1, method: "tools/list" })).statusCode).toBe(
+      401,
+    );
+    const res = await rpc(agent.tokens.access_token, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/list",
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain("tasks_create");
+    expect(res.body).toContain("tasks_heartbeat");
+  });
+
   it("serves room.digest over HTTP: counts per type since a sequence, identical on repeat", async () => {
     const { server } = await start();
     const { owner, cmd } = await walkthrough(server.app);
@@ -322,6 +453,106 @@ describe("composeServer", () => {
     });
     expect(await ask({})).toEqual(all);
     expect(await ask({ since: all.up_to })).toMatchObject({ event_count: 0, up_to: all.up_to });
+  });
+
+  it("serves decide, withdraw, get and list over HTTP: the lead decides, a developer can't", async () => {
+    const { server } = await start();
+    const { owner, agent, cmd } = await walkthrough(server.app);
+    const propose = async (token: string) =>
+      (
+        await ok(
+          await cmd(
+            envelope("decisions.propose", {
+              title: "Pick a database",
+              options: [{ summary: "PostgreSQL" }, { summary: "SQLite" }],
+            }),
+            token,
+          ),
+        )
+      ).response;
+    const first = await propose(agent.tokens.access_token);
+    const decide = (token: string, d: { id: string; version: number }) =>
+      cmd(
+        envelope("decisions.decide", {
+          decision_id: d.id,
+          expected_version: d.version,
+          outcome_option_id: "opt_1",
+          rationale: "We run it already",
+        }),
+        token,
+      );
+    // The agent is a developer: it can propose but not decide.
+    expect((await decide(agent.tokens.access_token, first)).statusCode).toBe(403);
+
+    const withdrawn = await ok(
+      await cmd(
+        envelope("decisions.withdraw", { decision_id: first.id, expected_version: 1 }),
+        agent.tokens.access_token,
+      ),
+    );
+    expect(withdrawn.response.status).toBe("WITHDRAWN");
+
+    const second = await propose(agent.tokens.access_token);
+    const got = await ok(
+      await cmd(envelope("decisions.get", { decision_id: second.id }), owner.tokens.access_token),
+    );
+    expect(got.response).toMatchObject({ id: second.id, status: "PROPOSED" });
+    const listed = await ok(
+      await cmd(envelope("decisions.list", { status: ["PROPOSED"] }), owner.tokens.access_token),
+    );
+    expect(listed.response.decisions.map((d: { id: string }) => d.id)).toEqual([second.id]);
+  });
+
+  it("serves memory.put over HTTP with compare-and-set", async () => {
+    const { server } = await start();
+    const { owner, agent, cmd } = await walkthrough(server.app);
+    const put = (token: string, params: Record<string, unknown>) =>
+      cmd(envelope("memory.put", { key: "architecture/database", ...params }), token);
+    const created = await ok(
+      await put(owner.tokens.access_token, { value: "PostgreSQL", expected_revision: 0 }),
+    );
+    expect(created.response).toMatchObject({ revision: 1, value: "PostgreSQL" });
+    const stale = await put(agent.tokens.access_token, { value: "SQLite", expected_revision: 0 });
+    expect(stale.statusCode).toBe(409);
+    expect(stale.json().error.details.current).toMatchObject({ revision: 1 });
+    const updated = await ok(
+      await put(agent.tokens.access_token, { value: "Postgres 16", expected_revision: 1 }),
+    );
+    expect(updated.response).toMatchObject({ revision: 2 });
+  });
+
+  it("serves decisions.veto over HTTP: the owner may, a developer may not", async () => {
+    const { server } = await start();
+    const { owner, agent, cmd } = await walkthrough(server.app);
+    const proposed = (
+      await ok(
+        await cmd(
+          envelope("decisions.propose", {
+            title: "Pick a database",
+            options: [{ summary: "PostgreSQL" }, { summary: "SQLite" }],
+          }),
+          agent.tokens.access_token,
+        ),
+      )
+    ).response;
+    // Decided by the lead in a real room; here, put it in the state a decision would be in.
+    await db.pool.query(
+      `UPDATE decisions SET status = 'ACCEPTED', outcome_option_id = 'opt_1', rationale = 'r',
+              decided_by = proposed_by, decided_at = now(), version = 2 WHERE id = $1`,
+      [proposed.id],
+    );
+    const veto = (token: string) =>
+      cmd(
+        envelope("decisions.veto", {
+          decision_id: proposed.id,
+          expected_version: 2,
+          rationale: "Too risky",
+        }),
+        token,
+      );
+    expect((await veto(agent.tokens.access_token)).statusCode).toBe(403);
+    const vetoed = await ok(await veto(owner.tokens.access_token));
+    expect(vetoed.response).toMatchObject({ status: "VETOED", version: 3 });
   });
 
   it("enforces the real policy: an observer can't apply a ChangeSet", async () => {

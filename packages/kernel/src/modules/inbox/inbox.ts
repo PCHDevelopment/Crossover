@@ -9,6 +9,7 @@ export const INBOX_KINDS = [
   "REVIEW_REQUEST",
   "MENTION",
   "CONFLICT",
+  "HEALTH_RED",
   "APPROVAL",
   "LEASE_WARNING",
   "LEASE_EXPIRED",

@@ -14,8 +14,8 @@ import {
 } from "./task.js";
 
 /**
- * Is the workspace healthy enough to approve `task` (§12)? The real gate (T610) runs the room's
- * health command at the reviewed revision; until then {@link alwaysGreen} lets everything through.
+ * Is the workspace healthy enough to approve `task` (§12)? The server composition root wires the
+ * T610 workspace gate; {@link alwaysGreen} remains available for isolated command-module use.
  */
 export interface HealthGate {
   isGreenFor(task: TaskView, ctx: CommandContext): Promise<boolean>;
@@ -31,6 +31,21 @@ export const taskVersionParams = z.strictObject({
   task_id: z.string().min(1).max(100),
   /** The version you last saw; a stale one is `CONFLICT_VERSION`. */
   expected_version: z.number().int().min(1),
+});
+
+export const tasksAssignParams = taskVersionParams.extend({
+  participant_id: z.string().min(1).max(100),
+});
+
+export const tasksBlockParams = taskVersionParams.extend({
+  reason: z.string().trim().min(1).max(2000),
+});
+
+export const tasksReviewParams = taskVersionParams.extend({
+  verdict: z.enum(["approve", "request_changes"]),
+  comments: z.string().max(10_000).default(""),
+  /** Lead only: approve although the health gate says the workspace is red. */
+  override_health: z.boolean().optional(),
 });
 
 /**
@@ -61,7 +76,7 @@ export function registerTaskLifecycleCommands(
   dispatcher.registerCommand({
     method: "tasks.assign",
     mutating: true,
-    params: taskVersionParams.extend({ participant_id: z.string().min(1).max(100) }),
+    params: tasksAssignParams,
     execute: async (ctx, p) => {
       const task = await loadTask(ctx.client, ctx.room_id, p.task_id, true);
       if (task.status !== "OPEN" || task.version !== p.expected_version)
@@ -141,7 +156,7 @@ export function registerTaskLifecycleCommands(
   dispatcher.registerCommand({
     method: "tasks.block",
     mutating: true,
-    params: taskVersionParams.extend({ reason: z.string().trim().min(1).max(2000) }),
+    params: tasksBlockParams,
     execute: async (ctx, p) => {
       const { task, actor } = await ownerOrLead(ctx, p);
       if (task.status !== "IN_PROGRESS") {
@@ -212,12 +227,7 @@ export function registerTaskLifecycleCommands(
   dispatcher.registerCommand({
     method: "tasks.review",
     mutating: true,
-    params: taskVersionParams.extend({
-      verdict: z.enum(["approve", "request_changes"]),
-      comments: z.string().max(10_000).default(""),
-      /** Lead only: approve although the health gate says the workspace is red. */
-      override_health: z.boolean().optional(),
-    }),
+    params: tasksReviewParams,
     execute: async (ctx, p) => {
       const task = await loadTask(ctx.client, ctx.room_id, p.task_id, true);
       const actor = await loadActor(ctx);

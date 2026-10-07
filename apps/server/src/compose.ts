@@ -1,5 +1,6 @@
 import { createPool, type Pool } from "@crossover/db";
 import { buildGateway } from "@crossover/gateway";
+import { registerMcp } from "@crossover/mcp";
 import {
   Dispatcher,
   LeaseRenewer,
@@ -8,13 +9,17 @@ import {
   RedisEventSubscriber,
   registerRoomEventsSubscribeCommand,
   registerCapabilityCommands,
+  registerDecisionCommands,
+  registerDecisionDecideCommands,
   registerInboxCommands,
   registerInviteCommands,
   registerJoinCommand,
   registerLeadCommands,
+  registerMemoryCommands,
   registerMessageCommands,
   registerParticipantLifecycleCommands,
   registerParticipantRoleCommand,
+  registerPresenceIntentCommands,
   registerRoomCommands,
   registerRoomDigestCommand,
   registerRoomEventsCommand,
@@ -26,13 +31,20 @@ import {
   type Authorizer,
   type EventPublisher,
   type EventSubscriber,
+  RedisEditIntentStore,
 } from "@crossover/kernel";
 import { authorize } from "@crossover/policy";
 import {
   ConflictEscalationSweeper,
+  DockerHealthRunner,
+  HealthCheckQueue,
+  workspaceHealthGate,
   provisionWorkspace,
   reconcileRef,
   registerWorkspaceCommands,
+  runHealthCheck,
+  publishHealthResult,
+  normalizePath,
 } from "@crossover/workspace";
 import type { ServerConfig } from "./config.js";
 
@@ -99,8 +111,11 @@ export async function composeServer(
     subscriber = redisSubscriber;
   }
 
+  const intentStore = new RedisEditIntentStore(config.redisUrl);
+
   try {
     if (redis) await redis.ready();
+    await intentStore.ready();
 
     const dispatcher = new Dispatcher({
       pool,
@@ -110,7 +125,15 @@ export async function composeServer(
       onLeaseAcquire: (roomId) => reconcileRef(pool, roomId),
       ...(overrides.leaseTtlMs !== undefined ? { leaseTtlMs: overrides.leaseTtlMs } : {}),
     });
-    registerCommands(dispatcher, config);
+    const healthRunner = new DockerHealthRunner({ allowedImages: config.healthImages });
+    const healthQueue = new HealthCheckQueue({
+      run: async (roomId, revision, signal) => {
+        const outcome = await runHealthCheck(pool, healthRunner, roomId, revision, signal);
+        if (outcome && !signal.aborted)
+          await publishHealthResult(pool, dispatcher, roomId, revision, outcome.id, outcome.result);
+      },
+    });
+    registerCommands(dispatcher, config, healthQueue, intentStore);
 
     const renewer = new LeaseRenewer({ leases: dispatcher.leases, actors: dispatcher.actors });
     renewer.start();
@@ -131,6 +154,7 @@ export async function composeServer(
       devLogin: config.devLogin,
       ws: { subscriber },
     });
+    registerMcp(app, { dispatcher, pool }); // POST /mcp, the agents' tool surface
 
     let closing: Promise<void> | undefined;
     const close = () =>
@@ -139,9 +163,11 @@ export async function composeServer(
         await leaseSweeper?.stop();
         await renewer.stop();
         await app.close();
+        await healthQueue.close();
         await renewer.close(); // releases every lease once nothing can take a new one
         await redis?.close();
         await redisSubscriber?.close();
+        await intentStore.close();
         if (!overrides.pool) await pool.end();
       })());
 
@@ -151,13 +177,19 @@ export async function composeServer(
     await leaseSweeper?.stop();
     await redis?.close();
     await redisSubscriber?.close();
+    await intentStore.close();
     if (!overrides.pool) await pool.end();
     throw err;
   }
 }
 
 /** Every command module merged so far. Each new module is registered here, once. */
-function registerCommands(dispatcher: Dispatcher, config: ServerConfig): void {
+function registerCommands(
+  dispatcher: Dispatcher,
+  config: ServerConfig,
+  healthQueue: HealthCheckQueue,
+  intentStore: RedisEditIntentStore,
+): void {
   registerRoomCommands(dispatcher, {
     provision: async ({ client, room_id }) => {
       await provisionWorkspace(client, room_id, config.workspaceRoot);
@@ -173,15 +205,21 @@ function registerCommands(dispatcher: Dispatcher, config: ServerConfig): void {
   registerRoomEventsCommand(dispatcher);
   registerRoomDigestCommand(dispatcher);
   registerInboxCommands(dispatcher);
+  registerPresenceIntentCommands(dispatcher, intentStore, normalizePath);
   registerRoomEventsSubscribeCommand(dispatcher); // the WebSocket `subscribe` frame
 
   // Tasks: create/update, list/get, and the claim → start → block lifecycle.
   registerTaskCommands(dispatcher);
   registerTaskReadCommands(dispatcher);
-  registerTaskLifecycleCommands(dispatcher);
+  registerTaskLifecycleCommands(dispatcher, { healthGate: workspaceHealthGate });
   registerTaskHeartbeat(dispatcher);
   registerMessageCommands(dispatcher);
+  registerMemoryCommands(dispatcher);
+  registerDecisionCommands(dispatcher);
+  registerDecisionDecideCommands(dispatcher);
 
-  // apply_changeset plus read, list, diff, history, blame, search, and conflict reads/abandon.
-  registerWorkspaceCommands(dispatcher);
+  // apply_changeset plus reads; schedule health for every committed revision.
+  registerWorkspaceCommands(dispatcher, {
+    scheduleHealthCheck: (roomId, revision) => healthQueue.enqueue(roomId, revision),
+  });
 }

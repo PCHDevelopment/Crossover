@@ -15,6 +15,7 @@ import { registerWorkspaceSearch } from "./search.js";
 import { refreshSearchTree } from "./search-tree.js";
 import { registerWorkspaceConflictReads } from "./conflict-reads.js";
 import { escalateOpenConflict, registerWorkspaceConflictActions } from "./conflict-actions.js";
+import { registerWorkspaceHealthReads } from "./health-events.js";
 
 export interface WorkspaceCommandDeps {
   /** Failure is reported after commit; startup reconcileRef restores the DB-authoritative head. */
@@ -23,6 +24,8 @@ export interface WorkspaceCommandDeps {
   refreshSearchTree?: (repo: string, commit: string, previousCommit?: string) => Promise<void>;
   /** Merge engine seam for deterministic conflict-policy checks. */
   merge?: typeof merge;
+  /** Schedule health for an applied head after its transaction commits. */
+  scheduleHealthCheck?: (roomId: string, revision: number) => void;
 }
 
 export type ApplyResponse =
@@ -58,6 +61,7 @@ export function registerWorkspaceCommands(
   registerWorkspaceSearch(dispatcher);
   registerWorkspaceConflictReads(dispatcher);
   registerWorkspaceConflictActions(dispatcher);
+  registerWorkspaceHealthReads(dispatcher);
 }
 
 async function apply(
@@ -374,6 +378,7 @@ async function apply(
     if (deps.refreshSearchTree) await deps.refreshSearchTree(ws.repo_path, commit, head.commit_sha);
     else await refreshSearchTree(ws.repo_path, commit, head.commit_sha);
   });
+  if (deps.scheduleHealthCheck) ctx.afterCommit(() => deps.scheduleHealthCheck!(room_id, revision));
   return {
     response: { status: "APPLIED" as const, changeset_id: id, applied_revision: revision },
     events: [

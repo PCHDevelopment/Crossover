@@ -6,6 +6,20 @@ import {
   findOrCreateUser,
   issueTokens,
   registerCapabilityCommands,
+  registerTaskCommands,
+  registerTaskHeartbeat,
+  registerTaskLifecycleCommands,
+  registerTaskReadCommands,
+  tasksAssignParams,
+  tasksBlockParams,
+  tasksCreateParams,
+  tasksGetParams,
+  tasksHeartbeatParams,
+  tasksListParams,
+  tasksReviewParams,
+  tasksUpdateParams,
+  taskVersionParams,
+  type Dispatcher as KernelDispatcher,
   registerInviteCommands,
   registerJoinCommand,
   registerRoomCommands,
@@ -23,7 +37,7 @@ import { join } from "node:path";
 import Fastify, { type FastifyInstance } from "fastify";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { registerMcp } from "./server.js";
-import { BASE_TOOLS, MCP_TOOLS } from "./tools.js";
+import { BASE_TOOLS, MCP_TOOLS, TASK_TOOLS } from "./tools.js";
 import { provisionWorkspace, registerWorkspaceCommands } from "@crossover/workspace";
 
 let db: TestDatabase;
@@ -62,6 +76,10 @@ async function setup(tools?: Parameters<typeof registerMcp>[1]["tools"]) {
   registerJoinCommand(dispatcher);
   registerCapabilityCommands(dispatcher);
   registerWorkspaceCommands(dispatcher);
+  registerTaskCommands(dispatcher);
+  registerTaskReadCommands(dispatcher);
+  registerTaskLifecycleCommands(dispatcher);
+  registerTaskHeartbeat(dispatcher);
   const app = Fastify();
   registerMcp(app, { dispatcher, pool, ...(tools ? { tools } : {}) });
   apps.push(app);
@@ -193,6 +211,40 @@ describe("MCP server (T707)", () => {
     expect(JSON.parse((diff.content as { text: string }[])[0]!.text).diff).toContain(
       "Crossover MCP",
     );
+  });
+
+  it("returns only health status through health_get for a scoped workspace reader", async () => {
+    const s = await setup();
+    const { rows: workspaces } = await pool.query<{ id: string }>(
+      "SELECT id FROM workspaces WHERE room_id = $1",
+      [s.room],
+    );
+    const runId = newId("health");
+    const privateLog = "test failed at /private/build/secret.ts with token=fixture-secret";
+    await pool.query(
+      `INSERT INTO health_runs (id, workspace_id, room_id, revision, status, duration_ms, log)
+       VALUES ($1, $2, $3, 0, 'RED', 12, $4)`,
+      [runId, workspaces[0]!.id, s.room, privateLog],
+    );
+    await pool.query(
+      `INSERT INTO capability_grants
+       (id, room_id, participant_id, effect, capability, created_by)
+       VALUES ($1, $2, $3, 'DENY', 'workspace.read', $4),
+              ($5, $2, $3, 'GRANT', 'workspace.read:docs/**', $4)`,
+      [newId("grant"), s.room, s.agentId, s.ownerId, newId("grant")],
+    );
+    const agent = await connect(s.url, s.agent.access_token);
+    const result = await agent.callTool({ name: "health_get", arguments: { run_id: runId } });
+    const body = JSON.parse((result.content as { text: string }[])[0]!.text) as Record<
+      string,
+      unknown
+    >;
+    expect(result.isError).toBeFalsy();
+    expect(body).toMatchObject({ run_id: runId, revision: 0, status: "RED" });
+    expect(body).not.toHaveProperty("summary");
+    expect(body).not.toHaveProperty("log_tail");
+    expect(JSON.stringify(body)).not.toContain("fixture-secret");
+    expect(JSON.stringify(body)).not.toContain("/private/build");
   });
 
   it("rejects traversal and .git paths at the MCP boundary", async () => {
@@ -422,5 +474,127 @@ describe("MCP server (T707)", () => {
       });
       expect(res.status).toBe(405);
     }
+  });
+});
+
+describe("MCP task tools (T708)", () => {
+  const call = async (client: Client, name: string, args: Record<string, unknown> = {}) => {
+    const res = await client.callTool({ name, arguments: args });
+    const body = JSON.parse((res.content as { text: string }[])[0]!.text);
+    return { isError: Boolean(res.isError), body };
+  };
+
+  it("has a tool for every tasks.* command, and no tool for one that doesn't exist", () => {
+    const methods: string[] = [];
+    const recorder = { registerCommand: (def: { method: string }) => methods.push(def.method) };
+    registerTaskCommands(recorder as unknown as KernelDispatcher);
+    registerTaskReadCommands(recorder as unknown as KernelDispatcher);
+    registerTaskLifecycleCommands(recorder as unknown as KernelDispatcher);
+    registerTaskHeartbeat(recorder as unknown as KernelDispatcher);
+    expect(methods.length).toBeGreaterThanOrEqual(15);
+    expect(TASK_TOOLS.map((t) => t.method).sort()).toEqual([...methods].sort());
+    expect(new Set(TASK_TOOLS.map((t) => t.name)).size).toBe(TASK_TOOLS.length);
+    for (const tool of TASK_TOOLS) expect(tool.name).toBe(tool.method.replace(".", "_"));
+  });
+
+  it("take their argument schemas from the commands' own zod schemas, not copies", () => {
+    const by = Object.fromEntries(TASK_TOOLS.map((t) => [t.method, t.input]));
+    expect(by["tasks.create"]).toBe(tasksCreateParams.shape);
+    expect(by["tasks.update"]).toBe(tasksUpdateParams.shape);
+    expect(by["tasks.list"]).toBe(tasksListParams.shape);
+    expect(by["tasks.get"]).toBe(tasksGetParams.shape);
+    expect(by["tasks.assign"]).toBe(tasksAssignParams.shape);
+    expect(by["tasks.block"]).toBe(tasksBlockParams.shape);
+    expect(by["tasks.review"]).toBe(tasksReviewParams.shape);
+    expect(by["tasks.heartbeat"]).toBe(tasksHeartbeatParams.shape);
+    for (const m of ["claim", "start", "unblock", "submit", "release", "reopen", "cancel"]) {
+      expect(by[`tasks.${m}`], m).toBe(taskVersionParams.shape);
+    }
+  });
+
+  it("advertises JSON schemas derived from them", async () => {
+    const s = await setup();
+    const client = await connect(s.url, s.agent.access_token);
+    const { tools } = await client.listTools();
+    const create = tools.find((t) => t.name === "tasks_create")!;
+    expect(create.inputSchema.required).toEqual(expect.arrayContaining(["title", "requirements"]));
+    expect(Object.keys(create.inputSchema.properties!)).toEqual(
+      expect.arrayContaining(["title", "requirements", "priority", "idempotency_key"]),
+    );
+    const claim = tools.find((t) => t.name === "tasks_claim")!;
+    expect(claim.inputSchema.required).toEqual(
+      expect.arrayContaining(["task_id", "expected_version"]),
+    );
+    expect(Object.keys(tools.find((t) => t.name === "tasks_get")!.inputSchema.properties!)).toEqual(
+      ["task_id"], // reads take no idempotency key
+    );
+  });
+
+  it("run a task from creation to done through the dispatcher, as the agent", async () => {
+    const s = await setup();
+    const agent = await connect(s.url, s.agent.access_token);
+    const owner = await connect(s.url, s.owner.access_token);
+
+    const created = await call(agent, "tasks_create", {
+      title: "Write docs",
+      requirements: ["A README exists"],
+    });
+    expect(created.isError).toBe(false);
+    const id = created.body.id as string;
+    const claimed = await call(agent, "tasks_claim", { task_id: id, expected_version: 1 });
+    expect(claimed.body).toMatchObject({ status: "CLAIMED", owner_id: s.agentId });
+    const started = await call(agent, "tasks_start", { task_id: id, expected_version: 2 });
+    expect(started.body.status).toBe("IN_PROGRESS");
+    const beat = await call(agent, "tasks_heartbeat", { task_id: id });
+    expect(beat.body.task_id).toBe(id);
+    const submitted = await call(agent, "tasks_submit", { task_id: id, expected_version: 3 });
+    expect(submitted.body.status).toBe("REVIEW");
+
+    const got = await call(agent, "tasks_get", { task_id: id });
+    expect(got.body).toBeDefined();
+    const listed = await call(agent, "tasks_list", { status: ["REVIEW"] });
+    expect(JSON.stringify(listed.body)).toContain(id);
+
+    // The owner is the lead here; the agent can't approve its own task, the lead can.
+    const mine = await call(agent, "tasks_review", {
+      task_id: id,
+      expected_version: 4,
+      verdict: "approve",
+    });
+    expect(mine.isError).toBe(true);
+    expect(mine.body.error.code).toBe("FORBIDDEN");
+    const approved = await call(owner, "tasks_review", {
+      task_id: id,
+      expected_version: 4,
+      verdict: "approve",
+    });
+    expect(approved.body.status).toBe("DONE");
+  });
+
+  it("report a stale version as a tool error carrying the current task", async () => {
+    const s = await setup();
+    const agent = await connect(s.url, s.agent.access_token);
+    const created = await call(agent, "tasks_create", { title: "T", requirements: ["r"] });
+    const stale = await call(agent, "tasks_claim", {
+      task_id: created.body.id,
+      expected_version: 9,
+    });
+    expect(stale.isError).toBe(true);
+    expect(stale.body.error.code).toBe("CONFLICT_VERSION");
+    expect(stale.body.error.details.current.id).toBe(created.body.id);
+  });
+
+  it("a retry with the same idempotency_key doesn't create a second task", async () => {
+    const s = await setup();
+    const agent = await connect(s.url, s.agent.access_token);
+    const args = { title: "Once", requirements: ["r"], idempotency_key: "retry-1" };
+    const a = await call(agent, "tasks_create", args);
+    const b = await call(agent, "tasks_create", args);
+    expect(b.body.id).toBe(a.body.id);
+    const { rows } = await pool.query(
+      "SELECT count(*)::int AS n FROM tasks WHERE room_id = $1 AND title = 'Once'",
+      [s.room],
+    );
+    expect(rows[0].n).toBe(1);
   });
 });
