@@ -77,3 +77,11 @@ export function versionConflict(current: TaskRow): CrossoverError {
     details: { current: taskView(current) },
   });
 }
+
+/** An agent's claim lasts this long unless renewed (§8.4). */
+export const AGENT_LEASE_MINUTES = 15;
+
+/** The lease an owner gets when they take a task: agents expire, humans never (§8.4). */
+export const leaseSql = (ownerKindParam: string) =>
+  `CASE WHEN ${ownerKindParam} = 'AGENT'
+        THEN clock_timestamp() + make_interval(mins => ${AGENT_LEASE_MINUTES}) END`;

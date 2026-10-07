@@ -6,7 +6,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Dispatcher } from "../../dispatcher.js";
 import type { Principal } from "../../principal.js";
 import { registerTaskCommands } from "./create-update.js";
-import { AGENT_LEASE_MINUTES, registerTaskLifecycleCommands } from "./lifecycle.js";
+import { registerTaskLifecycleCommands } from "./lifecycle.js";
+import { AGENT_LEASE_MINUTES } from "./task.js";
 import type { TaskView } from "./task.js";
 
 let db: TestDatabase;

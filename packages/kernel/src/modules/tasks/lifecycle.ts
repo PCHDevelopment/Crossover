@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { CommandContext, Dispatcher } from "../../dispatcher.js";
 import { loadActor, manages } from "./create-update.js";
 import {
+  leaseSql,
   loadTask,
   TASK_COLUMNS,
   taskView,
@@ -25,19 +26,11 @@ export interface TaskLifecycleOptions {
   healthGate?: HealthGate;
 }
 
-/** An agent's claim lasts this long unless renewed (§8.4). */
-export const AGENT_LEASE_MINUTES = 15;
-
 export const taskVersionParams = z.strictObject({
   task_id: z.string().min(1).max(100),
   /** The version you last saw; a stale one is `CONFLICT_VERSION`. */
   expected_version: z.number().int().min(1),
 });
-
-/** The lease an owner gets when they take a task: agents expire, humans never (§8.4). */
-export const leaseSql = (ownerKindParam: string) =>
-  `CASE WHEN ${ownerKindParam} = 'AGENT'
-        THEN clock_timestamp() + make_interval(mins => ${AGENT_LEASE_MINUTES}) END`;
 
 /**
  * Register the task lifecycle commands (T304 onwards, §8.2, §8.3). Each is one conditional
