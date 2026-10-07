@@ -884,15 +884,27 @@ export class Dispatcher {
     }
     // The authorization came first, ahead of the idempotency lookup, so a request that already ran
     // (approved earlier, the gate still on) would be queued again: replay its stored result.
-    const { rows: stored } = await this.pool.query<{
-      response: { response: unknown; events: RoomEvent[] };
+    const { rows: used } = await this.pool.query<{
+      request_hash: string;
+      response: { response: unknown; events: RoomEvent[] } | null;
     }>(
-      `SELECT response FROM idempotency_keys
-       WHERE participant_id = $1 AND idempotency_key = $2 AND request_hash = $3
-         AND response IS NOT NULL
-         AND created_at >= clock_timestamp() - make_interval(hours => $4)`,
-      [principal.participant_id, idempotency.key, idempotency.hash, IDEMPOTENCY_TTL_HOURS],
+      `SELECT request_hash, response FROM idempotency_keys
+       WHERE participant_id = $1 AND idempotency_key = $2
+         AND created_at >= clock_timestamp() - make_interval(hours => $3)`,
+      [principal.participant_id, idempotency.key, IDEMPOTENCY_TTL_HOURS],
     );
+    // The key stands for the request it first ran: reusing it for another, gated one is the usual
+    // key-reuse error, and must not leave an approval nobody could decide.
+    if (used[0] && used[0].request_hash !== idempotency.hash) {
+      return {
+        error: new CrossoverError(
+          "VALIDATION",
+          "Idempotency key was already used with a different request",
+          { details: { idempotency_key: idempotency.key } },
+        ),
+      };
+    }
+    const stored = used[0]?.response ? [{ response: used[0].response }] : [];
     if (stored[0]) {
       return {
         replay: {
