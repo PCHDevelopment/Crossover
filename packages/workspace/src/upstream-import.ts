@@ -1,3 +1,4 @@
+import type { Pool, PoolClient } from "@crossover/db";
 import type { CommandContext, Dispatcher } from "@crossover/kernel";
 import { CrossoverError, newId } from "@crossover/protocol";
 import { z } from "zod";
@@ -13,6 +14,7 @@ import {
   MAX_UPSTREAM_URL_LENGTH,
   noCredentials,
   validBranch,
+  type FetchedUpstream,
   type GitCredentialProvider,
   type UpstreamFetcher,
 } from "./upstream.js";
@@ -147,18 +149,135 @@ export function registerGitImport(
     method: "git.import",
     mutating: true,
     params: gitImportParams,
-    execute: async (ctx, p) => importUpstream(ctx, p, fetcher, credentials, deps, hooks),
+    // The fetch is slow and needs no lock: it happens before the command's transaction (T807).
+    prepare: async (ctx, p) => prepareImport(ctx, p, fetcher, credentials, deps),
+    disposePrepared: async (prepared) => disposeFetched(prepared as PreparedFetch),
+    execute: async (ctx, p) => importUpstream(ctx, p, ctx.prepared as PreparedImport, hooks),
   });
+}
+
+/** A fetched upstream tip, already read into the room repository under a ref of its own. */
+export interface PreparedFetch {
+  fetched: FetchedUpstream;
+  repo_path: string;
+  /** The temporary ref holding the tip in the room repository. */
+  ref: string;
+  url: URL;
+  sha: string;
+}
+
+export async function disposeFetched(prepared: PreparedFetch | undefined): Promise<void> {
+  if (!prepared) return;
+  await git(["update-ref", "-d", prepared.ref], {
+    gitDir: prepared.repo_path,
+    timeoutMs: 10_000,
+  }).catch(() => undefined);
+  await prepared.fetched.cleanup().catch(() => undefined);
+}
+
+/**
+ * Fetch `url`'s branch (through `fetcher`) and read the tip into the room repository under the
+ * temporary ref `refs/upstream/prepare/<command id>`. Throws `VALIDATION` on a fetch that
+ * doesn't work, and cleans up after itself if anything past the fetch fails.
+ */
+export async function fetchIntoRoomRepo(
+  ctx: { command_id: string },
+  repo_path: string,
+  request: { url: string; branch: string },
+  fetcher: UpstreamFetcher,
+  credentials: GitCredentialProvider,
+  deps: UpstreamDeps,
+): Promise<PreparedFetch> {
+  const url = await assertPublicHttpsUrl(request.url, deps.resolve);
+  const credential = await credentials.credentialFor(url);
+  const fetched = await fetcher.fetch({ url: url.href, branch: request.branch, credential });
+  const ref = `refs/upstream/prepare/${ctx.command_id.replace(/[^A-Za-z0-9_-]/g, "_")}`;
+  const prepared: PreparedFetch = { fetched, repo_path, ref, url, sha: fetched.sha };
+  try {
+    const options = { gitDir: repo_path, timeoutMs: 120_000 };
+    await git(["fetch", "--no-tags", "--quiet", fetched.repo, `+${fetched.ref}:${ref}`], options);
+    const sha = (await git(["rev-parse", "--verify", `${ref}^{commit}`], options)).stdout.trim();
+    if (sha !== fetched.sha) {
+      throw refuse("fetch_mismatch", "The fetched commit isn't the branch tip");
+    }
+    return prepared;
+  } catch (error) {
+    await disposeFetched(prepared);
+    throw error;
+  }
+}
+
+interface PreparedImport extends PreparedFetch {
+  branch: string;
+  tree: string;
+  files: number;
+}
+
+async function prepareImport(
+  ctx: { pool: Pool; room_id: string; command_id: string },
+  p: z.infer<typeof gitImportParams>,
+  fetcher: UpstreamFetcher,
+  credentials: GitCredentialProvider,
+  deps: UpstreamDeps,
+): Promise<PreparedImport> {
+  const { rows: workspaces } = await ctx.pool.query<{ id: string; repo_path: string }>(
+    "SELECT id, repo_path FROM workspaces WHERE room_id = $1",
+    [ctx.room_id],
+  );
+  const ws = workspaces[0];
+  if (!ws) throw new CrossoverError("NOT_FOUND", "Workspace not provisioned");
+  await assertImportable(ctx.pool, ctx.room_id, ws.id, refuse);
+  const prepared = await fetchIntoRoomRepo(ctx, ws.repo_path, p, fetcher, credentials, deps);
+  try {
+    const entries = await listTree(ws.repo_path, prepared.sha);
+    const tree = (
+      await git(["rev-parse", `${prepared.sha}^{tree}`], {
+        gitDir: ws.repo_path,
+        timeoutMs: 10_000,
+      })
+    ).stdout.trim();
+    return { ...prepared, branch: p.branch, tree, files: entries.length };
+  } catch (error) {
+    await disposeFetched(prepared);
+    throw error;
+  }
+}
+
+/** The room has no revision past 0 and no upstream; `fail` says how it isn't. */
+async function assertImportable(
+  db: Pool | PoolClient,
+  room_id: string,
+  workspace_id: string,
+  fail: (reason: string, message: string, details?: Record<string, unknown>) => Error,
+): Promise<{ commit_sha: string }> {
+  const { rows: heads } = await db.query<{ revision: string; commit_sha: string }>(
+    `SELECT revision, commit_sha FROM workspace_revisions
+     WHERE room_id = $1 AND workspace_id = $2 ORDER BY revision DESC LIMIT 1`,
+    [room_id, workspace_id],
+  );
+  const head = heads[0];
+  if (!head) throw new CrossoverError("NOT_FOUND", "Workspace has no revision 0");
+  if (Number(head.revision) !== 0) {
+    throw fail(
+      "workspace_not_empty",
+      "Only a workspace with no revisions beyond 0 can be imported into",
+      { head_revision: Number(head.revision) },
+    );
+  }
+  const { rowCount: already } = await db.query("SELECT 1 FROM upstreams WHERE room_id = $1", [
+    room_id,
+  ]);
+  if (already) throw fail("already_imported", "This room already has an upstream");
+  return head;
 }
 
 async function importUpstream(
   ctx: CommandContext,
   p: z.infer<typeof gitImportParams>,
-  fetcher: UpstreamFetcher,
-  credentials: GitCredentialProvider,
-  deps: UpstreamDeps,
+  prepared: PreparedImport | undefined,
   hooks: ImportHooks,
 ) {
+  if (!prepared) throw new Error("git.import ran without its prepared fetch");
   const { client, room_id } = ctx;
   const { rows: workspaces } = await client.query<{ id: string; repo_path: string }>(
     "SELECT id, repo_path FROM workspaces WHERE room_id = $1 FOR UPDATE",
@@ -166,43 +285,26 @@ async function importUpstream(
   );
   const ws = workspaces[0];
   if (!ws) throw new CrossoverError("NOT_FOUND", "Workspace not provisioned");
-  const { rows: heads } = await client.query<{ revision: string; commit_sha: string }>(
-    `SELECT revision, commit_sha FROM workspace_revisions
-     WHERE room_id = $1 AND workspace_id = $2 ORDER BY revision DESC LIMIT 1`,
-    [room_id, ws.id],
-  );
-  const head = heads[0];
-  if (!head) throw new CrossoverError("NOT_FOUND", "Workspace has no revision 0");
-  if (Number(head.revision) !== 0) {
-    throw refuse(
-      "workspace_not_empty",
-      "Only a workspace with no revisions beyond 0 can be imported into",
-      { head_revision: Number(head.revision) },
-    );
-  }
-  const { rowCount: already } = await client.query("SELECT 1 FROM upstreams WHERE room_id = $1", [
+  // The room was empty and had no upstream when the fetch started (`prepare` checked); it may not
+  // be now.
+  const head = await assertImportable(
+    client,
     room_id,
-  ]);
-  if (already) throw refuse("already_imported", "This room already has an upstream");
-
-  const url = await assertPublicHttpsUrl(p.url, deps.resolve);
-  const credential = await credentials.credentialFor(url);
-  const fetched = await fetcher.fetch({ url: url.href, branch: p.branch, credential });
-  try {
-    const options = { gitDir: ws.repo_path, timeoutMs: 120_000 };
-    // Read the fetched objects into the room's repository, under a ref of their own.
-    await git(
-      ["fetch", "--no-tags", "--quiet", fetched.repo, `+${fetched.ref}:refs/upstream/head`],
-      options,
-    );
-    const sha = (
-      await git(["rev-parse", "--verify", "refs/upstream/head^{commit}"], options)
-    ).stdout.trim();
-    if (sha !== fetched.sha)
-      throw refuse("fetch_mismatch", "The fetched commit isn't the branch tip");
-    const entries = await listTree(ws.repo_path, sha);
-    const tree = (await git(["rev-parse", `${sha}^{tree}`], options)).stdout.trim();
-
+    ws.id,
+    (reason, message, details) =>
+      new CrossoverError(
+        "CONFLICT_VERSION",
+        `${message} (it changed while the upstream was fetched)`,
+        {
+          details: { reason, ...details },
+        },
+      ),
+  );
+  const { url, sha, tree } = prepared;
+  const entries = { length: prepared.files };
+  const options = { gitDir: ws.repo_path, timeoutMs: 120_000 };
+  await git(["update-ref", "refs/upstream/head", sha], options);
+  {
     const message = `Import ${url.host}${url.pathname}@${p.branch} (${sha.slice(0, 12)})`;
     const commit = (
       await git(["commit-tree", tree, "-p", head.commit_sha], {
@@ -304,7 +406,5 @@ async function importUpstream(
         },
       ],
     };
-  } finally {
-    await fetched.cleanup().catch(() => undefined);
   }
 }

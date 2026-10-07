@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { withTransaction } from "@crossover/db";
 import { createTestDatabase, type TestDatabase } from "@crossover/db/testing";
-import { allowAll, Dispatcher } from "@crossover/kernel";
+import { allowAll, Dispatcher, registerMessageCommands } from "@crossover/kernel";
 import { CrossoverError, newId } from "@crossover/protocol";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { registerWorkspaceCommands } from "./apply.js";
@@ -61,9 +61,12 @@ async function upstreamRepo() {
 
 class FixtureFetcher implements UpstreamFetcher {
   fetches = 0;
+  /** Runs while a fetch is "on the network": a slow upstream, or something happening meanwhile. */
+  during: (() => Promise<void>) | undefined;
   constructor(private readonly source: string) {}
   async fetch() {
     this.fetches += 1;
+    await this.during?.();
     const dir = await tmp("crossover-fetched-");
     await run(dir, ["clone", "-q", "--bare", this.source, "repo"]);
     const repo = join(dir, "repo");
@@ -109,6 +112,7 @@ async function setup() {
   registerWorkspaceCommands(d, {
     upstream: { fetcher, resolve: async () => ["93.184.216.34"] },
   });
+  registerMessageCommands(d);
   const as = (id: string, kind: "HUMAN" | "AGENT", role: "LEAD" | "DEVELOPER") => ({
     room_id: roomId,
     participant_id: id,
@@ -329,13 +333,126 @@ describe("git.pull_upstream (§24.2, T803)", () => {
     });
   });
 
-  it("more changed files than a ChangeSet holds is refused, naming the limit", async () => {
+  it("a pull of more than 500 files is split into ordered ChangeSets and the sync advances at the end", async () => {
     const s = await setup();
-    await s.up.commit(async (dir) => {
+    const sha = await s.up.commit(async (dir) => {
       await mkdir(join(dir, "many"), { recursive: true });
       for (let i = 0; i < 501; i++) await writeFile(join(dir, `many/f${i}.txt`), `${i}\n`);
     });
-    await rejects(s.pull(), "too_many_changes");
+    const out = await s.pull();
+    expect(out.response).toMatchObject({
+      status: "APPLIED",
+      applied_revision: 3,
+      upstream: { last_synced_sha: sha, last_synced_room_revision: 3 },
+    });
+    const { rows } = await db.pool.query(
+      `SELECT source, applied_revision, payload #>> '{upstream,part}' AS part,
+              payload #>> '{upstream,parts}' AS parts, jsonb_array_length(payload -> 'operations') AS ops
+       FROM changesets WHERE room_id = $1 AND source = 'UPSTREAM' AND applied_revision > 1
+       ORDER BY applied_revision`,
+      [s.roomId],
+    );
+    expect(rows).toEqual([
+      { source: "UPSTREAM", applied_revision: "2", part: "1", parts: "2", ops: 500 },
+      { source: "UPSTREAM", applied_revision: "3", part: "2", parts: "2", ops: 1 },
+    ]);
+    const room = (await s.head()).commit_sha;
+    expect(
+      (
+        await git(["rev-parse", `${room}^{tree}`], { gitDir: s.repo, timeoutMs: 10_000 })
+      ).stdout.trim(),
+    ).toBe(await s.up.tree());
+  }, 60_000);
+
+  it("a conflict in the last part of a split pull: the first part is in, the position waits, resolving it advances", async () => {
+    const s = await setup();
+    await s.edit("src/b.ts", "export const b = 'room';\n");
+    const sha = await s.up.commit(async (dir) => {
+      await mkdir(join(dir, "many"), { recursive: true });
+      for (let i = 0; i < 600; i++) await writeFile(join(dir, `many/f${i}.txt`), `${i}\n`);
+      await writeFile(join(dir, "src/b.ts"), "export const b = 'upstream';\n"); // sorts after many/
+    });
+    const out = await s.pull();
+    expect(out.response).toMatchObject({ status: "CONFLICT", parts: 2, applied_parts: 1 });
+    expect((await s.upstreamRow()).last_synced_room_revision).toBe(1);
+    const conflictId = (out.response as { conflict_id: string }).conflict_id;
+    const resolved = await s.call(s.leadP, "workspace.apply_changeset", {
+      source: "RESOLUTION",
+      conflict_id: conflictId,
+      message: "both",
+      base_workspace_revision: Number((await s.head()).revision),
+      operations: [{ type: "modify", path: "src/b.ts", content: "export const b = 'both';\n" }],
+    });
+    expect(resolved.response).toMatchObject({ status: "APPLIED" });
+    expect(await s.upstreamRow()).toMatchObject({ last_synced_sha: sha });
+  }, 60_000);
+
+  it("a conflict in an early part: resolving it doesn't finish the pull, and pulling again carries on", async () => {
+    const s = await setup();
+    await s.edit("README.md", "# Room's readme\n");
+    const sha = await s.up.commit(async (dir) => {
+      await mkdir(join(dir, "many"), { recursive: true });
+      for (let i = 0; i < 600; i++) await writeFile(join(dir, `many/f${i}.txt`), `${i}\n`);
+      await writeFile(join(dir, "README.md"), "# Upstream's readme\n"); // sorts before many/
+    });
+    const out = await s.pull();
+    expect(out.response).toMatchObject({ status: "CONFLICT", parts: 2, applied_parts: 0 });
+    const conflictId = (out.response as { conflict_id: string }).conflict_id;
+    await s.call(s.leadP, "workspace.apply_changeset", {
+      source: "RESOLUTION",
+      conflict_id: conflictId,
+      message: "keep both",
+      base_workspace_revision: Number((await s.head()).revision),
+      operations: [{ type: "modify", path: "README.md", content: "# Both\n" }],
+    });
+    // Not finished: the position hasn't moved.
+    expect((await s.upstreamRow()).last_synced_sha).not.toBe(sha);
+    const again = await s.pull();
+    expect(again.response).toMatchObject({ status: "APPLIED", upstream: { last_synced_sha: sha } });
+    expect(await s.read("many/f599.txt")).toBe("599\n");
+    expect(await s.read("README.md")).toBe("# Both\n"); // the resolution stands
+  }, 60_000);
+
+  it("the fetch doesn't hold the room: a message posts while a slow upstream is still being fetched", async () => {
+    const s = await setup();
+    await s.up.commit(async (dir) => {
+      await writeFile(join(dir, "src/a.ts"), "export const a = 2;\nexport const keep = 0;\n");
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let started!: () => void;
+    const fetching = new Promise<void>((resolve) => (started = resolve));
+    s.fetcher.during = async () => {
+      started();
+      await gate;
+    };
+    const pulling = s.pull();
+    await fetching; // the fetch is on the network
+    const posted = await Promise.race([
+      s.call(s.leadP, "messages.send", { body: "still here" }).then(() => "posted"),
+      new Promise((resolve) => setTimeout(() => resolve("blocked"), 3_000)),
+    ]);
+    expect(posted).toBe("posted");
+    release();
+    expect((await pulling).response).toMatchObject({ status: "APPLIED" });
+  }, 30_000);
+
+  it("what the fetch assumed moved while it ran: refused with CONFLICT_VERSION, nothing changes", async () => {
+    const s = await setup();
+    await s.up.commit(async (dir) => {
+      await writeFile(join(dir, "src/a.ts"), "export const a = 2;\nexport const keep = 0;\n");
+    });
+    s.fetcher.during = async () => {
+      // Another pull got in first, in effect: the last synced commit is no longer what was read.
+      await db.pool.query("UPDATE upstreams SET last_synced_sha = $2 WHERE room_id = $1", [
+        s.roomId,
+        "b".repeat(40),
+      ]);
+    };
+    await expect(s.pull()).rejects.toMatchObject({
+      code: "CONFLICT_VERSION",
+      details: { reason: "upstream_moved" },
+    });
     expect(Number((await s.head()).revision)).toBe(1);
   });
 });
