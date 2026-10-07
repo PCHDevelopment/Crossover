@@ -50,6 +50,7 @@ import {
   publishHealthResult,
   normalizePath,
   type ExecutionDriver,
+  type UpstreamDeps,
 } from "@crossover/workspace";
 import type { ServerConfig } from "./config.js";
 
@@ -68,6 +69,8 @@ export interface ComposeOverrides {
   leaseSweepIntervalMs?: number;
   /** Sandbox runtime seam for lifecycle tests; production uses the Docker driver. */
   executionDriver?: ExecutionDriver;
+  /** How `git.import` reaches an upstream (fetcher, credentials, host check); production: HTTPS clone, no credentials. */
+  upstream?: UpstreamDeps;
 }
 
 export interface CrossoverServer {
@@ -160,7 +163,14 @@ export async function composeServer(
           await publishHealthResult(pool, dispatcher, roomId, revision, outcome.id, outcome.result);
       },
     });
-    registerCommands(dispatcher, config, healthQueue, intentStore, executionService);
+    registerCommands(
+      dispatcher,
+      config,
+      healthQueue,
+      intentStore,
+      executionService,
+      overrides.upstream,
+    );
 
     const renewer = new LeaseRenewer({ leases: dispatcher.leases, actors: dispatcher.actors });
     renewer.start();
@@ -219,6 +229,7 @@ function registerCommands(
   healthQueue: HealthCheckQueue,
   intentStore: RedisEditIntentStore,
   execution: ExecutionService,
+  upstream?: UpstreamDeps,
 ): void {
   registerRoomCommands(dispatcher, {
     provision: async ({ client, room_id }) => {
@@ -261,5 +272,6 @@ function registerCommands(
   // apply_changeset plus reads; schedule health for every committed revision.
   registerWorkspaceCommands(dispatcher, {
     scheduleHealthCheck: (roomId, revision) => healthQueue.enqueue(roomId, revision),
+    ...(upstream ? { upstream } : {}),
   });
 }

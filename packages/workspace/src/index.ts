@@ -57,4 +57,6 @@ export type {
 } from "./execution.js";
 export { DockerExecutionDriver } from "./docker-execution-driver.js";
 export type { DockerExecutionDriverOptions, DockerInvoker } from "./docker-execution-driver.js";
+export * from "./upstream.js";
+export * from "./upstream-import.js";
 export * from "./health-suggestion.js";
