@@ -141,6 +141,46 @@ describe("REST transport", () => {
     });
   });
 
+  it("a Retry-After longer than the retry cap is an error to the caller, not an hour's sleep", async () => {
+    let calls = 0;
+    const room = clientWith(async () => {
+      calls += 1;
+      return json(
+        429,
+        {
+          error: {
+            code: "BUDGET_EXCEEDED",
+            message: "used up",
+            retryable: true,
+            details: { retry_after: 3600 },
+          },
+        },
+        { "retry-after": "3600" },
+      );
+    }).room("room_1", "tok");
+    const started = Date.now();
+    const err = await room.api.messages.send({ body: "x" }).catch((e: unknown) => e);
+    expect(err).toMatchObject({
+      code: "BUDGET_EXCEEDED",
+      retryable: true,
+      details: { retry_after: 3600 },
+    });
+    expect(calls).toBe(1);
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  it("an invite is single-use: join is never retried", async () => {
+    let calls = 0;
+    const client = clientWith(async () => {
+      calls += 1;
+      throw new TypeError("fetch failed");
+    });
+    await expect(client.join("room_1", { token: "inv", manifest: {} })).rejects.toBeInstanceOf(
+      TransportError,
+    );
+    expect(calls).toBe(1);
+  });
+
   it("signs in, creates a room, exchanges a session and joins, against the documented routes", async () => {
     const urls: string[] = [];
     const client = clientWith(async (url) => {
@@ -286,6 +326,67 @@ describe("subscribe", () => {
       (i) => i.sent.find((f) => f["type"] === "subscribe")?.["after"],
     );
     expect(afters).toEqual([0, 1, 2]);
+  });
+
+  it("a retryable refusal of the subscription (a budget, an overloaded server) is waited out and retried, not fatal", async () => {
+    const errors: unknown[] = [];
+    const sub = subscribeWith(
+      (s, i) => {
+        if (i === 0) {
+          s.emit({
+            type: "error",
+            error: {
+              code: "BUDGET_EXCEEDED",
+              message: "used up",
+              retryable: true,
+              details: { retry_after: 0.03 },
+            },
+          });
+        } else {
+          s.event(1);
+          s.event(2);
+        }
+      },
+      { onError: (e: unknown) => errors.push(e) },
+    );
+    const started = Date.now();
+    expect(await take(sub, 2)).toEqual([1, 2]);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(25); // it waited as long as it was asked
+    sub.close();
+    expect(errors).toEqual([]);
+    expect(FakeSocket.instances.length).toBeGreaterThanOrEqual(2);
+    expect(FakeSocket.instances[1]!.sent.find((f) => f["type"] === "subscribe")).toMatchObject({
+      after: 0,
+    });
+  });
+
+  it("a retryable error while connecting (the server is busy) is retried too", async () => {
+    FakeSocket.instances = [];
+    FakeSocket.script = (s) => {
+      s.event(1);
+    };
+    class Busy extends FakeSocket {
+      override send(data: string) {
+        const frame = JSON.parse(data) as Record<string, unknown>;
+        if (frame["type"] === "hello" && this.index === 0) {
+          this.emit({
+            type: "error",
+            error: { code: "STALE_FENCE", message: "handing over", retryable: true },
+          });
+          this.drop(4500);
+          return;
+        }
+        super.send(data);
+      }
+    }
+    const room = clientWith(async () => ok(), { WebSocket: Busy as unknown as WebSocketCtor }).room(
+      "room_1",
+      "tok",
+    );
+    const sub = room.subscribe({ reconnect: { minMs: 1, maxMs: 2 } });
+    expect(await take(sub, 1)).toEqual([1]);
+    sub.close();
+    expect(FakeSocket.instances.length).toBe(2);
   });
 
   it("starts after the sequence you give, and tells you through callbacks too", async () => {

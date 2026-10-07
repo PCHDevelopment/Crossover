@@ -103,12 +103,11 @@ export async function postJson(
       if (!errored) return { status: res.status, json };
       if (retryableStatus(res.status) && attempt < attempts) {
         const header = Number(res.headers.get("retry-after"));
-        await sleep(
-          Number.isFinite(header) && header > 0
-            ? header * 1000
-            : Math.min(cap, base * 2 ** (attempt - 1)),
-          signal,
-        );
+        const asked = Number.isFinite(header) && header > 0 ? header * 1000 : undefined;
+        // A server that says "come back in an hour" isn't waited for: the caller gets the error
+        // (its details carry `retry_after`) and decides.
+        if (asked !== undefined && asked > cap) throw errorFromBody(json, res.status);
+        await sleep(asked ?? Math.min(cap, base * 2 ** (attempt - 1)), signal);
         continue;
       }
       throw errorFromBody(json, res.status);

@@ -115,7 +115,8 @@ export class CrossoverClient {
       `${this.options.baseUrl}/v1/rooms/${encodeURIComponent(roomId)}/join`,
       undefined,
       input,
-      this.options.retry,
+      // An invite is single-use: a retry after a lost answer would be refused, so don't retry.
+      { ...this.options.retry, attempts: 1 },
     );
     return json as Record<string, unknown> & { tokens: RoomTokens };
   }

@@ -121,6 +121,16 @@ export class WsSession {
   }
 }
 
+/** The longest the stream waits because a server asked it to (a budget's `retry_after`). */
+const MAX_RETRY_AFTER_MS = 10 * 60_000;
+
+function retryAfterOf(error: CrossoverError): number | undefined {
+  const seconds = Number(error.details?.["retry_after"]);
+  return Number.isFinite(seconds) && seconds > 0
+    ? Math.min(seconds * 1000, MAX_RETRY_AFTER_MS)
+    : undefined;
+}
+
 /** The error a server `error` frame carries (§16.3 body). */
 export function frameError(frame: Frame): CrossoverError {
   const error = frame["error"] as
@@ -239,6 +249,8 @@ export class Subscription implements AsyncIterable<SdkEvent> {
   private done = false;
   private failure: unknown;
   private session: WsSession | undefined;
+  /** How long the server asked us to wait before the next try (`details.retry_after`, seconds). */
+  private retryAfterMs: number | undefined;
   private readonly abort = new AbortController();
 
   constructor(
@@ -315,11 +327,20 @@ export class Subscription implements AsyncIterable<SdkEvent> {
               case "resync_required":
                 session.close();
                 break;
-              case "error":
-                // Once subscribed, an error frame is the subscription itself being refused.
-                this.finish(frameError(frame));
-                resolve("fatal");
+              case "error": {
+                // An error frame is the subscription being refused. If it says to try again (a
+                // budget, an overloaded server) wait as long as it asks and reconnect; otherwise
+                // it ends here.
+                const error = frameError(frame);
+                if (error.retryable) {
+                  this.retryAfterMs = retryAfterOf(error);
+                  session.close();
+                } else {
+                  this.finish(error);
+                  resolve("fatal");
+                }
                 break;
+              }
             }
           });
           session.onClose((code) => {
@@ -330,7 +351,9 @@ export class Subscription implements AsyncIterable<SdkEvent> {
           session.send({ type: "subscribe", after: this.lastSequence });
         });
       } catch (error) {
-        if (
+        if (error instanceof CrossoverError && error.retryable) {
+          this.retryAfterMs = retryAfterOf(error);
+        } else if (
           error instanceof CrossoverError ||
           (error instanceof TransportError && !error.retryable)
         ) {
@@ -346,8 +369,10 @@ export class Subscription implements AsyncIterable<SdkEvent> {
       }
       attempt += 1;
       const wait = Math.min(max, min * 2 ** (attempt - 1));
+      const asked = this.retryAfterMs;
+      this.retryAfterMs = undefined;
       try {
-        await sleep(wait / 2 + Math.random() * (wait / 2), this.abort.signal);
+        await sleep(asked ?? wait / 2 + Math.random() * (wait / 2), this.abort.signal);
       } catch {
         return;
       }
