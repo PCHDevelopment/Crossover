@@ -399,8 +399,9 @@ describe("DockerExecutionDriver", () => {
       return false;
     }
   })();
+  const skipDockerIntegration = !dockerImageAvailable && !process.env["CI"];
 
-  it.skipIf(!dockerImageAvailable)(
+  it.skipIf(skipDockerIntegration)(
     "creates, hibernates, resumes and removes a soft-mode Docker sandbox",
     async () => {
       const driver = new DockerExecutionDriver();
@@ -438,5 +439,6 @@ describe("DockerExecutionDriver", () => {
         await driver.destroy({ sandbox_id: sandboxId, resources });
       }
     },
+    15_000,
   );
 });

@@ -61,7 +61,7 @@ export interface ServerConfig {
   /** Operator-provisioned HTTP allowlist proxy; absent means network-none sandboxes. */
   sandboxEgressProxyContainer?: string;
   sandboxEgressProxyPort?: number;
-  /** Shared HMAC secret for per-sandbox egress proxy credentials. */
+  /** Shared HMAC secret for sandbox and short-lived health-install proxy credentials. */
   sandboxEgressProxySecret?: string;
   /** Platform key wake-up webhook secrets are derived from; no wake-ups without it. */
   wakeWebhookKey?: string;
