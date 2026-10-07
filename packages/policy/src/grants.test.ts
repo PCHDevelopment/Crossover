@@ -181,6 +181,27 @@ describe("grants in authorize()", () => {
     expect(await outcome(f, "workspace.write")).toBe("allowed");
   });
 
+  it("an approved command runs past the gate (T905), but a revocation still stops it", async () => {
+    const f = await fixture("DEVELOPER");
+    const approved = (action: string) =>
+      authorize(
+        f.principal,
+        action,
+        { room_id: f.room },
+        { method: "x", params: {}, client: pool, approved: true },
+      ).then(
+        () => "allowed",
+        (e: { code?: string }) => e.code,
+      );
+    await addGrant(f, "github.create_pull_request", { requires_approval: true });
+    expect(await outcome(f, "github.create_pull_request")).toBe("APPROVAL_REQUIRED");
+    expect(await approved("github.create_pull_request")).toBe("allowed");
+    // The flag lifts the gate, not the need for the capability.
+    expect(await approved("slack.post_message")).toBe("FORBIDDEN");
+    await addGrant(f, "github.create_pull_request", { effect: "DENY" });
+    expect(await approved("github.create_pull_request")).toBe("FORBIDDEN");
+  });
+
   it("an ungated grant next to a gated one allows the action", async () => {
     const f = await fixture("REVIEWER");
     await addGrant(f, "workspace.write:src/**", { requires_approval: true });

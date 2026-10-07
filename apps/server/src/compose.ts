@@ -13,6 +13,7 @@ import {
   registerCapabilityCommands,
   registerDecisionCommands,
   registerDecisionDecideCommands,
+  registerApprovalCommands,
   registerInboxCommands,
   registerInviteCommands,
   registerJoinCommand,
@@ -270,6 +271,7 @@ function registerCommands(
   registerEventsRedactCommand(dispatcher);
   registerRoomDigestCommand(dispatcher);
   registerInboxCommands(dispatcher);
+  registerApprovalCommands(dispatcher);
   registerPresenceIntentCommands(dispatcher, intentStore, normalizePath);
   registerRoomEventsSubscribeCommand(dispatcher); // the WebSocket `subscribe` frame
 

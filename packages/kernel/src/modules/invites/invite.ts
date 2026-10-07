@@ -78,6 +78,7 @@ export function registerInviteCommands(dispatcher: Dispatcher): void {
     method: "room.invite",
     action: "room.invite",
     mutating: true,
+    returnsOneTime: true,
     params: roomInviteParams,
     execute: async (ctx, params) => {
       const inviteId = newId("inv");

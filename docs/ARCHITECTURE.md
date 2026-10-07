@@ -877,7 +877,7 @@ PARTICIPANTS & PRESENCE
 CAPABILITIES
   capabilities.list        participant_id
   capabilities.grant / capabilities.revoke
-  approvals.list / approvals.decide                  (§22.2)
+  approvals.list / approvals.decide / approvals.withdraw   (§22.2)
 
 MESSAGES
   messages.list            before/after, limit
@@ -1287,7 +1287,9 @@ You chose full autonomy and wanted to be able to pull it back later. These contr
 
 ## 22.2 Approval gates
 
-Any capability grant can carry `requires_approval: true`. Invocations then return `APPROVAL_REQUIRED` with an approval id, appear in the owner's and lead's inbox, and execute when approved (`approvals.decide`). Approvals expire after 24 h. Default: off for all capabilities.
+Any capability grant can carry `requires_approval: true`. Invocations then return `APPROVAL_REQUIRED` with an approval id, appear in the owner's and admins' inbox, and execute when approved (`approvals.decide`). Approvals expire after 24 h. Default: off for all capabilities.
+
+How it runs (T905): the refused command is kept whole (method, params, the requester's idempotency key and request hash) as an approval, `approval.requested` is appended, and the owner and every admin (except the requester) get an `APPROVAL` inbox item; the requester's retry of the same request gets the same approval id. **The owner and admins decide, not the lead**: the lead is usually an agent, and an agent approving other agents' gated actions would defeat the gate's point, human oversight. `approvals.decide { approval_id, decision: approve | reject, note? }` is never on one's own request. Approving runs the stored command once, as its requester, in the approver's transaction and records the result under the requester's idempotency key, so a retry of the original request replays it (and, past the key's 24 hours, is `already_approved`) rather than running it again. Only the approval gate is lifted: a revoked capability, a paused participant or a frozen room still stop it, the refusal is recorded against the approver's command with `on_behalf_of` naming the requester, and the approval stays pending. A rejected or withdrawn request, retried with the same key, is told so; a key reused for a different request is the usual key-reuse error and opens no approval. The requester can withdraw their own pending request (`approvals.withdraw`). `approvals.list` shows every request, with its params, to the owner and admins, and each requester only their own. A command that returns a one-time secret (`room.invite`) can't wait for approval, and reads are not queued.
 
 ## 22.3 Budgets
 
