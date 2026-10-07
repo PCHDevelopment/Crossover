@@ -163,6 +163,15 @@ async function fixture(): Promise<Fixture> {
     operations: [{ type: "create", path: SECRET, content: "changed\n" }],
   });
   expect(denied.statusCode, denied.body).toBe(403);
+  // B may not read secrets/** either, and A announces it is about to edit the secret path:
+  // an intent that must stay out of B's reads too.
+  await ok(
+    await mutate(owner, "capabilities.revoke", {
+      participant_id: b.id,
+      capability: "workspace.read:secrets/**",
+    }),
+  );
+  await ok(await command(a.token, "presence.set_intent", { paths: [SECRET] }));
   return { roomId, owner, a, b, command };
 }
 
@@ -282,6 +291,42 @@ describe("egress visibility conformance (§34.5)", () => {
     );
     asB.sock.close();
     asOwner.sock.close();
+  });
+
+  it("edit intents: a reader denied a path never sees it in someone else's intent (scoped reader)", async () => {
+    const f = await fixture();
+    const set = (token: string, params: Record<string, unknown>) =>
+      post(`/v1/rooms/${f.roomId}/commands`, envelope("presence.set_intent", params, false), token);
+    // The fixture already denies B secrets/** and has A announcing an edit of the secret.
+    await ok(
+      await set(f.a.token, {
+        paths: [SECRET, "docs/readme.md"],
+        ranges: [
+          { path: SECRET, start_line: 1, end_line: 2 },
+          { path: "docs/readme.md", start_line: 1, end_line: 1 },
+        ],
+      }),
+    );
+    const list = async (token: string) =>
+      (await ok(await f.command(token, "presence.list_intents"))).response.intents as {
+        participant_id: string;
+        paths: string[];
+        ranges: { path: string }[];
+      }[];
+
+    const asB = await list(f.b.token);
+    expect(JSON.stringify(asB)).not.toContain(SECRET);
+    expect(asB).toHaveLength(1);
+    expect(asB[0]).toMatchObject({ participant_id: f.a.id, paths: ["docs/readme.md"] });
+    expect(asB[0]!.ranges.map((r) => r.path)).toEqual(["docs/readme.md"]);
+
+    // Control: a reader who may read secrets/** sees both.
+    expect((await list(f.owner))[0]!.paths).toEqual([SECRET, "docs/readme.md"]);
+
+    // An intent only on a path B can't read is omitted whole.
+    await ok(await set(f.a.token, { paths: [SECRET] }));
+    expect(await list(f.b.token)).toEqual([]);
+    expect((await list(f.owner))[0]!.paths).toEqual([SECRET]);
   });
 
   it("every MCP read tool: B never receives it, and each tool is a registered read command", async () => {

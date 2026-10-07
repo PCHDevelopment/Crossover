@@ -197,11 +197,40 @@ export function registerPresenceIntentCommands(
     method: "presence.list_intents",
     action: "room.read",
     mutating: false,
-    view: "none",
-    view_reason:
-      "edit intents are advisory and room-wide by design: what a participant announced it will edit",
+    view: "participant",
     params: z.strictObject({}),
-    execute: async (ctx) => ({ response: { intents: await store.list(ctx.room_id) } }),
+    execute: async (ctx) => {
+      // An intent names the paths someone is about to edit, so a reader sees only the paths
+      // they may read: others are left out, and an intent with none left is left out whole
+      // (its task link with it), so a denied path is neither named nor hinted at (§34.5).
+      const readable = new Map<string, boolean>();
+      const mayRead = async (path: string): Promise<boolean> => {
+        const known = readable.get(path);
+        if (known !== undefined) return known;
+        let allowed = true;
+        try {
+          await ctx.authorize("workspace.read", { path });
+        } catch (error) {
+          if (!(error instanceof CrossoverError) || error.code !== "FORBIDDEN") throw error;
+          allowed = false;
+        }
+        readable.set(path, allowed);
+        return allowed;
+      };
+      const intents = [];
+      for (const intent of await store.list(ctx.room_id)) {
+        const paths: string[] = [];
+        for (const path of intent.paths) if (await mayRead(path)) paths.push(path);
+        if (paths.length === 0) continue;
+        const keep = new Set(paths);
+        intents.push({
+          ...intent,
+          paths,
+          ranges: intent.ranges.filter((r) => keep.has(r.path)),
+        });
+      }
+      return { response: { intents } };
+    },
   });
 }
 
