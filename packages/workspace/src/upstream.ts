@@ -20,7 +20,8 @@ export type GitCredential =
  * never stored, logged, put in an event or returned in a response.
  */
 export interface GitCredentialProvider {
-  credentialFor(url: URL): Promise<GitCredential | null>;
+  /** `access` is `write` for a push (a checkpoint export), `read` (the default) for a fetch. */
+  credentialFor(url: URL, access?: "read" | "write"): Promise<GitCredential | null>;
 }
 
 export const noCredentials: GitCredentialProvider = { credentialFor: async () => null };
@@ -115,6 +116,65 @@ export function scrub(text: string, credential: GitCredential | null): string {
   return out;
 }
 
+/**
+ * The environment for Git talking to an upstream: https only, no prompts, none of the host's own
+ * Git configuration, no redirects (a validated public URL must not lead anywhere else, nor carry
+ * the credential along), and any credential as an `Authorization` header here, so it appears in
+ * no command line, no URL and no error text.
+ */
+export function upstreamGitEnv(credential: GitCredential | null): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_ALLOW_PROTOCOL: "https",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_ASKPASS: "true",
+    GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: "http.followRedirects",
+    GIT_CONFIG_VALUE_0: "false",
+  };
+  if (credential) {
+    const header =
+      credential.type === "bearer"
+        ? `Bearer ${credential.token}`
+        : `Basic ${Buffer.from(`${credential.username}:${credential.password}`).toString("base64")}`;
+    env["GIT_CONFIG_COUNT"] = "2";
+    env["GIT_CONFIG_KEY_1"] = "http.extraHeader";
+    env["GIT_CONFIG_VALUE_1"] = `Authorization: ${header}`;
+  }
+  return env;
+}
+
+/** The seam between `checkpoints.export` and the network (§24.3): tests push to a local fixture. */
+export interface UpstreamPusher {
+  /** Push `commit` of the Git repository `repo` to `branch` of `url`, without forcing. */
+  push(request: {
+    url: string;
+    branch: string;
+    credential: GitCredential | null;
+    repo: string;
+    commit: string;
+  }): Promise<void>;
+}
+
+/**
+ * The seam between `checkpoints.export` and the code host's pull requests (§24.3, T806): the
+ * GitHub implementation arrives with the plugin runner (T1204); tests use a fake. `create` opens a
+ * pull request for `head` into `base` of the repository at `url`, or returns the one already open
+ * for that head, so repeating an export doesn't open a second. It must not put the credential in
+ * anything it returns or throws.
+ */
+export interface PullRequestProvider {
+  create(request: {
+    url: string;
+    head: string;
+    base: string;
+    title: string;
+    body: string;
+    credential: GitCredential | null;
+  }): Promise<{ url: string; number: number }>;
+}
+
 export interface HttpsGitFetcherOptions {
   /** Where the temporary clone goes. Default: the OS temp directory. */
   tmpDir?: string;
@@ -147,29 +207,8 @@ export class HttpsGitFetcher implements UpstreamFetcher {
     const dir = await mkdtemp(join(this.options.tmpDir ?? tmpdir(), "crossover-import-"));
     const repo = join(dir, "repo");
     const cleanup = () => rm(dir, { recursive: true, force: true });
-    const env: NodeJS.ProcessEnv = {
-      GIT_TERMINAL_PROMPT: "0",
-      GIT_ALLOW_PROTOCOL: "https",
-      GIT_CONFIG_NOSYSTEM: "1",
-      // No user-level config of the host (a url.insteadOf, a credential helper) reaches the fetch.
-      GIT_CONFIG_GLOBAL: "/dev/null",
-      GIT_ASKPASS: "true",
-      // A redirect could send a validated public URL to a private host, or carry the credential
-      // to another one: refuse them all.
-      GIT_CONFIG_COUNT: "1",
-      GIT_CONFIG_KEY_0: "http.followRedirects",
-      GIT_CONFIG_VALUE_0: "false",
-    };
     const credential = request.credential;
-    if (credential) {
-      const header =
-        credential.type === "bearer"
-          ? `Bearer ${credential.token}`
-          : `Basic ${Buffer.from(`${credential.username}:${credential.password}`).toString("base64")}`;
-      env["GIT_CONFIG_COUNT"] = "2";
-      env["GIT_CONFIG_KEY_1"] = "http.extraHeader";
-      env["GIT_CONFIG_VALUE_1"] = `Authorization: ${header}`;
-    }
+    const env = upstreamGitEnv(credential);
     const timeoutMs = this.options.timeoutMs ?? 120_000;
     try {
       await this.run(
@@ -207,6 +246,63 @@ export class HttpsGitFetcher implements UpstreamFetcher {
               : "upstream_unavailable",
           // The first line of Git's complaint, with any secret and the URL's own text removed.
           message: scrub(detail, credential).split("\n")[0]?.slice(0, 300) ?? "",
+        },
+      });
+    }
+  }
+}
+
+/**
+ * Push one commit to a branch over HTTPS (§24.3): the URL is checked like a fetch's, Git is
+ * limited to https and never prompts, and the push is never forced, so a branch that moved on is
+ * refused (`push_rejected`) rather than overwritten. The credential reaches Git the same way as
+ * for a fetch.
+ */
+export class HttpsGitPusher implements UpstreamPusher {
+  private readonly run: typeof git;
+  constructor(private readonly options: HttpsGitFetcherOptions = {}) {
+    this.run = options.run ?? git;
+  }
+
+  async push(request: {
+    url: string;
+    branch: string;
+    credential: GitCredential | null;
+    repo: string;
+    commit: string;
+  }): Promise<void> {
+    const url = await assertPublicHttpsUrl(request.url, this.options.resolve);
+    if (!validBranch(request.branch)) {
+      throw new CrossoverError("VALIDATION", "The branch name isn't allowed", {
+        details: { reason: "branch" },
+      });
+    }
+    try {
+      await this.run(
+        ["push", "--porcelain", "--", url.href, `${request.commit}:refs/heads/${request.branch}`],
+        {
+          gitDir: request.repo,
+          env: upstreamGitEnv(request.credential),
+          timeoutMs: this.options.timeoutMs ?? 120_000,
+        },
+      );
+    } catch (error) {
+      const detail =
+        error instanceof GitError ? `${error.stderr}\n${String(error.stdout)}` : String(error);
+      const text = scrub(detail, request.credential);
+      throw new CrossoverError("VALIDATION", "Couldn't push to the upstream", {
+        details: {
+          reason:
+            error instanceof GitError && error.timedOut
+              ? "upstream_timeout"
+              : /rejected|non-fast-forward|fetch first/i.test(text)
+                ? "push_rejected"
+                : "push_failed",
+          message:
+            text
+              .split("\n")
+              .find((line) => line.trim() !== "")
+              ?.slice(0, 300) ?? "",
         },
       });
     }

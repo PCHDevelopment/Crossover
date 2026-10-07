@@ -20,6 +20,7 @@ export const ID_PREFIXES = [
   "cmd",
   "evt",
   "sandbox",
+  "appr",
   "ckpt",
 ] as const;
 

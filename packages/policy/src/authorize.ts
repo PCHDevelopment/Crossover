@@ -41,6 +41,12 @@ export interface PolicyContext {
    * checks never carry it.
    */
   perPath?: boolean;
+  /**
+   * Set only while a command that an owner or admin approved (T905) runs as its requester: the
+   * approval gate on a grant (§22.2) is what was approved, so it no longer stops the command.
+   * Everything else (revocations, pauses, a frozen room, missing capabilities) still applies.
+   */
+  approved?: boolean;
 }
 
 /**
@@ -144,9 +150,9 @@ export async function authorize(
   }
   const covering = grants.filter((g) => covers(g.capability));
   if (covering.length > 0) {
-    if (covering.some((g) => !g.requires_approval)) return;
+    if (context.approved || covering.some((g) => !g.requires_approval)) return;
     // An approval gate (§22.2) makes the action wait for a human, even when the role bundle
-    // would allow it. The approval queue arrives with T905; until then the gate fails closed.
+    // would allow it: the dispatcher queues the command (T905) and answers with the approval's id.
     throw new CrossoverError("APPROVAL_REQUIRED", `Approval required for ${action}`, {
       details: { capability: action },
     });

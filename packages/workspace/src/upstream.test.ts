@@ -4,6 +4,7 @@ import { GitError, type git } from "./git.js";
 import {
   assertPublicHttpsUrl,
   HttpsGitFetcher,
+  HttpsGitPusher,
   isPrivateAddress,
   scrub,
   validBranch,
@@ -283,5 +284,73 @@ describe("HttpsGitFetcher", () => {
       ),
     ).toBe("branch");
     expect(r.calls).toEqual([]);
+  });
+});
+
+describe("HttpsGitPusher", () => {
+  type Call = { args: readonly string[]; env: NodeJS.ProcessEnv | undefined };
+  const recorder = (fail?: GitError) => {
+    const calls: Call[] = [];
+    const run = (async (args: readonly string[], options: { env?: NodeJS.ProcessEnv }) => {
+      calls.push({ args, env: options.env });
+      if (fail) throw fail;
+      return { stdout: "", stderr: "" };
+    }) as unknown as typeof git;
+    return { calls, run };
+  };
+  const request = (credential: Parameters<HttpsGitPusher["push"]>[0]["credential"] = null) => ({
+    url: "https://github.com/acme/widgets",
+    branch: "room/alpha",
+    credential,
+    repo: "/repo",
+    commit: "a".repeat(40),
+  });
+
+  it("pushes one commit to the branch without forcing; the credential is in the environment only", async () => {
+    const { calls, run } = recorder();
+    await new HttpsGitPusher({ resolve: PUBLIC, run }).push(
+      request({ type: "bearer", token: "tok_secret" }),
+    );
+    const push = calls[0]!;
+    expect(push.args).toEqual([
+      "push",
+      "--porcelain",
+      "--",
+      "https://github.com/acme/widgets",
+      `${"a".repeat(40)}:refs/heads/room/alpha`,
+    ]);
+    expect(push.args.join(" ")).not.toMatch(/--force|-f\b|tok_secret|\+/);
+    expect(push.env).toMatchObject({
+      GIT_ALLOW_PROTOCOL: "https",
+      GIT_TERMINAL_PROMPT: "0",
+      GIT_CONFIG_KEY_0: "http.followRedirects",
+      GIT_CONFIG_VALUE_0: "false",
+      GIT_CONFIG_KEY_1: "http.extraHeader",
+      GIT_CONFIG_VALUE_1: "Authorization: Bearer tok_secret",
+    });
+  });
+
+  it("refuses a private host and a bad branch before running Git, and tells a rejection from other failures, with secrets scrubbed", async () => {
+    const never = recorder();
+    const pusher = new HttpsGitPusher({ resolve: PUBLIC, run: never.run });
+    expect(await refusal(pusher.push({ ...request(), url: "https://10.0.0.1/x" }))).toBe(
+      "url_host",
+    );
+    expect(await refusal(pusher.push({ ...request(), branch: "../x" }))).toBe("branch");
+    expect(never.calls).toEqual([]);
+
+    const rejected = recorder(
+      new GitError("push failed", 1, "! [rejected] x -> y (fetch first) tok_secret", false),
+    );
+    const err = await new HttpsGitPusher({ resolve: PUBLIC, run: rejected.run })
+      .push(request({ type: "bearer", token: "tok_secret" }))
+      .catch((e: unknown) => e);
+    expect((err as CrossoverError).details).toMatchObject({ reason: "push_rejected" });
+    expect(JSON.stringify((err as CrossoverError).details)).not.toContain("tok_secret");
+    const failed = recorder(new GitError("push failed", 128, "fatal: unable to access", false));
+    const other = await new HttpsGitPusher({ resolve: PUBLIC, run: failed.run })
+      .push(request())
+      .catch((e: unknown) => e);
+    expect((other as CrossoverError).details).toMatchObject({ reason: "push_failed" });
   });
 });

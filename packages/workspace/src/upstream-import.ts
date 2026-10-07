@@ -17,6 +17,8 @@ import {
   type FetchedUpstream,
   type GitCredentialProvider,
   type UpstreamFetcher,
+  type PullRequestProvider,
+  type UpstreamPusher,
 } from "./upstream.js";
 
 /** The actor of every change that comes from upstream (§24.2). */
@@ -35,6 +37,12 @@ export interface UpstreamDeps {
   fetcher?: UpstreamFetcher;
   /** Most files and bytes of new content one `git.pull_upstream` applies; default the import's limits. */
   pullLimits?: { files?: number; bytes?: number };
+  /** How `checkpoints.export` pushes (tests push to a local repository). */
+  pusher?: UpstreamPusher;
+  /** How `checkpoints.export` opens a pull request; without one, asking for a pull request is refused. */
+  pullRequests?: PullRequestProvider;
+  /** The domain of the e-mail addresses given to participants in exported commits. Default `crossover.local`. */
+  platformDomain?: string;
   credentials?: GitCredentialProvider;
   /** Host check for the URL (tests); default: the DNS resolver. */
   resolve?: Parameters<typeof assertPublicHttpsUrl>[1];

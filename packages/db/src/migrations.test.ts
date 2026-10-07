@@ -1084,3 +1084,54 @@ describe("0026_redaction", () => {
     });
   });
 });
+
+describe("0020_approvals", () => {
+  let n = 0;
+  const setup = async () => {
+    const room = `room_ap${++n}`;
+    await db.pool.query(
+      `INSERT INTO rooms (id, slug, name, objective, owner_id) VALUES ($1, $1, 'n', 'o', 'x')`,
+      [room],
+    );
+    const who = `part_ap${n}`;
+    await db.pool.query(
+      `INSERT INTO participants (id, room_id, kind, display_name, role, status)
+       VALUES ($1, $2, 'AGENT', 'a', 'DEVELOPER', 'ACTIVE')`,
+      [who, room],
+    );
+    return { room, who };
+  };
+  const insert = (c: { room: string; who: string }, over: Record<string, unknown> = {}) => {
+    const v = { hash: "h1", status: "PENDING", decided: false, ...over };
+    return db.pool.query(
+      `INSERT INTO approvals (id, room_id, requester_id, method, params, idempotency_key, idempotency_hash, request_hash,
+                              capability, status, expires_at, decided_by, decided_at)
+       VALUES ($1, $2, $3, 'messages.send', '{}'::jsonb, 'k', 'ih', $4, 'messages.send', $5,
+               clock_timestamp() + interval '24 hours', $6, $7)`,
+      [
+        `appr_${++n}`,
+        c.room,
+        c.who,
+        v.hash,
+        v.status,
+        v.decided ? c.who : null,
+        v.decided ? new Date() : null,
+      ],
+    );
+  };
+
+  it("one request waits once: a second pending approval for the same request is refused", async () => {
+    const c = await setup();
+    await insert(c);
+    await expect(insert(c)).rejects.toMatchObject({ code: "23505" });
+    await insert(c, { hash: "h2" });
+    await insert(c, { status: "REJECTED", decided: true }); // a decided one doesn't hold the place
+  });
+
+  it("a decision names who made it, and only a decision does", async () => {
+    const c = await setup();
+    await expect(insert(c, { status: "APPROVED" })).rejects.toMatchObject({ code: "23514" });
+    await expect(insert(c, { decided: true })).rejects.toMatchObject({ code: "23514" });
+    await expect(insert(c, { status: "MAYBE" })).rejects.toMatchObject({ code: "23514" });
+  });
+});

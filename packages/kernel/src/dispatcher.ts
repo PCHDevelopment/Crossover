@@ -27,6 +27,7 @@ import {
   type BudgetName,
 } from "./budgets.js";
 import { RoomLeases, type RoomLeasesOptions } from "./leases.js";
+import { queueApproval, type ApprovalRow } from "./modules/approvals/approvals.js";
 import type { Principal } from "./principal.js";
 import type { EventPublisher } from "./publisher.js";
 
@@ -168,6 +169,11 @@ export interface CommandDefinition<S extends z.ZodType, R> {
    */
   perPathAuthorize?: boolean;
   /**
+   * The command hands back a one-time secret (`oneTime`). It can't be kept for approval (T905):
+   * the secret would go to the approver, not the requester.
+   */
+  returnsOneTime?: boolean;
+  /**
    * How a **read** command keeps one participant from seeing what another may not (§34.5,
    * T1301). Required for every non-mutating command; checked at registration.
    * - `participant`: what it returns can differ by reader (events, paths, denials) and goes
@@ -232,7 +238,13 @@ export type Authorizer = (
   principal: Principal,
   action: string,
   resource: { room_id: string; [key: string]: unknown },
-  context: { method: string; params: unknown; client: PoolClient; perPath?: boolean },
+  context: {
+    method: string;
+    params: unknown;
+    client: PoolClient;
+    perPath?: boolean;
+    approved?: boolean;
+  },
 ) => Promise<void>;
 
 /** Allows everything. For tests only; production wiring must pass the real policy. */
@@ -872,6 +884,187 @@ export class Dispatcher {
   }
 
   /**
+   * The command was stopped by an approval gate (§22.2) and rolled back: keep it for the owner
+   * or an admin in a transaction of its own (`approval.requested`, inbox items), and return the
+   * error to throw, now naming the approval. If it can't be kept, the original error stands.
+   */
+  private async queueForApproval(
+    principal: Principal,
+    envelope: { method: string; id: string },
+    def: CommandDefinition<z.ZodType, unknown>,
+    params: unknown,
+    idempotency: { key: string; hash: string },
+    error: CrossoverError,
+    token: number,
+  ): Promise<
+    { error: CrossoverError; replay?: undefined } | { replay: DispatchResult; error?: undefined }
+  > {
+    if (def.returnsOneTime) {
+      return {
+        error: new CrossoverError("VALIDATION", `${envelope.method} can't wait for approval`, {
+          details: { reason: "not_approvable", method: envelope.method },
+        }),
+      };
+    }
+    // The authorization came first, ahead of the idempotency lookup, so a request that already ran
+    // (approved earlier, the gate still on) would be queued again: replay its stored result.
+    const { rows: used } = await this.pool.query<{
+      request_hash: string;
+      response: { response: unknown; events: RoomEvent[] } | null;
+    }>(
+      `SELECT request_hash, response FROM idempotency_keys
+       WHERE participant_id = $1 AND idempotency_key = $2
+         AND created_at >= clock_timestamp() - make_interval(hours => $3)`,
+      [principal.participant_id, idempotency.key, IDEMPOTENCY_TTL_HOURS],
+    );
+    // The key stands for the request it first ran: reusing it for another, gated one is the usual
+    // key-reuse error, and must not leave an approval nobody could decide.
+    if (used[0] && used[0].request_hash !== idempotency.hash) {
+      return {
+        error: new CrossoverError(
+          "VALIDATION",
+          "Idempotency key was already used with a different request",
+          { details: { idempotency_key: idempotency.key } },
+        ),
+      };
+    }
+    const stored = used[0]?.response ? [{ response: used[0].response }] : [];
+    if (stored[0]) {
+      return {
+        replay: {
+          response: stored[0].response.response,
+          events: stored[0].response.events ?? [],
+          replayed: true,
+        },
+      };
+    }
+    const capability =
+      typeof error.details?.["capability"] === "string"
+        ? error.details["capability"]
+        : envelope.method;
+    try {
+      const queued = await withTransaction(this.pool, async (client) => {
+        const { approval, created } = await queueApproval(client, principal, {
+          method: envelope.method,
+          params,
+          idempotency_key: idempotency.key,
+          idempotency_hash: idempotency.hash,
+          capability,
+        });
+        const events = created
+          ? await appendEvents(
+              client,
+              principal.room_id,
+              [
+                {
+                  type: "approval.requested",
+                  actor_id: principal.participant_id,
+                  causation_id: envelope.id,
+                  payload: {
+                    approval_id: approval.id,
+                    method: envelope.method,
+                    capability,
+                    expires_at: approval.expires_at,
+                  },
+                },
+              ],
+              token,
+            )
+          : [];
+        return { approval, events };
+      });
+      await this.afterCommitWork(principal.room_id, envelope, [], {
+        response: undefined,
+        events: queued.events,
+        replayed: false,
+      });
+      return {
+        error: new CrossoverError("APPROVAL_REQUIRED", error.message, {
+          details: {
+            ...error.details,
+            approval_id: queued.approval.id,
+            expires_at: queued.approval.expires_at,
+          },
+        }),
+      };
+    } catch (queueError) {
+      if (queueError instanceof CrossoverError && queueError.code === "VALIDATION") {
+        return { error: queueError };
+      }
+      // Without an approval there is nothing to wait for: say so, don't answer "queued".
+      this.onDenialRecordError(queueError, {
+        method: envelope.method,
+        command_id: envelope.id,
+        room_id: principal.room_id,
+        action: "approval.requested",
+      });
+      return {
+        error: new CrossoverError("STALE_FENCE", "The request couldn't be queued; retry it", {
+          retryable: true,
+        }),
+      };
+    }
+  }
+
+  /**
+   * Run the command an approval kept (T905), as its requester, inside the approver's
+   * transaction (`outer`). The approval gate is lifted for it; every other check still applies.
+   * Returns what the command returned, for the caller to append its events. A command that
+   * returns a one-time secret can't run this way (`VALIDATION`, `one_time_result`).
+   */
+  async runApproved(outer: CommandContext, approval: ApprovalRow): Promise<CommandResult<unknown>> {
+    const registered = this.commands.get(approval.method);
+    if (!registered || !registered.def.mutating) {
+      throw new CrossoverError("VALIDATION", `Approval is for a method that isn't available now`, {
+        details: { reason: "unknown_method", method: approval.method },
+      });
+    }
+    const { def, action } = registered;
+    const parsed = def.params.safeParse(approval.params);
+    if (!parsed.success)
+      throw validation(`Invalid params for ${approval.method}`, parsed.error.issues);
+    const params: unknown = parsed.data;
+    const { client, room_id } = outer;
+    const requester = await this.principalOf(client, room_id, approval.requester_id);
+    // A refusal while running the approved command is the requester's, so it names them; the
+    // approver, whose transaction this is, is who the denial is recorded against.
+    const check = (
+      principal: Principal,
+      a: string,
+      resource: Record<string, unknown>,
+      extra = {},
+    ) =>
+      this.authorize(
+        principal,
+        a,
+        { ...resource, room_id },
+        { method: approval.method, params, client, approved: true, ...extra },
+      ).catch((error: unknown) => this.onBehalfOf(error, principal.participant_id));
+    await check(requester, action, {}, def.perPathAuthorize ? { perPath: true } : {});
+    const ctx: CommandContext = {
+      client,
+      principal: requester,
+      room_id,
+      command_id: outer.command_id,
+      idempotency_key: approval.idempotency_key,
+      authorize: (a, resource) => check(requester, a, resource ?? {}),
+      authorizeAs: async (participantId, a, resource) =>
+        check(await this.principalOf(client, room_id, participantId), a, resource ?? {}).catch(
+          (error: unknown) => this.onBehalfOf(error, participantId),
+        ),
+      afterCommit: outer.afterCommit,
+    };
+    const out = await def.execute(ctx, params);
+    if (out.oneTime !== undefined) {
+      throw new CrossoverError("VALIDATION", "That command returns a one-time secret", {
+        details: { reason: "one_time_result", method: approval.method },
+      });
+    }
+    if (out.afterCommit) outer.afterCommit(out.afterCommit);
+    return out;
+  }
+
+  /**
    * Count the command against the agent's budgets (§22.3) and refuse it with `BUDGET_EXCEEDED`
    * and `retry_after` (seconds) when one is used up. Agents only; the limits are the defaults
    * unless the room's `settings.budgets` or the participant's `budgets` say otherwise. The first
@@ -1267,6 +1460,23 @@ export class Dispatcher {
         if (err instanceof CrossoverError && err.code === "STALE_FENCE")
           this.leases.forget(room_id);
         await this.recordDenial(principal, envelope, err, token);
+        if (
+          err instanceof CrossoverError &&
+          err.code === "APPROVAL_REQUIRED" &&
+          err.details?.["approval_id"] === undefined
+        ) {
+          const queued = await this.queueForApproval(
+            principal,
+            envelope,
+            def,
+            params,
+            { key, hash: requestHash },
+            err,
+            token,
+          );
+          if (queued.replay) return queued.replay;
+          throw queued.error;
+        }
         throw err;
       }
 
