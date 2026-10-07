@@ -1,3 +1,4 @@
+import type { Pool, PoolClient } from "@crossover/db";
 import {
   effectiveCapabilities,
   capabilityMatches,
@@ -26,6 +27,25 @@ const capabilityString = z.string().superRefine((value, ctx) => {
 });
 
 const participantId = z.string().min(1).max(100);
+
+/** Whether a participant has any live base or scoped DENY for a capability. */
+export async function hasLiveDeny(
+  client: Pool | PoolClient,
+  roomId: string,
+  participantId: string,
+  capability: string,
+): Promise<boolean> {
+  const { rows } = await client.query<{ denied: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM capability_grants
+       WHERE room_id = $1 AND participant_id = $2 AND effect = 'DENY'
+         AND ended_at IS NULL AND (expires_at IS NULL OR expires_at > clock_timestamp())
+         AND (capability = $3 OR left(capability, length($3) + 1) = $3 || ':')
+     ) AS denied`,
+    [roomId, participantId, capability],
+  );
+  return rows[0]?.denied ?? false;
+}
 
 export const capabilitiesGrantParams = z
   .strictObject({

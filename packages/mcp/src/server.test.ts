@@ -213,6 +213,40 @@ describe("MCP server (T707)", () => {
     );
   });
 
+  it("returns only health status through health_get for a scoped workspace reader", async () => {
+    const s = await setup();
+    const { rows: workspaces } = await pool.query<{ id: string }>(
+      "SELECT id FROM workspaces WHERE room_id = $1",
+      [s.room],
+    );
+    const runId = newId("health");
+    const privateLog = "test failed at /private/build/secret.ts with token=fixture-secret";
+    await pool.query(
+      `INSERT INTO health_runs (id, workspace_id, room_id, revision, status, duration_ms, log)
+       VALUES ($1, $2, $3, 0, 'RED', 12, $4)`,
+      [runId, workspaces[0]!.id, s.room, privateLog],
+    );
+    await pool.query(
+      `INSERT INTO capability_grants
+       (id, room_id, participant_id, effect, capability, created_by)
+       VALUES ($1, $2, $3, 'DENY', 'workspace.read', $4),
+              ($5, $2, $3, 'GRANT', 'workspace.read:docs/**', $4)`,
+      [newId("grant"), s.room, s.agentId, s.ownerId, newId("grant")],
+    );
+    const agent = await connect(s.url, s.agent.access_token);
+    const result = await agent.callTool({ name: "health_get", arguments: { run_id: runId } });
+    const body = JSON.parse((result.content as { text: string }[])[0]!.text) as Record<
+      string,
+      unknown
+    >;
+    expect(result.isError).toBeFalsy();
+    expect(body).toMatchObject({ run_id: runId, revision: 0, status: "RED" });
+    expect(body).not.toHaveProperty("summary");
+    expect(body).not.toHaveProperty("log_tail");
+    expect(JSON.stringify(body)).not.toContain("fixture-secret");
+    expect(JSON.stringify(body)).not.toContain("/private/build");
+  });
+
   it("rejects traversal and .git paths at the MCP boundary", async () => {
     const s = await setup();
     const client = await connect(s.url, s.agent.access_token);

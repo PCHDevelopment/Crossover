@@ -37,6 +37,7 @@ import {
   reconcileRef,
   registerWorkspaceCommands,
   runHealthCheck,
+  publishHealthResult,
 } from "@crossover/workspace";
 import type { ServerConfig } from "./config.js";
 
@@ -113,8 +114,11 @@ export async function composeServer(
     });
     const healthRunner = new DockerHealthRunner({ allowedImages: config.healthImages });
     const healthQueue = new HealthCheckQueue({
-      run: (roomId, revision, signal) =>
-        runHealthCheck(pool, healthRunner, roomId, revision, signal),
+      run: async (roomId, revision, signal) => {
+        const outcome = await runHealthCheck(pool, healthRunner, roomId, revision, signal);
+        if (outcome && !signal.aborted)
+          await publishHealthResult(pool, dispatcher, roomId, revision, outcome.id, outcome.result);
+      },
     });
     registerCommands(dispatcher, config, healthQueue);
 
