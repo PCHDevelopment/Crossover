@@ -955,3 +955,94 @@ describe("workspace.apply_changeset", () => {
     }
   });
 });
+
+describe("workspace.apply_changeset — secret scanning (T901)", () => {
+  const AWS_KEY = "AKIAIOSFODNN7EXAMPLE";
+  const HIGH_ENTROPY = "aB3dE5fG7hI9jK1lM3nO5pQ7rS9tU1vW";
+  const GITHUB_TOKEN = `ghp_${"x".repeat(36)}`;
+
+  it("blocks a high-confidence secret with VALIDATION naming file and line", async () => {
+    const f = await fixture();
+    await expect(
+      f.apply([{ type: "create", path: "config.env", content: `AWS_KEY=${AWS_KEY}\n` }]),
+    ).rejects.toMatchObject({
+      code: "VALIDATION",
+      details: {
+        reason: "secret_detected",
+        findings: [
+          expect.objectContaining({
+            rule: "aws_access_key_id",
+            path: "config.env",
+            line: 1,
+          }),
+        ],
+      },
+    });
+    // Nothing persisted: no ChangeSet, no new revision, no file.
+    expect(await f.rowsFor("changesets")).toEqual([]);
+    expect(await f.rowsFor("workspace_revisions")).toHaveLength(1);
+    expect(await f.rowsFor("file_revisions")).toEqual([]);
+  });
+
+  it("applies a low-confidence secret and flags the author and owner via inbox", async () => {
+    const f = await fixture();
+    const owner = newId("part");
+    await f.addParticipant(owner);
+    await db.pool.query("UPDATE participants SET authority = 'OWNER' WHERE id = $1", [owner]);
+    await db.pool.query("UPDATE rooms SET owner_id = $2 WHERE id = $1", [f.room, owner]);
+
+    const response = await f.apply([
+      { type: "create", path: "config.ts", content: `api_key = "${HIGH_ENTROPY}"\n` },
+    ]);
+    expect(response.response).toMatchObject({ status: "APPLIED" });
+
+    const { rows: inbox } = await db.pool.query(
+      "SELECT participant_id, kind, ref, summary, author_id FROM inbox_items WHERE room_id = $1",
+      [f.room],
+    );
+    // Flagged to both the author and the owner.
+    expect(inbox.map((r) => r.participant_id).sort()).toEqual([f.actor, owner].sort());
+    for (const item of inbox) {
+      expect(item.kind).toBe("SECRET_SCAN");
+      expect(item.ref).toEqual({ kind: "changeset", id: expect.any(String) });
+      expect(item.author_id).toBe("system");
+      // The summary names the file and line, never the value.
+      expect(item.summary).toContain("config.ts:1");
+      expect(item.summary).not.toContain(HIGH_ENTROPY);
+    }
+  });
+
+  it("sends a single inbox item when the author is the room owner", async () => {
+    const f = await fixture(); // in the fixture the room owner IS the actor
+    await f.apply([{ type: "create", path: "config.ts", content: `token: ${HIGH_ENTROPY}\n` }]);
+    const { rows: inbox } = await db.pool.query(
+      "SELECT participant_id, kind FROM inbox_items WHERE room_id = $1",
+      [f.room],
+    );
+    expect(inbox).toEqual([{ participant_id: f.actor, kind: "SECRET_SCAN" }]);
+  });
+
+  it("does not flag a clean ChangeSet", async () => {
+    const f = await fixture();
+    await f.apply([{ type: "create", path: "readme.md", content: "# Hello\n" }]);
+    const { rows: inbox } = await db.pool.query("SELECT * FROM inbox_items WHERE room_id = $1", [
+      f.room,
+    ]);
+    expect(inbox).toEqual([]);
+  });
+
+  it("scans base64 content and modify patches", async () => {
+    const f = await fixture();
+    // base64-encoded content containing an AWS key
+    const b64 = Buffer.from(`AWS_KEY=${AWS_KEY}\n`).toString("base64");
+    await expect(
+      f.apply([{ type: "create", path: "bin.dat", content: b64, encoding: "base64" }]),
+    ).rejects.toMatchObject({ code: "VALIDATION" });
+
+    // a modify patch containing a GitHub token
+    await f.apply([{ type: "create", path: "a.txt", content: "start\n" }]);
+    await expect(
+      f.apply([{ type: "modify", path: "a.txt", patch: `+${GITHUB_TOKEN}\n` }], 1),
+    ).rejects.toMatchObject({ code: "VALIDATION" });
+  });
+});

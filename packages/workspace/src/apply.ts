@@ -1,11 +1,13 @@
 import type { CommandContext, CommandResult, Dispatcher, EmittedEvent } from "@crossover/kernel";
+import { deliverInbox } from "@crossover/kernel";
 import { CrossoverError, newId } from "@crossover/protocol";
+import { scanSecrets, type SecretFinding } from "@crossover/security";
 import { changesetParamsSchema, type ChangesetParams } from "./changeset.js";
 import { classifyConflicts, type ClassifiedConflict } from "./conflicts.js";
 import { git } from "./git.js";
 import { materialize } from "./materialize.js";
 import { merge } from "./merge.js";
-import type { Operation } from "./operations.js";
+import type { ContentEncoding, Operation } from "./operations.js";
 import { treeChanges } from "./tree-changes.js";
 import { updateCanonicalRef } from "./reconcile.js";
 import { registerWorkspaceReads } from "./reads.js";
@@ -93,6 +95,68 @@ export interface ApplyExtras {
   payload?: Record<string, unknown>;
 }
 
+/** A scanner finding tagged with the ChangeSet path it came from. */
+interface PathFinding extends SecretFinding {
+  path: string;
+}
+
+/** Decode an operation's content to the text the scanner reads. */
+function decodeContent(content: string | Buffer, encoding?: ContentEncoding): string {
+  if (Buffer.isBuffer(content)) return content.toString("utf8");
+  if (encoding === "base64") {
+    try {
+      return Buffer.from(content, "base64").toString("utf8");
+    } catch {
+      return content;
+    }
+  }
+  return content;
+}
+
+/** The scannable text of one operation, tagged with the path it lands on. */
+function operationTexts(op: Operation): Array<{ path: string; text: string }> {
+  if (op.type === "delete") return [];
+  if (op.type === "rename") {
+    return op.content === undefined
+      ? []
+      : [{ path: op.to, text: decodeContent(op.content, op.encoding) }];
+  }
+  if (op.type === "modify") {
+    if (op.patch !== undefined) return [{ path: op.path, text: op.patch }];
+    return op.content === undefined
+      ? []
+      : [{ path: op.path, text: decodeContent(op.content, op.encoding) }];
+  }
+  // create
+  return op.content === undefined
+    ? []
+    : [{ path: op.path, text: decodeContent(op.content, op.encoding) }];
+}
+
+/** Scan every operation; split findings by confidence, each tagged with its path. */
+function scanChangeSet(operations: Operation[]): { high: PathFinding[]; low: PathFinding[] } {
+  const high: PathFinding[] = [];
+  const low: PathFinding[] = [];
+  for (const op of operations) {
+    for (const { path, text } of operationTexts(op)) {
+      for (const finding of scanSecrets(text, { path })) {
+        (finding.confidence === "high" ? high : low).push({ ...finding, path });
+      }
+    }
+  }
+  return { high, low };
+}
+
+/**
+ * Inbox summary for low-confidence findings. Names the file, line and rule —
+ * never the matched value, which the scanner already withholds.
+ */
+function secretScanSummary(findings: PathFinding[]): string {
+  const shown = findings.slice(0, 5).map((f) => `${f.path}:${f.line} (${f.rule})`);
+  const more = findings.length > 5 ? ` (+${findings.length - 5} more)` : "";
+  return `Low-confidence secret scan: ${shown.join(", ")}${more}. Review before this change ships.`;
+}
+
 export async function apply(
   ctx: CommandContext,
   params: ChangesetParams,
@@ -116,6 +180,24 @@ export async function apply(
     operations.flatMap((op) => (op.type === "rename" ? [op.from, op.to] : [op.path])),
   );
   for (const path of touched) await ctx.authorize("workspace.write", { path });
+  // Step 2: secret scan (§23.3, T901). High confidence blocks the ChangeSet with
+  // VALIDATION naming the file and line; low confidence is applied, then flagged
+  // to the author and the room owner via inbox. The value is never echoed.
+  const secrets = scanChangeSet(operations);
+  if (secrets.high.length > 0) {
+    throw new CrossoverError("VALIDATION", "ChangeSet contains a high-confidence secret", {
+      details: {
+        reason: "secret_detected",
+        findings: secrets.high.map((f) => ({
+          rule: f.rule,
+          path: f.path,
+          line: f.line,
+          col: f.col,
+          fingerprint: f.fingerprint,
+        })),
+      },
+    });
+  }
   const workspace = await client.query<{ id: string; repo_path: string }>(
     "SELECT id, repo_path FROM workspaces WHERE room_id = $1 FOR UPDATE",
     [room_id],
@@ -418,6 +500,24 @@ export async function apply(
      WHERE room_id = $1 AND id = $2`,
     [room_id, id, revision],
   );
+  // Low-confidence secrets are applied but flagged to the author and the room
+  // owner (§23.3). The summary names file and line, never the value.
+  if (secrets.low.length > 0) {
+    const { rows } = await client.query<{ owner_id: string }>(
+      "SELECT owner_id FROM rooms WHERE id = $1",
+      [room_id],
+    );
+    const owner_id = rows[0]?.owner_id;
+    const recipients = new Set([actorId, owner_id].filter((x): x is string => Boolean(x)));
+    for (const recipient of recipients) {
+      await deliverInbox(client, room_id, recipient, {
+        kind: "SECRET_SCAN",
+        ref: { kind: "changeset", id },
+        summary: secretScanSummary(secrets.low),
+        author_id: "system",
+      });
+    }
+  }
   if (resolution) {
     await client.query(
       `UPDATE conflicts SET status = 'RESOLVED', resolver_id = $3,
