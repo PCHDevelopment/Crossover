@@ -116,6 +116,8 @@ export async function changeAgentManifest(
   for (const { id } of leaders) {
     await deliverInbox(client, roomId, id, {
       kind: "MANIFEST_CHANGED",
+      // The summary quotes what the agent declared (vendor, model), so it is the agent's words.
+      author_id: participantId,
       ref: { kind: "participant", id: participantId },
       summary: `${next.name} (${participantId}) changed its manifest: ${parts.join("; ")}`,
     });

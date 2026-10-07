@@ -99,10 +99,15 @@ const manifestEvents = async (s: Setup) =>
 const inbox = async (s: Setup, who: Principal) =>
   (
     await pool.query(
-      "SELECT kind, ref, summary FROM inbox_items WHERE room_id = $1 AND participant_id = $2",
+      "SELECT kind, ref, summary, author_id FROM inbox_items WHERE room_id = $1 AND participant_id = $2",
       [s.room, who.participant_id],
     )
-  ).rows as { kind: string; ref: { kind: string; id: string }; summary: string }[];
+  ).rows as {
+    kind: string;
+    ref: { kind: string; id: string };
+    summary: string;
+    author_id: string;
+  }[];
 
 const rejects = async (p: Promise<unknown>, code: string) => {
   const err = await p.then(
@@ -151,6 +156,8 @@ describe("participants.update_manifest (§34.6)", () => {
       });
       expect(items[0]!.summary).toContain("vendor Anthropic → OtherCo");
       expect(items[0]!.summary).toContain("model model-a → model-z");
+      // It quotes the agent's declared vendor and model, so it says the agent wrote it.
+      expect(items[0]!.author_id).toBe(s.agent.participant_id);
     }
     for (const who of [s.agent, s.other, s.human]) expect(await inbox(s, who)).toEqual([]);
   });
