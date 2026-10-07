@@ -14,6 +14,7 @@ import {
   registerInviteCommands,
   registerJoinCommand,
   registerLeadCommands,
+  registerMemoryAccessCommands,
   registerMemoryCommands,
   registerMessageCommands,
   registerParticipantLifecycleCommands,
@@ -199,6 +200,7 @@ function registerCommands(
   registerTaskLifecycleCommands(dispatcher, { healthGate: workspaceHealthGate });
   registerMessageCommands(dispatcher);
   registerMemoryCommands(dispatcher);
+  registerMemoryAccessCommands(dispatcher);
   registerDecisionCommands(dispatcher);
   registerDecisionDecideCommands(dispatcher);
 
