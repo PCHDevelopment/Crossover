@@ -16,6 +16,7 @@ import { refreshSearchTree } from "./search-tree.js";
 import { registerWorkspaceConflictReads } from "./conflict-reads.js";
 import { escalateOpenConflict, registerWorkspaceConflictActions } from "./conflict-actions.js";
 import { registerWorkspaceHealthReads } from "./health-events.js";
+import { parseConflicts } from "./parse-check.js";
 
 export interface WorkspaceCommandDeps {
   /** Failure is reported after commit; startup reconcileRef restores the DB-authoritative head. */
@@ -24,6 +25,8 @@ export interface WorkspaceCommandDeps {
   refreshSearchTree?: (repo: string, commit: string, previousCommit?: string) => Promise<void>;
   /** Merge engine seam for deterministic conflict-policy checks. */
   merge?: typeof merge;
+  /** Parser seam for deterministic check-failure handling tests. */
+  parseConflicts?: typeof parseConflicts;
   /** Schedule health for an applied head after its transaction commits. */
   scheduleHealthCheck?: (roomId: string, revision: number) => void;
 }
@@ -182,12 +185,41 @@ async function apply(
     ],
   );
   const candidate = await materialize(ws.repo_path, base.commit_sha, operations);
-  const result = await (deps.merge ?? merge)(
+  let result = await (deps.merge ?? merge)(
     ws.repo_path,
     base.commit_sha,
     head.commit_sha,
     candidate,
   );
+  if (result.clean) {
+    try {
+      const paths = await (deps.parseConflicts ?? parseConflicts)(
+        ws.repo_path,
+        head.commit_sha,
+        candidate,
+        result,
+      );
+      if (paths.length) {
+        result = {
+          clean: false,
+          tree: result.tree,
+          conflicts: {
+            files: paths.map((path) => ({ path, stages: [] })),
+            messages: paths.map((path) => ({
+              paths: [path],
+              type: "CONFLICT (parse)",
+              message: "Merged source file does not parse",
+            })),
+          },
+        };
+      }
+    } catch (error) {
+      console.error("Workspace syntax check failed; allowing the clean merge", {
+        room_id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
   if (!result.clean) {
     const classified = await classifyConflicts(ws.repo_path, result);
     const conflicts: ConflictResponse[] = [];

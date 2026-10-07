@@ -725,7 +725,8 @@ Deps: T512 · Migration: —
 
 §10.3 step 7 with tree-sitter for TypeScript, JavaScript and Python: merged file fails to parse while neither side did → treat as conflict. `source = EDITOR` drafts that already fail are let through.
 
-- Fixture: two clean-merging edits that produce invalid syntax → conflict.
+- Fixture: two clean-merging edits that produce invalid syntax → conflict; skip a file over 1 MiB
+  and stop after 8 MiB of unique source has been parsed in one apply.
 
 ---
 

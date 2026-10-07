@@ -5,8 +5,11 @@ import { withTransaction } from "@crossover/db";
 import { createTestDatabase, type TestDatabase } from "@crossover/db/testing";
 import { allowAll, Dispatcher, type Authorizer } from "@crossover/kernel";
 import { CrossoverError, newId } from "@crossover/protocol";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { git } from "./git.js";
+import { materialize } from "./materialize.js";
+import { merge } from "./merge.js";
+import { parseConflicts } from "./parse-check.js";
 import { registerWorkspaceCommands, type WorkspaceCommandDeps } from "./apply.js";
 import { ConflictEscalationSweeper } from "./conflict-escalation-sweeper.js";
 import { HealthCheckQueue } from "./health-queue.js";
@@ -134,6 +137,53 @@ async function seedConflict(
 }
 
 describe("workspace.apply_changeset", () => {
+  it("records a parse conflict from a real clean merge of Python edits", async () => {
+    const f = await fixture();
+    const path = "src/main.py";
+    const baseContent = "if x:\n    a()\n\nb()\n";
+    const ours = "a()\n\nb()\n";
+    const theirs = "if x:\n    a()\n\n    b()\n";
+    await f.apply([{ type: "create", path, content: baseContent }]);
+    const base = await f.head();
+    await f.apply([{ type: "modify", path, content: theirs }], 1);
+    const head = await f.head();
+    const candidate = await materialize(f.repo, base, [{ type: "modify", path, content: ours }]);
+    const merged = await merge(f.repo, base, head, candidate);
+    expect(merged.clean).toBe(true);
+    if (!merged.clean) throw new Error("Expected a clean Git merge");
+    expect((await git(["show", `${merged.tree}:${path}`], f.options)).stdout).toBe(
+      "a()\n\n    b()\n",
+    );
+    await expect(parseConflicts(f.repo, head, candidate, merged)).resolves.toEqual([path]);
+
+    const response = await f.apply([{ type: "modify", path, content: ours }], 1);
+
+    expect(response.response).toMatchObject({ status: "CONFLICT" });
+    expect(await f.rowsFor("conflicts")).toMatchObject([{ files: [{ path, kind: "PARSE" }] }]);
+    expect(await f.rowsFor("workspace_revisions")).toHaveLength(3);
+  });
+
+  it("logs parser failures and lets a clean ChangeSet apply", async () => {
+    const logger = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const f = await fixture(allowAll, {
+        parseConflicts: async () => {
+          throw new Error("Tree-sitter unavailable");
+        },
+      });
+      const response = await f.apply([
+        { type: "create", path: "src/main.ts", content: "const value = 1;\n" },
+      ]);
+      expect(response.response).toMatchObject({ status: "APPLIED" });
+      expect(logger).toHaveBeenCalledWith(
+        "Workspace syntax check failed; allowing the clean merge",
+        expect.objectContaining({ room_id: f.room }),
+      );
+    } finally {
+      logger.mockRestore();
+    }
+  });
+
   it("coalesces ten rapid applied revisions into the active and latest health checks", async () => {
     const firstGate = deferred();
     const secondGate = deferred();
