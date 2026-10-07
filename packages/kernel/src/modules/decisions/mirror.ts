@@ -23,6 +23,8 @@ export function decisionMirrorValue(d: DecisionRow): string {
     decided_by: d.decided_by,
     decided_at: d.decided_at ? d.decided_at.toISOString() : null,
     supersedes: d.supersedes,
+    vetoed_by: d.vetoed_by,
+    veto_rationale: d.veto_rationale,
     version: d.version,
   });
 }

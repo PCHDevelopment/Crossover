@@ -124,6 +124,8 @@ describe("decision → memory mirror (§7.4)", () => {
       decided_by: s.lead.participant_id,
       decided_at: (out.response as DecisionView).decided_at,
       supersedes: null,
+      vetoed_by: null,
+      veto_rationale: null,
       version: 2,
     });
     expect(out.events.map((ev) => [ev.type, ev.actor_id])).toEqual([
@@ -241,6 +243,7 @@ describe("mirrorDecision on its own (the status updates T406 relies on)", () => 
       proposed_by: s.dev.participant_id,
       decided_by: s.lead.participant_id,
       vetoed_by: null,
+      veto_rationale: null,
       decide_by: null,
       links: [],
       supersedes: null,

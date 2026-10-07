@@ -25,6 +25,8 @@ export const decisionsProposeParams = z.strictObject({
   /** When the lead should have decided by. */
   decide_by: z.iso.datetime({ offset: true }).optional(),
   links: z.array(link).max(MAX_DECISION_LINKS).default([]),
+  /** An accepted decision of this room that this one replaces if it is accepted (§7.1 step 5). */
+  supersedes: z.string().min(1).max(100).optional(),
 });
 
 export const decisionsAddPositionParams = z.strictObject({
@@ -51,21 +53,28 @@ export interface DecisionRow {
   proposed_by: string;
   decided_by: string | null;
   vetoed_by: string | null;
+  veto_rationale: string | null;
   decide_by: Date | null;
   links: { kind: string; id: string }[];
   supersedes: string | null;
   version: number;
   created_at: Date;
   decided_at: Date | null;
+  vetoed_at: Date | null;
 }
 
 export const DECISION_COLUMNS = `id, room_id, title, context, options, status, outcome_option_id, rationale,
-  proposed_by, decided_by, vetoed_by, decide_by, links, supersedes, version, created_at, decided_at`;
+  proposed_by, decided_by, vetoed_by, veto_rationale, decide_by, links, supersedes, version,
+  created_at, decided_at, vetoed_at`;
 
-export interface DecisionView extends Omit<DecisionRow, "decide_by" | "created_at" | "decided_at"> {
+export interface DecisionView extends Omit<
+  DecisionRow,
+  "decide_by" | "created_at" | "decided_at" | "vetoed_at"
+> {
   decide_by: string | null;
   created_at: string;
   decided_at: string | null;
+  vetoed_at: string | null;
   positions: PositionView[];
 }
 
@@ -84,6 +93,7 @@ export function decisionView(row: DecisionRow, positions: PositionView[] = []): 
     decide_by: iso(row.decide_by),
     created_at: row.created_at.toISOString(),
     decided_at: iso(row.decided_at),
+    vetoed_at: iso(row.vetoed_at),
     positions,
   };
 }
@@ -110,14 +120,37 @@ export function registerDecisionCommands(dispatcher: Dispatcher): void {
           details: { decide_by: p.decide_by },
         });
       }
+      if (p.supersedes !== undefined) {
+        const old = await loadDecision(ctx.client, ctx.room_id, p.supersedes).catch(
+          (e: unknown) => {
+            if (e instanceof CrossoverError && e.code === "NOT_FOUND") {
+              throw new CrossoverError(
+                "VALIDATION",
+                `Can't supersede unknown decision ${p.supersedes}`,
+                {
+                  details: { supersedes: p.supersedes },
+                },
+              );
+            }
+            throw e;
+          },
+        );
+        if (old.status !== "ACCEPTED") {
+          throw new CrossoverError(
+            "VALIDATION",
+            `Only an accepted decision can be superseded (${old.id} is ${old.status})`,
+            { details: { supersedes: old.id, status: old.status } },
+          );
+        }
+      }
       const options: DecisionOption[] = p.options.map((o, i) => ({
         id: `opt_${i + 1}`,
         summary: o.summary,
         detail: o.detail,
       }));
       const { rows } = await ctx.client.query<DecisionRow>(
-        `INSERT INTO decisions (id, room_id, title, context, options, proposed_by, decide_by, links)
-         VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8::jsonb)
+        `INSERT INTO decisions (id, room_id, title, context, options, proposed_by, decide_by, links, supersedes)
+         VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8::jsonb, $9)
          RETURNING ${DECISION_COLUMNS}`,
         [
           newId("dec"),
@@ -128,6 +161,7 @@ export function registerDecisionCommands(dispatcher: Dispatcher): void {
           ctx.principal.participant_id,
           p.decide_by ?? null,
           JSON.stringify(p.links),
+          p.supersedes ?? null,
         ],
       );
       const decision = decisionView(rows[0]!);
