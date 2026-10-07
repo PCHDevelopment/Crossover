@@ -97,15 +97,25 @@ async function makeRepo(): Promise<{ repository: string; revision: string }> {
   return { repository, revision };
 }
 
-function fakeInstallDocker(installExitCode = 0, installOutput?: string) {
-  const volumes = new Map<string, { room: string; key: string }>();
+function fakeInstallDocker(
+  installExitCode = 0,
+  installOutput?: string | ((args: readonly string[]) => string),
+) {
+  const volumes = new Map<string, { room: string; key: string; install: string }>();
   let installs = 0;
   let healthRuns = 0;
+  let failVolumeList = false;
+  let failContainerList = false;
   const calls: string[][] = [];
   const invoke = vi.fn(async (_binary: string, args: readonly string[]) => {
     calls.push([...args]);
-    if (args[0] === "container" && args[1] === "ls")
+    if (args[0] === "container" && args[1] === "ls") {
+      if (failContainerList) {
+        failContainerList = false;
+        return { code: 1, timedOut: false, output: "temporary docker ls failure" };
+      }
       return { code: 0, timedOut: false, output: "" };
+    }
     if (args[0] === "network" && args[1] === "ls") return { code: 0, timedOut: false, output: "" };
     if (args[0] === "volume" && args[1] === "inspect") {
       const exists = volumes.has(args[2]!);
@@ -121,7 +131,10 @@ function fakeInstallDocker(installExitCode = 0, installOutput?: string) {
         .find((arg) => arg.startsWith("crossover.health.cache_room="))
         ?.split("=")[1];
       const key = args.find((arg) => arg.startsWith("crossover.health.cache_key="))?.split("=")[1];
-      volumes.set(name, { room: room!, key: key! });
+      const install = args
+        .find((arg) => arg.startsWith("crossover.health.cache_install="))
+        ?.split("=")[1];
+      volumes.set(name, { room: room!, key: key!, install: install! });
       return { code: 0, timedOut: false, output: name };
     }
     if (args[0] === "volume" && args[1] === "rm") {
@@ -133,12 +146,14 @@ function fakeInstallDocker(installExitCode = 0, installOutput?: string) {
       };
     }
     if (args[0] === "volume" && args[1] === "ls") {
+      if (failVolumeList)
+        return { code: 1, timedOut: false, output: "temporary volume ls failure" };
       const room = args
         .find((arg) => arg.startsWith("label=crossover.health.cache_room="))
         ?.split("=")[2];
       const output = [...volumes]
         .filter(([, labels]) => labels.room === room)
-        .map(([name, labels]) => `${name}|${labels.key}`)
+        .map(([name, labels]) => `${name}|${labels.key}|${labels.install}`)
         .join("\n");
       return { code: 0, timedOut: false, output };
     }
@@ -151,7 +166,10 @@ function fakeInstallDocker(installExitCode = 0, installOutput?: string) {
       return {
         code: installExitCode,
         timedOut: false,
-        output: installOutput ?? (installExitCode === 0 ? "install ok" : "registry refused"),
+        output:
+          typeof installOutput === "function"
+            ? installOutput(args)
+            : (installOutput ?? (installExitCode === 0 ? "install ok" : "registry refused")),
       };
     }
     if (args[0] === "run" && args.includes("crossover.health.runner=true")) {
@@ -166,10 +184,20 @@ function fakeInstallDocker(installExitCode = 0, installOutput?: string) {
     installCount: () => installs,
     healthCount: () => healthRuns,
     cacheVolumes: () => [...volumes.keys()],
+    setVolumeListFailure: (value: boolean) => {
+      failVolumeList = value;
+    },
+    failNextContainerList: () => {
+      failContainerList = true;
+    },
+    seedCacheVolume: (name: string, labels: { room: string; key: string; install: string }) => {
+      volumes.set(name, labels);
+    },
   };
 }
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(
     directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })),
   );
@@ -364,7 +392,21 @@ describe("DockerHealthRunner", () => {
     const installArgs = docker.calls.find(
       (args) => args[0] === "run" && args.includes("crossover.health.install=true"),
     )!;
+    const volumeInitArgs = docker.calls.find(
+      (args) => args[0] === "run" && args.includes("--user=0:0"),
+    )!;
     expect(installArgs[installArgs.indexOf("--runtime") + 1]).toBe("runsc");
+    expect(installArgs).toContain("npm_config_cache=/tmp/npm-cache");
+    expect(installArgs).toContain("GOCACHE=/tmp/go-build");
+    expect(installArgs).not.toContain("PIP_CACHE_DIR=/health-dependency-cache/pip-cache");
+    expect(volumeInitArgs).toEqual(
+      expect.arrayContaining([
+        "--network=none",
+        "--cap-drop=ALL",
+        "--cap-add=CHOWN",
+        "--security-opt=no-new-privileges",
+      ]),
+    );
     expect(healthArgs).toContain("--network=none");
     expect(healthArgs.some((arg) => arg.includes("target=/workspace/node_modules,readonly"))).toBe(
       true,
@@ -374,6 +416,167 @@ describe("DockerHealthRunner", () => {
       ["room_health"],
     );
     expect(rows.map((row) => row.status)).toEqual(["SUCCEEDED", "SUCCEEDED", "SUCCEEDED"]);
+  });
+
+  it("does not mount a leftover volume from a failed reinstall", async () => {
+    await db.pool.query("DELETE FROM health_install_runs WHERE room_id = $1", ["room_health"]);
+    const { repository } = await makeRepo();
+    await writeFile(join(repository, "package-lock.json"), '{"lock":1}\n');
+    await git(["add", "--all"], { cwd: repository, timeoutMs: 10_000 });
+    await git(
+      [
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "commit",
+        "--quiet",
+        "-m",
+        "add lockfile",
+      ],
+      { cwd: repository, timeoutMs: 10_000 },
+    );
+    const revision = (
+      await git(["rev-parse", "HEAD"], { cwd: repository, timeoutMs: 10_000 })
+    ).stdout.trim();
+    const lockfileHash = await hashHealthLockfiles(repository, revision, ["package-lock.json"]);
+    const cacheKey = createHash("sha256")
+      .update(
+        JSON.stringify({ lockfileHash, installCommand: "npm ci", image: DEFAULT_HEALTH_IMAGE }),
+      )
+      .digest("hex");
+    const priorSuccessId = newId("hinstall");
+    const abandonedInstallId = newId("hinstall");
+    await db.pool.query(
+      `INSERT INTO health_install_runs (id, room_id, cache_key, status, started_at, expires_at, finished_at)
+       VALUES ($1, 'room_health', $3, 'SUCCEEDED', clock_timestamp() - interval '5 minutes',
+               clock_timestamp() - interval '4 minutes', clock_timestamp() - interval '4 minutes'),
+              ($2, 'room_health', $3, 'FAILED', clock_timestamp() - interval '2 minutes',
+               clock_timestamp() + interval '8 minutes', clock_timestamp() - interval '1 minute')`,
+      [priorSuccessId, abandonedInstallId, cacheKey],
+    );
+    const roomLabel = createHash("sha256").update("room_health").digest("hex").slice(0, 24);
+    const leftoverVolume = `crossover-health-cache-${roomLabel}-${cacheKey}-${abandonedInstallId}`;
+    const docker = fakeInstallDocker();
+    docker.seedCacheVolume(leftoverVolume, {
+      room: roomLabel,
+      key: cacheKey,
+      install: abandonedInstallId,
+    });
+    const result = await new DockerHealthRunner(
+      {
+        egressProxyContainer: "egress-proxy",
+        egressProxySecret: "0123456789abcdef0123456789abcdef",
+      },
+      docker.invoke,
+    ).run({
+      repository,
+      revision,
+      roomId: "room_health",
+      command: "npm test",
+      dependencyInstall: {
+        pool: db.pool,
+        command: "npm ci",
+        lockfilePaths: ["package-lock.json"],
+      },
+    });
+
+    expect(result.status).toBe("GREEN");
+    expect(docker.installCount()).toBe(1);
+    expect(docker.healthCount()).toBe(1);
+    const healthArgs = docker.calls.find((args) => args.includes("crossover.health.runner=true"))!;
+    expect(healthArgs.some((arg) => arg.includes(`source=${leftoverVolume},`))).toBe(false);
+    expect(docker.cacheVolumes()).not.toContain(leftoverVolume);
+    const { rows } = await db.pool.query(
+      "SELECT status FROM health_install_runs WHERE room_id = $1 ORDER BY started_at",
+      ["room_health"],
+    );
+    expect(rows.map((row) => row.status)).toEqual(["SUCCEEDED", "FAILED", "SUCCEEDED"]);
+  });
+
+  it("keeps the selected cache across best-effort GC failures and protects it during collection", async () => {
+    await db.pool.query("DELETE FROM health_install_runs WHERE room_id = $1", ["room_health"]);
+    const { repository } = await makeRepo();
+    await writeFile(join(repository, "package-lock.json"), '{"lock":1}\n');
+    const commit = async (message: string): Promise<string> => {
+      await git(["add", "--all"], { cwd: repository, timeoutMs: 10_000 });
+      await git(
+        [
+          "-c",
+          "user.name=Test",
+          "-c",
+          "user.email=test@example.invalid",
+          "commit",
+          "--quiet",
+          "-m",
+          message,
+        ],
+        { cwd: repository, timeoutMs: 10_000 },
+      );
+      return (
+        await git(["rev-parse", "HEAD"], { cwd: repository, timeoutMs: 10_000 })
+      ).stdout.trim();
+    };
+    const revisionA = await commit("lock A");
+    const docker = fakeInstallDocker();
+    const logError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const runner = new DockerHealthRunner(
+      {
+        egressProxyContainer: "egress-proxy",
+        egressProxySecret: "0123456789abcdef0123456789abcdef",
+      },
+      docker.invoke,
+    );
+    const run = (revision: string) =>
+      runner.run({
+        repository,
+        revision,
+        roomId: "room_health",
+        command: "npm test",
+        dependencyInstall: {
+          pool: db.pool,
+          command: "npm ci",
+          lockfilePaths: ["package-lock.json"],
+        },
+      });
+
+    expect((await run(revisionA)).status).toBe("GREEN");
+    const { rows: firstSuccessRows } = await db.pool.query<{ id: string }>(
+      "SELECT id FROM health_install_runs WHERE room_id = $1 AND status = 'SUCCEEDED' ORDER BY finished_at LIMIT 1",
+      ["room_health"],
+    );
+    const selectedVolume = docker
+      .cacheVolumes()
+      .find((name) => name.endsWith(firstSuccessRows[0]!.id))!;
+    docker.setVolumeListFailure(true);
+    await writeFile(join(repository, "package-lock.json"), '{"lock":2}\n');
+    const revisionB = await commit("lock B");
+    expect((await run(revisionB)).status).toBe("GREEN");
+    await writeFile(join(repository, "package-lock.json"), '{"lock":3}\n');
+    const revisionC = await commit("lock C");
+    expect((await run(revisionC)).status).toBe("GREEN");
+    expect(docker.cacheVolumes()).toHaveLength(3);
+
+    docker.setVolumeListFailure(false);
+    expect((await run(revisionA)).status).toBe("GREEN");
+    expect(docker.cacheVolumes()).toContain(selectedVolume);
+    const healthCalls = docker.calls.filter((args) =>
+      args.includes("crossover.health.runner=true"),
+    );
+    expect(healthCalls.at(-1)?.some((arg) => arg.includes(`source=${selectedVolume},`))).toBe(true);
+
+    docker.setVolumeListFailure(true);
+    expect((await run(revisionA)).status).toBe("GREEN");
+    expect(docker.cacheVolumes()).toContain(selectedVolume);
+    const afterGcFailureHealthCalls = docker.calls.filter((args) =>
+      args.includes("crossover.health.runner=true"),
+    );
+    expect(
+      afterGcFailureHealthCalls.at(-1)?.some((arg) => arg.includes(`source=${selectedVolume},`)),
+    ).toBe(true);
+    expect(docker.installCount()).toBe(3);
+    expect(docker.healthCount()).toBe(5);
+    expect(logError).toHaveBeenCalled();
   });
 
   it("records install failure as ERROR and skips the health command", async () => {
@@ -397,11 +600,20 @@ describe("DockerHealthRunner", () => {
     const revision = (
       await git(["rev-parse", "HEAD"], { cwd: repository, timeoutMs: 10_000 })
     ).stdout.trim();
-    const exposedCredential = "a".repeat(43);
-    const docker = fakeInstallDocker(
-      1,
-      `registry refused after proxy http://hinstall_example:${exposedCredential}@egress-proxy:3128`,
-    );
+    const leakedSecrets: string[] = [];
+    const docker = fakeInstallDocker(1, (args) => {
+      const proxyUrl = args
+        .find((arg) => arg.startsWith("HTTPS_PROXY="))!
+        .slice("HTTPS_PROXY=".length);
+      const proxy = new URL(proxyUrl);
+      const installId = decodeURIComponent(proxy.username);
+      const credential = decodeURIComponent(proxy.password);
+      const urlEncoded = encodeURIComponent(credential);
+      const base64 = Buffer.from(credential).toString("base64");
+      const basic = Buffer.from(`${installId}:${credential}`).toString("base64");
+      leakedSecrets.push(credential, urlEncoded, base64, basic);
+      return `registry refused after ${installId}:${credential}@egress-proxy:3128; encoded=${urlEncoded}; base64=${base64}; Proxy-Authorization: Basic ${basic}`;
+    });
     const result = await new DockerHealthRunner(
       {
         egressProxyContainer: "egress-proxy",
@@ -423,7 +635,7 @@ describe("DockerHealthRunner", () => {
     expect(result.status).toBe("ERROR");
     expect(result.log).toContain("registry refused");
     expect(result.log).toContain("installation failed");
-    expect(result.log).not.toContain(exposedCredential);
+    for (const secret of leakedSecrets) expect(result.log).not.toContain(secret);
     expect(result.log).toContain("[REDACTED]");
     expect(docker.installCount()).toBe(1);
     expect(docker.healthCount()).toBe(0);
@@ -435,7 +647,7 @@ describe("DockerHealthRunner", () => {
     expect(rows).toEqual([{ status: "FAILED" }]);
   });
 
-  it("fails a crashed setup run that has no container or network", async () => {
+  it("fails a crashed setup run when its network survives but its container is gone", async () => {
     await db.pool.query("DELETE FROM health_install_runs WHERE room_id = $1", ["room_health"]);
     const installId = newId("hinstall");
     await db.pool.query(
@@ -444,7 +656,12 @@ describe("DockerHealthRunner", () => {
                clock_timestamp() + interval '8 minutes')`,
       [installId, "c".repeat(64)],
     );
-    const invoke = vi.fn(async () => ({ code: 0, timedOut: false, output: "" }));
+    const networkName = `crossover-health-install-${installId.slice("hinstall_".length).toLowerCase()}`;
+    const invoke = vi.fn(async (_binary: string, args: readonly string[]) => ({
+      code: 0,
+      timedOut: false,
+      output: args[0] === "network" && args[1] === "ls" ? `${networkName}|${installId}` : "",
+    }));
     const runner = new DockerHealthRunner(
       {
         egressProxyContainer: "egress-proxy",
@@ -459,6 +676,57 @@ describe("DockerHealthRunner", () => {
       installId,
     ]);
     expect(rows).toEqual([{ status: "FAILED" }]);
+    expect(invoke).toHaveBeenCalledWith(
+      "docker",
+      ["network", "rm", networkName],
+      expect.anything(),
+    );
+  });
+
+  it("continues an install after a transient Docker container-list failure", async () => {
+    await db.pool.query("DELETE FROM health_install_runs WHERE room_id = $1", ["room_health"]);
+    const { repository } = await makeRepo();
+    await writeFile(join(repository, "package-lock.json"), "{}\n");
+    await git(["add", "--all"], { cwd: repository, timeoutMs: 10_000 });
+    await git(
+      [
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "commit",
+        "--quiet",
+        "-m",
+        "add lockfile",
+      ],
+      { cwd: repository, timeoutMs: 10_000 },
+    );
+    const revision = (
+      await git(["rev-parse", "HEAD"], { cwd: repository, timeoutMs: 10_000 })
+    ).stdout.trim();
+    const docker = fakeInstallDocker();
+    docker.failNextContainerList();
+    const result = await new DockerHealthRunner(
+      {
+        egressProxyContainer: "egress-proxy",
+        egressProxySecret: "0123456789abcdef0123456789abcdef",
+      },
+      docker.invoke,
+    ).run({
+      repository,
+      revision,
+      roomId: "room_health",
+      command: "npm test",
+      dependencyInstall: {
+        pool: db.pool,
+        command: "npm ci",
+        lockfilePaths: ["package-lock.json"],
+      },
+    });
+
+    expect(result.status).toBe("GREEN");
+    expect(docker.installCount()).toBe(1);
+    expect(docker.healthCount()).toBe(1);
   });
 
   it("removes an expired install container before its network", async () => {

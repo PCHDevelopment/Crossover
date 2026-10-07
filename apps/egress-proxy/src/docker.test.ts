@@ -195,7 +195,7 @@ describe.skipIf(!dockerImageAvailable)("egress proxy Docker smoke", () => {
         lockfilePaths: ["package-lock.json"],
       },
     });
-    healthCacheVolume = execFileSync(
+    const cacheVolumes = execFileSync(
       "docker",
       [
         "volume",
@@ -210,7 +210,10 @@ describe.skipIf(!dockerImageAvailable)("egress proxy Docker smoke", () => {
       { encoding: "utf8", timeout: 5_000 },
     )
       .trim()
-      .split(/\r?\n/)[0];
+      .split(/\r?\n/)
+      .filter(Boolean);
+    expect(cacheVolumes).toHaveLength(1);
+    healthCacheVolume = cacheVolumes[0];
 
     expect(result.status).toBe("GREEN");
     expect(healthCacheVolume).toContain(cacheRoomLabel);

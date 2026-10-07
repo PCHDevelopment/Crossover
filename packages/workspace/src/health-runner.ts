@@ -171,6 +171,19 @@ function clipLog(log: string): string {
   return `${bytes.subarray(0, MAX_LOG_BYTES).toString("utf8")}\n[log truncated]`;
 }
 
+function redactHealthInstallCredential(log: string, installId: string, credential: string): string {
+  const secrets = [
+    credential,
+    encodeURIComponent(credential),
+    Buffer.from(credential).toString("base64"),
+    Buffer.from(`${installId}:${credential}`).toString("base64"),
+  ];
+  return secrets.reduce(
+    (output, secret) => (secret ? output.replaceAll(secret, "[REDACTED]") : output),
+    log,
+  );
+}
+
 async function chownCheckout(checkout: string, uid: number, gid: number): Promise<void> {
   for (const entry of await readdir(checkout, { withFileTypes: true })) {
     const path = join(checkout, entry.name);
@@ -436,8 +449,13 @@ export class DockerHealthRunner implements HealthRunner {
       ],
       { timeoutMs: 10_000, maxBuffer: 64 * 1024 },
     );
-    if (containers.code !== 0)
-      throw new Error(`Health install container sweep failed: ${containers.output}`);
+    if (containers.code !== 0) {
+      console.error(
+        "[health] install container sweep failed; continuing without cleanup",
+        containers.output,
+      );
+      return;
+    }
     const networks = await this.processRunner(
       this.dockerBinary,
       [
@@ -450,8 +468,13 @@ export class DockerHealthRunner implements HealthRunner {
       ],
       { timeoutMs: 10_000, maxBuffer: 64 * 1024 },
     );
-    if (networks.code !== 0)
-      throw new Error(`Health install network sweep failed: ${networks.output}`);
+    if (networks.code !== 0) {
+      console.error(
+        "[health] install network sweep failed; continuing without cleanup",
+        networks.output,
+      );
+      return;
+    }
     const running = await pool.query<{ id: string; started_at: Date }>(
       `SELECT id, started_at FROM health_install_runs
        WHERE status = 'RUNNING' AND expires_at > clock_timestamp()`,
@@ -462,17 +485,10 @@ export class DockerHealthRunner implements HealthRunner {
         .map((line) => line.split("|", 2)[1])
         .filter((id): id is string => Boolean(id)),
     );
-    const networkIds = new Set(
-      networks.output
-        .split(/\r?\n/)
-        .map((line) => line.split("|", 2)[1])
-        .filter((id): id is string => Boolean(id)),
-    );
     for (const run of running.rows) {
       if (
         Date.now() - run.started_at.getTime() < INSTALL_SETUP_STALE_MS ||
-        containerIds.has(run.id) ||
-        networkIds.has(run.id)
+        containerIds.has(run.id)
       )
         continue;
       await pool.query(
@@ -541,17 +557,22 @@ export class DockerHealthRunner implements HealthRunner {
         }),
       )
       .digest("hex");
-    const volume = healthDependencyVolumeName(roomId, cacheKey);
-    const prior = await install.pool.query<{ exists: boolean }>(
-      `SELECT EXISTS (
-         SELECT 1 FROM health_install_runs
-         WHERE room_id = $1 AND cache_key = $2 AND status = 'SUCCEEDED'
-       ) AS exists`,
+    const prior = await install.pool.query<{ id: string }>(
+      `SELECT id FROM health_install_runs
+       WHERE room_id = $1 AND cache_key = $2 AND status = 'SUCCEEDED'
+       ORDER BY finished_at DESC, started_at DESC
+       LIMIT 1`,
       [roomId, cacheKey],
     );
-    if (prior.rows[0]?.exists && (await this.dependencyVolumeExists(volume))) {
-      await this.collectDependencyVolumes(install.pool, roomId);
-      return volume;
+    const successfulInstallId = prior.rows[0]?.id;
+    if (successfulInstallId) {
+      const successfulVolume = healthDependencyVolumeName(roomId, cacheKey, successfulInstallId);
+      if (await this.dependencyVolumeExists(successfulVolume)) {
+        await this.collectDependencyVolumes(install.pool, roomId, successfulInstallId).catch(
+          (error: unknown) => console.error("[health] dependency cache collection failed", error),
+        );
+        return successfulVolume;
+      }
     }
     const running = await install.pool.query<{ id: string }>(
       `SELECT id FROM health_install_runs WHERE room_id = $1 AND status = 'RUNNING' LIMIT 1`,
@@ -561,6 +582,7 @@ export class DockerHealthRunner implements HealthRunner {
       throw new Error("Health dependency installation is already running for this room");
 
     const installId = newId("hinstall");
+    const volume = healthDependencyVolumeName(roomId, cacheKey, installId);
     const network = healthInstallNetworkName(installId);
     let installCheckout: string | undefined;
     let statusUpdated = false;
@@ -594,7 +616,15 @@ export class DockerHealthRunner implements HealthRunner {
       installCheckout = await this.createCheckout(repository, revision, signal);
       const user = await prepareHealthCheckout(installCheckout);
       cacheCreated = true;
-      await this.ensureDependencyVolume(volume, image, roomId, cacheKey, user.uid, user.gid);
+      await this.ensureDependencyVolume(
+        volume,
+        image,
+        roomId,
+        cacheKey,
+        installId,
+        user.uid,
+        user.gid,
+      );
       const containerName = healthInstallContainerName(installId);
       const credential = createHealthInstallProxyCredential(installId, this.egressProxySecret);
       const proxyUrl = `http://${encodeURIComponent(installId)}:${encodeURIComponent(credential)}@${this.egressProxyContainer}:${this.egressProxyPort}`;
@@ -663,10 +693,11 @@ export class DockerHealthRunner implements HealthRunner {
           : processResult.aborted
             ? "Health dependency installation was aborted."
             : `Health dependency installation failed with exit code ${processResult.code ?? "unknown"}.`;
-        throw new Error(`${processResult.output}\n${detail}`.trim());
+        const output = redactHealthInstallCredential(processResult.output, installId, credential);
+        throw new Error(`${output}\n${detail}`.trim());
       }
       installSucceeded = true;
-      await this.collectDependencyVolumes(install.pool, roomId).catch((error: unknown) =>
+      await this.collectDependencyVolumes(install.pool, roomId, installId).catch((error: unknown) =>
         console.error("[health] dependency cache collection failed", error),
       );
       return volume;
@@ -723,6 +754,7 @@ export class DockerHealthRunner implements HealthRunner {
     image: string,
     roomId: string,
     cacheKey: string,
+    installId: string,
     uid: number,
     gid: number,
   ): Promise<void> {
@@ -738,6 +770,8 @@ export class DockerHealthRunner implements HealthRunner {
         `crossover.health.cache_room=${healthCacheRoomLabel(roomId)}`,
         "--label",
         `crossover.health.cache_key=${cacheKey}`,
+        "--label",
+        `crossover.health.cache_install=${installId}`,
         name,
       ],
       { timeoutMs: 10_000, maxBuffer: 64 * 1024 },
@@ -750,6 +784,9 @@ export class DockerHealthRunner implements HealthRunner {
         "--rm",
         "--network=none",
         "--user=0:0",
+        "--cap-drop=ALL",
+        "--cap-add=CHOWN",
+        "--security-opt=no-new-privileges",
         "--mount",
         `type=volume,source=${name},target=/health-dependency-cache,volume-nocopy`,
         "--entrypoint",
@@ -794,22 +831,32 @@ export class DockerHealthRunner implements HealthRunner {
   }
 
   /** Retain the two most recently successful cache generations for this room. */
-  private async collectDependencyVolumes(pool: Pool, roomId: string): Promise<void> {
+  private async collectDependencyVolumes(
+    pool: Pool,
+    roomId: string,
+    preserveInstallId?: string,
+  ): Promise<void> {
     const [successful, active] = await Promise.all([
-      pool.query<{ cache_key: string }>(
-        `SELECT cache_key FROM health_install_runs
-         WHERE room_id = $1 AND status = 'SUCCEEDED'
-         GROUP BY cache_key ORDER BY max(finished_at) DESC LIMIT 2`,
+      pool.query<{ id: string }>(
+        `SELECT id FROM (
+           SELECT DISTINCT ON (cache_key) id, cache_key, finished_at, started_at
+           FROM health_install_runs
+           WHERE room_id = $1 AND status = 'SUCCEEDED'
+           ORDER BY cache_key, finished_at DESC, started_at DESC
+         ) newest_by_key
+         ORDER BY finished_at DESC, started_at DESC
+         LIMIT 2`,
         [roomId],
       ),
-      pool.query<{ cache_key: string }>(
-        "SELECT cache_key FROM health_install_runs WHERE room_id = $1 AND status = 'RUNNING'",
+      pool.query<{ id: string }>(
+        "SELECT id FROM health_install_runs WHERE room_id = $1 AND status = 'RUNNING'",
         [roomId],
       ),
     ]);
-    const retained = new Set([
-      ...successful.rows.map((row) => row.cache_key),
-      ...active.rows.map((row) => row.cache_key),
+    const retainedInstallIds = new Set([
+      ...successful.rows.map((row) => row.id),
+      ...active.rows.map((row) => row.id),
+      ...(preserveInstallId ? [preserveInstallId] : []),
     ]);
     const listed = await this.processRunner(
       this.dockerBinary,
@@ -821,17 +868,25 @@ export class DockerHealthRunner implements HealthRunner {
         "--filter",
         `label=crossover.health.cache_room=${healthCacheRoomLabel(roomId)}`,
         "--format",
-        '{{.Name}}|{{.Label "crossover.health.cache_key"}}',
+        '{{.Name}}|{{.Label "crossover.health.cache_key"}}|{{.Label "crossover.health.cache_install"}}',
       ],
       { timeoutMs: 10_000, maxBuffer: 64 * 1024 },
     );
     if (listed.code !== 0)
       throw new Error(`Health dependency cache listing failed: ${listed.output}`);
     for (const line of listed.output.split(/\r?\n/)) {
-      const [name, cacheKey] = line.split("|", 2);
+      const [name, cacheKey, installId] = line.split("|", 3);
       if (!name || !cacheKey || !/^[a-f0-9]{64}$/.test(cacheKey)) continue;
-      if (name !== healthDependencyVolumeName(roomId, cacheKey) || retained.has(cacheKey)) continue;
-      await this.removeDependencyVolume(name);
+      if (installId && isHealthInstallId(installId)) {
+        if (
+          name !== healthDependencyVolumeName(roomId, cacheKey, installId) ||
+          retainedInstallIds.has(installId)
+        )
+          continue;
+        await this.removeDependencyVolume(name);
+      } else if (name === legacyKeyedHealthDependencyVolumeName(roomId, cacheKey)) {
+        await this.removeDependencyVolume(name);
+      }
     }
     // Remove the pre-T611-keyed volume after at least one keyed cache has succeeded.
     const legacy = legacyHealthDependencyVolumeName(roomId);
@@ -867,7 +922,11 @@ export class DockerHealthRunner implements HealthRunner {
   }
 }
 
-function healthDependencyVolumeName(roomId: string, cacheKey: string): string {
+function healthDependencyVolumeName(roomId: string, cacheKey: string, installId: string): string {
+  return `crossover-health-cache-${healthCacheRoomLabel(roomId)}-${cacheKey}-${installId}`;
+}
+
+function legacyKeyedHealthDependencyVolumeName(roomId: string, cacheKey: string): string {
   return `crossover-health-cache-${healthCacheRoomLabel(roomId)}-${cacheKey}`;
 }
 
@@ -895,19 +954,21 @@ function isHealthInstallId(value: string): boolean {
 function dependencyCacheEnvironment(): string[] {
   return [
     "--env",
-    "npm_config_cache=/health-dependency-cache/npm-cache",
+    "npm_config_cache=/tmp/npm-cache",
     "--env",
-    "PIP_CACHE_DIR=/health-dependency-cache/pip-cache",
+    "PIP_CACHE_DIR=/tmp/pip-cache",
     "--env",
-    "POETRY_VIRTUALENVS_PATH=/health-dependency-cache/poetry-virtualenvs",
+    "POETRY_CACHE_DIR=/tmp/poetry-cache",
+    "--env",
+    "POETRY_VIRTUALENVS_PATH=/tmp/poetry-virtualenvs",
     "--env",
     "POETRY_VIRTUALENVS_IN_PROJECT=false",
     "--env",
-    "GOPATH=/health-dependency-cache/go",
+    "GOPATH=/tmp/go",
     "--env",
-    "GOMODCACHE=/health-dependency-cache/go-mod",
+    "GOMODCACHE=/tmp/go-mod",
     "--env",
-    "GOCACHE=/health-dependency-cache/go-build",
+    "GOCACHE=/tmp/go-build",
   ];
 }
 
@@ -916,17 +977,17 @@ function healthDependencyCacheEnvironment(): string[] {
     "--env",
     "npm_config_cache=/tmp/npm-cache",
     "--env",
-    "PIP_CACHE_DIR=/health-dependency-cache/pip-cache",
+    "PIP_CACHE_DIR=/tmp/pip-cache",
     "--env",
-    "POETRY_CACHE_DIR=/health-dependency-cache/poetry-cache",
+    "POETRY_CACHE_DIR=/tmp/poetry-cache",
     "--env",
-    "POETRY_VIRTUALENVS_PATH=/health-dependency-cache/poetry-virtualenvs",
+    "POETRY_VIRTUALENVS_PATH=/tmp/poetry-virtualenvs",
     "--env",
     "POETRY_VIRTUALENVS_IN_PROJECT=false",
     "--env",
-    "GOPATH=/health-dependency-cache/go",
+    "GOPATH=/tmp/go",
     "--env",
-    "GOMODCACHE=/health-dependency-cache/go-mod",
+    "GOMODCACHE=/tmp/go-mod",
     "--env",
     "GOCACHE=/tmp/go-build",
   ];

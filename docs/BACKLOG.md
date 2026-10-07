@@ -811,12 +811,12 @@ Implement `HealthGate` for T309: GREEN at a revision including the task's artifa
 
 ### T611 · Health dependency cache — S2
 
-Deps: T607, T1007 · Migration: 0027
+Deps: T607, T1007 · Migration: 0028
 
 Added in Review 4. Health runs have no network (T607), so a project's dependencies can't be installed in the run itself. Each room gets a dependency-cache volume per cache key. A separate **install step** fills it: the room setting `health_install_command`, e.g. `npm ci`, runs in the same image with egress only through the T1007 allowlist proxy (package registries), whenever the lockfile at the target revision differs from the one the cache was built from. Health runs mount the cache read-only, with no network.
 
 - `health_lockfile_paths` is a validated list of up to 10 normalized relative paths, defaulting to `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `poetry.lock`, and `go.sum`. Missing files are ignored. An unchanged lockfile, image, install command, and runtime means no install.
-- Each cache key gets a fresh Docker volume, so a postinstall from an older dependency graph cannot survive a lockfile change or a failed install. Cache collection keeps the two most recently successful generations per room and removes older or incomplete volumes. The current mount persists root `node_modules` plus package-manager download caches; workspace-local links, in-project virtualenvs, and Plug'n'Play layouts are not persisted.
+- Each install gets a fresh Docker volume named and labeled with its install id. Health runs mount only the volume from the newest successful install for that cache key, so a failed or concurrent install volume is never reused. Cache collection keeps the two most recently successful generations per room and removes older or incomplete volumes. The volume persists root `node_modules` and files explicitly written under `HEALTH_DEPENDENCY_CACHE`; package-manager download caches use `/tmp`, and workspace-local links, virtualenvs, and Plug'n'Play layouts are not persisted.
 - The install proxy identity is `hinstall_<run id>` and works only while its database row is `RUNNING` and the room is active. Install networks are internal, per-run, and swept when stale.
 - An install failure records the health run as `ERROR` with the install log, never as `RED`.
 - Tests: a non-allowlisted host is refused during install; the health run itself still has no network; a changed lockfile triggers exactly one reinstall.
