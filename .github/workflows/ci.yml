@@ -43,6 +43,7 @@ jobs:
       - run: pnpm format:check
       - run: pnpm lint
       - run: pnpm typecheck
+      - run: python3 -m pip install httpx websockets
       - run: docker pull node:22-bookworm-slim
       - run: docker build -f apps/egress-proxy/Dockerfile -t crossover-egress-proxy:test .
       - run: pnpm test

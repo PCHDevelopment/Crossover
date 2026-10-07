@@ -41,7 +41,9 @@ type Tail<M extends string, H extends string> = M extends `${H}.${infer T}` ? T 
 
 /** The catalog as nested namespaces: `"tasks.create"` becomes `api.tasks.create`. */
 export type Nest<M extends string> = {
-  [H in Head<M>]: [Tail<M, H>] extends [never] ? CommandFn : Nest<Tail<M, H>>;
+  // A name that is also a command is callable and has what is under it (`sandbox.exec`).
+  [H in Head<M>]: (H extends M ? CommandFn : unknown) &
+    ([Tail<M, H>] extends [never] ? unknown : Nest<Tail<M, H>>);
 };
 
 /** Every Room Protocol method of the catalog, as typed calls. */
@@ -68,7 +70,17 @@ export function makeApi(
     if (known.has(path)) {
       const fn = (params: Record<string, unknown> = {}, options?: CallOptions) =>
         call(path as MethodName, params, options);
-      return fn;
+      // A command that is also a namespace (`sandbox.exec`, `sandbox.exec.cancel`).
+      if (!prefixes.has(path)) return fn;
+      return new Proxy(fn, {
+        get(target, key, receiver) {
+          if (typeof key === "string") {
+            const next = `${path}.${key}`;
+            if (known.has(next) || prefixes.has(next)) return node(next);
+          }
+          return Reflect.get(target, key, receiver) as unknown;
+        },
+      });
     }
     return new Proxy(Object.create(null) as object, {
       get(_target, key) {
