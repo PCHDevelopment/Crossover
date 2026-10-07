@@ -69,6 +69,84 @@ export function registerTaskLifecycleCommands(dispatcher: Dispatcher): void {
       });
     },
   });
+
+  dispatcher.registerCommand({
+    method: "tasks.start",
+    mutating: true,
+    params: taskVersionParams,
+    execute: async (ctx, p) => {
+      const task = await loadTask(ctx.client, ctx.room_id, p.task_id, true);
+      const actor = await loadActor(ctx);
+      if (task.owner_id !== actor.id) {
+        throw new CrossoverError("FORBIDDEN", "Only the task's owner can start it", {
+          details: { reason: "not_task_owner" },
+        });
+      }
+      if (task.version !== p.expected_version) throw versionConflict(task);
+      if (task.status !== "CLAIMED") {
+        throw new CrossoverError("VALIDATION", `Can't start a task that is ${task.status}`, {
+          details: { status: task.status },
+        });
+      }
+      // Every dependency must be DONE, unless the lead set override_dependencies (§8.2).
+      if (!task.override_dependencies && task.dependencies.length > 0) {
+        const { rows } = await ctx.client.query<{ id: string; status: string }>(
+          "SELECT id, status FROM tasks WHERE room_id = $1 AND id = ANY($2::text[]) AND status <> 'DONE' ORDER BY id",
+          [ctx.room_id, task.dependencies],
+        );
+        if (rows.length > 0) {
+          throw new CrossoverError(
+            "VALIDATION",
+            `Dependency ${rows[0]!.id} is ${rows[0]!.status}, not DONE`,
+            {
+              details: {
+                unfinished_dependencies: rows.map((r) => ({ id: r.id, status: r.status })),
+              },
+            },
+          );
+        }
+      }
+      return ownerTransition(ctx, task, "IN_PROGRESS", "task.started");
+    },
+  });
+}
+
+/** Move a task the caller owns from `from` to `to`, renewing an agent owner's lease (§8.4). */
+async function ownerTransition(
+  ctx: CommandContext,
+  task: TaskRow,
+  to: TaskRow["status"],
+  eventType: "task.started",
+  extraSet = "",
+  extraPayload: Record<string, unknown> = {},
+) {
+  const { rows } = await ctx.client.query<TaskRow>(
+    `UPDATE tasks t SET status = $4, version = t.version + 1, updated_at = clock_timestamp(),
+            lease_expires_at = (SELECT ${leaseSql("p.kind")} FROM participants p
+                                WHERE p.id = t.owner_id AND p.room_id = t.room_id)
+            ${extraSet}
+     WHERE t.id = $1 AND t.room_id = $2 AND t.version = $3
+     RETURNING ${TASK_COLUMNS.split(",")
+       .map((c) => `t.${c.trim()}`)
+       .join(", ")}`,
+    [task.id, ctx.room_id, task.version, to],
+  );
+  const updated = rows[0];
+  if (!updated) throw versionConflict(await loadTask(ctx.client, ctx.room_id, task.id));
+  return {
+    response: taskView(updated),
+    events: [
+      {
+        type: eventType,
+        payload: {
+          task_id: task.id,
+          from_version: task.version,
+          version: updated.version,
+          ...extraPayload,
+        },
+      },
+    ],
+  };
 }
 
 /** Mark `task` as owned by `ownerId` (claim or assign): `OPEN → CLAIMED`, version + 1, lease for agents. */
