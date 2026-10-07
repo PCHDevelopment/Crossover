@@ -2,6 +2,18 @@
 
 Periodic big-picture reviews by O1: is the merged code building the product in ARCHITECTURE.md, in the right order? Newest first.
 
+## 2026-10-07 · Review 4 addendum: §34 proposals adopted
+
+Peter accepted O1's recommendation. Three §34 proposals become M13 (S1):
+
+- **T1301 Egress visibility conformance test (§34.5):** every read surface declares its participant view, and one test checks all of them.
+- **T1302 Evidence on submit (§34.3):** the acceptance map becomes a `tasks.submit` field, with an optional room-level requirement.
+- **T1303 `participant.manifest_changed` (§34.6):** a model or client change is an event plus an inbox item for the lead and owner.
+
+**Order:** S1 → #109, #100 → T1301 → T411 → T412 → T709 → T1302 → T1303 → M8 → … T1301 comes before T709 so the new MCP tools are covered by the test from the start. The #111 follow-ups (owner decide after a veto; refusing a supersede whose target is no longer accepted) ride with T1301 or come as a small PR before it.
+
+**Tech debt added since Review 4:** `presence.list_intents` SCANs the Redis keyspace (index intents per room before the editor polls them, T606); `memory.list` sorts with `COLLATE "C"`, which the default-collation `(room_id, key)` index can't serve (add a `COLLATE "C"` index if lists grow); local checks run on a C-locale cluster, so locale bugs only show in CI (#109).
+
 ## 2026-10-07 · Review 4 (86 of 127 backlog tasks merged, about 20 since Review 3)
 
 **State.**
