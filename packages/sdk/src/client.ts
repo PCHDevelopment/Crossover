@@ -158,7 +158,8 @@ export class CrossoverClient {
    * memory: if it throws, the call that triggered the refresh fails with that error but the client
    * keeps working with the new pair (so persist best-effort, and expect a restart to need a new
    * login if you lost it). Rooms entered with the same refresh token share one token store, so two
-   * `room()` calls never refresh the same login twice.
+   * `room()` calls never refresh the same login twice (so the `onTokens` of the first call wins; later ones are ignored, and the store lives as long
+   * as the client).
    */
   room(roomId: string, tokens: string | RoomTokens, options: TokenOptions = {}): RoomClient {
     const login = typeof tokens === "string" ? undefined : tokens.refresh_token;

@@ -1,3 +1,4 @@
+import { isIP } from "node:net";
 import { hostname } from "node:os";
 import { resolve } from "node:path";
 import { z } from "zod";
@@ -7,6 +8,15 @@ const flag = z
   .enum(["true", "false", "1", "0"])
   .optional()
   .transform((v) => v === "true" || v === "1");
+
+/** An IP address, or an address with a CIDR prefix length. */
+function isProxyAddress(entry: string): boolean {
+  const [address, length, ...rest] = entry.split("/");
+  const version = isIP(address ?? "");
+  if (version === 0 || rest.length > 0) return false;
+  if (length === undefined) return true;
+  return /^\d{1,3}$/.test(length) && Number(length) <= (version === 4 ? 32 : 128);
+}
 
 const envSchema = z.object({
   DATABASE_URL: z.string().min(1),
@@ -22,14 +32,23 @@ const envSchema = z.object({
   TRUST_PROXY: z
     .string()
     .optional()
-    .transform((v) =>
-      v
+    .transform((v, ctx) => {
+      const entries = v
         ? v
             .split(",")
             .map((x) => x.trim())
             .filter(Boolean)
-        : [],
-    ),
+        : [];
+      for (const entry of entries) {
+        if (!isProxyAddress(entry)) {
+          ctx.addIssue({
+            code: "custom",
+            message: `TRUST_PROXY: "${entry}" is not an IP address or CIDR (comma-separated, e.g. 10.0.0.0/8,127.0.0.1)`,
+          });
+        }
+      }
+      return entries;
+    }),
   /** Refresh attempts per client address per minute (`POST /v1/auth/refresh`). Default 30. */
   REFRESH_PER_MINUTE: z.coerce.number().int().min(1).max(100_000).default(30),
   /** Serve the built web app (`apps/web/dist`) from this directory next to the API. */

@@ -43,6 +43,8 @@ beforeAll(async () => {
     port: 0,
     nodeId: `sdk-e2e-${process.pid}`,
     devLogin: true,
+    // The refresh limit counts per address in Redis, shared by every test server: keep it out of the way.
+    refreshPerMinute: 100_000,
     healthImages: ["node:22-bookworm-slim"],
   };
   // The real Redis publisher and subscriber: live events travel the way they do in production.
@@ -290,7 +292,7 @@ describe("SDK token refresh against a real server", () => {
     expect(pair.status).toBe(200);
     // Past the window in which a spent token is taken for a retry after a lost response.
     await db.pool.query(
-      "UPDATE auth_tokens SET used_at = used_at - interval '31 seconds' WHERE room_id = $1 AND used_at IS NOT NULL",
+      "UPDATE auth_tokens SET used_at = used_at - interval '31 seconds', created_at = created_at - interval '31 seconds' WHERE room_id = $1",
       [spent.roomId],
     );
     await expireAccessTokens(spent.roomId);

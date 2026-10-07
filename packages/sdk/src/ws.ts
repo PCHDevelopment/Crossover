@@ -128,6 +128,9 @@ export class WsSession {
   }
 }
 
+/** How long a subscription keeps retrying a failing refresh (the server's grace for a spent token is 30 s). */
+const REFRESH_PATIENCE_MS = 25_000;
+
 /** The longest the stream waits because a server asked it to (a budget's `retry_after`). */
 const MAX_RETRY_AFTER_MS = 10 * 60_000;
 
@@ -315,12 +318,20 @@ export class Subscription implements AsyncIterable<SdkEvent> {
     // One renewal per refusal: a token that is refused again right after renewing ends it.
     let renewed = false;
     // "later": the refresh itself failed in a way that may pass (the server busy, the network),
-    // which is not the token being refused: wait and connect again.
+    // which is not the token being refused: wait and connect again. But only for so long: a refresh
+    // token is single-use and the server takes a spent one for a retry only briefly, so a retry
+    // after REFRESH_PATIENCE_MS could revoke the login. Past that the stream ends with the error.
+    let refreshSince: number | undefined;
     const renew = async (used: string): Promise<"renewed" | "refused" | "later"> => {
       if (!this.config.refresh) return "refused";
+      if (refreshSince !== undefined && Date.now() - refreshSince > REFRESH_PATIENCE_MS)
+        return "refused";
       try {
-        return (await this.config.refresh(used)) ? "renewed" : "refused";
+        const renewedNow = await this.config.refresh(used);
+        refreshSince = undefined;
+        return renewedNow ? "renewed" : "refused";
       } catch (error) {
+        refreshSince ??= Date.now();
         if (error instanceof CrossoverError) this.retryAfterMs = retryAfterOf(error);
         return "later";
       }

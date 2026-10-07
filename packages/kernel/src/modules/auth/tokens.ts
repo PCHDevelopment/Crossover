@@ -95,6 +95,16 @@ export async function refresh(
   // Resolve to either a new pair or a rejection, but never throw inside the transaction for
   // a reuse: that would roll back the family revocation we need to keep.
   const outcome = await withTransaction(pool, async (client) => {
+    // One rotation of a login at a time: take the login's lock before looking at any of its
+    // tokens, so a grace refresh and a normal rotation can't each judge the other's successor
+    // unused and fork the family.
+    const { rows: login } = await client.query<{ family_id: string }>(
+      "SELECT family_id FROM auth_tokens WHERE token_hash = $1 AND kind = 'REFRESH'",
+      [hash],
+    );
+    if (login[0]) {
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [login[0].family_id]);
+    }
     const { rows } = await client.query<{
       participant_id: string;
       room_id: string;
@@ -102,12 +112,16 @@ export async function refresh(
       expired: boolean;
       used: boolean;
       revoked: boolean;
+      by_grace: boolean;
+      graced: boolean;
       status: string;
     }>(
       `SELECT t.participant_id, t.room_id, t.family_id,
               t.expires_at <= clock_timestamp() AS expired,
               t.used_at IS NOT NULL AS used,
               t.revoked_at IS NOT NULL AS revoked,
+              t.revoked_by_grace AS by_grace,
+              t.graced_at IS NOT NULL AS graced,
               p.status
          FROM auth_tokens t
          JOIN participants p ON p.id = t.participant_id
@@ -116,6 +130,15 @@ export async function refresh(
       [hash],
     );
     const token = rows[0];
+    if (token?.revoked && token.by_grace) {
+      // The successor a grace refresh revoked, presented by someone: its holder is not the client
+      // that retried, so the login has two holders. Revoke it.
+      await client.query(
+        "UPDATE auth_tokens SET revoked_at = clock_timestamp() WHERE family_id = $1 AND revoked_at IS NULL",
+        [token.family_id],
+      );
+      return { ok: false as const };
+    }
     if (!token || token.revoked || token.expired || token.status === "REMOVED") {
       return { ok: false as const };
     }
@@ -126,7 +149,7 @@ export async function refresh(
       // secret nobody has seen) instead of revoking the login. Anything else is reuse.
       const { rows: graced } = await client.query<{ used_at: Date }>(
         `SELECT t.used_at FROM auth_tokens t
-          WHERE t.token_hash = $1
+          WHERE t.token_hash = $1 AND t.graced_at IS NULL
             AND t.used_at > clock_timestamp() - make_interval(secs => $2)
             AND NOT EXISTS (SELECT 1 FROM auth_tokens later
                              WHERE later.family_id = t.family_id AND later.kind = 'REFRESH'
@@ -141,11 +164,16 @@ export async function refresh(
         [hash, options.reuseGraceSeconds ?? REUSE_GRACE_SECONDS],
       );
       if (graced[0]) {
+        // Revoke the successor pair nobody has seen, marked as revoked by grace; and this spent
+        // token has had its one grace.
         await client.query(
-          `UPDATE auth_tokens SET revoked_at = clock_timestamp()
+          `UPDATE auth_tokens SET revoked_at = clock_timestamp(), revoked_by_grace = true
             WHERE family_id = $1 AND revoked_at IS NULL AND created_at >= $2`,
           [token.family_id, graced[0].used_at],
         );
+        await client.query("UPDATE auth_tokens SET graced_at = now() WHERE token_hash = $1", [
+          hash,
+        ]);
         const pair = await insertPair(
           client,
           token.participant_id,

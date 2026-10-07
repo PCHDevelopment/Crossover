@@ -725,7 +725,7 @@ describe("POST /v1/auth/refresh", () => {
     const pair = first.json() as TokenPair;
     // Past the grace window for a lost response, a spent token is a replay.
     await pool.query(
-      "UPDATE auth_tokens SET used_at = used_at - interval '31 seconds' WHERE kind = 'REFRESH' AND used_at IS NOT NULL",
+      "UPDATE auth_tokens SET used_at = used_at - interval '31 seconds', created_at = created_at - interval '31 seconds'",
     );
     const again = await post(s, "/v1/auth/refresh", { refresh_token: s.owner.refresh_token });
     errorShape(again.json(), "UNAUTHENTICATED", 401, again);
