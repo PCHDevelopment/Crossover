@@ -15,6 +15,7 @@ const CATALOG = `
   room.digest
   room.events.subscribe
   room.events.list
+  events.redact
   room.set_lead
   room.transfer_lead / room.accept_lead
   room.freeze / room.resume / room.archive
