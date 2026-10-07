@@ -25,6 +25,7 @@ import {
   tasksHeartbeatParams,
   tasksListParams,
   tasksReviewParams,
+  tasksSubmitParams,
   tasksUpdateParams,
 } from "@crossover/kernel";
 import type { MethodName } from "@crossover/protocol";
@@ -200,9 +201,9 @@ export const TASK_TOOLS: readonly McpToolDefinition[] = [
   {
     name: "tasks_submit",
     description:
-      "Submit a task you own for review (or straight to done when no review is required).",
+      "Submit a task you own for review (or straight to done when no review is required). Attach `evidence`: for each requirement, the proof (tests, checks, manual steps) and any sabotage checks.",
     method: "tasks.submit",
-    input: taskVersionParams.shape,
+    input: tasksSubmitParams.shape,
     mutating: true,
   },
   {

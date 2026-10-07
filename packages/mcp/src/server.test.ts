@@ -23,6 +23,7 @@ import {
   tasksGetParams,
   tasksHeartbeatParams,
   tasksListParams,
+  tasksSubmitParams,
   tasksReviewParams,
   tasksUpdateParams,
   taskVersionParams,
@@ -527,7 +528,8 @@ describe("MCP task tools (T708)", () => {
     expect(by["tasks.block"]).toBe(tasksBlockParams.shape);
     expect(by["tasks.review"]).toBe(tasksReviewParams.shape);
     expect(by["tasks.heartbeat"]).toBe(tasksHeartbeatParams.shape);
-    for (const m of ["claim", "start", "unblock", "submit", "release", "reopen", "cancel"]) {
+    expect(by["tasks.submit"]).toBe(tasksSubmitParams.shape);
+    for (const m of ["claim", "start", "unblock", "release", "reopen", "cancel"]) {
       expect(by[`tasks.${m}`], m).toBe(taskVersionParams.shape);
     }
   });
