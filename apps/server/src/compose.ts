@@ -24,6 +24,7 @@ import {
   registerRoomEventsCommand,
   registerRoomLifecycleCommands,
   registerTaskCommands,
+  registerTaskHeartbeat,
   registerTaskLifecycleCommands,
   registerTaskReadCommands,
   type Authorizer,
@@ -197,6 +198,7 @@ function registerCommands(
   registerTaskCommands(dispatcher);
   registerTaskReadCommands(dispatcher);
   registerTaskLifecycleCommands(dispatcher, { healthGate: workspaceHealthGate });
+  registerTaskHeartbeat(dispatcher); // the MCP `tasks_heartbeat` tool runs it
   registerMessageCommands(dispatcher);
   registerMemoryCommands(dispatcher);
   registerDecisionCommands(dispatcher);

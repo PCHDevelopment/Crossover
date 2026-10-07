@@ -78,6 +78,8 @@ async function setup(
     method: "tasks.list",
     action: "tasks.read",
     mutating: false,
+    view: "none",
+    view_reason: "test fixture",
     params: z.object({}),
     execute: async () => ({ response: { tasks: [] } }),
   });

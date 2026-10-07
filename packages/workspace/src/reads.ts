@@ -148,6 +148,7 @@ export function registerWorkspaceReads(dispatcher: Dispatcher): void {
     action: "workspace.read",
     perPathAuthorize: true,
     mutating: false,
+    view: "participant",
     params: workspaceReadParamsSchema,
     execute: async (ctx, params) => {
       await ctx.authorize("workspace.read", { path: params.path });
@@ -185,6 +186,7 @@ export function registerWorkspaceReads(dispatcher: Dispatcher): void {
     // Every returned file is checked, and directories are shown only when they contain one.
     perPathAuthorize: true,
     mutating: false,
+    view: "participant",
     params: workspaceListParamsSchema,
     execute: async (ctx, params) => {
       const ws = await snapshot(ctx, params.revision);

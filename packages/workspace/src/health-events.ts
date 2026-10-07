@@ -85,6 +85,7 @@ export function registerWorkspaceHealthReads(dispatcher: Dispatcher): void {
     action: "room.read",
     perPathAuthorize: true,
     mutating: false,
+    view: "participant",
     params: healthGetParamsSchema,
     execute: async (ctx, { run_id }) => {
       const { rows } = await ctx.client.query<{

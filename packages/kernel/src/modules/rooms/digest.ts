@@ -111,6 +111,7 @@ export function registerRoomDigestCommand(dispatcher: Dispatcher): void {
     method: "room.digest",
     action: "room.read",
     mutating: false,
+    view: "participant",
     params: roomDigestParams,
     execute: async (ctx, p) => {
       const { rows } = await ctx.client.query<{ role: string; authority: string }>(

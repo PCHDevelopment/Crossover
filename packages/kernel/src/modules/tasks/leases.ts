@@ -24,6 +24,7 @@ export function registerTaskHeartbeat(dispatcher: Dispatcher): void {
     // The catalog (§16.1) lists it as a read: no events, no version, no idempotency key. It
     // still writes the lease, in one atomic UPDATE, which is all a repeat needs.
     mutating: false,
+    view: "own",
     params: tasksHeartbeatParams,
     execute: async (ctx, p) => {
       const task = await loadTask(ctx.client, ctx.room_id, p.task_id);

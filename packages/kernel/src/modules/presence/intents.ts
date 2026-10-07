@@ -168,6 +168,7 @@ export function registerPresenceIntentCommands(
     method: "presence.set_intent",
     action: "presence.update",
     mutating: false,
+    view: "own",
     params: setParams,
     execute: async (ctx, params) => {
       if (params.task_id !== undefined) await requireRoomTask(ctx, params.task_id);
@@ -184,6 +185,7 @@ export function registerPresenceIntentCommands(
     method: "presence.clear_intent",
     action: "presence.update",
     mutating: false,
+    view: "own",
     params: z.strictObject({}),
     execute: async (ctx) => {
       await store.clear(ctx.room_id, ctx.principal.participant_id);
@@ -195,6 +197,9 @@ export function registerPresenceIntentCommands(
     method: "presence.list_intents",
     action: "room.read",
     mutating: false,
+    view: "none",
+    view_reason:
+      "edit intents are advisory and room-wide by design: what a participant announced it will edit",
     params: z.strictObject({}),
     execute: async (ctx) => ({ response: { intents: await store.list(ctx.room_id) } }),
   });
