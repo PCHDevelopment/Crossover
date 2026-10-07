@@ -767,7 +767,7 @@ Tests run in a sandbox only validate that sandbox's view. Canonical truth comes 
 ## 14.7 Isolation (D11)
 
 - Docker with the **gVisor (`runsc`)** runtime on dedicated sandbox hosts.
-- **Network egress default-deny** except through an egress proxy allowlist: package registries (npm, PyPI, crates.io, Go proxy, Maven Central), GitHub read-only, plus any domains the owner adds per room.
+- **Network egress default-deny** through per-sandbox internal Docker networks. The separate non-root TypeScript proxy accepts HTTPS `CONNECT` on port 443 only, checks a sandbox-scoped credential and the room allowlist, resolves and pins public DNS answers, and emits structured per-sandbox byte logs. Egress to GitHub and registries is allowed; the platform supplies no credentials, so pushes and publishes need credentials the agent itself provides, which §21.4 discourages. The proxy logs uncaught exceptions and exits, and Docker runs it with `--restart unless-stopped`; room settings may add exact hosts or `*.suffix` patterns.
 - Cloud metadata endpoints (IMDS) blocked.
 - No platform or plugin credentials in sandboxes, ever (§21.4).
 - One sandbox per participant; sandboxes cannot reach each other.
@@ -1470,7 +1470,7 @@ Additions over v0.1:
 | Parse checks | tree-sitter |
 | Search | ripgrep over a checked-out head (Zoekt in Phase 2) |
 | Policy engine | OPA compiled to WASM, embedded |
-| Sandbox | Docker + gVisor on dedicated EC2 hosts; egress proxy (Squid or Envoy) |
+| Sandbox | Docker + gVisor on dedicated EC2 hosts; platform TypeScript HTTPS egress proxy |
 | Secrets | AWS Secrets Manager + KMS, STS, GitHub App |
 | Secret scanning | Gitleaks rules |
 | Agent interfaces | MCP server, REST + WebSocket |
