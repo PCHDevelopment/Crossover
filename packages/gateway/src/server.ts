@@ -5,6 +5,7 @@ import {
   createUserSession,
   exchangeRoomSession,
   findOrCreateUser,
+  listUserRooms,
   refresh,
   type Dispatcher,
 } from "@crossover/kernel";
@@ -12,6 +13,7 @@ import { CrossoverError, newId } from "@crossover/protocol";
 import { z } from "zod";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import { toHttpError } from "./errors.js";
+import { staticSite } from "./static.js";
 import { attachWebSocket, type WebSocketOptions } from "./ws.js";
 
 /** Counts hits per key in fixed windows (Redis in production). */
@@ -49,6 +51,12 @@ export interface GatewayOptions {
    * `Retry-After`. If the limiter fails, requests go ahead. Off unless given.
    */
   refreshLimit?: { limiter: RouteRateLimiter; perMinute?: number };
+  /**
+   * Serve the built web app from this directory (`index.html` and its assets, the app's routes
+   * falling back to `index.html`) next to the API. Off unless given; never serves anything under
+   * `/v1/`.
+   */
+  staticRoot?: string;
   /** Serve `GET /v1/rooms/:roomId/ws` (T703). Off unless given. */
   ws?: Omit<WebSocketOptions, "dispatcher" | "pool">;
 }
@@ -120,9 +128,27 @@ export function buildGateway(options: GatewayOptions): FastifyInstance {
     }
     return reply.status(mapped.status).header("Cache-Control", "no-store").send(mapped.body);
   });
-  app.setNotFoundHandler((_request, reply) =>
-    reply.status(404).send(new CrossoverError("NOT_FOUND", "No such route").toErrorBody()),
-  );
+  const web = options.staticRoot ? staticSite(options.staticRoot) : undefined;
+  app.setNotFoundHandler(async (request, reply) => {
+    const file = request.method === "GET" ? await web?.(request.url) : undefined;
+    if (file) {
+      return reply
+        .status(200)
+        .header("Content-Type", file.type)
+        .header(
+          "Cache-Control",
+          file.immutable ? "public, max-age=31536000, immutable" : "no-cache",
+        )
+        .header("X-Content-Type-Options", "nosniff")
+        .header("Referrer-Policy", "no-referrer")
+        .header(
+          "Content-Security-Policy",
+          "default-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'",
+        )
+        .send(file.body);
+    }
+    return reply.status(404).send(new CrossoverError("NOT_FOUND", "No such route").toErrorBody());
+  });
 
   app.post<{ Params: { roomId: string } }>("/v1/rooms/:roomId/commands", async (request, reply) => {
     const principal = await authenticate(pool, bearerToken(request));
@@ -201,6 +227,12 @@ export function buildGateway(options: GatewayOptions): FastifyInstance {
     );
     void reply.status(201).header("Cache-Control", "no-store");
     return { ...(result.response as object), tokens: result.one_time };
+  });
+
+  app.get("/v1/rooms", async (request, reply) => {
+    const user = await authenticateUser(pool, bearerToken(request));
+    void reply.header("Cache-Control", "no-store");
+    return { rooms: await listUserRooms(pool, user) };
   });
 
   app.post<{ Params: { roomId: string } }>("/v1/rooms/:roomId/session", async (request, reply) => {

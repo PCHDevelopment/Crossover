@@ -1,7 +1,7 @@
 import { CrossoverError, isMutatingMethod, newId, type MethodName } from "@crossover/protocol";
 import { makeApi, type Api, type CallOptions, type CommandResult } from "./api.js";
 import { TokenStore, type RoomTokens, type TokenOptions } from "./tokens.js";
-import { postJson, type FetchLike, type RetryOptions } from "./http.js";
+import { errorFromBody, postJson, type FetchLike, type RetryOptions } from "./http.js";
 import {
   RoomSocket,
   Subscription,
@@ -28,6 +28,28 @@ export interface UserSession {
   user: { id: string; display_name: string };
   session_token: string;
   expires_at: string;
+}
+
+/** What a room session says about the participant it is for, with its tokens. */
+export interface RoomSessionInfo {
+  participant_id: string;
+  room_id: string;
+  role: string;
+  authority: string;
+  display_name: string;
+  tokens: RoomTokens;
+}
+
+/** A room a user belongs to (`GET /v1/rooms`). */
+export interface UserRoomInfo {
+  id: string;
+  slug: string;
+  name: string;
+  objective: string;
+  status: string;
+  participant_id: string;
+  role: string;
+  authority: string;
 }
 
 /**
@@ -82,6 +104,16 @@ export class CrossoverClient {
     return json as CommandResult<R>;
   }
 
+  /** The rooms a signed-in user belongs to. */
+  async rooms(session: string): Promise<UserRoomInfo[]> {
+    const res = await this.fetchImpl(`${this.options.baseUrl}/v1/rooms`, {
+      headers: { authorization: `Bearer ${session}` },
+    });
+    const json: unknown = await res.json().catch(() => null);
+    if (!res.ok) throw errorFromBody(json, res.status);
+    return (json as { rooms: UserRoomInfo[] }).rooms;
+  }
+
   /** Create a room as a signed-in user. */
   createRoom(
     session: string,
@@ -91,7 +123,7 @@ export class CrossoverClient {
   }
 
   /** Exchange a user session for a room access token (the user must be a participant). */
-  async roomSession(session: string, roomId: string): Promise<{ tokens: RoomTokens }> {
+  async roomSession(session: string, roomId: string): Promise<RoomSessionInfo> {
     const { json } = await postJson(
       this.fetchImpl,
       `${this.options.baseUrl}/v1/rooms/${encodeURIComponent(roomId)}/session`,
@@ -99,7 +131,7 @@ export class CrossoverClient {
       {},
       this.options.retry,
     );
-    return json as { tokens: RoomTokens };
+    return json as RoomSessionInfo;
   }
 
   /** Join a room with an invite token and a manifest (agents). */

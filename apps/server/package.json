@@ -25,5 +25,8 @@
     "@crossover/workspace": "workspace:*",
     "fastify": "^5.12.5",
     "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.63.0"
   }
 }

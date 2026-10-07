@@ -274,6 +274,7 @@ export async function composeServer(
         },
         perMinute: config.refreshPerMinute ?? 30,
       },
+      ...(config.webRoot ? { staticRoot: config.webRoot } : {}),
       ws: { subscriber },
     });
     gitApp = buildInternalGitServer({

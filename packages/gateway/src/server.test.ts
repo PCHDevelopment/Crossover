@@ -1,3 +1,6 @@
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Pool } from "@crossover/db";
 import { createTestDatabase, type TestDatabase } from "@crossover/db/testing";
 import {
@@ -817,5 +820,87 @@ describe("POST /v1/auth/refresh rate limit", () => {
     const s = await setup(undefined, false, { refreshLimit: { limiter: broken, perMinute: 1 } });
     const res = await post(s, "/v1/auth/refresh", { refresh_token: s.owner.refresh_token });
     expect(res.statusCode).toBe(200);
+  });
+});
+
+describe("GET /v1/rooms and the static web app (T1104)", () => {
+  it("lists the caller's own rooms, and nothing without a user session", async () => {
+    const s = await setup(undefined, true);
+    const login = await post(s, "/v1/auth/dev-login", {
+      subject: `lister-${n}`,
+      display_name: "L",
+    });
+    const session = (login.json() as { session_token: string }).session_token;
+    const bearer = { authorization: `Bearer ${session}` };
+    const empty = await s.app.inject({ method: "GET", url: "/v1/rooms", headers: bearer });
+    expect(empty.statusCode).toBe(200);
+    expect(empty.json()).toEqual({ rooms: [] });
+    const created = await post(
+      s,
+      "/v1/commands",
+      {
+        id: newId("cmd"),
+        method: "room.create",
+        params: { slug: `listed-${n}`, name: "Listed", objective: "Show up" },
+        idempotency_key: `k-${n}`,
+      },
+      bearer,
+    );
+    expect(created.statusCode, created.body).toBe(200);
+    const mine = await s.app.inject({ method: "GET", url: "/v1/rooms", headers: bearer });
+    expect(mine.json().rooms).toMatchObject([
+      { name: "Listed", slug: `listed-${n}`, status: "ACTIVE", role: "LEAD", authority: "OWNER" },
+    ]);
+    expect(mine.headers["cache-control"]).toBe("no-store");
+    // Someone else's session doesn't see it; a room token isn't a user session.
+    const other = await post(s, "/v1/auth/dev-login", { subject: `other-${n}`, display_name: "O" });
+    const theirs = await s.app.inject({
+      method: "GET",
+      url: "/v1/rooms",
+      headers: {
+        authorization: `Bearer ${(other.json() as { session_token: string }).session_token}`,
+      },
+    });
+    expect(theirs.json()).toEqual({ rooms: [] });
+    for (const headers of [{}, { authorization: `Bearer ${s.owner.access_token}` }]) {
+      const res = await s.app.inject({ method: "GET", url: "/v1/rooms", headers });
+      expect(res.statusCode).toBe(401);
+    }
+  });
+
+  it("serves the built app from staticRoot: files, the app's routes as index.html, never outside the root or under /v1", async () => {
+    const root = await mkdtemp(join(tmpdir(), "static-"));
+    await mkdir(join(root, "assets"));
+    await writeFile(join(root, "index.html"), "<!doctype html><title>app</title>");
+    await writeFile(join(root, "assets", "app-abc.js"), "console.log(1)");
+    await writeFile(join(root, "secret.txt"), "not served");
+    const outside = join(root, "..", `outside-${n}.js`);
+    await writeFile(outside, "outside");
+    const s = await setup(undefined, false, { staticRoot: root });
+    const get = (url: string) => s.app.inject({ method: "GET", url });
+    const index = await get("/");
+    expect(index.statusCode).toBe(200);
+    expect(index.headers["content-type"]).toContain("text/html");
+    expect(index.headers["content-security-policy"]).toContain("default-src 'self'");
+    expect((await get("/rooms/rom_x")).body).toContain("<title>app</title>");
+    const asset = await get("/assets/app-abc.js");
+    expect(asset.body).toBe("console.log(1)");
+    expect(asset.headers["cache-control"]).toContain("immutable");
+    expect(asset.headers["content-type"]).toContain("text/javascript");
+    expect((await get("/secret.txt")).statusCode).toBe(404); // not a type the app has
+    for (const url of [
+      `/..%2foutside-${n}.js`,
+      `/assets/..%2f..%2foutside-${n}.js`,
+      "/%2e%2e/%2e%2e/etc/passwd.js",
+      "/v1/nothing",
+      "/v1/rooms/x/unknown",
+    ]) {
+      expect((await get(url)).statusCode, url).toBe(404);
+    }
+    const post404 = await s.app.inject({ method: "POST", url: "/anything", payload: {} });
+    expect(post404.statusCode).toBe(404);
+    // Without staticRoot nothing is served.
+    const bare = await setup();
+    expect((await bare.app.inject({ method: "GET", url: "/" })).statusCode).toBe(404);
   });
 });

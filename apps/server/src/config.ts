@@ -32,6 +32,8 @@ const envSchema = z.object({
     ),
   /** Refresh attempts per client address per minute (`POST /v1/auth/refresh`). Default 30. */
   REFRESH_PER_MINUTE: z.coerce.number().int().min(1).max(100_000).default(30),
+  /** Serve the built web app (`apps/web/dist`) from this directory next to the API. */
+  WEB_ROOT: z.string().min(1).optional(),
   /** Comma-separated operator-approved images usable by room health checks. */
   HEALTH_IMAGES: z
     .string()
@@ -75,6 +77,8 @@ export interface ServerConfig {
   devLogin: boolean;
   trustProxy?: string[];
   refreshPerMinute?: number;
+  /** Directory of the built web app, served next to the API. */
+  webRoot?: string;
   /** Operator allowlist for room-selected health container images. */
   healthImages: readonly string[];
   /** Production defaults to hard; development and CI default to soft. */
@@ -160,6 +164,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     devLogin: e.DEV_LOGIN,
     trustProxy: e.TRUST_PROXY,
     refreshPerMinute: e.REFRESH_PER_MINUTE,
+    ...(e.WEB_ROOT ? { webRoot: resolve(e.WEB_ROOT) } : {}),
     healthImages: e.HEALTH_IMAGES,
     sandboxDiskEnforcement,
     ...(e.SANDBOX_VOLUME_DRIVER ? { sandboxVolumeDriver: e.SANDBOX_VOLUME_DRIVER } : {}),
