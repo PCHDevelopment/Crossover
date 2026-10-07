@@ -655,6 +655,37 @@ describe("composeServer", () => {
     expect(vetoed.response).toMatchObject({ status: "VETOED", version: 3 });
   });
 
+  it("serves participants.update_manifest over HTTP: self only, and the owner is told", async () => {
+    const { server } = await start();
+    const { owner, agent, roomId, cmd } = await walkthrough(server.app);
+    const me = (
+      await db.pool.query(
+        "SELECT id, agent_manifest FROM participants WHERE room_id = $1 AND kind = 'AGENT'",
+        [roomId],
+      )
+    ).rows[0];
+    const { self_declared: _platform, ...declared } = me.agent_manifest; // the platform adds it at join
+    void _platform;
+    const next = { ...declared, model: "a-newer-model" };
+    const updated = await ok(
+      await cmd(
+        envelope("participants.update_manifest", { manifest: next }),
+        agent.tokens.access_token,
+      ),
+    );
+    expect(updated.response).toMatchObject({
+      changed: true,
+      changes: { model: { before: "test-model", after: "a-newer-model" } },
+    });
+    const forbidden = await cmd(
+      envelope("participants.update_manifest", { participant_id: me.id, manifest: next }),
+      owner.tokens.access_token,
+    );
+    expect(forbidden.statusCode).toBe(403);
+    const inbox = await ok(await cmd(envelope("inbox.list"), owner.tokens.access_token));
+    expect(inbox.response.items.map((i: { kind: string }) => i.kind)).toContain("MANIFEST_CHANGED");
+  });
+
   it("enforces the real policy: an observer can't apply a ChangeSet", async () => {
     const { server } = await start();
     const { owner, cmd, roomId } = await walkthrough(server.app);

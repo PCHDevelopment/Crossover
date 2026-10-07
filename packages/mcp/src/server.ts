@@ -1,6 +1,6 @@
 import type { Pool } from "@crossover/db";
 import { toHttpError } from "@crossover/gateway";
-import { authenticate, type Dispatcher } from "@crossover/kernel";
+import { authenticate, syncAgentClientInfo, type Dispatcher } from "@crossover/kernel";
 import { CrossoverError, newId } from "@crossover/protocol";
 import type { Principal } from "@crossover/kernel";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -24,6 +24,17 @@ function bearer(request: FastifyRequest): string {
   const match = request.headers.authorization ? BEARER.exec(request.headers.authorization) : null;
   if (!match?.[1]) throw new CrossoverError("UNAUTHENTICATED", "Missing or invalid bearer token");
   return match[1];
+}
+
+/** `params.clientInfo` of an MCP `initialize` request, if that is what `body` is. */
+export function initializeClientInfo(body: unknown): { name?: unknown; version?: unknown } | null {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) return null;
+  const request = body as { method?: unknown; params?: { clientInfo?: unknown } };
+  if (request.method !== "initialize") return null;
+  const info = request.params?.clientInfo;
+  return typeof info === "object" && info !== null && !Array.isArray(info)
+    ? (info as { name?: unknown; version?: unknown })
+    : null;
 }
 
 /** A fresh MCP server for one authenticated agent, with one tool per definition. */
@@ -88,6 +99,15 @@ export function registerMcp(app: FastifyInstance, options: McpOptions): void {
       const mapped = toHttpError(error);
       if (mapped.status === 401) void reply.header("WWW-Authenticate", "Bearer");
       return reply.status(mapped.status).header("Cache-Control", "no-store").send(mapped.body);
+    }
+    // §34.6: an agent that reconnects as a different client version has changed its manifest.
+    const clientInfo = initializeClientInfo(request.body);
+    if (clientInfo) {
+      try {
+        await syncAgentClientInfo(options.dispatcher, principal, clientInfo);
+      } catch (error) {
+        request.log.warn({ err: error }, "could not record the MCP client's manifest change");
+      }
     }
     const server = buildMcpServer(options.dispatcher, principal, tools);
     const transport = new StreamableHTTPServerTransport({

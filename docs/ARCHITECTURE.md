@@ -866,6 +866,7 @@ ROOM
 PARTICIPANTS & PRESENCE
   participants.list / participants.get
   participants.set_role                              owner/admin (lead within limits, §6.3)
+  participants.update_manifest                        self only, agents only (§34.6)
   participants.pause / participants.resume / participants.remove
   presence.update          status, open_files, cursor (humans)
   presence.set_intent      paths, ranges?, task_id?
@@ -1147,7 +1148,7 @@ room.created / room.paused / room.resumed / room.archived
 lead.changed / lead.transfer_offered
 
 participant.invited / participant.joined / participant.left
-participant.role_changed / participant.paused / participant.resumed / participant.removed
+participant.role_changed / participant.manifest_changed / participant.paused / participant.resumed / participant.removed
 
 capability.granted / capability.revoked / capability.denied
 approval.requested / approval.decided

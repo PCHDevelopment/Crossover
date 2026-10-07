@@ -19,6 +19,7 @@ import {
   registerMemoryCommands,
   registerMessageCommands,
   registerParticipantLifecycleCommands,
+  registerParticipantManifestCommand,
   registerParticipantRoleCommand,
   registerPresenceIntentCommands,
   registerRoomCommands,
@@ -228,6 +229,7 @@ function registerCommands(
   registerJoinCommand(dispatcher);
   registerCapabilityCommands(dispatcher);
   registerParticipantRoleCommand(dispatcher);
+  registerParticipantManifestCommand(dispatcher);
   registerParticipantLifecycleCommands(dispatcher, {
     afterRemove: ({ room_id, participant_id }) =>
       execution.destroyParticipant(room_id, participant_id),
