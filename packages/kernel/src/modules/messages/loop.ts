@@ -16,11 +16,11 @@ const isStateChange = (type: string): boolean =>
   type.startsWith("memory.");
 
 export interface MessageRun {
-  /** Consecutive agent messages since the last state change or human message. */
+  /** Consecutive agent messages since the last state change or human message (capped at the limit + 2). */
   length: number;
   /** The agents who sent them. */
   authors: string[];
-  /** The sequence of the first message of the run. */
+  /** The sequence of the earliest message counted. */
   first_sequence: number | null;
 }
 
@@ -32,12 +32,15 @@ export interface MessageRun {
  * denials, health, edits) neither extend nor end it.
  */
 export async function currentMessageRun(client: PoolClient, roomId: string): Promise<MessageRun> {
-  // One more than the limit is all the answer needs; the scan is capped well past that to
-  // step over the unrelated events that can sit between messages.
+  // Only the events that can extend or end a run are read (so denials, health and the like
+  // can't crowd the window and hide a loop or lift a throttle), and only enough of them to
+  // tell whether the run is past the limit: it is capped at LIMIT + 2 messages back.
   const { rows } = await client.query<{ sequence: string; type: string; actor_id: string }>(
     `SELECT sequence, type, actor_id FROM events
-     WHERE room_id = $1 ORDER BY sequence DESC LIMIT $2`,
-    [roomId, (LOOP_MESSAGE_LIMIT + 2) * 10],
+     WHERE room_id = $1
+       AND (type = 'message.sent' OR type ~ '^(task|decision|memory)\\.' OR type ~ '^workspace\\.changeset\\.')
+     ORDER BY sequence DESC LIMIT $2`,
+    [roomId, LOOP_MESSAGE_LIMIT + 2],
   );
   const senders = [
     ...new Set(rows.filter((r) => r.type === "message.sent").map((r) => r.actor_id)),
@@ -113,9 +116,12 @@ export async function checkLoopProtection(
     }
   }
 
-  // This message makes the run one longer: is it the one that crosses the limit?
+  // This message makes the run one longer. Announce the loop at the transition from "not a
+  // loop" to "a loop", whichever way it happens: a run of two agents crossing the limit, or
+  // a long monologue that a second agent joins.
   const authors = new Set([...run.authors, sender.id]);
-  if (run.length === LOOP_MESSAGE_LIMIT && authors.size >= 2) {
+  const loopingAfter = run.length + 1 > LOOP_MESSAGE_LIMIT && authors.size >= 2;
+  if (!looping && loopingAfter) {
     const participants = [...authors].sort();
     const { rows: leaders } = await client.query<{ id: string }>(
       `SELECT id FROM participants
@@ -127,7 +133,7 @@ export async function checkLoopProtection(
       await deliverInbox(client, roomId, id, {
         kind: "LOOP_DETECTED",
         ref: { kind: "participant", id: sender.id },
-        summary: `${participants.length} agents have exchanged ${LOOP_MESSAGE_LIMIT + 1} messages with no task, ChangeSet, decision or memory change; their messages are limited to one a minute until something changes.`,
+        summary: `${participants.length} agents have exchanged ${run.length + 1} messages with no task, ChangeSet, decision or memory change; their messages are limited to one a minute until something changes.`,
       });
     }
     return {
@@ -138,7 +144,7 @@ export async function checkLoopProtection(
           actor_id: "system",
           payload: {
             participants,
-            consecutive_messages: LOOP_MESSAGE_LIMIT + 1,
+            consecutive_messages: run.length + 1,
             first_sequence: run.first_sequence,
             throttle_seconds: LOOP_THROTTLE_SECONDS,
             notified: leaders.map((l) => l.id),

@@ -261,6 +261,56 @@ describe("loop protection (§17.6)", () => {
     expect(await loopEvents(s)).toEqual([]);
   });
 
+  it("a monologue that a second agent joins past the limit is detected at that moment", async () => {
+    const s = await setup();
+    await chat(s, [s.a], LOOP_MESSAGE_LIMIT + 5);
+    expect(await loopEvents(s)).toEqual([]);
+    const out = await say(s, s.b, "mind if I join?");
+    expect(out.events.map((e) => e.type)).toEqual(["message.sent", "loop.detected"]);
+    const [ev] = await loopEvents(s);
+    expect(ev!.payload).toMatchObject({
+      participants: [s.a.participant_id, s.b.participant_id].sort(),
+    });
+    expect(Number(ev!.payload.consecutive_messages)).toBeGreaterThan(LOOP_MESSAGE_LIMIT);
+    expect((await inbox(s, s.lead))[0]).toMatchObject({ kind: "LOOP_DETECTED" });
+    // Both are now throttled, and it isn't announced again.
+    await rejects(say(s, s.a), "RATE_LIMITED");
+    await rejects(say(s, s.b), "RATE_LIMITED");
+    expect(await loopEvents(s)).toHaveLength(1);
+  });
+
+  it("unrelated events between messages (denials, health) neither hide a loop nor lift the throttle", async () => {
+    const s = await setup();
+    await chat(s, [s.a, s.b], LOOP_MESSAGE_LIMIT + 1);
+    // Far more neutral events than the scan window holds.
+    await s.d.runSystem(s.room, "test.noise", async () => ({
+      result: null,
+      events: Array.from({ length: 300 }, (_, i) => ({
+        type: i % 2 ? ("capability.denied" as const) : ("workspace.health" as const),
+        actor_id: "system",
+        payload: {},
+      })),
+    }));
+    await rejects(say(s, s.a), "RATE_LIMITED");
+    await rejects(say(s, s.b), "RATE_LIMITED");
+    expect(await loopEvents(s)).toHaveLength(1);
+  });
+
+  it("noise before the 21st message doesn't hide the loop it completes", async () => {
+    const s = await setup();
+    await chat(s, [s.a, s.b], LOOP_MESSAGE_LIMIT);
+    await s.d.runSystem(s.room, "test.noise", async () => ({
+      result: null,
+      events: Array.from({ length: 300 }, () => ({
+        type: "capability.denied" as const,
+        actor_id: "system",
+        payload: {},
+      })),
+    }));
+    const out = await say(s, s.a, "the 21st");
+    expect(out.events.map((e) => e.type)).toEqual(["message.sent", "loop.detected"]);
+  });
+
   it("a second loop after a reset is detected and announced again", async () => {
     const s = await setup();
     await chat(s, [s.a, s.b], LOOP_MESSAGE_LIMIT + 1);
