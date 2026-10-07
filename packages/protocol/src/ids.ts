@@ -13,6 +13,7 @@ export const ID_PREFIXES = [
   "cs",
   "conf",
   "rev",
+  "health",
   "inv",
   "usr",
   "grant",

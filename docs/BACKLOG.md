@@ -778,7 +778,7 @@ Deps: T207 · Migration: —
 
 Deps: T512 · Migration: `0016_health_runs`
 
-Room setting `health_command`. `HealthRunner` interface; first implementation runs the command in a Docker container (no network) on a checkout of the target revision with a 10-minute timeout. Store runs with status `GREEN|RED|ERROR`, duration, log.
+Room settings `health_command` and `health_image` (default `node:22-bookworm-slim`; image must be in operator allowlist `HEALTH_IMAGES`). `HealthRunner` interface; first implementation runs the command in a Docker container (no network, non-root, read-only checkout) on the target revision with CPU/memory limits and a 10-minute timeout. Store runs with status `GREEN|RED|ERROR`, duration, log.
 
 - Exit 0 → GREEN, non-zero → RED, timeout/docker failure → ERROR.
 

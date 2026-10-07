@@ -24,3 +24,15 @@ export { workspaceReadParamsSchema, workspaceListParamsSchema } from "./reads.js
 export { workspaceSearchParamsSchema } from "./search.js";
 export { workspaceDiffParamsSchema } from "./history.js";
 export { updateCanonicalRef, reconcileRef } from "./reconcile.js";
+export {
+  DEFAULT_HEALTH_IMAGE,
+  DockerHealthRunner,
+  runHealthCheck,
+  storeHealthRun,
+} from "./health-runner.js";
+export type {
+  HealthRunner,
+  HealthRunResult,
+  HealthStatus,
+  DockerHealthRunnerOptions,
+} from "./health-runner.js";

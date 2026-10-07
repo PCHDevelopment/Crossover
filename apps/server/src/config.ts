@@ -1,6 +1,7 @@
 import { hostname } from "node:os";
 import { resolve } from "node:path";
 import { z } from "zod";
+import { DEFAULT_HEALTH_IMAGE } from "@crossover/workspace";
 
 const flag = z
   .enum(["true", "false", "1", "0"])
@@ -17,6 +18,14 @@ const envSchema = z.object({
   NODE_ID: z.string().min(1).max(200).optional(),
   /** Serve `POST /v1/auth/dev-login`. Development only; off unless set. */
   DEV_LOGIN: flag,
+  /** Comma-separated operator-approved images usable by room health checks. */
+  HEALTH_IMAGES: z
+    .string()
+    .optional()
+    .transform((value) => (value ?? DEFAULT_HEALTH_IMAGE).split(",").map((image) => image.trim()))
+    .refine((images) => images.length > 0 && images.every(Boolean), {
+      message: "must contain one or more nonempty image names",
+    }),
 });
 
 export interface ServerConfig {
@@ -28,6 +37,8 @@ export interface ServerConfig {
   port: number;
   nodeId: string;
   devLogin: boolean;
+  /** Operator allowlist for room-selected health container images. */
+  healthImages: readonly string[];
 }
 
 /**
@@ -49,5 +60,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     port: e.PORT,
     nodeId: e.NODE_ID ?? `${hostname()}-${process.pid}`,
     devLogin: e.DEV_LOGIN,
+    healthImages: e.HEALTH_IMAGES,
   };
 }

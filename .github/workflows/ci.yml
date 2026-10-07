@@ -43,6 +43,7 @@ jobs:
       - run: pnpm format:check
       - run: pnpm lint
       - run: pnpm typecheck
+      - run: docker pull node:22-bookworm-slim
       - run: pnpm test
 
   workspace-benchmark:
