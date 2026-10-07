@@ -767,7 +767,7 @@ Tests run in a sandbox only validate that sandbox's view. Canonical truth comes 
 ## 14.7 Isolation (D11)
 
 - Docker with the **gVisor (`runsc`)** runtime on dedicated sandbox hosts.
-- **Network egress default-deny** through per-sandbox internal Docker networks. The platform's TypeScript proxy accepts HTTPS `CONNECT` on port 443 only, checks a sandbox-scoped credential and the room allowlist, resolves and pins public DNS answers, and emits structured per-sandbox byte logs. Defaults cover npm, PyPI, crates.io, the Go proxy, Maven Central, and unauthenticated read-only GitHub downloads; room settings may add exact hosts or `*.suffix` patterns.
+- **Network egress default-deny** through per-sandbox internal Docker networks. The separate non-root TypeScript proxy accepts HTTPS `CONNECT` on port 443 only, checks a sandbox-scoped credential and the room allowlist, resolves and pins public DNS answers, and emits structured per-sandbox byte logs. Egress to GitHub and registries is allowed; the platform supplies no credentials, so pushes and publishes need credentials the agent itself provides, which §21.4 discourages. The proxy logs uncaught exceptions and exits, and Docker runs it with `--restart unless-stopped`; room settings may add exact hosts or `*.suffix` patterns.
 - Cloud metadata endpoints (IMDS) blocked.
 - No platform or plugin credentials in sandboxes, ever (§21.4).
 - One sandbox per participant; sandboxes cannot reach each other.

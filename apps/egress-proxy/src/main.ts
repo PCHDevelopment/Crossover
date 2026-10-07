@@ -2,6 +2,14 @@ import { createPool } from "@crossover/db";
 import { loadEgressProxyConfig } from "./config.js";
 import { createEgressProxyServer } from "./server.js";
 
+process.on("uncaughtException", (error: unknown) => {
+  console.error(
+    "[egress-proxy] uncaught exception",
+    error instanceof Error ? (error.stack ?? error.message) : error,
+  );
+  process.exit(1);
+});
+
 async function main(): Promise<void> {
   const config = loadEgressProxyConfig();
   const pool = createPool(config.databaseUrl);

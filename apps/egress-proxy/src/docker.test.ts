@@ -57,6 +57,8 @@ describe.skipIf(!dockerImageAvailable)("egress proxy Docker smoke", () => {
       [
         "run",
         "--detach",
+        "--restart",
+        "unless-stopped",
         "--name",
         proxyName,
         "--add-host",
