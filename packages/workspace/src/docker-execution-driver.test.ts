@@ -12,7 +12,11 @@ function missingResources(args: readonly string[]) {
   if (args[0] === "volume" && args[1] === "inspect")
     return { code: 1, stdout: "", stderr: "Error: no such volume: sandbox" };
   if (args[0] === "container" && args[1] === "inspect")
-    return { code: 1, stdout: "", stderr: "Error: No such object: sandbox" };
+    return {
+      code: 1,
+      stdout: "",
+      stderr: "Error response from daemon: No such container: sandbox",
+    };
   return { code: 0, stdout: "", stderr: "" };
 }
 
@@ -26,7 +30,11 @@ describe("DockerExecutionDriver", () => {
       if (args[0] === "container" && args[1] === "inspect")
         return containerExists
           ? { code: 0, stdout: String(containerRunning), stderr: "" }
-          : { code: 1, stdout: "", stderr: "Error: No such object: sandbox" };
+          : {
+              code: 1,
+              stdout: "",
+              stderr: "Error response from daemon: No such container: sandbox",
+            };
       if (args[0] === "container" && args[1] === "create") containerExists = true;
       if (args[0] === "container" && args[1] === "start") containerRunning = true;
       return missingResources(args);
@@ -186,7 +194,11 @@ describe("DockerExecutionDriver", () => {
         if (args[0] === "volume" && args[1] === "inspect")
           return { code: 1, stdout: "", stderr: "Error: no such volume: sandbox" };
         if (args[0] === "container" && args[1] === "inspect")
-          return { code: 1, stdout: "", stderr: "Error: No such object: sandbox" };
+          return {
+            code: 1,
+            stdout: "",
+            stderr: "Error response from daemon: No such container: sandbox",
+          };
         if (args[0] === "container" && args[1] === "create")
           return { code: 1, stdout: "", stderr: "storage option is unsupported" };
         return { code: 0, stdout: "", stderr: "" };

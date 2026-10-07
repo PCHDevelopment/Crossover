@@ -214,7 +214,8 @@ export class DockerExecutionDriver implements ExecutionDriver {
       name,
     ]);
     if (inspected.code !== 0) {
-      if (inspected.stderr.toLowerCase().includes("no such object")) return null;
+      const message = inspected.stderr.toLowerCase();
+      if (message.includes("no such object") || message.includes("no such container")) return null;
       throw new Error(`ERROR: Docker inspect failed: ${inspected.stderr.trim()}`);
     }
     return { running: inspected.stdout.trim() === "true" };
