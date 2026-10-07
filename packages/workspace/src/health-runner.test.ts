@@ -30,6 +30,7 @@ const dockerImageAvailable = (() => {
     return false;
   }
 })();
+const skipDockerIntegration = !dockerImageAvailable && !process.env["CI"];
 
 function dockerHealthContainers(command: string): string[] {
   const commandHash = createHash("sha256").update(command).digest("hex");
@@ -774,7 +775,7 @@ describe("DockerHealthRunner", () => {
     expect(networkRemoval).toBeGreaterThan(containerRemoval);
   });
 
-  it.skipIf(!dockerImageAvailable)(
+  it.skipIf(skipDockerIntegration)(
     "runs with a writable checkout as its unprivileged UID",
     async () => {
       const { repository, revision } = await makeRepo();
@@ -789,7 +790,7 @@ describe("DockerHealthRunner", () => {
     },
   );
 
-  it.skipIf(!dockerImageAvailable)("blocks network access from the container", async () => {
+  it.skipIf(skipDockerIntegration)("blocks network access from the container", async () => {
     const { repository, revision } = await makeRepo();
     const result = await new DockerHealthRunner({ allowedImages: [DEFAULT_HEALTH_IMAGE] }).run({
       repository,
@@ -800,7 +801,7 @@ describe("DockerHealthRunner", () => {
     expect(result.status).toBe("GREEN");
   });
 
-  it.skipIf(!dockerImageAvailable)("keeps successful status with output over 1 MiB", async () => {
+  it.skipIf(skipDockerIntegration)("keeps successful status with output over 1 MiB", async () => {
     const { repository, revision } = await makeRepo();
     const result = await new DockerHealthRunner({ allowedImages: [DEFAULT_HEALTH_IMAGE] }).run({
       repository,
@@ -811,7 +812,7 @@ describe("DockerHealthRunner", () => {
     expect(Buffer.byteLength(result.log)).toBeLessThanOrEqual(1024 * 1024 + 20);
   });
 
-  it.skipIf(!dockerImageAvailable)("kills and removes a container on timeout", async () => {
+  it.skipIf(skipDockerIntegration)("kills and removes a container on timeout", async () => {
     const command = "sleep 30";
     const before = dockerHealthContainers(command);
     const { repository, revision } = await makeRepo();
@@ -823,7 +824,7 @@ describe("DockerHealthRunner", () => {
     expect(dockerHealthContainers(command)).toEqual(before);
   });
 
-  it.skipIf(!dockerImageAvailable)("kills and removes a container when aborted", async () => {
+  it.skipIf(skipDockerIntegration)("kills and removes a container when aborted", async () => {
     const command = "sleep 30";
     const before = dockerHealthContainers(command);
     const { repository, revision } = await makeRepo();

@@ -18,8 +18,9 @@ const dockerImageAvailable = (() => {
     return false;
   }
 })();
+const skipDockerIntegration = !dockerImageAvailable && !process.env["CI"];
 
-describe.skipIf(!dockerImageAvailable)("egress proxy Docker smoke", () => {
+describe.skipIf(skipDockerIntegration)("egress proxy Docker smoke", () => {
   let db: TestDatabase;
   let proxyName: string;
   let roomId: string;
