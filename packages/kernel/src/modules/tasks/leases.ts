@@ -9,6 +9,8 @@ import { leaseSql, loadTask } from "./task.js";
 /** Who is making these changes in the ledger when nobody is: the platform. */
 export const SYSTEM_ACTOR = "system";
 
+export const tasksHeartbeatParams = z.strictObject({ task_id: z.string().min(1).max(100) });
+
 /**
  * Register `tasks.heartbeat { task_id }` (T311, §8.4): the task's owner says "still working",
  * which renews an agent's 15-minute claim lease. It changes nothing else, so it bumps no
@@ -22,7 +24,7 @@ export function registerTaskHeartbeat(dispatcher: Dispatcher): void {
     // The catalog (§16.1) lists it as a read: no events, no version, no idempotency key. It
     // still writes the lease, in one atomic UPDATE, which is all a repeat needs.
     mutating: false,
-    params: z.strictObject({ task_id: z.string().min(1).max(100) }),
+    params: tasksHeartbeatParams,
     execute: async (ctx, p) => {
       const task = await loadTask(ctx.client, ctx.room_id, p.task_id);
       const actor = await loadActor(ctx);

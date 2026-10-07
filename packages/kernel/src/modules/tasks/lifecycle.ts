@@ -33,6 +33,21 @@ export const taskVersionParams = z.strictObject({
   expected_version: z.number().int().min(1),
 });
 
+export const tasksAssignParams = taskVersionParams.extend({
+  participant_id: z.string().min(1).max(100),
+});
+
+export const tasksBlockParams = taskVersionParams.extend({
+  reason: z.string().trim().min(1).max(2000),
+});
+
+export const tasksReviewParams = taskVersionParams.extend({
+  verdict: z.enum(["approve", "request_changes"]),
+  comments: z.string().max(10_000).default(""),
+  /** Lead only: approve although the health gate says the workspace is red. */
+  override_health: z.boolean().optional(),
+});
+
 /**
  * Register the task lifecycle commands (T304 onwards, §8.2, §8.3). Each is one conditional
  * `UPDATE … WHERE version = $expected AND status = …` after the task row is locked, so exactly
@@ -61,7 +76,7 @@ export function registerTaskLifecycleCommands(
   dispatcher.registerCommand({
     method: "tasks.assign",
     mutating: true,
-    params: taskVersionParams.extend({ participant_id: z.string().min(1).max(100) }),
+    params: tasksAssignParams,
     execute: async (ctx, p) => {
       const task = await loadTask(ctx.client, ctx.room_id, p.task_id, true);
       if (task.status !== "OPEN" || task.version !== p.expected_version)
@@ -141,7 +156,7 @@ export function registerTaskLifecycleCommands(
   dispatcher.registerCommand({
     method: "tasks.block",
     mutating: true,
-    params: taskVersionParams.extend({ reason: z.string().trim().min(1).max(2000) }),
+    params: tasksBlockParams,
     execute: async (ctx, p) => {
       const { task, actor } = await ownerOrLead(ctx, p);
       if (task.status !== "IN_PROGRESS") {
@@ -212,12 +227,7 @@ export function registerTaskLifecycleCommands(
   dispatcher.registerCommand({
     method: "tasks.review",
     mutating: true,
-    params: taskVersionParams.extend({
-      verdict: z.enum(["approve", "request_changes"]),
-      comments: z.string().max(10_000).default(""),
-      /** Lead only: approve although the health gate says the workspace is red. */
-      override_health: z.boolean().optional(),
-    }),
+    params: tasksReviewParams,
     execute: async (ctx, p) => {
       const task = await loadTask(ctx.client, ctx.room_id, p.task_id, true);
       const actor = await loadActor(ctx);

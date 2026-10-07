@@ -17,6 +17,7 @@
     "@crossover/db": "workspace:*",
     "@crossover/gateway": "workspace:*",
     "@crossover/kernel": "workspace:*",
+    "@crossover/mcp": "workspace:*",
     "@crossover/policy": "workspace:*",
     "@crossover/protocol": "workspace:*",
     "@crossover/workspace": "workspace:*",
