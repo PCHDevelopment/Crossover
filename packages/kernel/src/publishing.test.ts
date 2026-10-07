@@ -79,6 +79,8 @@ function setup(publisher: EventPublisher | undefined, extra: Partial<DispatcherO
     method: "room.get_state",
     params: z.object({}),
     mutating: false,
+    view: "none",
+    view_reason: "test fixture",
     execute: async () => ({ response: "state" }),
   });
   return { d, errors };

@@ -109,6 +109,7 @@ export function registerInboxCommands(dispatcher: Dispatcher): void {
     method: "inbox.list",
     action: "inbox.read",
     mutating: false,
+    view: "own",
     params: inboxListParams,
     execute: async (ctx, p) => {
       const me = ctx.principal.participant_id;

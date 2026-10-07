@@ -45,6 +45,8 @@ export function registerTaskReadCommands(dispatcher: Dispatcher): void {
     method: "tasks.list",
     action: "tasks.read",
     mutating: false,
+    view: "none",
+    view_reason: "tasks are visible to every member alike: no events, paths or denials in them",
     params: tasksListParams,
     execute: async (ctx, p) => {
       if (p.mine && p.owner_id !== undefined && p.owner_id !== ctx.principal.participant_id) {
@@ -87,6 +89,8 @@ export function registerTaskReadCommands(dispatcher: Dispatcher): void {
     method: "tasks.get",
     action: "tasks.read",
     mutating: false,
+    view: "none",
+    view_reason: "tasks are visible to every member alike: no events, paths or denials in them",
     params: tasksGetParams,
     execute: async (ctx, p) => {
       const task = await loadTask(ctx.client, ctx.room_id, p.task_id);

@@ -631,6 +631,8 @@ describe("dispatch: ctx.idempotency_key", () => {
       method: "room.get_state",
       params: z.object({}),
       mutating: false,
+      view: "none",
+      view_reason: "test fixture",
       execute: async (ctx) => {
         seen.push(ctx.idempotency_key);
         return { response: null };
@@ -714,6 +716,8 @@ describe("dispatch: ctx.authorize (finer-grained checks)", () => {
       method: "workspace.read",
       params: z.object({}),
       mutating: false,
+      view: "none",
+      view_reason: "test fixture",
       execute: async (ctx) => {
         await ctx.authorize("workspace.read.path", { path: "x" });
         return { response: 1 };
@@ -891,6 +895,8 @@ describe("dispatch: afterCommit", () => {
       method: "room.get_state",
       params: z.object({}),
       mutating: false,
+      view: "none",
+      view_reason: "test fixture",
       execute: async (ctx) => {
         ctx.afterCommit(() => {});
         return { response: 1 };
@@ -910,6 +916,8 @@ describe("dispatch: reads", () => {
       method: "room.get_state",
       params: z.object({}),
       mutating: false,
+      view: "none",
+      view_reason: "test fixture",
       execute: async (ctx: { client: PoolClient; room_id: string }) => {
         const { rows } = await ctx.client.query("SELECT last_sequence FROM rooms WHERE id = $1", [
           ctx.room_id,
@@ -932,6 +940,8 @@ describe("dispatch: reads", () => {
       method: "room.get_state",
       params: z.object({}),
       mutating: false,
+      view: "none",
+      view_reason: "test fixture",
       execute: async () => ({ response: 1 }),
     });
     await expect(
@@ -945,6 +955,8 @@ describe("dispatch: reads", () => {
       method: "room.digest",
       params: z.object({}),
       mutating: false,
+      view: "none",
+      view_reason: "test fixture",
       execute: async () => ({ response: 1, events: [{ type: "message.sent" as const }] }),
     });
     await expect(d.dispatch(principal(room), envelope("room.digest"))).rejects.toThrow(/read-only/);
@@ -958,6 +970,8 @@ describe("dispatch: reads", () => {
       method: "room.get_state",
       params: z.object({}),
       mutating: false,
+      view: "none",
+      view_reason: "test fixture",
       execute: async () => ({ response: "ok" }),
     });
     for (let i = 0; i < 30; i++) await d.dispatch(principal(room), envelope("room.get_state"));
@@ -983,6 +997,8 @@ describe("registerCommand", () => {
         method: "tasks.claim",
         params: z.object({}),
         mutating: false,
+        view: "none",
+        view_reason: "test fixture",
         execute: async () => ({ response: null }),
       }),
     ).toThrow(/mutating/);
@@ -994,6 +1010,57 @@ describe("registerCommand", () => {
         execute: async () => ({ response: null }),
       }),
     ).toThrow(/read-only/);
+  });
+
+  it("requires every read to declare how it applies the participant view (§34.5, T1301)", () => {
+    const read = (extra: Record<string, unknown>) =>
+      dispatcher().registerCommand({
+        method: "tasks.list",
+        params: z.object({}),
+        mutating: false,
+        execute: async () => ({ response: null }),
+        ...extra,
+      } as never);
+    expect(() => read({})).toThrow(/must declare view: participant \| own \| none/);
+    expect(() => read({ view: "everyone" })).toThrow(/must declare view/);
+    expect(() => read({ view: "none" })).toThrow(/without a view_reason/);
+    expect(() => read({ view: "none", view_reason: "  " })).toThrow(/without a view_reason/);
+    for (const view of ["participant", "own"]) expect(() => read({ view })).not.toThrow();
+    expect(() => read({ view: "none", view_reason: "same for every member" })).not.toThrow();
+  });
+
+  it("a mutating command declares no view", () => {
+    expect(() =>
+      dispatcher().registerCommand({
+        method: "tasks.claim",
+        params: z.object({}),
+        mutating: true,
+        view: "own",
+        execute: async () => ({ response: null }),
+      } as never),
+    ).toThrow(/declares no view/);
+  });
+
+  it("commandInfo lists what is registered, with each read's declaration", () => {
+    const d = dispatcher();
+    registerSay(d);
+    d.registerCommand({
+      method: "tasks.list",
+      params: z.object({}),
+      mutating: false,
+      view: "none",
+      view_reason: "shared",
+      view_probe: { x: 1 },
+      execute: async () => ({ response: null }),
+    });
+    const info = Object.fromEntries(d.commandInfo().map((c) => [c.method, c]));
+    expect(info["tasks.list"]).toMatchObject({
+      mutating: false,
+      view: "none",
+      view_reason: "shared",
+      view_probe: { x: 1 },
+    });
+    expect(Object.values(info).some((c) => c.mutating && c.view === undefined)).toBe(true);
   });
 
   it("rejects registering a method twice", () => {

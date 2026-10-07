@@ -66,6 +66,9 @@ function register(
     method,
     action: method === "workspace.search" ? "workspace.read" : "workspace.write",
     mutating: method === "workspace.apply_changeset",
+    ...(method === "workspace.apply_changeset"
+      ? {}
+      : { view: "none" as const, view_reason: "test fixture" }),
     ...(flagged ? { perPathAuthorize: true } : {}),
     params: z.object({ paths: z.array(z.string()) }),
     execute: async (ctx, params) => {

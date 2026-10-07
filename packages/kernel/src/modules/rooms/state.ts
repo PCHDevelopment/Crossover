@@ -117,6 +117,9 @@ export function registerRoomStateCommand(
     method: "room.get_state",
     action: "room.read",
     mutating: false,
+    view: "none",
+    view_reason:
+      "room-wide state (room, participants, tasks, workspace head) that is the same for every member; it carries no events or denials",
     params: roomStateParams,
     execute: async (ctx, params) => {
       if (params.room_id !== undefined && params.room_id !== ctx.room_id) {

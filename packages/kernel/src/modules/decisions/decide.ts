@@ -273,6 +273,8 @@ export function registerDecisionDecideCommands(dispatcher: Dispatcher): void {
     method: "decisions.get",
     action: "decisions.read",
     mutating: false,
+    view: "none",
+    view_reason: "decisions and positions are visible to every member alike",
     params: decisionsGetParams,
     execute: async (ctx, p) => {
       const row = await loadDecision(ctx.client, ctx.room_id, p.decision_id);
@@ -286,6 +288,8 @@ export function registerDecisionDecideCommands(dispatcher: Dispatcher): void {
     method: "decisions.list",
     action: "decisions.read",
     mutating: false,
+    view: "none",
+    view_reason: "decisions are visible to every member alike",
     params: decisionsListParams,
     execute: async (ctx, p) => {
       const { rows } = await ctx.client.query<DecisionRow & { position_count: number }>(

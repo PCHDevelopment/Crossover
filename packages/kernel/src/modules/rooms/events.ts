@@ -23,6 +23,7 @@ export function registerRoomEventsCommand(dispatcher: Dispatcher): void {
     method: "room.events.list",
     action: "room.read",
     mutating: false,
+    view: "participant",
     params: roomEventsListParams,
     execute: async (ctx, p) => {
       const events = await listEvents(ctx.client, ctx.room_id, {

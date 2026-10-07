@@ -17,6 +17,7 @@ export function registerRoomEventsSubscribeCommand(dispatcher: Dispatcher): void
     method: "room.events.subscribe",
     action: "room.read",
     mutating: false,
+    view: "participant",
     params: roomEventsSubscribeParams,
     execute: async (ctx, p) => {
       const { rows } = await ctx.client.query<{ last_sequence: string }>(

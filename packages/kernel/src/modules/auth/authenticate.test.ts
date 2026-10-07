@@ -206,6 +206,8 @@ describe("authenticate → dispatch", () => {
       method: "room.get_state",
       params: z.object({}),
       mutating: false,
+      view: "none",
+      view_reason: "test fixture",
       execute: async (ctx) => ({ response: ctx.principal.participant_id }),
     });
     const out = await d.dispatch(principal, {

@@ -27,6 +27,7 @@ export function registerWorkspaceSearch(dispatcher: Dispatcher): void {
     // Each match is authorized by its path before it is returned.
     perPathAuthorize: true,
     mutating: false,
+    view: "participant",
     params: workspaceSearchParamsSchema,
     execute: async (ctx, params) => {
       const ws = await snapshot(ctx);

@@ -102,6 +102,7 @@ export function registerWorkspaceConflictReads(dispatcher: Dispatcher): void {
     action: "workspace.read",
     perPathAuthorize: true,
     mutating: false,
+    view: "participant",
     params: conflictsListParamsSchema,
     execute: async (ctx, params) => {
       const where = ["room_id = $1"];
@@ -147,6 +148,7 @@ export function registerWorkspaceConflictReads(dispatcher: Dispatcher): void {
     action: "workspace.read",
     perPathAuthorize: true,
     mutating: false,
+    view: "participant",
     params: conflictsGetParamsSchema,
     execute: async (ctx, params) => {
       const { rows } = await ctx.client.query<ConflictRow>(
