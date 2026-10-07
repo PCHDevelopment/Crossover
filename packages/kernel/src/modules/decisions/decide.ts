@@ -9,6 +9,7 @@ import {
   loadPositions,
   type DecisionRow,
 } from "./decisions.js";
+import { mirrorDecision } from "./mirror.js";
 
 export const DEFAULT_DECISION_PAGE = 50;
 export const MAX_DECISION_PAGE = 100;
@@ -122,17 +123,23 @@ export function registerDecisionDecideCommands(dispatcher: Dispatcher): void {
       const updated = rows[0];
       if (!updated) throw await decisionConflict(ctx.client, ctx.room_id, row.id);
       // Accepting a decision that supersedes an earlier one moves that one to SUPERSEDED (§7.1).
-      let superseded: { id: string; version: number } | undefined;
+      let superseded: DecisionRow | undefined;
       if (status === "ACCEPTED" && updated.supersedes) {
-        const { rows: old } = await ctx.client.query<{ id: string; version: number }>(
+        const { rows: old } = await ctx.client.query<DecisionRow>(
           `UPDATE decisions SET status = 'SUPERSEDED', version = version + 1
            WHERE id = $1 AND room_id = $2 AND status = 'ACCEPTED'
-           RETURNING id, version`,
+           RETURNING ${DECISION_COLUMNS}`,
           [updated.supersedes, ctx.room_id],
         );
         superseded = old[0];
       }
       const decision = decisionView(updated, await loadPositions(ctx.client, ctx.room_id, row.id));
+      // An accepted decision is mirrored into memory in this same transaction (§7.4, T407).
+      const mirrored = await mirrorDecision(ctx.client, ctx.room_id, updated);
+      // …and the superseded one's entry moves to SUPERSEDED with it.
+      const supersededMirror = superseded
+        ? await mirrorDecision(ctx.client, ctx.room_id, superseded)
+        : null;
       return {
         response: decision,
         events: [
@@ -148,6 +155,7 @@ export function registerDecisionDecideCommands(dispatcher: Dispatcher): void {
               version: updated.version,
             },
           },
+          ...(mirrored ? [mirrored] : []),
           ...(superseded
             ? [
                 {
@@ -160,6 +168,7 @@ export function registerDecisionDecideCommands(dispatcher: Dispatcher): void {
                 },
               ]
             : []),
+          ...(supersededMirror ? [supersededMirror] : []),
         ],
       };
     },
@@ -198,6 +207,8 @@ export function registerDecisionDecideCommands(dispatcher: Dispatcher): void {
       );
       const updated = rows[0];
       if (!updated) throw await decisionConflict(ctx.client, ctx.room_id, row.id);
+      // A vetoed decision that had been accepted is no longer knowledge: its entry says so.
+      const mirrored = await mirrorDecision(ctx.client, ctx.room_id, updated);
       return {
         response: decisionView(updated, await loadPositions(ctx.client, ctx.room_id, row.id)),
         events: [
@@ -212,6 +223,7 @@ export function registerDecisionDecideCommands(dispatcher: Dispatcher): void {
               version: updated.version,
             },
           },
+          ...(mirrored ? [mirrored] : []),
         ],
       };
     },
