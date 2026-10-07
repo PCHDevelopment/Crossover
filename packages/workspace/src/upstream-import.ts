@@ -5,6 +5,7 @@ import { git } from "./git.js";
 import { normalizePath, PathValidationError } from "./path.js";
 import { updateCanonicalRef } from "./reconcile.js";
 import { refreshSearchTree } from "./search-tree.js";
+import { suggestHealthCommand } from "./health-suggestion.js";
 import { treeChanges } from "./tree-changes.js";
 import {
   assertPublicHttpsUrl,
@@ -41,7 +42,7 @@ export interface ImportHooks {
   scheduleHealthCheck?: (roomId: string, revision: number) => void;
 }
 
-const refuse = (reason: string, message: string, details: Record<string, unknown> = {}) =>
+export const refuse = (reason: string, message: string, details: Record<string, unknown> = {}) =>
   new CrossoverError("VALIDATION", message, { details: { reason, ...details } });
 
 interface TreeEntry {
@@ -52,7 +53,7 @@ interface TreeEntry {
 }
 
 /** Every entry of `commit`'s tree, refusing what a workspace can't hold (§24.1). */
-async function listTree(repo: string, commit: string): Promise<TreeEntry[]> {
+export async function listTree(repo: string, commit: string): Promise<TreeEntry[]> {
   const { stdout } = await git(["ls-tree", "-r", "-z", "-l", "--full-tree", commit], {
     gitDir: repo,
     timeoutMs: 60_000,
@@ -269,6 +270,14 @@ async function importUpstream(
     });
     if (hooks.scheduleHealthCheck) ctx.afterCommit(() => hooks.scheduleHealthCheck!(room_id, 1));
 
+    // §24.1: suggest a health command from the repository. Returned, never applied.
+    const suggested_health_command = await suggestHealthCommand(async (path) => {
+      try {
+        return (await git(["show", `${sha}:${path}`], { ...options, timeoutMs: 10_000 })).stdout;
+      } catch {
+        return null; // not in the tree
+      }
+    });
     const upstream = {
       url: url.href,
       branch: p.branch,
@@ -281,6 +290,7 @@ async function importUpstream(
         changeset_id: changesetId,
         applied_revision: 1,
         file_count: entries.length,
+        suggested_health_command,
       },
       events: [
         {

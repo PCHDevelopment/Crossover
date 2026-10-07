@@ -19,6 +19,11 @@ import { registerWorkspaceHealthReads } from "./health-events.js";
 import { parseConflicts } from "./parse-check.js";
 import { registerCheckpointCommands } from "./checkpoints.js";
 import { registerGitImport, type UpstreamDeps } from "./upstream-import.js";
+import {
+  advanceUpstreamAfterResolution,
+  registerGitPullUpstream,
+  setUpstreamRef,
+} from "./upstream-pull.js";
 
 export interface WorkspaceCommandDeps {
   /** Failure is reported after commit; startup reconcileRef restores the DB-authoritative head. */
@@ -70,6 +75,7 @@ export function registerWorkspaceCommands(
   registerWorkspaceConflictActions(dispatcher);
   registerWorkspaceHealthReads(dispatcher);
   registerCheckpointCommands(dispatcher);
+  registerGitPullUpstream(dispatcher, deps);
   registerGitImport(dispatcher, deps.upstream, {
     ...(deps.updateCanonicalRef ? { updateCanonicalRef: deps.updateCanonicalRef } : {}),
     ...(deps.refreshSearchTree ? { refreshSearchTree: deps.refreshSearchTree } : {}),
@@ -77,11 +83,21 @@ export function registerWorkspaceCommands(
   });
 }
 
-async function apply(
+/** What a caller other than `workspace.apply_changeset` adds to the pipeline (§24.2). */
+export interface ApplyExtras {
+  /** Recorded as the actor of the ChangeSet and its file revisions, instead of the caller. */
+  actorId?: string;
+  /** Stored in the ChangeSet's payload beside the operations. */
+  payload?: Record<string, unknown>;
+}
+
+export async function apply(
   ctx: CommandContext,
   params: ChangesetParams,
   deps: WorkspaceCommandDeps,
+  extras: ApplyExtras = {},
 ): Promise<CommandResult<ApplyResponse>> {
+  const actorId = extras.actorId ?? ctx.principal.participant_id;
   const { client, room_id } = ctx;
   const operations = params.operations.map((op): Operation =>
     op.type === "rename"
@@ -183,7 +199,7 @@ async function apply(
       id,
       ws.id,
       room_id,
-      ctx.principal.participant_id,
+      actorId,
       ctx.idempotency_key,
       params.source,
       params.task_id ?? null,
@@ -191,7 +207,7 @@ async function apply(
       params.message,
       params.base_workspace_revision,
       JSON.stringify(params.base_file_revisions),
-      JSON.stringify({ operations }),
+      JSON.stringify({ operations, ...extras.payload }),
     ],
   );
   const candidate = await materialize(ws.repo_path, base.commit_sha, operations);
@@ -392,7 +408,7 @@ async function apply(
       `INSERT INTO file_revisions (workspace_id, room_id, path, revision, workspace_revision, blob_sha, actor_id)
        SELECT $1,$2,$3,coalesce(max(revision),0)+1,$4,$5,$6 FROM file_revisions
        WHERE workspace_id = $1 AND room_id = $2 AND path = $3`,
-      [ws.id, room_id, path, revision, blob, ctx.principal.participant_id],
+      [ws.id, room_id, path, revision, blob, actorId],
     );
   }
   await client.query(
@@ -413,6 +429,14 @@ async function apply(
       [room_id, resolution.originalChangesetId],
     );
   }
+  // Resolving a conflict on an upstream pull is what applies the pull (§24.2): only now does the
+  // room count as synced to that commit.
+  const synced = resolution
+    ? await advanceUpstreamAfterResolution(ctx, resolution.originalChangesetId, revision)
+    : null;
+  if (synced) {
+    ctx.afterCommit(() => setUpstreamRef(ws.repo_path, synced.last_synced_sha));
+  }
   ctx.afterCommit(async () => {
     await (deps.updateCanonicalRef ?? updateCanonicalRef)(ws.repo_path, commit, head.commit_sha);
   });
@@ -428,6 +452,9 @@ async function apply(
         type: "workspace.changeset.applied" as const,
         payload: { changeset_id: id, applied_revision: revision },
       },
+      ...(synced
+        ? [{ type: "workspace.upstream_synced" as const, payload: { ...synced, imported: false } }]
+        : []),
       ...(resolution
         ? [
             {
