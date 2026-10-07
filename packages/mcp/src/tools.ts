@@ -12,6 +12,7 @@ import {
 import type { MethodName } from "@crossover/protocol";
 import {
   changesetInputSchema,
+  healthGetParamsSchema,
   workspaceDiffParamsSchema,
   workspaceListParamsSchema,
   workspaceReadParamsSchema,
@@ -59,6 +60,14 @@ export const BASE_TOOLS: readonly McpToolDefinition[] = [
 
 /** Canonical workspace tools (T710); every call is dispatched under the authenticated agent. */
 export const WORKSPACE_TOOLS: readonly McpToolDefinition[] = [
+  {
+    name: "health_get",
+    description:
+      "Get a workspace health run. Scoped readers receive status only; unscoped workspace readers can also see its failure summary and log tail.",
+    method: "workspace.health.get",
+    input: healthGetParamsSchema.shape,
+    mutating: false,
+  },
   {
     name: "read_file",
     description: "Read a file from the canonical workspace at its current revision.",

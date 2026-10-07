@@ -1,9 +1,11 @@
 import type { Pool } from "@crossover/db";
 import type { Dispatcher } from "@crossover/kernel";
-import { deliverInbox } from "@crossover/kernel";
+import { deliverInbox, hasLiveDeny } from "@crossover/kernel";
+import { CrossoverError } from "@crossover/protocol";
+import { z } from "zod";
 import type { HealthRunResult } from "./health-runner.js";
-
-const SUMMARY_LIMIT = 500;
+export const healthGetParamsSchema = z.strictObject({ run_id: z.string().min(1).max(100) });
+const LOG_TAIL_CHARS = 16 * 1024;
 
 interface HealthRevisionRow {
   workspace_id: string;
@@ -36,18 +38,10 @@ export async function publishHealthResult(
       [roomId, revision],
     );
     const lastGreenRevision = previousGreen[0] ? Number(previousGreen[0].revision) : null;
-    const summary = result.log
-      .trim()
-      .split(/\r?\n/)
-      .filter(Boolean)
-      .slice(-8)
-      .join("\n")
-      .slice(0, SUMMARY_LIMIT);
     const payload: Record<string, unknown> = {
       revision,
       status: result.status,
       duration: result.durationMs,
-      failing_summary: summary || null,
       log_ref: runId,
     };
     if (result.status === "RED") payload.last_green_revision = lastGreenRevision;
@@ -68,7 +62,7 @@ export async function publishHealthResult(
       );
       for (const { author_id } of suspects) {
         await deliverInbox(client, roomId, author_id, {
-          kind: "CONFLICT",
+          kind: "HEALTH_RED",
           ref: { kind: "health_run", id: runId },
           summary: `Health check failed at workspace revision ${revision}; your ChangeSet is in the suspect range.`,
         });
@@ -80,5 +74,73 @@ export async function publishHealthResult(
       result: { inboxCount, lastGreenRevision },
       events: [{ type: "workspace.health", actor_id: "system", payload }],
     };
+  });
+}
+
+/** Register the scoped-safe health log read (§12.1); scoped readers receive status only. */
+export function registerWorkspaceHealthReads(dispatcher: Dispatcher): void {
+  dispatcher.registerCommand({
+    method: "workspace.health.get",
+    // Status is room-readable; the more sensitive log is separately gated below.
+    action: "room.read",
+    perPathAuthorize: true,
+    mutating: false,
+    params: healthGetParamsSchema,
+    execute: async (ctx, { run_id }) => {
+      const { rows } = await ctx.client.query<{
+        revision: string;
+        status: string;
+        duration_ms: number;
+        log: string;
+      }>(
+        `SELECT revision, status, duration_ms, log
+         FROM health_runs WHERE room_id = $1 AND id = $2`,
+        [ctx.room_id, run_id],
+      );
+      const run = rows[0];
+      if (!run) throw new CrossoverError("NOT_FOUND", "Health run not found");
+      const response: Record<string, unknown> = {
+        run_id,
+        revision: Number(run.revision),
+        status: run.status,
+        duration: run.duration_ms,
+      };
+      let canReadLog = false;
+      const { rows: identity } = await ctx.client.query<{ authority: string }>(
+        "SELECT authority FROM participants WHERE id = $1 AND room_id = $2",
+        [ctx.principal.participant_id, ctx.room_id],
+      );
+      if (identity[0]?.authority === "OWNER" || identity[0]?.authority === "ADMIN") {
+        canReadLog = true;
+      } else {
+        try {
+          // No resource scope means this requires an unscoped workspace.read capability.
+          await ctx.authorize("workspace.read");
+          canReadLog = !(await hasLiveDeny(
+            ctx.client,
+            ctx.room_id,
+            ctx.principal.participant_id,
+            "workspace.read",
+          ));
+        } catch (error) {
+          if (
+            !(error instanceof CrossoverError) ||
+            !["FORBIDDEN", "APPROVAL_REQUIRED"].includes(error.code)
+          )
+            throw error;
+        }
+      }
+      if (canReadLog) {
+        response.summary = run.log
+          .trim()
+          .split(/\r?\n/)
+          .filter(Boolean)
+          .slice(-8)
+          .join("\n")
+          .slice(0, 500);
+        response.log_tail = run.log.slice(-LOG_TAIL_CHARS);
+      }
+      return { response };
+    },
   });
 }

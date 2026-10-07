@@ -43,4 +43,4 @@ export type {
 } from "./health-runner.js";
 export { HealthCheckQueue } from "./health-queue.js";
 export type { HealthCheckQueueOptions } from "./health-queue.js";
-export { publishHealthResult } from "./health-events.js";
+export { healthGetParamsSchema, publishHealthResult } from "./health-events.js";
