@@ -13,6 +13,7 @@ import { provisionWorkspace } from "./provision.js";
 import type {
   FetchedUpstream,
   GitCredential,
+  PullRequestProvider,
   UpstreamFetcher,
   UpstreamPusher,
 } from "./upstream.js";
@@ -90,7 +91,7 @@ class FixtureFetcher implements UpstreamFetcher {
 
 const URL_OK = "https://github.com/acme/widgets";
 
-async function setup() {
+async function setup(opts: { pullRequests?: boolean } = {}) {
   const up = await upstreamRepo();
   const roomId = newId("room");
   const lead = newId("part");
@@ -138,10 +139,29 @@ async function setup() {
     },
   };
   const d = new Dispatcher({ pool: db.pool, authorize: allowAll, nodeId: roomId });
+  // A fake code host: one pull request per head, however often it is asked.
+  const opened: { head: string; base: string; title: string; body: string }[] = [];
+  const failure: { next: Error | undefined } = { next: undefined };
+  const provider: PullRequestProvider = {
+    async create(request) {
+      if (failure.next) throw failure.next;
+      if (!opened.some((o) => o.head === request.head)) {
+        opened.push({
+          head: request.head,
+          base: request.base,
+          title: request.title,
+          body: request.body,
+        });
+      }
+      const index = opened.findIndex((o) => o.head === request.head) + 1;
+      return { url: `https://github.com/acme/widgets/pull/${index}`, number: index };
+    },
+  };
   registerWorkspaceCommands(d, {
     upstream: {
       fetcher,
       pusher,
+      ...(opts.pullRequests === false ? {} : { pullRequests: provider }),
       credentials: {
         credentialFor: async (_url, access) => {
           accessed.push(access ?? "read");
@@ -208,6 +228,8 @@ async function setup() {
   const slug = (await db.pool.query("SELECT slug FROM rooms WHERE id = $1", [roomId])).rows[0]
     .slug as string;
   return {
+    opened,
+    failure,
     remote,
     remoteGit,
     pushes,
@@ -412,6 +434,57 @@ describe("checkpoints.export (§24.3, T805)", () => {
     expect(neutralizeTrailers("plain\nnot a trailer: x y\nFixes: #1\n  Token : v")).toBe(
       "plain\nnot a trailer: x y\n> Fixes: #1\n>   Token : v",
     );
+  });
+
+  it("with pull_request it opens one from the branch into the upstream's branch, and returns its URL", async () => {
+    const s = await setup();
+    await s.edit("src/a.ts", "export const a = 1;\n");
+    await s.checkpoint("first milestone");
+    const out = await s.exportIt({ pull_request: { title: "Milestone one" } });
+    expect(out.response).toMatchObject({
+      pull_request: { url: "https://github.com/acme/widgets/pull/1", number: 1 },
+    });
+    expect(s.opened).toEqual([
+      {
+        head: `room/${s.slug}`,
+        base: "main",
+        title: "Milestone one",
+        body: expect.stringContaining("- first milestone"),
+      },
+    ]);
+    expect((await s.events("checkpoint.exported"))[0]!.payload).toMatchObject({
+      pull_request: { number: 1 },
+    });
+    // Without it, no pull request.
+    await s.edit("src/b.ts", "export const b = 2;\n");
+    await s.checkpoint("second");
+    const plain = await s.exportIt();
+    expect((plain.response as { pull_request?: unknown }).pull_request).toBeUndefined();
+    expect(s.opened).toHaveLength(1);
+  });
+
+  it("no provider configured: refused before anything is pushed", async () => {
+    const s = await setup({ pullRequests: false });
+    await s.edit("src/a.ts", "export const a = 1;\n");
+    await s.checkpoint("x");
+    await rejects(s.exportIt({ pull_request: {} }), "no_pull_request_provider");
+    expect(s.pushes).toEqual([]);
+  });
+
+  it("a pull request that can't be opened leaves the branch pushed and nothing recorded; exporting again opens it", async () => {
+    const s = await setup();
+    await s.edit("src/a.ts", "export const a = 1;\n");
+    await s.checkpoint("x");
+    s.failure.next = new Error("GitHub is down");
+    await rejects(s.exportIt({ pull_request: {} }), "pull_request_failed");
+    expect(await s.events("checkpoint.exported")).toEqual([]);
+    const branch = `refs/heads/room/${s.slug}`;
+    const pushedTip = await s.remoteGit("rev-parse", branch); // the branch did go up
+    s.failure.next = undefined;
+    const again = await s.exportIt({ pull_request: {} });
+    expect((again.response as { tip: string }).tip).toBe(pushedTip); // same commits
+    expect(again.response).toMatchObject({ pull_request: { number: 1 } });
+    expect(s.opened).toHaveLength(1);
   });
 
   it("needs an upstream and a checkpoint; asks for write access; no credential leaves the pusher", async () => {

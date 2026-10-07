@@ -157,6 +157,24 @@ export interface UpstreamPusher {
   }): Promise<void>;
 }
 
+/**
+ * The seam between `checkpoints.export` and the code host's pull requests (§24.3, T806): the
+ * GitHub implementation arrives with the plugin runner (T1204); tests use a fake. `create` opens a
+ * pull request for `head` into `base` of the repository at `url`, or returns the one already open
+ * for that head, so repeating an export doesn't open a second. It must not put the credential in
+ * anything it returns or throws.
+ */
+export interface PullRequestProvider {
+  create(request: {
+    url: string;
+    head: string;
+    base: string;
+    title: string;
+    body: string;
+    credential: GitCredential | null;
+  }): Promise<{ url: string; number: number }>;
+}
+
 export interface HttpsGitFetcherOptions {
   /** Where the temporary clone goes. Default: the OS temp directory. */
   tmpDir?: string;

@@ -19,6 +19,7 @@ let upstreamSha: string;
 let fetches = 0;
 let remoteDir: string;
 const pushed: string[] = [];
+const opened: string[] = [];
 let serial = 0;
 const identity = {
   GIT_AUTHOR_NAME: "T",
@@ -73,6 +74,12 @@ beforeAll(async () => {
     upstream: {
       fetcher,
       resolve: async () => ["93.184.216.34"],
+      pullRequests: {
+        async create(request) {
+          opened.push(`${request.head} -> ${request.base}`);
+          return { url: "https://github.com/acme/widgets/pull/7", number: 7 };
+        },
+      },
       pusher: {
         async push(request) {
           pushed.push(request.branch);
@@ -358,5 +365,38 @@ describe("checkpoints.export over HTTP", () => {
     const events = (await ok(await r.call(r.owner, "room.events.list", { limit: 500 }))).response
       .events as { type: string }[];
     expect(events.map((e) => e.type)).toContain("checkpoint.exported");
+  });
+});
+
+describe("checkpoints.export with a pull request over HTTP", () => {
+  it("needs the github.create_pull_request capability: without it nothing is pushed; with it the URL comes back", async () => {
+    const r = await newRoom();
+    await ok(
+      await r.call(r.owner, "git.import", {
+        url: "https://github.com/acme/widgets",
+        branch: "main",
+      }),
+    );
+    await ok(await r.call(r.owner, "checkpoints.create", { message: "imported" }));
+    const before = pushed.length;
+    const denied = await r.call(r.owner, "checkpoints.export", { pull_request: {} });
+    expect(denied.statusCode).toBe(403);
+    expect(pushed.length).toBe(before);
+    expect(opened).toEqual([]);
+
+    const ownerId = (await db.pool.query("SELECT owner_id FROM rooms WHERE id = $1", [r.roomId]))
+      .rows[0].owner_id as string;
+    await ok(
+      await r.call(r.owner, "capabilities.grant", {
+        participant_id: ownerId,
+        capability: "github.create_pull_request:acme/widgets",
+      }),
+    );
+    const out = await ok(await r.call(r.owner, "checkpoints.export", { pull_request: {} }));
+    expect(out.response.pull_request).toEqual({
+      url: "https://github.com/acme/widgets/pull/7",
+      number: 7,
+    });
+    expect(opened).toHaveLength(1);
   });
 });
