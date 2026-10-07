@@ -33,6 +33,16 @@ export const decisionsDecideParams = z
     "Give either outcome_option_id or reject: true",
   );
 
+export const decisionsVetoParams = z.strictObject({
+  decision_id: decisionId,
+  expected_version: expectedVersion,
+  /** Why. Required (§7.1 step 4). */
+  rationale: z.string().trim().min(1).max(10_000),
+});
+
+/** How long after it is decided that the owner may still veto (§7.1). */
+export const VETO_WINDOW_HOURS = 24;
+
 export const decisionsWithdrawParams = z.strictObject({
   decision_id: decisionId,
   expected_version: expectedVersion,
@@ -111,6 +121,17 @@ export function registerDecisionDecideCommands(dispatcher: Dispatcher): void {
       );
       const updated = rows[0];
       if (!updated) throw await decisionConflict(ctx.client, ctx.room_id, row.id);
+      // Accepting a decision that supersedes an earlier one moves that one to SUPERSEDED (§7.1).
+      let superseded: { id: string; version: number } | undefined;
+      if (status === "ACCEPTED" && updated.supersedes) {
+        const { rows: old } = await ctx.client.query<{ id: string; version: number }>(
+          `UPDATE decisions SET status = 'SUPERSEDED', version = version + 1
+           WHERE id = $1 AND room_id = $2 AND status = 'ACCEPTED'
+           RETURNING id, version`,
+          [updated.supersedes, ctx.room_id],
+        );
+        superseded = old[0];
+      }
       const decision = decisionView(updated, await loadPositions(ctx.client, ctx.room_id, row.id));
       return {
         response: decision,
@@ -123,6 +144,70 @@ export function registerDecisionDecideCommands(dispatcher: Dispatcher): void {
               outcome_option_id: updated.outcome_option_id,
               rationale: p.rationale,
               decided_by: ctx.principal.participant_id,
+              from_version: row.version,
+              version: updated.version,
+            },
+          },
+          ...(superseded
+            ? [
+                {
+                  type: "decision.superseded" as const,
+                  payload: {
+                    decision_id: superseded.id,
+                    superseded_by: row.id,
+                    version: superseded.version,
+                  },
+                },
+              ]
+            : []),
+        ],
+      };
+    },
+  });
+
+  dispatcher.registerCommand({
+    method: "decisions.veto",
+    mutating: true,
+    params: decisionsVetoParams,
+    execute: async (ctx, p) => {
+      const row = await loadDecision(ctx.client, ctx.room_id, p.decision_id, true);
+      if (row.version !== p.expected_version) {
+        throw await decisionConflict(ctx.client, ctx.room_id, row.id);
+      }
+      if (row.status !== "ACCEPTED" && row.status !== "REJECTED") {
+        throw notProposed(row, "veto");
+      }
+      const { rows: window } = await ctx.client.query<{ open: boolean }>(
+        `SELECT $1::timestamptz + make_interval(hours => ${VETO_WINDOW_HOURS}) > clock_timestamp() AS open`,
+        [row.decided_at],
+      );
+      if (!window[0]?.open) {
+        throw new CrossoverError(
+          "VALIDATION",
+          `The ${VETO_WINDOW_HOURS}-hour window to veto this decision has passed`,
+          { details: { decided_at: row.decided_at?.toISOString() ?? null } },
+        );
+      }
+      const { rows } = await ctx.client.query<DecisionRow>(
+        `UPDATE decisions
+         SET status = 'VETOED', vetoed_by = $4, veto_rationale = $5, vetoed_at = clock_timestamp(),
+             version = version + 1
+         WHERE id = $1 AND room_id = $2 AND version = $3 AND status IN ('ACCEPTED', 'REJECTED')
+         RETURNING ${DECISION_COLUMNS}`,
+        [row.id, ctx.room_id, row.version, ctx.principal.participant_id, p.rationale],
+      );
+      const updated = rows[0];
+      if (!updated) throw await decisionConflict(ctx.client, ctx.room_id, row.id);
+      return {
+        response: decisionView(updated, await loadPositions(ctx.client, ctx.room_id, row.id)),
+        events: [
+          {
+            type: "decision.vetoed" as const,
+            payload: {
+              decision_id: row.id,
+              previous_status: row.status,
+              rationale: p.rationale,
+              vetoed_by: ctx.principal.participant_id,
               from_version: row.version,
               version: updated.version,
             },

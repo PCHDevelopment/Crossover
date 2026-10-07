@@ -770,7 +770,7 @@ Deps: T601 · Migration: —
 
 Deps: T207 · Migration: —
 
-`presence.set_intent { paths, ranges?, task_id? }` stored in Redis with 45 s TTL; never in the ledger (§11.4, §19.3). `presence.list_intents`.
+`presence.set_intent { paths, ranges?, task_id? }` replaces the caller's room-scoped Redis intent (45 s TTL); paths are normalized/deduped, optional `{ path, start_line, end_line }` ranges are 1-based inclusive and must reference a listed path, and `task_id` must exist in the room. `presence.clear_intent {}` deletes it. `presence.list_intents {}` returns active `{ participant_id, paths, ranges, task_id, expires_at }` rows sorted by participant. None are ledger events (§11.4, §13.4, §19.3).
 
 - Intent expires without heartbeat.
 
