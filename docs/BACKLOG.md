@@ -1027,7 +1027,7 @@ Per-participant budgets (§22.3: 120 commands/min, 10 messages/min, 60 ChangeSet
 
 Deps: T210, T402 · Migration: `0020_approvals`
 
-Grants with `requires_approval` make invocations return `APPROVAL_REQUIRED` with an approval id; `approvals.list`, `approvals.decide` (owner/lead); approved actions execute; approvals expire after 24 h (§22.2).
+Grants with `requires_approval` make invocations return `APPROVAL_REQUIRED` with an approval id; `approvals.list`, `approvals.decide` (owner and admins, not the lead: an agent lead approving agents defeats the gate; decided in Review 5); approved actions execute exactly once, the requester's idempotency key replaying the result; approvals expire after 24 h (§22.2).
 
 - Approve executes exactly once (idempotent); reject and expiry never execute.
 
