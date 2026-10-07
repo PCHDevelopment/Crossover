@@ -20,6 +20,7 @@ export function registerWorkspaceBlame(dispatcher: Dispatcher): void {
     action: "workspace.read",
     perPathAuthorize: true,
     mutating: false,
+    view: "participant",
     params: z.strictObject({
       path: pathSchema(),
       revision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),

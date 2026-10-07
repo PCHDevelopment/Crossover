@@ -52,6 +52,7 @@ export function registerWorkspaceHistory(dispatcher: Dispatcher): void {
     action: "workspace.read",
     perPathAuthorize: true,
     mutating: false,
+    view: "participant",
     params: workspaceDiffParamsSchema,
     execute: async (ctx, params) => {
       if (params.from_revision > params.to_revision)
@@ -129,6 +130,7 @@ export function registerWorkspaceHistory(dispatcher: Dispatcher): void {
     action: "workspace.read",
     perPathAuthorize: true,
     mutating: false,
+    view: "participant",
     params: workspaceHistoryParamsSchema,
     execute: async (ctx, params) => {
       if (params.path !== undefined) await ctx.authorize("workspace.read", { path: params.path });

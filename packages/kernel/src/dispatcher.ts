@@ -151,7 +151,39 @@ export interface CommandDefinition<S extends z.ZodType, R> {
    * Declaring it on a command that doesn't check each path hands scoped holders everything.
    */
   perPathAuthorize?: boolean;
+  /**
+   * How a **read** command keeps one participant from seeing what another may not (§34.5,
+   * T1301). Required for every non-mutating command; checked at registration.
+   * - `participant`: what it returns can differ by reader (events, paths, denials) and goes
+   *   through a kernel participant-view function, or authorizes each path for the caller.
+   * - `own`: it returns the caller's own records only.
+   * - `none`: what it returns is the same for every member of the room, with no events, paths
+   *   or denials in it. A one-line `view_reason` saying why is required.
+   */
+  view?: ReadView;
+  /** Required with `view: "none"`: why nothing in the output needs a per-reader view. */
+  view_reason?: string;
+  /**
+   * Arguments the egress conformance test (T1301) calls this read with when `{}` isn't valid,
+   * to see what it returns to a reader. A `participant` command must answer them (or
+   * `NOT_FOUND` for a placeholder id); one that rejects them fails the test.
+   */
+  view_probe?: Record<string, unknown>;
   execute(ctx: CommandContext, params: z.infer<S>): Promise<CommandResult<R>>;
+}
+
+/** How a read command applies the participant view (§34.5). */
+export type ReadView = "participant" | "own" | "none";
+export const READ_VIEWS: readonly ReadView[] = ["participant", "own", "none"];
+
+/** What the dispatcher knows about a registered command, for conformance checks and docs. */
+export interface CommandInfo {
+  method: string;
+  mutating: boolean;
+  action: string;
+  view: ReadView | undefined;
+  view_reason: string | undefined;
+  view_probe: Record<string, unknown> | undefined;
 }
 
 /**
@@ -326,10 +358,38 @@ export class Dispatcher {
     if (this.commands.has(def.method) || this.roomlessCommands.has(def.method)) {
       throw new Error(`registerCommand: ${def.method} is already registered`);
     }
+    if (!def.mutating) {
+      // §34.5: every read says how it applies the participant view, so a new one can't ship
+      // without the question being asked.
+      if (def.view === undefined || !READ_VIEWS.includes(def.view)) {
+        throw new Error(
+          `registerCommand: read command ${def.method} must declare view: ${READ_VIEWS.join(" | ")}`,
+        );
+      }
+      if (def.view === "none" && !def.view_reason?.trim()) {
+        throw new Error(
+          `registerCommand: ${def.method} declares view: "none" without a view_reason`,
+        );
+      }
+    } else if (def.view !== undefined) {
+      throw new Error(`registerCommand: ${def.method} is mutating, so it declares no view`);
+    }
     this.commands.set(def.method, {
       def: def as unknown as CommandDefinition<z.ZodType, unknown>,
       action: def.action ?? def.method,
     });
+  }
+
+  /** Every registered room command, with how each declares its view (T1301). */
+  commandInfo(): CommandInfo[] {
+    return [...this.commands.values()].map(({ def, action }) => ({
+      method: def.method,
+      mutating: def.mutating,
+      action,
+      view: def.view,
+      view_reason: def.view_reason,
+      view_probe: def.view_probe,
+    }));
   }
 
   /**

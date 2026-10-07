@@ -211,6 +211,8 @@ export function registerMessageCommands(dispatcher: Dispatcher): void {
     method: "messages.list",
     action: "messages.read",
     mutating: false,
+    view: "none",
+    view_reason: "messages are visible to every member alike",
     params: messagesListParams,
     execute: async (ctx, p) => {
       let cursor: { created_at: string; id: string } | undefined;

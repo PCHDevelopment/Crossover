@@ -72,6 +72,9 @@ export function registerMemoryAccessCommands(dispatcher: Dispatcher): void {
     method: "memory.get",
     action: "memory.read",
     mutating: false,
+    view: "none",
+    view_reason:
+      "memory is room-shared knowledge, readable alike by every member (§18.3); it holds no events, paths or denials",
     params: memoryGetParams,
     execute: async (ctx, p) => {
       const { rows } = await ctx.client.query<Parameters<typeof memoryEntryView>[0]>(
@@ -93,6 +96,9 @@ export function registerMemoryAccessCommands(dispatcher: Dispatcher): void {
     method: "memory.list",
     action: "memory.read",
     mutating: false,
+    view: "none",
+    view_reason:
+      "memory keys are room-shared, readable alike by every member (§18.3); no events, paths or denials",
     params: memoryListParams,
     execute: async (ctx, p) => {
       const { rows } = await ctx.client.query<
@@ -126,6 +132,9 @@ export function registerMemoryAccessCommands(dispatcher: Dispatcher): void {
     method: "memory.history",
     action: "memory.read",
     mutating: false,
+    view: "none",
+    view_reason:
+      "memory revisions are room-shared, readable alike by every member (§18.3); no events, paths or denials",
     params: memoryHistoryParams,
     execute: async (ctx, p) => {
       const { rowCount } = await ctx.client.query(

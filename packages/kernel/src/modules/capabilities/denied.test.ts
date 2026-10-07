@@ -106,6 +106,7 @@ function register(
     method,
     ...(method === "tasks.list" ? { action: "tasks.read" } : {}),
     mutating: method === "tasks.create",
+    ...(method === "tasks.create" ? {} : { view: "none" as const, view_reason: "test fixture" }),
     params: z.object({}),
     execute: async (ctx) => {
       await fn(ctx);

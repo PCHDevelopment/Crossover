@@ -71,6 +71,8 @@ function dispatcher(): Dispatcher {
     action: "workspace.read",
     params: z.object({}),
     mutating: false,
+    view: "none",
+    view_reason: "test fixture",
     execute: async () => ({ response: "contents" }),
   });
   d.registerCommand({
@@ -170,6 +172,8 @@ describe("the real policy behind the dispatcher", () => {
       // (the capability is room.read)
       params: z.object({}),
       mutating: false,
+      view: "none",
+      view_reason: "test fixture",
       execute: async () => ({ response: "x" }),
     });
     await expect(d.dispatch(owner.principal, cmd("room.get_state"))).rejects.toMatchObject({

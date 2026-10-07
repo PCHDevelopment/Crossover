@@ -271,6 +271,9 @@ export function registerCapabilityCommands(dispatcher: Dispatcher): void {
     method: "capabilities.list",
     action: "capabilities.read",
     mutating: false,
+    view: "none",
+    view_reason:
+      "grants are the room's visible permission model (§21); scopes are patterns, never denial records",
     params: capabilitiesListParams,
     execute: async (ctx, params) => {
       const id = params.participant_id ?? ctx.principal.participant_id;
