@@ -277,6 +277,7 @@ describe("provenance labels (§16.5)", () => {
       "decisions.list",
       "tasks.get",
       "tasks.list",
+      "checkpoints.list",
     ];
     const NOT_LABELED_YET: Record<string, string> = {
       "inbox.list":

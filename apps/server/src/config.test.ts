@@ -58,14 +58,26 @@ describe("sandbox disk enforcement configuration", () => {
         ...env,
         SANDBOX_EGRESS_PROXY_CONTAINER: "egress-proxy",
         SANDBOX_EGRESS_PROXY_PORT: "3128",
+        SANDBOX_EGRESS_PROXY_SECRET: "0123456789abcdef0123456789abcdef",
       }),
     ).toMatchObject({
       sandboxEgressProxyContainer: "egress-proxy",
       sandboxEgressProxyPort: 3128,
+      sandboxEgressProxySecret: "0123456789abcdef0123456789abcdef",
     });
     expect(() => loadConfig({ ...env, SANDBOX_EGRESS_PROXY_PORT: "3128" })).toThrow(
       /requires SANDBOX_EGRESS_PROXY_CONTAINER/,
     );
+    expect(() => loadConfig({ ...env, SANDBOX_EGRESS_PROXY_CONTAINER: "egress-proxy" })).toThrow(
+      /requires SANDBOX_EGRESS_PROXY_SECRET/,
+    );
+    expect(() =>
+      loadConfig({
+        ...env,
+        SANDBOX_EGRESS_PROXY_CONTAINER: "egress-proxy",
+        SANDBOX_EGRESS_PROXY_SECRET: "too-short",
+      }),
+    ).toThrow(/SANDBOX_EGRESS_PROXY_SECRET/);
     expect(() => loadConfig({ ...env, SANDBOX_EGRESS_PROXY_CONTAINER: "Egress Proxy" })).toThrow(
       /SANDBOX_EGRESS_PROXY_CONTAINER/,
     );

@@ -4,6 +4,7 @@
   "include": ["src/**/*.ts"],
   "references": [
     { "path": "../protocol" },
+    { "path": "../security" },
     { "path": "../db" },
     { "path": "../kernel" },
     { "path": "../policy" }
