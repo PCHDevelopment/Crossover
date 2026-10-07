@@ -41,7 +41,7 @@ export interface ImportHooks {
   scheduleHealthCheck?: (roomId: string, revision: number) => void;
 }
 
-const refuse = (reason: string, message: string, details: Record<string, unknown> = {}) =>
+export const refuse = (reason: string, message: string, details: Record<string, unknown> = {}) =>
   new CrossoverError("VALIDATION", message, { details: { reason, ...details } });
 
 interface TreeEntry {
@@ -52,7 +52,7 @@ interface TreeEntry {
 }
 
 /** Every entry of `commit`'s tree, refusing what a workspace can't hold (§24.1). */
-async function listTree(repo: string, commit: string): Promise<TreeEntry[]> {
+export async function listTree(repo: string, commit: string): Promise<TreeEntry[]> {
   const { stdout } = await git(["ls-tree", "-r", "-z", "-l", "--full-tree", commit], {
     gitDir: repo,
     timeoutMs: 60_000,

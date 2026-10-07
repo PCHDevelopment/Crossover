@@ -60,3 +60,4 @@ export type { DockerExecutionDriverOptions, DockerInvoker } from "./docker-execu
 export * from "./upstream.js";
 export * from "./upstream-import.js";
 export * from "./health-suggestion.js";
+export * from "./upstream-pull.js";
