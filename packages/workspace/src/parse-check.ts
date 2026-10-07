@@ -4,11 +4,17 @@ import { git } from "./git.js";
 import type { MergeResult } from "./merge.js";
 import { treeChanges } from "./tree-changes.js";
 
+type SyntaxNode = {
+  type: string;
+  startPosition: { row: number; column: number };
+  endPosition: { row: number };
+  previousSibling: SyntaxNode | null;
+};
 type SyntaxTree = {
   rootNode: {
     hasError: boolean;
     childCount: number;
-    child(index: number): { startPosition: { column: number } } | null;
+    child(index: number): SyntaxNode | null;
   };
   delete(): void;
 };
@@ -178,11 +184,15 @@ async function failsToParse(content: Buffer | undefined, grammar: string): Promi
       const root = treeResult.rootNode;
       if (root.hasError) return true;
       // The Python grammar accepts a top-level unexpected indent; Python rejects it.
-      return (
-        grammar === "python" &&
-        Array.from({ length: root.childCount }, (_, index) => root.child(index)).some(
-          (child) => child !== null && child.startPosition.column > 0,
-        )
+      // Only the first non-comment node on each row can indicate that indentation.
+      if (grammar !== "python") return false;
+      return Array.from({ length: root.childCount }, (_, index) => root.child(index)).some(
+        (child) =>
+          child !== null &&
+          child.type !== "comment" &&
+          child.startPosition.column > 0 &&
+          (!child.previousSibling ||
+            child.previousSibling.endPosition.row < child.startPosition.row),
       );
     } finally {
       treeResult.delete();
