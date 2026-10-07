@@ -225,6 +225,40 @@ describe("composeServer", () => {
     expect(res.json().error.code).toBe("NOT_FOUND");
   });
 
+  it("streams a room's events over WebSocket after hello and subscribe", async () => {
+    const { server } = await start();
+    const { roomId, owner } = await walkthrough(server.app);
+    const address = await server.app.listen({ port: 0, host: "127.0.0.1" });
+    const sock = new WebSocket(`${address.replace("http", "ws")}/v1/rooms/${roomId}/ws`);
+    const frames: { type: string; event?: RoomEvent }[] = [];
+    sock.onmessage = (m) => frames.push(JSON.parse(String(m.data)));
+    await new Promise((resolve, reject) => {
+      sock.onopen = resolve;
+      sock.onerror = reject;
+    });
+    sock.send(
+      JSON.stringify({
+        type: "hello",
+        protocol_version: 1,
+        client: "e2e",
+        client_version: "1",
+        token: owner.tokens.access_token,
+      }),
+    );
+    const until = async (done: () => boolean) => {
+      for (let i = 0; i < 100 && !done(); i++) await new Promise((r) => setTimeout(r, 50));
+      expect(done(), JSON.stringify(frames).slice(0, 500)).toBe(true);
+    };
+    await until(() => frames.some((f) => f.type === "hello_ok"));
+    sock.send(JSON.stringify({ type: "subscribe", after: 0 }));
+    await until(() =>
+      frames.some((f) => f.type === "event" && f.event?.type === "workspace.changeset.applied"),
+    );
+    const seqs = frames.filter((f) => f.type === "event").map((f) => f.event!.sequence);
+    expect(seqs).toEqual([...seqs].sort((a, b) => a - b));
+    sock.close();
+  });
+
   it("enforces the real policy: an observer can't apply a ChangeSet", async () => {
     const { server } = await start();
     const { owner, cmd, roomId } = await walkthrough(server.app);

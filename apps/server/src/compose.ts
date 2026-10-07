@@ -4,6 +4,8 @@ import {
   Dispatcher,
   LeaseRenewer,
   RedisEventPublisher,
+  RedisEventSubscriber,
+  registerRoomEventsSubscribeCommand,
   registerCapabilityCommands,
   registerInboxCommands,
   registerInviteCommands,
@@ -20,6 +22,7 @@ import {
   registerTaskReadCommands,
   type Authorizer,
   type EventPublisher,
+  type EventSubscriber,
 } from "@crossover/kernel";
 import { authorize } from "@crossover/policy";
 import { provisionWorkspace, reconcileRef, registerWorkspaceCommands } from "@crossover/workspace";
@@ -30,6 +33,8 @@ export interface ComposeOverrides {
   pool?: Pool;
   /** Use this publisher instead of Redis at `redisUrl` (tests); it is then not closed by `close()`. */
   publisher?: EventPublisher;
+  /** Use this subscriber for WebSocket streams instead of Redis at `redisUrl` (tests); not closed by `close()`. */
+  subscriber?: EventSubscriber;
   /** Defaults to the real policy (T208). Tests must not pass `allowAll` to production paths. */
   authorize?: Authorizer;
   /** Lease TTL; the renewal interval is a third of it. Default: the kernel's. */
@@ -73,6 +78,15 @@ export async function composeServer(
     publisher = redis;
   }
 
+  let redisSubscriber: RedisEventSubscriber | undefined;
+  let subscriber: EventSubscriber;
+  if (overrides.subscriber) {
+    subscriber = overrides.subscriber;
+  } else {
+    redisSubscriber = new RedisEventSubscriber(config.redisUrl);
+    subscriber = redisSubscriber;
+  }
+
   try {
     if (redis) await redis.ready();
 
@@ -89,7 +103,12 @@ export async function composeServer(
     const renewer = new LeaseRenewer({ leases: dispatcher.leases, actors: dispatcher.actors });
     renewer.start();
 
-    const app = buildGateway({ dispatcher, pool, devLogin: config.devLogin });
+    const app = buildGateway({
+      dispatcher,
+      pool,
+      devLogin: config.devLogin,
+      ws: { subscriber },
+    });
 
     let closing: Promise<void> | undefined;
     const close = () =>
@@ -98,12 +117,14 @@ export async function composeServer(
         await app.close();
         await renewer.close(); // releases every lease once nothing can take a new one
         await redis?.close();
+        await redisSubscriber?.close();
         if (!overrides.pool) await pool.end();
       })());
 
     return { app, dispatcher, pool, renewer, close };
   } catch (err) {
     await redis?.close();
+    await redisSubscriber?.close();
     if (!overrides.pool) await pool.end();
     throw err;
   }
@@ -125,6 +146,7 @@ function registerCommands(dispatcher: Dispatcher, config: ServerConfig): void {
   registerRoomLifecycleCommands(dispatcher);
   registerRoomEventsCommand(dispatcher);
   registerInboxCommands(dispatcher);
+  registerRoomEventsSubscribeCommand(dispatcher); // the WebSocket `subscribe` frame
 
   // Tasks: create/update, list/get, and the claim → start → block lifecycle.
   registerTaskCommands(dispatcher);

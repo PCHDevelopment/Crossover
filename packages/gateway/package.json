@@ -12,12 +12,17 @@
   "dependencies": {
     "@crossover/db": "workspace:*",
     "@crossover/kernel": "workspace:*",
+    "@crossover/ledger": "workspace:*",
     "@crossover/policy": "workspace:*",
     "@crossover/protocol": "workspace:*",
     "fastify": "^5.12.5",
+    "ws": "^8.22.0",
     "zod": "^4.6.5"
   },
   "scripts": {
     "build": "tsc -b"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.18.2"
   }
 }

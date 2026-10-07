@@ -1,8 +1,29 @@
-import { CrossoverError } from "@crossover/protocol";
+import { CrossoverError, newId } from "@crossover/protocol";
 import { z } from "zod";
 import type { CommandContext, Dispatcher } from "../../dispatcher.js";
 import { loadActor, manages } from "./create-update.js";
-import { loadTask, TASK_COLUMNS, taskView, versionConflict, type TaskRow } from "./task.js";
+import {
+  loadTask,
+  TASK_COLUMNS,
+  taskView,
+  versionConflict,
+  type TaskRow,
+  type TaskView,
+} from "./task.js";
+
+/**
+ * Is the workspace healthy enough to approve `task` (§12)? The real gate (T610) runs the room's
+ * health command at the reviewed revision; until then {@link alwaysGreen} lets everything through.
+ */
+export interface HealthGate {
+  isGreenFor(task: TaskView, ctx: CommandContext): Promise<boolean>;
+}
+
+export const alwaysGreen: HealthGate = { isGreenFor: async () => true };
+
+export interface TaskLifecycleOptions {
+  healthGate?: HealthGate;
+}
 
 /** An agent's claim lasts this long unless renewed (§8.4). */
 export const AGENT_LEASE_MINUTES = 15;
@@ -24,7 +45,11 @@ export const leaseSql = (ownerKindParam: string) =>
  * one of several racing callers succeeds and the rest get `CONFLICT_VERSION` carrying the task
  * as it is now.
  */
-export function registerTaskLifecycleCommands(dispatcher: Dispatcher): void {
+export function registerTaskLifecycleCommands(
+  dispatcher: Dispatcher,
+  options: TaskLifecycleOptions = {},
+): void {
+  const healthGate = options.healthGate ?? alwaysGreen;
   dispatcher.registerCommand({
     method: "tasks.claim",
     mutating: true,
@@ -149,6 +174,125 @@ export function registerTaskLifecycleCommands(dispatcher: Dispatcher): void {
       });
     },
   });
+
+  dispatcher.registerCommand({
+    method: "tasks.submit",
+    mutating: true,
+    params: taskVersionParams,
+    execute: async (ctx, p) => {
+      const task = await loadTask(ctx.client, ctx.room_id, p.task_id, true);
+      const actor = await loadActor(ctx);
+      if (task.owner_id !== actor.id) {
+        throw new CrossoverError("FORBIDDEN", "Only the task's owner can submit it", {
+          details: { reason: "not_task_owner" },
+        });
+      }
+      if (task.version !== p.expected_version) throw versionConflict(task);
+      if (task.status !== "IN_PROGRESS") {
+        throw new CrossoverError("VALIDATION", `Can't submit a task that is ${task.status}`, {
+          details: { status: task.status },
+        });
+      }
+      // With review required it waits for a reviewer; otherwise it is done (§8.2). Either way
+      // the claim no longer needs a lease: only CLAIMED, IN_PROGRESS and BLOCKED expire.
+      const to = task.review_required ? "REVIEW" : "DONE";
+      return transition(ctx, task, to, {
+        eventType: "task.submitted",
+        set: "lease_expires_at = NULL",
+        renewLease: false,
+        payload: { status: to, review_required: task.review_required },
+      });
+    },
+  });
+
+  dispatcher.registerCommand({
+    method: "tasks.review",
+    mutating: true,
+    params: taskVersionParams.extend({
+      verdict: z.enum(["approve", "request_changes"]),
+      comments: z.string().max(10_000).default(""),
+      /** Lead only: approve although the health gate says the workspace is red. */
+      override_health: z.boolean().optional(),
+    }),
+    execute: async (ctx, p) => {
+      const task = await loadTask(ctx.client, ctx.room_id, p.task_id, true);
+      const actor = await loadActor(ctx);
+      // Nobody reviews their own task; otherwise the designated reviewer, or the lead (who
+      // reviews when none is named). Owners and admins count as the lead here, as elsewhere.
+      if (task.owner_id === actor.id) {
+        throw new CrossoverError("FORBIDDEN", "You can't review a task you own", {
+          details: { reason: "own_task" },
+        });
+      }
+      if (task.reviewer_id !== actor.id && !manages(actor)) {
+        throw new CrossoverError(
+          "FORBIDDEN",
+          "Only the task's reviewer or the lead can review it",
+          {
+            details: { reason: "not_reviewer" },
+          },
+        );
+      }
+      if (task.version !== p.expected_version) throw versionConflict(task);
+      if (task.status !== "REVIEW") {
+        throw new CrossoverError("VALIDATION", `Can't review a task that is ${task.status}`, {
+          details: { status: task.status },
+        });
+      }
+      if (p.override_health !== undefined && !manages(actor)) {
+        throw new CrossoverError("FORBIDDEN", "Only the lead can override the health gate", {
+          details: { reason: "override_health" },
+        });
+      }
+      const approve = p.verdict === "approve";
+      if (
+        approve &&
+        p.override_health !== true &&
+        !(await healthGate.isGreenFor(taskView(task), ctx))
+      ) {
+        throw new CrossoverError(
+          "VALIDATION",
+          "The workspace isn't healthy: the health gate is red",
+          {
+            details: { reason: "health_gate_red" },
+          },
+        );
+      }
+
+      const { rows: rev } = await ctx.client.query<{ revision: string }>(
+        "SELECT coalesce(max(revision), 0) AS revision FROM workspace_revisions WHERE room_id = $1",
+        [ctx.room_id],
+      );
+      const reviewId = newId("rev");
+      await ctx.client.query(
+        `INSERT INTO task_reviews (id, room_id, task_id, reviewer_id, verdict, comments, revision)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [
+          reviewId,
+          ctx.room_id,
+          task.id,
+          actor.id,
+          approve ? "APPROVE" : "REQUEST_CHANGES",
+          p.comments,
+          rev[0]!.revision,
+        ],
+      );
+      const to = approve ? "DONE" : "IN_PROGRESS";
+      return transition(ctx, task, to, {
+        eventType: "task.reviewed",
+        // Back to work: the owner's lease starts again. Done: nothing to expire.
+        ...(approve ? { set: "lease_expires_at = NULL" } : {}),
+        renewLease: !approve,
+        payload: {
+          review_id: reviewId,
+          verdict: p.verdict,
+          reviewer_id: actor.id,
+          status: to,
+          ...(p.override_health === true && approve ? { health_overridden: true } : {}),
+        },
+      });
+    },
+  });
 }
 
 /** Lock the task, require the caller to be its owner or the lead (owner/admin too), check the version. */
@@ -165,7 +309,8 @@ async function ownerOrLead(ctx: CommandContext, p: { task_id: string; expected_v
 }
 
 interface TransitionOptions {
-  eventType: "task.started" | "task.blocked" | "task.unblocked";
+  eventType:
+    "task.started" | "task.blocked" | "task.unblocked" | "task.submitted" | "task.reviewed";
   /** Extra `SET` assignments; their values are `$5, $6, …` in `values`. */
   set?: string;
   values?: unknown[];
