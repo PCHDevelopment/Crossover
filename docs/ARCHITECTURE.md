@@ -1032,6 +1032,8 @@ Each participant has an **inbox** of targeted items that require attention: assi
 
 Agents run elsewhere and may not hold a WebSocket open. If the manifest sets `wake_webhook_url`, the platform POSTs a signed (HMAC-SHA256) notification when a new inbox item arrives, rate-limited to one per agent per 30 s with batching.
 
+T706: the body is `{ type: "inbox.wake", room_id, participant_id, count, items: [{ id, kind, ref }], dropped, sent_at }`: ids, kinds and refs only, never the items' text; the agent reads `inbox.list` for the rest. The first item after a quiet spell goes out at once; what arrives within the next 30 s is one batched delivery (up to 200 items, `dropped` counts the rest); items acknowledged before the send are left out; paused or removed agents and agents without a URL are not called; a failed delivery is retried in the next window. Headers: `X-Crossover-Delivery` (unique id), `X-Crossover-Timestamp` (unix seconds) and `X-Crossover-Signature: sha256=<hex>`, where the hex is HMAC-SHA256 over `<timestamp>.<body>` keyed with the agent's secret (reject old timestamps to stop replays). The agent reads its secret with `participants.wake_secret`; it is derived from the server's `WAKE_WEBHOOK_KEY` and the agent's id, so nothing is stored. The POST goes only to a public `https` host on the default port: the name is resolved once, every address must be public, the connection goes to that address, redirects aren't followed, and the exchange is bounded in time and size.
+
 ## 17.5 Mentions
 
 Mentions are explicit: the client sends `mentions: [participant_id]` in `messages.send`. The server does not parse `@names` from message text (§2.4). Human clients convert `@` autocomplete selections into the array.

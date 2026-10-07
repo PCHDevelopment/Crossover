@@ -66,6 +66,9 @@ importers:
       '@crossover/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
+      '@crossover/security':
+        specifier: workspace:*
+        version: link:../../packages/security
       '@crossover/workspace':
         specifier: workspace:*
         version: link:../../packages/workspace
