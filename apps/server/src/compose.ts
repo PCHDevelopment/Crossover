@@ -9,6 +9,7 @@ import {
   registerRoomEventsSubscribeCommand,
   registerCapabilityCommands,
   registerDecisionCommands,
+  registerDecisionDecideCommands,
   registerInboxCommands,
   registerInviteCommands,
   registerJoinCommand,
@@ -190,6 +191,7 @@ function registerCommands(
   registerMemoryCommands(dispatcher);
   registerMemoryAccessCommands(dispatcher);
   registerDecisionCommands(dispatcher);
+  registerDecisionDecideCommands(dispatcher);
 
   // apply_changeset plus reads; schedule health for every committed revision.
   registerWorkspaceCommands(dispatcher, {

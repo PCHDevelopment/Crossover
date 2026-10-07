@@ -1,4 +1,5 @@
 import { CrossoverError, newId } from "@crossover/protocol";
+import type { PoolClient } from "@crossover/db";
 import { z } from "zod";
 import type { Dispatcher } from "../../dispatcher.js";
 
@@ -38,7 +39,7 @@ export interface DecisionOption {
   detail: string;
 }
 
-interface DecisionRow {
+export interface DecisionRow {
   id: string;
   room_id: string;
   title: string;
@@ -58,7 +59,7 @@ interface DecisionRow {
   decided_at: Date | null;
 }
 
-const COLUMNS = `id, room_id, title, context, options, status, outcome_option_id, rationale,
+export const DECISION_COLUMNS = `id, room_id, title, context, options, status, outcome_option_id, rationale,
   proposed_by, decided_by, vetoed_by, decide_by, links, supersedes, version, created_at, decided_at`;
 
 export interface DecisionView extends Omit<DecisionRow, "decide_by" | "created_at" | "decided_at"> {
@@ -117,7 +118,7 @@ export function registerDecisionCommands(dispatcher: Dispatcher): void {
       const { rows } = await ctx.client.query<DecisionRow>(
         `INSERT INTO decisions (id, room_id, title, context, options, proposed_by, decide_by, links)
          VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8::jsonb)
-         RETURNING ${COLUMNS}`,
+         RETURNING ${DECISION_COLUMNS}`,
         [
           newId("dec"),
           ctx.room_id,
@@ -143,7 +144,7 @@ export function registerDecisionCommands(dispatcher: Dispatcher): void {
     params: decisionsAddPositionParams,
     execute: async (ctx, p) => {
       const { rows: found } = await ctx.client.query<DecisionRow>(
-        `SELECT ${COLUMNS} FROM decisions WHERE id = $1 AND room_id = $2 FOR UPDATE`,
+        `SELECT ${DECISION_COLUMNS} FROM decisions WHERE id = $1 AND room_id = $2 FOR UPDATE`,
         [p.decision_id, ctx.room_id],
       );
       const decision = found[0];
@@ -187,5 +188,54 @@ export function registerDecisionCommands(dispatcher: Dispatcher): void {
         events: [{ type: "decision.position_added" as const, payload: position }],
       };
     },
+  });
+}
+
+/** A decision's positions, oldest first. */
+export async function loadPositions(
+  client: PoolClient,
+  roomId: string,
+  decisionId: string,
+): Promise<PositionView[]> {
+  const { rows } = await client.query<{
+    participant_id: string;
+    option_id: string;
+    argument: string;
+    created_at: Date;
+  }>(
+    `SELECT participant_id, option_id, argument, created_at FROM decision_positions
+     WHERE decision_id = $1 AND room_id = $2 ORDER BY created_at, participant_id`,
+    [decisionId, roomId],
+  );
+  return rows.map((r) => ({ ...r, created_at: r.created_at.toISOString() }));
+}
+
+/** One decision with its positions; `NOT_FOUND` if it isn't this room's. */
+export async function loadDecision(
+  client: PoolClient,
+  roomId: string,
+  decisionId: string,
+  forUpdate = false,
+): Promise<DecisionRow> {
+  const { rows } = await client.query<DecisionRow>(
+    `SELECT ${DECISION_COLUMNS} FROM decisions WHERE id = $1 AND room_id = $2
+     ${forUpdate ? "FOR UPDATE" : ""}`,
+    [decisionId, roomId],
+  );
+  const row = rows[0];
+  if (!row) throw new CrossoverError("NOT_FOUND", `Decision ${decisionId} not found`);
+  return row;
+}
+
+/** The stale-write answer: `CONFLICT_VERSION` carrying the decision as it is now. */
+export async function decisionConflict(
+  client: PoolClient,
+  roomId: string,
+  decisionId: string,
+): Promise<CrossoverError> {
+  const row = await loadDecision(client, roomId, decisionId);
+  const current = decisionView(row, await loadPositions(client, roomId, decisionId));
+  return new CrossoverError("CONFLICT_VERSION", "Decision was updated by another participant", {
+    details: { current },
   });
 }
