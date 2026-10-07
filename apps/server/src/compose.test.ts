@@ -330,6 +330,54 @@ describe("composeServer", () => {
     expect(await ask({ since: all.up_to })).toMatchObject({ event_count: 0, up_to: all.up_to });
   });
 
+  it("serves decide, withdraw, get and list over HTTP: the lead decides, a developer can't", async () => {
+    const { server } = await start();
+    const { owner, agent, cmd } = await walkthrough(server.app);
+    const propose = async (token: string) =>
+      (
+        await ok(
+          await cmd(
+            envelope("decisions.propose", {
+              title: "Pick a database",
+              options: [{ summary: "PostgreSQL" }, { summary: "SQLite" }],
+            }),
+            token,
+          ),
+        )
+      ).response;
+    const first = await propose(agent.tokens.access_token);
+    const decide = (token: string, d: { id: string; version: number }) =>
+      cmd(
+        envelope("decisions.decide", {
+          decision_id: d.id,
+          expected_version: d.version,
+          outcome_option_id: "opt_1",
+          rationale: "We run it already",
+        }),
+        token,
+      );
+    // The agent is a developer: it can propose but not decide.
+    expect((await decide(agent.tokens.access_token, first)).statusCode).toBe(403);
+
+    const withdrawn = await ok(
+      await cmd(
+        envelope("decisions.withdraw", { decision_id: first.id, expected_version: 1 }),
+        agent.tokens.access_token,
+      ),
+    );
+    expect(withdrawn.response.status).toBe("WITHDRAWN");
+
+    const second = await propose(agent.tokens.access_token);
+    const got = await ok(
+      await cmd(envelope("decisions.get", { decision_id: second.id }), owner.tokens.access_token),
+    );
+    expect(got.response).toMatchObject({ id: second.id, status: "PROPOSED" });
+    const listed = await ok(
+      await cmd(envelope("decisions.list", { status: ["PROPOSED"] }), owner.tokens.access_token),
+    );
+    expect(listed.response.decisions.map((d: { id: string }) => d.id)).toEqual([second.id]);
+  });
+
   it("enforces the real policy: an observer can't apply a ChangeSet", async () => {
     const { server } = await start();
     const { owner, cmd, roomId } = await walkthrough(server.app);

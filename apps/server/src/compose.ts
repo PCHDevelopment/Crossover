@@ -9,6 +9,7 @@ import {
   registerRoomEventsSubscribeCommand,
   registerCapabilityCommands,
   registerDecisionCommands,
+  registerDecisionDecideCommands,
   registerInboxCommands,
   registerInviteCommands,
   registerJoinCommand,
@@ -169,6 +170,7 @@ function registerCommands(dispatcher: Dispatcher, config: ServerConfig): void {
   registerTaskLifecycleCommands(dispatcher);
   registerMessageCommands(dispatcher);
   registerDecisionCommands(dispatcher);
+  registerDecisionDecideCommands(dispatcher);
 
   // apply_changeset plus read, list, diff, history, blame, search, and conflict reads/abandon.
   registerWorkspaceCommands(dispatcher);
