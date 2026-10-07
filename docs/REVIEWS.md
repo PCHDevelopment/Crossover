@@ -2,6 +2,65 @@
 
 Periodic big-picture reviews by O1: is the merged code building the product in ARCHITECTURE.md, in the right order? Newest first.
 
+## 2026-10-07 · Review 6 (about 110 of 141 tasks; 8 PRs merged since Review 5)
+
+**State.**
+
+- **Merged since Review 5:**
+  - T805 checkpoint export and T806 PR on export (with T806b scrubbing provider errors), so M8 is complete.
+  - T807, the dispatcher prepare phase.
+  - T905 follow-ups.
+  - T1101, the TypeScript SDK.
+  - T1106 `POST /v1/auth/refresh`.
+  - T706 wake webhooks (a Postgres outbox).
+- **Demo step 17** (checkpoint → export → PR) now works on the backend.
+- **Open:**
+  - S1: T1201 (#150), T1106 leftovers (#151), T1104 web shell (#152), T704 (#153), T1103 Python SDK (#154).
+  - S2: T611 (#148).
+
+**Against the §30 demo flow.** No change since Review 5, except that step 17 now works. Step 8 (sandbox exec) is still blocked on M10, behind T611. Steps 7 and 9 and the UI wait on T1104/T1105.
+
+**On track.** Review keeps catching real defects before they merge. This round found:
+- a ReDoS in subscription type patterns;
+- refresh retries that revoke the whole login when a response is lost;
+- `TRUST_PROXY` trusting a forged `X-Forwarded-For`;
+- a tool that runs and then reports key reuse;
+- a crashed reinstall's half-written cache being mounted for health runs.
+
+**Course corrections.**
+
+1. **WIP limit: at most two open PRs per engineer, and blockers first.** S1 opened five PRs in about 90 minutes while three earlier ones waited on rework. Four of the five came back with blockers. Parallel PRs pile up rework and merge conflicts (#152 already conflicts with #147). From now on, fixing review blockers comes before starting a new task.
+2. **Order deviations.** T1103 (Python SDK) and T704 were started ahead of the agreed order (T1201 → T1106 → T1104 → T1105 → T905 → T902 → T704–T706). Both PRs stay open. New work follows the order below.
+3. **T704 contract (backlog updated).**
+   - Relevance is decided from the event payload alone, so events carry `owner_id`, `reviewer_id` and author as of the event. That way a replay with `after` equals live delivery.
+   - Type patterns match without building a regex.
+   - `relevant` includes `task.created` for unassigned tasks and review requests.
+4. **T1106 contract.** The SDKs send a refresh exactly once and never retry it automatically. The server gets a 30-second grace window: presenting the immediately previous refresh token, while its successor is still unused, rotates again instead of revoking the family. `TRUST_PROXY` becomes a hop count or a CIDR list.
+5. **T1105 is split** into editor + drafts, live intents + cursors, and merge view. S1 adds the split in its first T1105 PR.
+6. **CI rule.** Acceptance tests that need an external tool (Chromium, Python, Docker) must fail, not skip, when `CI` is set and the tool is missing.
+7. **Order.**
+   - **S1:** #152 → #150 → #151 → #153 → #154 → T706 follow-ups → T1105a–c → T905 remainder → T902 → T705.
+   - **S2:** #148 → T1002 → T1003 → T1005 → T1006 → T1004 → T1008 → T711 → T901 → T903 → T1202–T1206.
+
+**Tech-debt register.**
+
+- **New:**
+  - The wake outbox's claim only protects for `windowMs`, so assert `deadline < window`.
+  - It uses node clocks rather than the database's `now()`.
+  - Rows for agents without a URL never clear.
+  - The web session token sits in `sessionStorage` (move to an HttpOnly cookie, and add a logout route).
+  - The CSP `connect-src` is too broad.
+  - `/v1/rooms` and `/session` are outside the T1301 conformance enumeration.
+  - The filtered streams have no server watermark, so a quiet agent re-scans history on every reconnect (propose a `progress` frame).
+- **Carried over:** everything in Review 5's register that isn't listed as resolved.
+
+**Quality.**
+
+- **S1:** fast, and its second passes fix what was asked, with tests that fail when the fix is reverted (#147). But first passes are slipping as volume rises.
+- **S2:** T611 needed a third round. The second pass fixed the named items, but claimed "only after SUCCEEDED" without enforcing it, and the crash and reinstall cases weren't tested.
+
+**Lead process.** The lead hit a usage limit and was away about three hours (11:00–13:45 UTC). The PR queue grew from three to seven open PRs in that time. The WIP limit above bounds what can pile up during an outage.
+
 ## 2026-10-07 · Review 5 (105 of 139 backlog tasks merged, about 25 PRs since Review 4)
 
 **State.**

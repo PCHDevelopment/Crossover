@@ -854,6 +854,9 @@ Deps: T703 · Migration: —
 Profiles `relevant` (default for agents), `all`, `custom` per §17.1.
 
 - `relevant` delivers a task assignment to the assignee and not to an unrelated agent.
+- Relevance is decided from the event alone: task and workspace events carry the inputs (`owner_id`, `reviewer_id`, author) as of the event, so a replay with `after` delivers exactly what live delivery would have. Tested across an ownership change.
+- `relevant` includes `task.created` for unassigned tasks, review requests for the reviewer, and mentions in `message.sent` and `message.edited`.
+- Type patterns match per dotted segment without building a regex (no backtracking); a pathological pattern is tested with a time bound.
 
 ### T705 · Backpressure — S1
 
@@ -863,7 +866,7 @@ Per-connection buffer limit (1,000 events or 5 MB) → close with `resync_requir
 
 ### T706 · Wake webhooks — S1
 
-Deps: T402, T205 · Migration: —
+Deps: T402, T205 · Migration: 0027 (`wake_outbox`)
 
 POST to the manifest's `wake_webhook_url` on new inbox items, HMAC-SHA256 signed, at most one per agent per 30 s with batching (§17.4).
 
