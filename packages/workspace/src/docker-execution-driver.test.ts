@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { newId } from "@crossover/protocol";
-import { createSandboxProxyCredential } from "@crossover/security";
+import { createSandboxProxyCredential, verifySandboxReadToken } from "@crossover/security";
 import { DockerExecutionDriver, type DockerInvoker } from "./docker-execution-driver.js";
 
 const hardOptions = {
@@ -22,6 +22,94 @@ function missingResources(args: readonly string[]) {
 }
 
 describe("DockerExecutionDriver", () => {
+  it("runs the fetcher on crossover-git with a short-lived token and hardening", async () => {
+    const calls: Array<{ args: string[]; timeoutMs?: number; env?: NodeJS.ProcessEnv }> = [];
+    const secret = "a sufficiently long internal Git signing secret";
+    let networkExists = false;
+    let serverConnected = false;
+    const invoke: DockerInvoker = async (input, options) => {
+      const args = [...input];
+      calls.push({
+        args,
+        ...(options?.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+        ...(options?.env ? { env: options.env } : {}),
+      });
+      if (args[0] === "network" && args[1] === "inspect") {
+        return networkExists
+          ? {
+              code: 0,
+              stdout: `true|${JSON.stringify(serverConnected ? { endpoint: { Name: "crossover-server" } } : {})}`,
+              stderr: "",
+            }
+          : { code: 1, stdout: "", stderr: "Error: no such network: crossover-git" };
+      }
+      if (args[0] === "network" && args[1] === "create") {
+        networkExists = true;
+        return { code: 0, stdout: "crossover-git", stderr: "" };
+      }
+      if (args[0] === "network" && args[1] === "connect") {
+        serverConnected = true;
+        return { code: 0, stdout: "", stderr: "" };
+      }
+      if (args[0] === "container" && args[1] === "rm")
+        return { code: 1, stdout: "", stderr: "Error: No such container" };
+      if (args[0] === "run") return { code: 0, stdout: "", stderr: "" };
+      return { code: 1, stdout: "", stderr: `unexpected Docker invocation: ${args.join(" ")}` };
+    };
+    const driver = new DockerExecutionDriver({
+      invoke,
+      gitInternalContainer: "crossover-server",
+      gitInternalPort: 8081,
+      gitInternalTokenSecret: secret,
+      gitFetcherImage: "crossover-git-fetcher:test",
+    });
+    const sandboxId = newId("sandbox");
+    const roomId = newId("room");
+    const participantId = newId("part");
+    const suffix = sandboxId.toLowerCase();
+
+    await driver.materialize({
+      sandbox_id: sandboxId,
+      room_id: roomId,
+      participant_id: participantId,
+      resources: {
+        volume_ref: `crossover-sbx-${suffix}`,
+        container_ref: `crossover-sbx-${suffix}`,
+      },
+      workspace: { repo_path: `/workspace/${roomId}.git`, revision: 5 },
+    });
+
+    const run = calls.find(({ args }) => args[0] === "run")!;
+    const connect = calls.find(({ args }) => args[0] === "network" && args[1] === "connect")!;
+    const runArgs = run.args;
+    const credential = run.env?.GIT_CONFIG_VALUE_0?.split("Bearer ")[1];
+    expect(connect.args).toEqual(["network", "connect", "crossover-git", "crossover-server"]);
+    expect(runArgs).toContain("--network=crossover-git");
+    expect(runArgs).toContain("--read-only");
+    expect(runArgs).toContain("GIT_CONFIG_VALUE_0");
+    expect(runArgs.some((arg) => arg.includes(credential!))).toBe(false);
+    expect(runArgs).toContain("--user=1000:1000");
+    expect(runArgs).toContain("--cap-drop=ALL");
+    expect(runArgs).toContain("--security-opt=no-new-privileges");
+    expect(runArgs).toContain(
+      `type=volume,source=crossover-sbx-${suffix},target=/workspace,volume-nocopy`,
+    );
+    expect(runArgs).toContain(
+      `type=bind,source=/workspace/${roomId}.git,target=/reference.git,readonly`,
+    );
+    expect(runArgs).toContain(
+      `GIT_REMOTE_URL=http://crossover-server:8081/git/${roomId}/${sandboxId}/5`,
+    );
+    expect(verifySandboxReadToken(credential!, secret)).toMatchObject({
+      room_id: roomId,
+      participant_id: participantId,
+      sandbox_id: sandboxId,
+      revision: 5,
+    });
+    expect(run.timeoutMs).toBeLessThanOrEqual(5 * 60 * 1000);
+    expect(runArgs.at(-1)).toBe("crossover-git-fetcher:test");
+  });
+
   it("creates a hard-quota volume and container with deterministic names", async () => {
     const calls: string[][] = [];
     let containerExists = false;
