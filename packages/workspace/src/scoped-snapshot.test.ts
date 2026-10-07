@@ -65,17 +65,21 @@ describe("createScopedSnapshotRepository", () => {
     const { stdout: reachable } = await git(["rev-list", "--objects", "refs/heads/main"], {
       gitDir: scoped.repo_path,
       timeoutMs: 10_000,
-      env: { GIT_ALTERNATE_OBJECT_DIRECTORIES: join(source.referenceRepository, "objects") },
     });
     const { stdout: entries } = await git(["ls-tree", "-r", "--name-only", "main"], {
       gitDir: scoped.repo_path,
       timeoutMs: 10_000,
-      env: { GIT_ALTERNATE_OBJECT_DIRECTORIES: join(source.referenceRepository, "objects") },
     });
 
     expect(entries.trim().split("\n")).toEqual(["src/public.txt"]);
     expect(reachable).toContain(source.publicBlob);
     expect(reachable).not.toContain(source.secretBlob);
+    await expect(
+      git(["cat-file", "blob", source.publicBlob], {
+        gitDir: scoped.repo_path,
+        timeoutMs: 10_000,
+      }),
+    ).resolves.toMatchObject({ stdout: "visible content" });
     const { stdout: commitContent } = await git(["cat-file", "commit", scoped.commit], {
       gitDir: scoped.repo_path,
       timeoutMs: 10_000,
@@ -95,22 +99,28 @@ describe("createScopedSnapshotRepository", () => {
         timeoutMs: 10_000,
       }),
     ).rejects.toThrow();
+    await expect(
+      git(["rev-list", "--objects", source.canonicalCommit], {
+        gitDir: scoped.repo_path,
+        timeoutMs: 10_000,
+      }),
+    ).rejects.toThrow();
   });
 
-  it("creates a deterministic empty snapshot when no path is readable", async () => {
+  it("creates the same nonempty snapshot for the same canonical revision and scope", async () => {
     const source = await fixture();
     const [first, second] = await Promise.all([
       createScopedSnapshotRepository({
         ...source,
         revision: 17,
         canonicalTimestamp: 1_700_000_000,
-        canRead: async () => false,
+        canRead: async (path) => path === "src/public.txt",
       }),
       createScopedSnapshotRepository({
         ...source,
         revision: 17,
         canonicalTimestamp: 1_700_000_000,
-        canRead: async () => false,
+        canRead: async (path) => path === "src/public.txt",
       }),
     ]);
     roots.push(first.repo_path.slice(0, first.repo_path.lastIndexOf("/")));
@@ -120,9 +130,8 @@ describe("createScopedSnapshotRepository", () => {
     const { stdout } = await git(["ls-tree", "-r", "--name-only", "main"], {
       gitDir: first.repo_path,
       timeoutMs: 10_000,
-      env: { GIT_ALTERNATE_OBJECT_DIRECTORIES: join(source.referenceRepository, "objects") },
     });
-    expect(stdout).toBe("");
+    expect(stdout.trim()).toBe("src/public.txt");
   });
 
   it("keeps the real canonical commit for an unscoped reader", async () => {

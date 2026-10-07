@@ -21,8 +21,8 @@ interface TreeNode {
 export interface ScopedSnapshotRepository {
   /** A temporary bare repository whose only advertised branch is the filtered snapshot. */
   repo_path: string;
-  /** Canonical room object database shared with the fetcher as a read-only alternate. */
-  reference_repository: string;
+  /** Canonical object database used as an alternate only for unscoped snapshots. */
+  reference_repository?: string;
   /** Synthetic commit SHA for the filtered tree; the canonical revision remains numeric. */
   commit: string;
   /** Stable digest of the readable path set represented by the snapshot. */
@@ -33,9 +33,9 @@ export interface ScopedSnapshotRepository {
 
 /**
  * Create an isolated Git view containing only paths accepted by `canRead` (§14.3, T521).
- * The bare repo uses the room's canonical repository as an object alternate, but has one
- * synthetic root commit and no ref to the canonical history. Git upload-pack can therefore
- * advertise and serve the scoped tree without giving the sandbox the unfiltered object graph.
+ * The canonical repository is a temporary alternate while building the filtered tree. The
+ * reachable snapshot objects are then packed into this repository so Git upload-pack cannot
+ * serve any other canonical object, even when a client requests an arbitrary object ID.
  */
 export async function createScopedSnapshotRepository(input: {
   referenceRepository: string;
@@ -95,10 +95,15 @@ export async function createScopedSnapshotRepository(input: {
       gitDir: repoPath,
       timeoutMs: GIT_TIMEOUT_MS,
     });
+    await git(["pack-objects", "--revs", join(repoPath, "objects", "pack", "snapshot")], {
+      gitDir: repoPath,
+      timeoutMs: GIT_TIMEOUT_MS,
+      env,
+      input: `${syntheticCommit}\n`,
+    });
 
     return {
       repo_path: repoPath,
-      reference_repository: input.referenceRepository,
       commit: syntheticCommit,
       scope_hash: scopeHash,
       dispose: () => rm(directory, { recursive: true, force: true }),
