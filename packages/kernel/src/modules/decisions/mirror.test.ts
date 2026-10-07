@@ -8,7 +8,9 @@ import type { Principal } from "../../principal.js";
 import { registerMemoryCommands } from "../memory/memory.js";
 import { registerDecisionDecideCommands } from "./decide.js";
 import { registerDecisionCommands, type DecisionView } from "./decisions.js";
-import { decisionMemoryKey } from "./mirror.js";
+import { withTransaction } from "@crossover/db";
+import type { DecisionRow } from "./decisions.js";
+import { decisionMemoryKey, mirrorDecision } from "./mirror.js";
 
 let db: TestDatabase;
 let pool: Pool;
@@ -219,5 +221,93 @@ describe("decision → memory mirror (§7.4)", () => {
       }
     }
     expect((await entry(s, decisionMemoryKey(d.id)))!.revision).toBe(1);
+  });
+});
+
+describe("mirrorDecision on its own (the status updates T406 relies on)", () => {
+  const row = (s: Setup, extra: Partial<DecisionRow> = {}): DecisionRow =>
+    ({
+      id: newId("dec"),
+      room_id: s.room,
+      title: "Pick a database",
+      context: "",
+      options: [
+        { id: "opt_1", summary: "PostgreSQL", detail: "" },
+        { id: "opt_2", summary: "SQLite", detail: "" },
+      ],
+      status: "ACCEPTED",
+      outcome_option_id: "opt_1",
+      rationale: "Because",
+      proposed_by: s.dev.participant_id,
+      decided_by: s.lead.participant_id,
+      vetoed_by: null,
+      decide_by: null,
+      links: [],
+      supersedes: null,
+      version: 2,
+      created_at: new Date("2026-01-01T00:00:00Z"),
+      decided_at: new Date("2026-01-01T01:00:00Z"),
+      ...extra,
+    }) as unknown as DecisionRow; // veto columns arrive with T406; the mirror ignores them
+  const mirror = (s: Setup, d: DecisionRow) =>
+    withTransaction(pool, (client) => mirrorDecision(client, s.room, d));
+  const status = async (s: Setup, d: DecisionRow) =>
+    JSON.parse((await entry(s, decisionMemoryKey(d.id)))!.value).status as string;
+  const revisions = async (s: Setup, d: DecisionRow) =>
+    (
+      await pool.query(
+        "SELECT revision, value FROM memory_revisions WHERE room_id = $1 AND key = $2 ORDER BY revision",
+        [s.room, decisionMemoryKey(d.id)],
+      )
+    ).rows as { revision: number; value: string }[];
+
+  it("accepting creates revision 1 and returns a system memory.updated event", async () => {
+    const s = await setup();
+    const d = row(s);
+    const ev = await mirror(s, d);
+    expect(ev).toMatchObject({
+      type: "memory.updated",
+      actor_id: "system",
+      payload: { key: decisionMemoryKey(d.id), revision: 1, previous_revision: 0 },
+    });
+    expect(await status(s, d)).toBe("ACCEPTED");
+  });
+
+  it("a veto updates the entry to VETOED at revision 2, keeping the history", async () => {
+    const s = await setup();
+    const d = row(s);
+    await mirror(s, d);
+    const ev = await mirror(s, { ...d, status: "VETOED", version: 3 });
+    expect(ev?.payload).toMatchObject({ revision: 2, previous_revision: 1 });
+    expect(await status(s, d)).toBe("VETOED");
+    expect((await revisions(s, d)).map((r) => [r.revision, JSON.parse(r.value).status])).toEqual([
+      [1, "ACCEPTED"],
+      [2, "VETOED"],
+    ]);
+    expect((await entry(s, decisionMemoryKey(d.id)))!.author_id).toBe("system");
+  });
+
+  it("superseding updates the entry to SUPERSEDED at the next revision", async () => {
+    const s = await setup();
+    const d = row(s);
+    await mirror(s, d);
+    await mirror(s, { ...d, status: "SUPERSEDED", version: 3 });
+    expect(await status(s, d)).toBe("SUPERSEDED");
+    expect((await entry(s, decisionMemoryKey(d.id)))!.revision).toBe(2);
+  });
+
+  it("a decision with no entry that isn't accepted writes nothing and returns null", async () => {
+    const s = await setup();
+    for (const [status, outcome] of [
+      ["REJECTED", null],
+      ["WITHDRAWN", null],
+      ["PROPOSED", null],
+      ["VETOED", null], // rejected, then vetoed: it never had an entry
+      ["SUPERSEDED", "opt_1"],
+    ] as const) {
+      const d = row(s, { status, outcome_option_id: outcome });
+      expect(await mirror(s, d), status).toBeNull();
+      expect(await entry(s, decisionMemoryKey(d.id)), status).toBeUndefined();
+    }
   });
 });
