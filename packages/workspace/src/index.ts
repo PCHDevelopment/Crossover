@@ -9,9 +9,12 @@ export type { MergeResult, MergeFile, MergeStage, MergeMessage } from "./merge.j
 export { classifyConflicts } from "./conflicts.js";
 export type { ConflictKind, ClassifiedConflict } from "./conflicts.js";
 export type { ConflictHunk, LineRange } from "./hunks.js";
-export { changesetParamsSchema } from "./changeset.js";
+export { changesetInputSchema, changesetParamsSchema } from "./changeset.js";
 export type { ChangesetParams } from "./changeset.js";
 export { provisionWorkspace } from "./provision.js";
 export { registerWorkspaceCommands } from "./apply.js";
 export type { WorkspaceCommandDeps, ApplyResponse } from "./apply.js";
+export { workspaceReadParamsSchema, workspaceListParamsSchema } from "./reads.js";
+export { workspaceSearchParamsSchema } from "./search.js";
+export { workspaceDiffParamsSchema } from "./history.js";
 export { updateCanonicalRef, reconcileRef } from "./reconcile.js";

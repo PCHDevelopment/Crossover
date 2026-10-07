@@ -12,18 +12,29 @@ import { registerWorkspaceReads } from "./reads.js";
 import { registerWorkspaceHistory } from "./history.js";
 import { registerWorkspaceBlame } from "./blame.js";
 import { registerWorkspaceSearch } from "./search.js";
-import { withSearchTree } from "./search-tree.js";
+import { refreshSearchTree } from "./search-tree.js";
 
 export interface WorkspaceCommandDeps {
   /** Failure is reported after commit; startup reconcileRef restores the DB-authoritative head. */
   updateCanonicalRef?: (repo: string, commit: string, expected: string) => Promise<void>;
   /** A failed checkout refresh is repaired by the next search against the committed DB head. */
-  refreshSearchTree?: (repo: string, commit: string) => Promise<void>;
+  refreshSearchTree?: (repo: string, commit: string, previousCommit?: string) => Promise<void>;
+  /** Merge engine seam for deterministic conflict-policy checks. */
+  merge?: typeof merge;
 }
 
 export type ApplyResponse =
   | { status: "APPLIED"; changeset_id: string; applied_revision: number }
-  | { status: "CONFLICT"; changeset_id: string; conflicts: ClassifiedConflict[] };
+  | {
+      status: "CONFLICT";
+      changeset_id: string;
+      conflict_id: string;
+      conflicts: ConflictResponse[];
+      counterparty_changesets: string[];
+    };
+
+export type ConflictResponse =
+  ClassifiedConflict | { path: null; kind: ClassifiedConflict["kind"]; reason: "unauthorized" };
 
 /** Register §10.3 application; all state and events share the dispatcher transaction. */
 export function registerWorkspaceCommands(
@@ -109,20 +120,106 @@ async function apply(
     ],
   );
   const candidate = await materialize(ws.repo_path, base.commit_sha, operations);
-  const result = await merge(ws.repo_path, base.commit_sha, head.commit_sha, candidate);
+  const result = await (deps.merge ?? merge)(
+    ws.repo_path,
+    base.commit_sha,
+    head.commit_sha,
+    candidate,
+  );
   if (!result.clean) {
-    const conflicts = await classifyConflicts(ws.repo_path, result);
+    const classified = await classifyConflicts(ws.repo_path, result);
+    const conflicts: ConflictResponse[] = [];
+    let allConflictsAuthorized = true;
+    for (const conflict of classified) {
+      let authorized = true;
+      for (const path of new Set([
+        conflict.path,
+        ...conflict.messages.flatMap((message) => message.paths),
+      ])) {
+        try {
+          await ctx.authorize("workspace.write", { path });
+        } catch (error) {
+          if (!(error instanceof CrossoverError) || error.code !== "FORBIDDEN") throw error;
+          authorized = false;
+        }
+      }
+      if (authorized) {
+        conflicts.push(conflict);
+      } else {
+        allConflictsAuthorized = false;
+        conflicts.push({ path: null, kind: conflict.kind, reason: "unauthorized" });
+      }
+    }
+    const conflictId = newId("conf");
+    const { rows: counterparties } = await client.query<{ id: string }>(
+      `SELECT cs.id FROM changesets cs
+       WHERE cs.room_id = $1 AND cs.workspace_id = $2 AND cs.status = 'APPLIED'
+         AND cs.applied_revision > $3 AND cs.applied_revision <= $4
+         AND EXISTS (
+           SELECT 1 FROM file_revisions fr
+           WHERE fr.room_id = cs.room_id AND fr.workspace_id = cs.workspace_id
+             AND fr.workspace_revision = cs.applied_revision AND fr.path = ANY($5::text[])
+         )
+       ORDER BY cs.applied_revision, cs.created_at, cs.id`,
+      [
+        room_id,
+        ws.id,
+        params.base_workspace_revision,
+        Number(head.revision),
+        [
+          ...new Set(
+            classified.flatMap((conflict) => [
+              conflict.path,
+              ...conflict.messages.flatMap((message) => message.paths),
+            ]),
+          ),
+        ],
+      ],
+    );
+    const counterpartyChangesets = counterparties.map(({ id: counterpartyId }) => counterpartyId);
     await client.query(
-      `UPDATE changesets SET status = 'CONFLICT', payload = payload || jsonb_build_object('conflicts', $3::jsonb)
+      `INSERT INTO conflicts (id, workspace_id, room_id, changeset_id, submitter_id,
+       base_revision, head_revision_at_detection, files, counterparty_changesets)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+      [
+        conflictId,
+        ws.id,
+        room_id,
+        id,
+        ctx.principal.participant_id,
+        params.base_workspace_revision,
+        head.revision,
+        JSON.stringify(classified),
+        JSON.stringify(counterpartyChangesets),
+      ],
+    );
+    await client.query(
+      `UPDATE changesets SET status = 'CONFLICT', conflict_id = $3,
+       payload = payload || jsonb_build_object(
+         'conflicts', $4::jsonb, 'counterparty_changesets', $5::jsonb
+       )
        WHERE room_id = $1 AND id = $2`,
-      [room_id, id, JSON.stringify(conflicts)],
+      [room_id, id, conflictId, JSON.stringify(classified), JSON.stringify(counterpartyChangesets)],
     );
     return {
-      response: { status: "CONFLICT" as const, changeset_id: id, conflicts },
+      response: {
+        status: "CONFLICT" as const,
+        changeset_id: id,
+        conflict_id: conflictId,
+        conflicts,
+        counterparty_changesets: allConflictsAuthorized ? counterpartyChangesets : [],
+      },
       events: [
         {
           type: "workspace.conflict.created" as const,
-          payload: { changeset_id: id, files: conflicts },
+          payload: {
+            conflict_id: conflictId,
+            changeset_id: id,
+            submitter_id: ctx.principal.participant_id,
+            file_count: classified.length,
+            kinds: classified.map(({ kind }) => kind),
+            counterparty_count: counterpartyChangesets.length,
+          },
         },
       ],
     };
@@ -166,8 +263,8 @@ async function apply(
     await (deps.updateCanonicalRef ?? updateCanonicalRef)(ws.repo_path, commit, head.commit_sha);
   });
   ctx.afterCommit(async () => {
-    if (deps.refreshSearchTree) await deps.refreshSearchTree(ws.repo_path, commit);
-    else await withSearchTree(ws.repo_path, commit, async () => {});
+    if (deps.refreshSearchTree) await deps.refreshSearchTree(ws.repo_path, commit, head.commit_sha);
+    else await refreshSearchTree(ws.repo_path, commit, head.commit_sha);
   });
   return {
     response: { status: "APPLIED" as const, changeset_id: id, applied_revision: revision },

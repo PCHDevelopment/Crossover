@@ -4,6 +4,7 @@ import {
   Dispatcher,
   issueTokens,
   registerInviteCommands,
+  registerRoomEventsCommand,
   registerJoinCommand,
   registerRoomCommands,
   type TokenPair,
@@ -58,6 +59,7 @@ const manifest = (extra: Record<string, unknown> = {}) => ({
 async function setup(onInternalError?: (e: unknown) => void, devLogin = false) {
   const dispatcher = new Dispatcher({ pool, authorize, nodeId: `node-${++n}` });
   registerRoomCommands(dispatcher);
+  registerRoomEventsCommand(dispatcher);
   registerInviteCommands(dispatcher);
   registerJoinCommand(dispatcher);
   dispatcher.registerCommand({
@@ -542,5 +544,146 @@ describe("POST /v1/rooms/:roomId/session (T217)", () => {
       const res = await post(s, `/v1/rooms/${roomId}/session`, {}, headers);
       errorShape(res.json(), "UNAUTHENTICATED", 401, res);
     }
+  });
+});
+
+describe("GET /v1/rooms/:roomId/events and /state (T702)", () => {
+  const get = (s: Setup, path: string, token: string | null = s.owner.access_token) =>
+    s.app.inject({
+      method: "GET",
+      url: path,
+      headers: token ? { authorization: `Bearer ${token}` } : {},
+    });
+  /** A room with a handful of events: creation, a join, and some invites. */
+  async function busy() {
+    const s = await setup(undefined, true);
+    const session = (
+      await post(s, "/v1/auth/dev-login", { subject: `ev-${++n}-${Date.now()}`, display_name: "P" })
+    ).json().session_token as string;
+    const created = await post(
+      s,
+      "/v1/commands",
+      envelope("room.create", {
+        slug: `ev-${++n}-${Date.now().toString(36)}`,
+        name: "n",
+        objective: "o",
+      }),
+      { authorization: `Bearer ${session}` },
+    );
+    const roomId = (created.json().response as { room: { id: string } }).room.id;
+    const tokens = (
+      await post(s, `/v1/rooms/${roomId}/session`, {}, { authorization: `Bearer ${session}` })
+    ).json().tokens;
+    const room = { ...s, room: roomId, owner: tokens as typeof s.owner };
+    for (let i = 0; i < 4; i++) {
+      await command(room, envelope("room.invite", { role: "DEVELOPER" }));
+    }
+    return room;
+  }
+
+  it("lists a room's events in order, uncached, to any member", async () => {
+    const s = await busy();
+    const res = await get(s, `/v1/rooms/${s.room}/events`);
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["cache-control"]).toBe("no-store");
+    const body = res.json() as {
+      events: { sequence: number; type: string }[];
+      next_after: number | null;
+    };
+    expect(body.events.map((e) => e.sequence)).toEqual(body.events.map((_, i) => i + 1));
+    expect(body.events.map((e) => e.type)).toEqual([
+      "room.created",
+      "participant.joined",
+      "participant.invited",
+      "participant.invited",
+      "participant.invited",
+      "participant.invited",
+    ]);
+    expect(body.next_after).toBeNull(); // caught up
+  });
+
+  it("pages with after and limit: next_after continues, null when caught up", async () => {
+    const s = await busy();
+    const first = (await get(s, `/v1/rooms/${s.room}/events?limit=4`)).json();
+    expect(first.events).toHaveLength(4);
+    expect(first.next_after).toBe(4);
+    const second = (await get(s, `/v1/rooms/${s.room}/events?after=4&limit=4`)).json();
+    expect(second.events.map((e: { sequence: number }) => e.sequence)).toEqual([5, 6]);
+    expect(second.next_after).toBeNull();
+    expect((await get(s, `/v1/rooms/${s.room}/events?after=6`)).json().events).toEqual([]);
+  });
+
+  it("filters by types: exact names, wildcards and several at once", async () => {
+    const s = await busy();
+    const types = async (q: string) =>
+      (
+        (await get(s, `/v1/rooms/${s.room}/events?types=${q}`)).json().events as { type: string }[]
+      ).map((e) => e.type);
+    expect(await types("participant.invited")).toEqual(Array(4).fill("participant.invited"));
+    expect((await types("participant.*")).length).toBe(5);
+    expect(await types("room.created,participant.joined")).toEqual([
+      "room.created",
+      "participant.joined",
+    ]);
+  });
+
+  it.each([
+    ["after=-1"],
+    ["after=abc"],
+    ["limit=0"],
+    ["limit=501"],
+    ["limit=1.5"],
+    ["types=not.an.event"],
+    ["types=nothing.*"],
+    ["types="],
+  ])("rejects bad query %s with 400 VALIDATION", async (q) => {
+    const s = await busy();
+    const res = await get(s, `/v1/rooms/${s.room}/events?${q}`);
+    errorShape(res.json(), "VALIDATION", 400, res);
+  });
+
+  it("returns the room state, summary by default and full on request", async () => {
+    const s = await busy();
+    const summary = await get(s, `/v1/rooms/${s.room}/state`);
+    expect(summary.statusCode).toBe(200);
+    expect(summary.json()).toMatchObject({ view: "summary", last_sequence: 6 });
+    expect(summary.json().sections.room).toMatchObject({ id: s.room });
+    const full = await get(s, `/v1/rooms/${s.room}/state?view=full`);
+    expect(full.json()).toMatchObject({ view: "full" });
+    errorShape((await get(s, `/v1/rooms/${s.room}/state?view=nope`)).json(), "VALIDATION", 400, {
+      statusCode: 400,
+    });
+  });
+
+  it("room ID in the path must match the token's room (404, and no data), and a token is needed (401)", async () => {
+    const a = await busy();
+    const b = await busy();
+    for (const path of ["events", "state"]) {
+      const wrong = await get(a, `/v1/rooms/${b.room}/${path}`);
+      errorShape(wrong.json(), "NOT_FOUND", 404, wrong);
+      expect(JSON.stringify(wrong.json())).not.toContain("participant");
+      const missing = await get(a, `/v1/rooms/${a.room}/${path}`, null);
+      errorShape(missing.json(), "UNAUTHENTICATED", 401, missing);
+      const bad = await get(a, `/v1/rooms/${a.room}/${path}`, "at_nope");
+      errorShape(bad.json(), "UNAUTHENTICATED", 401, bad);
+    }
+    const nonexistent = await get(a, "/v1/rooms/room_nope/events");
+    expect(nonexistent.json()).toEqual((await get(a, `/v1/rooms/${b.room}/events`)).json());
+  });
+
+  it("only shows events of the caller's own room, even for a paused or removed member's token", async () => {
+    const a = await busy();
+    const b = await busy();
+    const events = (await get(a, `/v1/rooms/${a.room}/events`)).json().events as {
+      room_id: string;
+    }[];
+    expect(new Set(events.map((e) => e.room_id))).toEqual(new Set([a.room]));
+    expect(b.room).not.toBe(a.room);
+    await pool.query(
+      "UPDATE participants SET status = 'REMOVED' WHERE room_id = $1 AND authority = 'OWNER'",
+      [a.room],
+    );
+    const res = await get(a, `/v1/rooms/${a.room}/events`);
+    errorShape(res.json(), "UNAUTHENTICATED", 401, res);
   });
 });

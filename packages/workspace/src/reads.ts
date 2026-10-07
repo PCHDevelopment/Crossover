@@ -7,6 +7,11 @@ import { git } from "./git.js";
 import { normalizePath, PathValidationError } from "./path.js";
 
 const revision = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional();
+export const workspaceReadParamsSchema = z.strictObject({ path: pathSchema(), revision });
+export const workspaceListParamsSchema = z.strictObject({
+  path: pathSchema(true).default(""),
+  revision,
+});
 export function pathSchema(root = false) {
   return z.string().transform((value, ctx) => {
     if (root && ["", ".", "./"].includes(value)) return "";
@@ -55,6 +60,49 @@ export async function entries(repo: string, tree: string, path?: string): Promis
       };
     });
 }
+async function hasReadableDescendant(
+  ctx: CommandContext,
+  repo: string,
+  tree: string,
+  prefix = "",
+): Promise<boolean> {
+  for (const entry of await entries(repo, tree)) {
+    const path = prefix ? `${prefix}/${entry.path}` : entry.path;
+    if (entry.type === "directory") {
+      if (await hasReadableDescendant(ctx, repo, entry.oid, path)) return true;
+    } else {
+      try {
+        await ctx.authorize("workspace.read", { path });
+        return true;
+      } catch (error) {
+        if (!(error instanceof CrossoverError) || error.code !== "FORBIDDEN") throw error;
+      }
+    }
+  }
+  return false;
+}
+async function visibleEntries(
+  ctx: CommandContext,
+  repo: string,
+  tree: string,
+  prefix = "",
+): Promise<Entry[]> {
+  const visible: Entry[] = [];
+  for (const entry of await entries(repo, tree)) {
+    const path = prefix ? `${prefix}/${entry.path}` : entry.path;
+    if (entry.type === "directory") {
+      if (await hasReadableDescendant(ctx, repo, entry.oid, path)) visible.push({ ...entry, path });
+    } else {
+      try {
+        await ctx.authorize("workspace.read", { path });
+        visible.push({ ...entry, path });
+      } catch (error) {
+        if (!(error instanceof CrossoverError) || error.code !== "FORBIDDEN") throw error;
+      }
+    }
+  }
+  return visible;
+}
 export async function snapshot(ctx: CommandContext, selected?: number) {
   const ws = (
     await ctx.client.query<{ id: string; repo_path: string }>(
@@ -100,7 +148,7 @@ export function registerWorkspaceReads(dispatcher: Dispatcher): void {
     action: "workspace.read",
     perPathAuthorize: true,
     mutating: false,
-    params: z.strictObject({ path: pathSchema(), revision }),
+    params: workspaceReadParamsSchema,
     execute: async (ctx, params) => {
       await ctx.authorize("workspace.read", { path: params.path });
       const ws = await snapshot(ctx, params.revision);
@@ -134,10 +182,11 @@ export function registerWorkspaceReads(dispatcher: Dispatcher): void {
   dispatcher.registerCommand({
     method: "workspace.list",
     action: "workspace.read",
+    // Every returned file is checked, and directories are shown only when they contain one.
+    perPathAuthorize: true,
     mutating: false,
-    params: z.strictObject({ path: pathSchema(true).default(""), revision }),
+    params: workspaceListParamsSchema,
     execute: async (ctx, params) => {
-      await ctx.authorize("workspace.read", { path: params.path });
       const ws = await snapshot(ctx, params.revision);
       let tree = ws.commit;
       if (params.path) {
@@ -145,13 +194,15 @@ export function registerWorkspaceReads(dispatcher: Dispatcher): void {
           (entry) => entry.path === params.path,
         );
         if (!target) throw new CrossoverError("NOT_FOUND", "Workspace path not found");
-        if (target.type !== "directory") notFile(params.path, "not_a_directory");
+        if (target.type !== "directory") {
+          await ctx.authorize("workspace.read", { path: params.path });
+          notFile(params.path, "not_a_directory");
+        }
         tree = target.oid;
       }
-      const children = (await entries(ws.repo_path, tree)).map((entry) => ({
-        ...entry,
-        path: params.path ? `${params.path}/${entry.path}` : entry.path,
-      }));
+      const children = await visibleEntries(ctx, ws.repo_path, tree, params.path);
+      if (params.path && children.length === 0)
+        throw new CrossoverError("NOT_FOUND", "Workspace path not found");
       const revisions = await fileRevisions(
         ctx,
         ws.id,

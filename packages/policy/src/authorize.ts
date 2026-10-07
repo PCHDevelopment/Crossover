@@ -1,5 +1,5 @@
 import type { Pool, PoolClient } from "@crossover/db";
-import { CrossoverError } from "@crossover/protocol";
+import { CrossoverError, isMethodName, METHODS } from "@crossover/protocol";
 import {
   capabilityMatches,
   capabilityMatchesPath,
@@ -10,6 +10,7 @@ import {
 import { loadLiveGrants } from "./grants.js";
 import {
   AUTHORITIES,
+  CAPABILITIES,
   effectiveCapabilities,
   isCapability,
   ROLES,
@@ -57,7 +58,9 @@ export interface PolicyContext {
  *   (`reason: "revoked"`), or the capability is unknown and no grant covers it (fail closed);
  * - `APPROVAL_REQUIRED` when the only grants covering it carry an approval gate (T210, §22.2);
  * - `FORBIDDEN` when the principal isn't an active participant of the resource's room;
- * - `PARTICIPANT_PAUSED` for any action by a paused participant.
+ * - `PARTICIPANT_PAUSED` for any action by a paused participant;
+ * - `ROOM_PAUSED` (`details.room_status`) for a mutation in a frozen room by anyone but the
+ *   owner, and for any mutation in an archived room (T214, §5); `NOT_FOUND` in a deleted one.
  */
 export async function authorize(
   principal: PolicyPrincipal,
@@ -69,8 +72,15 @@ export async function authorize(
     throw forbidden(action, { reason: "room_mismatch" });
   }
 
-  const { rows } = await context.client.query<{ authority: string; role: string; status: string }>(
-    "SELECT authority, role, status FROM participants WHERE id = $1 AND room_id = $2",
+  const { rows } = await context.client.query<{
+    authority: string;
+    role: string;
+    status: string;
+    room_status: string;
+  }>(
+    `SELECT p.authority, p.role, p.status, r.status AS room_status
+     FROM participants p JOIN rooms r ON r.id = p.room_id
+     WHERE p.id = $1 AND p.room_id = $2`,
     [principal.participant_id, principal.room_id],
   );
   const participant = rows[0];
@@ -89,6 +99,23 @@ export async function authorize(
   }
 
   const base = typeof action === "string" ? (action.split(":", 1)[0] ?? "") : "";
+
+  // The room's own state (§5): a frozen room accepts mutations from its owner only; an
+  // archived room accepts none, from anyone. Reads always pass this gate.
+  if (participant.room_status !== "ACTIVE") {
+    if (participant.room_status === "DELETED") {
+      throw new CrossoverError("NOT_FOUND", "Room not found");
+    }
+    const ownerMayAct = participant.room_status === "PAUSED" && participant.authority === "OWNER";
+    if (isMutating(context.method, base) && !ownerMayAct) {
+      throw new CrossoverError(
+        "ROOM_PAUSED",
+        participant.room_status === "ARCHIVED" ? "Room is archived" : "Room is paused",
+        { details: { room_status: participant.room_status } },
+      );
+    }
+  }
+
   const inBundle =
     isCapability(base) && effectiveCapabilities(participant.role, participant.authority).has(base);
 
@@ -148,6 +175,15 @@ function pathOf(action: string, base: string, resource: PolicyResource): string 
   if (action !== base || typeof resource.path !== "string") return undefined;
   const root = base.split(".", 1)[0] ?? "";
   return PATH_SCOPED_RESOURCES.has(root) ? resource.path : undefined;
+}
+
+/**
+ * Does the command change state? The catalog says for a known method; for anything else the
+ * capability's own flag, and an unknown capability counts as a mutation (fail closed).
+ */
+function isMutating(method: string, base: string): boolean {
+  if (isMethodName(method)) return METHODS[method].mutating;
+  return isCapability(base) ? CAPABILITIES[base].mutating : true;
 }
 
 /** Is `capability` a scoped grant (has a `:scope`) of `base`? */

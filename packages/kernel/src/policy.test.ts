@@ -119,7 +119,7 @@ describe("the real policy behind the dispatcher", () => {
       },
     );
     expect(await effects(r)).toBe(0);
-    expect(await lastSeq(r)).toBe(0);
+    expect(await lastSeq(r)).toBe(1); // only the capability.denied event (T215)
   });
 
   it("owner-only commands: owner yes, admin and lead-member no", async () => {

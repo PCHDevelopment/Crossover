@@ -7,9 +7,9 @@ import {
   findOrCreateUser,
   type Dispatcher,
 } from "@crossover/kernel";
-import { CrossoverError } from "@crossover/protocol";
+import { CrossoverError, newId } from "@crossover/protocol";
 import { z } from "zod";
-import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import { toHttpError } from "./errors.js";
 
 export interface GatewayOptions {
@@ -59,6 +59,9 @@ function expectObject(body: unknown): Record<string, unknown> {
  * - `POST /v1/rooms/:roomId/join`: body `{ token, manifest }`; the invite token is the
  *   credential, so there is no bearer header.
  *
+ * - `GET /v1/rooms/:roomId/events?after&limit&types`: the room's events in order (`room.events.list`;
+ *   `types` is comma-separated). `GET /v1/rooms/:roomId/state?view`: `room.get_state`. Both need
+ *   the bearer token of a member of that room, and run through the dispatcher like any read.
  * - `POST /v1/commands`: a roomless command (`room.create`); bearer is a user session token
  *   (`us_…`), not a room token. The creating user becomes the new room's owner.
  * - `POST /v1/rooms/:roomId/session`: a user session (`us_…`) for room tokens, if the user is an
@@ -97,6 +100,59 @@ export function buildGateway(options: GatewayOptions): FastifyInstance {
       ...(result.one_time === undefined ? {} : { one_time: result.one_time }),
     };
   });
+
+  /** Run a read command for the bearer's room, with query-string values turned into params. */
+  async function read(
+    request: FastifyRequest<{ Params: { roomId: string } }>,
+    reply: FastifyReply,
+    method: string,
+    params: Record<string, unknown>,
+  ) {
+    const principal = await authenticate(pool, bearerToken(request));
+    if (principal.room_id !== request.params.roomId) {
+      throw new CrossoverError("NOT_FOUND", "Room not found");
+    }
+    const result = await dispatcher.dispatch(principal, { id: newId("cmd"), method, params });
+    void reply.header("Cache-Control", "no-store");
+    return result.response;
+  }
+
+  /** A query value as a number if it looks like one; otherwise left for the schema to reject. */
+  const num = (v: unknown): unknown => (typeof v === "string" && /^-?\d+$/.test(v) ? Number(v) : v);
+  const compact = (o: Record<string, unknown>) =>
+    Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined));
+
+  app.get<{ Params: { roomId: string }; Querystring: Record<string, string | string[]> }>(
+    "/v1/rooms/:roomId/events",
+    (request, reply) => {
+      const q = request.query;
+      const one = (v: string | string[] | undefined) => (Array.isArray(v) ? v[0] : v);
+      const types = one(q.types);
+      return read(
+        request,
+        reply,
+        "room.events.list",
+        compact({
+          after: num(one(q.after)),
+          limit: num(one(q.limit)),
+          types: types === undefined ? undefined : types.split(",").map((t) => t.trim()),
+        }),
+      );
+    },
+  );
+
+  app.get<{ Params: { roomId: string }; Querystring: Record<string, string | string[]> }>(
+    "/v1/rooms/:roomId/state",
+    (request, reply) => {
+      const view = request.query.view;
+      return read(
+        request,
+        reply,
+        "room.get_state",
+        compact({ view: Array.isArray(view) ? view[0] : view }),
+      );
+    },
+  );
 
   app.post<{ Params: { roomId: string } }>("/v1/rooms/:roomId/join", async (request, reply) => {
     const result = await dispatcher.dispatchAnonymous(

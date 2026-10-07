@@ -1,0 +1,262 @@
+import { CrossoverError } from "@crossover/protocol";
+import { z } from "zod";
+import type { CommandContext, Dispatcher } from "../../dispatcher.js";
+import { loadActor, manages } from "./create-update.js";
+import { loadTask, TASK_COLUMNS, taskView, versionConflict, type TaskRow } from "./task.js";
+
+/** An agent's claim lasts this long unless renewed (§8.4). */
+export const AGENT_LEASE_MINUTES = 15;
+
+export const taskVersionParams = z.strictObject({
+  task_id: z.string().min(1).max(100),
+  /** The version you last saw; a stale one is `CONFLICT_VERSION`. */
+  expected_version: z.number().int().min(1),
+});
+
+/** The lease an owner gets when they take a task: agents expire, humans never (§8.4). */
+export const leaseSql = (ownerKindParam: string) =>
+  `CASE WHEN ${ownerKindParam} = 'AGENT'
+        THEN clock_timestamp() + make_interval(mins => ${AGENT_LEASE_MINUTES}) END`;
+
+/**
+ * Register the task lifecycle commands (T304 onwards, §8.2, §8.3). Each is one conditional
+ * `UPDATE … WHERE version = $expected AND status = …` after the task row is locked, so exactly
+ * one of several racing callers succeeds and the rest get `CONFLICT_VERSION` carrying the task
+ * as it is now.
+ */
+export function registerTaskLifecycleCommands(dispatcher: Dispatcher): void {
+  dispatcher.registerCommand({
+    method: "tasks.claim",
+    mutating: true,
+    params: taskVersionParams,
+    execute: async (ctx, p) => {
+      const task = await loadTask(ctx.client, ctx.room_id, p.task_id, true);
+      // A claim only wins against exactly the open task the caller saw.
+      if (task.status !== "OPEN" || task.version !== p.expected_version)
+        throw versionConflict(task);
+      const actor = await loadActor(ctx);
+      return takeTask(ctx, task, actor.id, "task.claimed");
+    },
+  });
+
+  dispatcher.registerCommand({
+    method: "tasks.assign",
+    mutating: true,
+    params: taskVersionParams.extend({ participant_id: z.string().min(1).max(100) }),
+    execute: async (ctx, p) => {
+      const task = await loadTask(ctx.client, ctx.room_id, p.task_id, true);
+      if (task.status !== "OPEN" || task.version !== p.expected_version)
+        throw versionConflict(task);
+      const { rows } = await ctx.client.query<{ status: string }>(
+        "SELECT status FROM participants WHERE id = $1 AND room_id = $2",
+        [p.participant_id, ctx.room_id],
+      );
+      const status = rows[0]?.status;
+      if (status === undefined) {
+        throw new CrossoverError("NOT_FOUND", `Participant ${p.participant_id} not found`);
+      }
+      if (status !== "ACTIVE") {
+        throw new CrossoverError(
+          "VALIDATION",
+          `Participant ${p.participant_id} is ${status}, not active`,
+          {
+            details: { participant_id: p.participant_id, status },
+          },
+        );
+      }
+      return takeTask(ctx, task, p.participant_id, "task.assigned", {
+        assigned_by: ctx.principal.participant_id,
+      });
+    },
+  });
+
+  dispatcher.registerCommand({
+    method: "tasks.start",
+    mutating: true,
+    params: taskVersionParams,
+    execute: async (ctx, p) => {
+      const task = await loadTask(ctx.client, ctx.room_id, p.task_id, true);
+      const actor = await loadActor(ctx);
+      if (task.owner_id !== actor.id) {
+        throw new CrossoverError("FORBIDDEN", "Only the task's owner can start it", {
+          details: { reason: "not_task_owner" },
+        });
+      }
+      if (task.version !== p.expected_version) throw versionConflict(task);
+      if (task.status !== "CLAIMED") {
+        throw new CrossoverError("VALIDATION", `Can't start a task that is ${task.status}`, {
+          details: { status: task.status },
+        });
+      }
+      // Every dependency must be DONE, unless the lead set override_dependencies (§8.2).
+      if (!task.override_dependencies && task.dependencies.length > 0) {
+        const { rows } = await ctx.client.query<{ id: string; status: string }>(
+          "SELECT id, status FROM tasks WHERE room_id = $1 AND id = ANY($2::text[]) AND status <> 'DONE' ORDER BY id",
+          [ctx.room_id, task.dependencies],
+        );
+        if (rows.length > 0) {
+          throw new CrossoverError(
+            "VALIDATION",
+            `Dependency ${rows[0]!.id} is ${rows[0]!.status}, not DONE`,
+            {
+              details: {
+                unfinished_dependencies: rows.map((r) => ({ id: r.id, status: r.status })),
+              },
+            },
+          );
+        }
+      }
+      return ownerTransition(ctx, task, "IN_PROGRESS", "task.started");
+    },
+  });
+
+  dispatcher.registerCommand({
+    method: "tasks.block",
+    mutating: true,
+    params: taskVersionParams.extend({ reason: z.string().trim().min(1).max(2000) }),
+    execute: async (ctx, p) => {
+      const { task, actor } = await ownerOrLead(ctx, p);
+      if (task.status !== "IN_PROGRESS") {
+        throw new CrossoverError("VALIDATION", `Can't block a task that is ${task.status}`, {
+          details: { status: task.status },
+        });
+      }
+      return transition(ctx, task, "BLOCKED", {
+        eventType: "task.blocked",
+        set: "blocked_reason = $5",
+        values: [p.reason],
+        renewLease: task.owner_id === actor.id,
+        payload: { reason: p.reason },
+      });
+    },
+  });
+
+  dispatcher.registerCommand({
+    method: "tasks.unblock",
+    mutating: true,
+    params: taskVersionParams,
+    execute: async (ctx, p) => {
+      const { task, actor } = await ownerOrLead(ctx, p);
+      if (task.status !== "BLOCKED") {
+        throw new CrossoverError("VALIDATION", `Can't unblock a task that is ${task.status}`, {
+          details: { status: task.status },
+        });
+      }
+      return transition(ctx, task, "IN_PROGRESS", {
+        eventType: "task.unblocked",
+        set: "blocked_reason = NULL",
+        renewLease: task.owner_id === actor.id,
+      });
+    },
+  });
+}
+
+/** Lock the task, require the caller to be its owner or the lead (owner/admin too), check the version. */
+async function ownerOrLead(ctx: CommandContext, p: { task_id: string; expected_version: number }) {
+  const task = await loadTask(ctx.client, ctx.room_id, p.task_id, true);
+  const actor = await loadActor(ctx);
+  if (task.owner_id !== actor.id && !manages(actor)) {
+    throw new CrossoverError("FORBIDDEN", "Only the task's owner or the lead can do that", {
+      details: { reason: "not_task_owner" },
+    });
+  }
+  if (task.version !== p.expected_version) throw versionConflict(task);
+  return { task, actor };
+}
+
+interface TransitionOptions {
+  eventType: "task.started" | "task.blocked" | "task.unblocked";
+  /** Extra `SET` assignments; their values are `$5, $6, …` in `values`. */
+  set?: string;
+  values?: unknown[];
+  /** Renew an agent owner's lease (§8.4): when the owner is the one acting. */
+  renewLease: boolean;
+  payload?: Record<string, unknown>;
+}
+
+/** Move `task` to `to` (version + 1) under the version the caller saw; `CONFLICT_VERSION` if it moved. */
+async function transition(
+  ctx: CommandContext,
+  task: TaskRow,
+  to: TaskRow["status"],
+  o: TransitionOptions,
+) {
+  const { rows } = await ctx.client.query<TaskRow>(
+    `UPDATE tasks t SET status = $4, version = t.version + 1, updated_at = clock_timestamp()
+            ${o.renewLease ? `, lease_expires_at = (SELECT ${leaseSql("p.kind")} FROM participants p WHERE p.id = t.owner_id AND p.room_id = t.room_id)` : ""}
+            ${o.set ? `, ${o.set}` : ""}
+     WHERE t.id = $1 AND t.room_id = $2 AND t.version = $3
+     RETURNING ${TASK_COLUMNS.split(",")
+       .map((c) => `t.${c.trim()}`)
+       .join(", ")}`,
+    [task.id, ctx.room_id, task.version, to, ...(o.values ?? [])],
+  );
+  const updated = rows[0];
+  if (!updated) throw versionConflict(await loadTask(ctx.client, ctx.room_id, task.id));
+  return {
+    response: taskView(updated),
+    events: [
+      {
+        type: o.eventType,
+        payload: {
+          task_id: task.id,
+          from_version: task.version,
+          version: updated.version,
+          ...o.payload,
+        },
+      },
+    ],
+  };
+}
+
+/** Start: the owner moves `CLAIMED → IN_PROGRESS`, which renews their lease. */
+const ownerTransition = (
+  ctx: CommandContext,
+  task: TaskRow,
+  to: TaskRow["status"],
+  eventType: "task.started",
+) => transition(ctx, task, to, { eventType, renewLease: true });
+
+/** Mark `task` as owned by `ownerId` (claim or assign): `OPEN → CLAIMED`, version + 1, lease for agents. */
+export async function takeTask(
+  ctx: CommandContext,
+  task: TaskRow,
+  ownerId: string,
+  eventType: "task.claimed" | "task.assigned",
+  extra: Record<string, unknown> = {},
+) {
+  const { rows } = await ctx.client.query<TaskRow>(
+    `UPDATE tasks t SET status = 'CLAIMED', owner_id = p.id, version = t.version + 1,
+                        lease_expires_at = ${leaseSql("p.kind")}, updated_at = clock_timestamp()
+     FROM participants p
+     WHERE t.id = $1 AND t.room_id = $2 AND t.status = 'OPEN' AND t.version = $3
+       AND p.id = $4 AND p.room_id = $2
+     RETURNING ${TASK_COLUMNS.split(",")
+       .map((c) => `t.${c.trim()}`)
+       .join(", ")}`,
+    [task.id, ctx.room_id, task.version, ownerId],
+  );
+  const updated = rows[0];
+  if (!updated) {
+    const current = await loadTask(ctx.client, ctx.room_id, task.id);
+    if (current.status !== "OPEN" || current.version !== task.version)
+      throw versionConflict(current);
+    throw new CrossoverError("NOT_FOUND", `Participant ${ownerId} not found`);
+  }
+  return {
+    response: taskView(updated),
+    events: [
+      {
+        type: eventType,
+        payload: {
+          task_id: task.id,
+          owner_id: ownerId,
+          from_version: task.version,
+          version: updated.version,
+          lease_expires_at: updated.lease_expires_at?.toISOString() ?? null,
+          ...extra,
+        },
+      },
+    ],
+  };
+}
