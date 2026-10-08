@@ -39,8 +39,9 @@ describe("CrossoverError", () => {
     }
   });
 
-  it("covers every §16.3 code plus the internal STALE_FENCE", () => {
-    expect([...PUBLIC_ERROR_CODES]).toHaveLength(12);
+  it("covers every §16.3 code, PROVIDER_UNAVAILABLE (T1201) and the internal STALE_FENCE", () => {
+    expect([...PUBLIC_ERROR_CODES]).toHaveLength(13);
+    expect(PUBLIC_ERROR_CODES).toContain("PROVIDER_UNAVAILABLE");
     expect(ERROR_CODES).toContain("STALE_FENCE");
     expect(PUBLIC_ERROR_CODES).not.toContain("STALE_FENCE" as never);
   });

@@ -15,6 +15,9 @@ import {
   registerDecisionCommands,
   registerDecisionDecideCommands,
   registerApprovalCommands,
+  registerToolCommands,
+  ToolRegistry,
+  type ToolRunner,
   registerWakeSecretCommand,
   WakeWebhookService,
   registerInboxCommands,
@@ -43,7 +46,7 @@ import {
   RedisEditIntentStore,
 } from "@crossover/kernel";
 import { postWebhook } from "@crossover/security";
-import { authorize } from "@crossover/policy";
+import { authorize, tierOf } from "@crossover/policy";
 import {
   ConflictEscalationSweeper,
   DockerExecutionDriver,
@@ -79,6 +82,8 @@ export interface ComposeOverrides {
   executionDriver?: ExecutionDriver;
   /** Use this limiter for agents' budgets (§22.3) instead of Redis at `redisUrl` (tests); not closed by `close()`. */
   budgets?: BudgetLimiter;
+  /** Tools plugins declare, and what runs them (the plugin runner, T1202); none by default. */
+  tools?: { registry?: ToolRegistry; runner?: ToolRunner; timeoutMs?: number };
   /** How `git.import` reaches an upstream (fetcher, credentials, host check); production: HTTPS clone, no credentials. */
   upstream?: UpstreamDeps;
 }
@@ -230,6 +235,7 @@ export async function composeServer(
       intentStore,
       executionService,
       overrides.upstream,
+      overrides.tools,
     );
 
     const renewer = new LeaseRenewer({ leases: dispatcher.leases, actors: dispatcher.actors });
@@ -312,6 +318,7 @@ function registerCommands(
   intentStore: RedisEditIntentStore,
   execution: ExecutionService,
   upstream?: UpstreamDeps,
+  tools: ComposeOverrides["tools"] = {},
 ): void {
   registerRoomCommands(dispatcher, {
     provision: async ({ client, room_id }) => {
@@ -339,6 +346,12 @@ function registerCommands(
   registerRoomDigestCommand(dispatcher);
   registerInboxCommands(dispatcher);
   registerApprovalCommands(dispatcher);
+  // Tools plugins declare (T1201); the plugin runner (T1202) will be what runs them.
+  registerToolCommands(dispatcher, {
+    registry: tools.registry ?? new ToolRegistry({ tierOf }),
+    ...(tools.runner ? { runner: tools.runner } : {}),
+    ...(tools.timeoutMs !== undefined ? { timeoutMs: tools.timeoutMs } : {}),
+  });
   registerWakeSecretCommand(dispatcher, config.wakeWebhookKey);
   registerPresenceIntentCommands(dispatcher, intentStore, normalizePath);
   registerRoomEventsSubscribeCommand(dispatcher); // the WebSocket `subscribe` frame

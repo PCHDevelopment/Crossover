@@ -26,6 +26,8 @@ let participantId: string;
 let sandboxId: string;
 let canonicalCommit: string;
 let secretBlob: string;
+let historicalCommit: string;
+let historicalBlob: string;
 let internalGit: ReturnType<typeof buildInternalGitServer>;
 let publicGateway: ReturnType<typeof buildGateway>;
 let remoteBase: string;
@@ -51,12 +53,20 @@ beforeAll(async () => {
     timeoutMs: 10_000,
   });
   await writeFile(join(working, "public.txt"), "visible in the sandbox\n");
+  await writeFile(join(working, "deleted-private.txt"), "historical private content\n");
   await git(["add", "-A"], { cwd: working, timeoutMs: 10_000 });
   await git(["commit", "-q", "-m", "first canonical revision"], {
     cwd: working,
     timeoutMs: 10_000,
     env: GIT_IDENTITY,
   });
+  historicalCommit = (
+    await git(["rev-parse", "HEAD"], { cwd: working, timeoutMs: 10_000 })
+  ).stdout.trim();
+  historicalBlob = (
+    await git(["rev-parse", "HEAD:deleted-private.txt"], { cwd: working, timeoutMs: 10_000 })
+  ).stdout.trim();
+  await rm(join(working, "deleted-private.txt"));
   await mkdir(join(working, "private"), { recursive: true });
   await writeFile(join(working, "private", "secret.txt"), "must never reach the sandbox\n");
   await git(["add", "-A"], { cwd: working, timeoutMs: 10_000 });
@@ -255,6 +265,98 @@ describe("internal Git workspace reads", () => {
       headers: { authorization: `Bearer ${otherRoomToken}` },
     });
     expect(response.statusCode).toBe(401);
+  });
+
+  it.each(["0", "2"])(
+    "refuses deleted-path history over protocol v%s even with current unscoped read",
+    async (protocol) => {
+      const server = buildInternalGitServer({
+        pool: db.pool,
+        tokenSecret: TOKEN_SECRET,
+        authorize: async (_principal, _action, resource) => {
+          if (resource.path === "deleted-private.txt")
+            throw new CrossoverError("FORBIDDEN", "Historical path denied");
+        },
+      });
+      const address = await server.listen({ host: "127.0.0.1", port: 0 });
+      try {
+        for (const object of [historicalCommit, historicalBlob]) {
+          const target = join(root, `historical-${protocol}-${object}`);
+          await mkdir(target);
+          await git(["init", "-q"], { cwd: target, timeoutMs: 10_000 });
+          await expect(
+            git(
+              [
+                "-c",
+                `protocol.version=${protocol}`,
+                "fetch",
+                "--depth=1",
+                `${address}/git/${roomId}/${sandboxId}/1`,
+                object,
+              ],
+              {
+                cwd: target,
+                timeoutMs: 10_000,
+                env: {
+                  GIT_CONFIG_COUNT: "1",
+                  GIT_CONFIG_KEY_0: "http.extraHeader",
+                  GIT_CONFIG_VALUE_0: `Authorization: Bearer ${token}`,
+                },
+              },
+            ),
+          ).rejects.toThrow();
+          await expect(
+            git(["cat-file", "-e", object], { cwd: target, timeoutMs: 10_000 }),
+          ).rejects.toThrow();
+        }
+      } finally {
+        await server.close();
+      }
+    },
+  );
+
+  it("fails closed when the revision's Git object was garbage collected", async () => {
+    const options = { gitDir: repoPath, timeoutMs: 10_000 };
+    const tree = (await git(["mktree"], { ...options, input: "" })).stdout.trim();
+    const commit = (
+      await git(["commit-tree", tree, "-m", "unreferenced"], {
+        ...options,
+        env: GIT_IDENTITY,
+      })
+    ).stdout.trim();
+    await git(["gc", "--prune=now"], options);
+    await expect(git(["cat-file", "-e", commit], options)).rejects.toThrow();
+    await db.pool.query(
+      `INSERT INTO workspace_revisions (workspace_id, room_id, revision, commit_sha)
+      SELECT id, room_id, 2, $2 FROM workspaces WHERE room_id = $1`,
+      [roomId, commit],
+    );
+    try {
+      const readToken = createSandboxReadToken(
+        {
+          room_id: roomId,
+          participant_id: participantId,
+          sandbox_id: sandboxId,
+          revision: 2,
+          expires_at: Date.now() + 60_000,
+        },
+        TOKEN_SECRET,
+      );
+      const response = await internalGit.inject({
+        method: "GET",
+        url: `/git/${roomId}/${sandboxId}/2/info/refs?service=git-upload-pack`,
+        headers: { authorization: `Bearer ${readToken}` },
+      });
+      expect(response.statusCode).toBe(500);
+      expect(response.headers["content-type"]).not.toBe(
+        "application/x-git-upload-pack-advertisement",
+      );
+      expect(response.body).not.toContain(commit);
+    } finally {
+      await db.pool.query("DELETE FROM workspace_revisions WHERE room_id = $1 AND revision = 2", [
+        roomId,
+      ]);
+    }
   });
 
   it("rejects a token when the URL requests a different workspace revision", async () => {
