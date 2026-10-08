@@ -522,6 +522,7 @@ export class DockerExecutionDriver implements ExecutionDriver {
     resources: SandboxResources;
     tracked_paths: readonly string[];
     object_format: "sha1" | "sha256";
+    ignore_rules?: { path: string; patterns: string[] }[];
   }): Promise<SandboxSnapshotEntry[]> {
     this.assertResources(input.sandbox_id, input.resources);
     const payload = await this.runSnapshotHelper(input.resources, {
@@ -530,6 +531,7 @@ export class DockerExecutionDriver implements ExecutionDriver {
       tracked_paths: input.tracked_paths.map((path) =>
         Buffer.from(path, "utf8").toString("base64"),
       ),
+      ignore_rules: input.ignore_rules ?? [],
       max_bytes: 1024 * 1024 * 1024,
     });
     if (!Array.isArray(payload.entries)) throw snapshotUnavailable();

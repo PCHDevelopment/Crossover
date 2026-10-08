@@ -200,6 +200,7 @@ describe("DockerExecutionDriver", () => {
         resources,
         tracked_paths: ["src/a.txt"],
         object_format: "sha1",
+        ignore_rules: [{ path: ".gitignore", patterns: ["node_modules/"] }],
       }),
     ).resolves.toMatchObject([{ path: "src/a.txt", mode: "100644", sha: null, size: 0 }]);
     await driver.updateSnapshot({
@@ -219,6 +220,7 @@ describe("DockerExecutionDriver", () => {
     expect(JSON.parse(read!.input)).toMatchObject({
       action: "inventory",
       tracked_paths: [Buffer.from("src/a.txt").toString("base64")],
+      ignore_rules: [{ path: ".gitignore", patterns: ["node_modules/"] }],
     });
     expect(install!.args).toContain("--network=none");
     expect(install!.args).not.toContain(

@@ -87,6 +87,7 @@ export interface ExecutionDriver {
     resources: SandboxResources;
     tracked_paths: readonly string[];
     object_format: "sha1" | "sha256";
+    ignore_rules?: { path: string; patterns: string[] }[];
   }): Promise<SandboxSnapshotEntry[]>;
   /** Read only selected files, refusing a path that changed since inventory. */
   readSnapshotFiles?(input: {
@@ -173,6 +174,7 @@ export class ExecutionService {
     sandbox: SandboxRecord,
     trackedPaths: readonly string[],
     objectFormat: "sha1" | "sha256",
+    ignoreRules: { path: string; patterns: string[] }[] = [],
   ): Promise<SandboxSnapshotEntry[]> {
     if (!this.driver.snapshotInventory || !sandbox.volume_ref || !sandbox.container_ref)
       throw new CrossoverError(
@@ -184,6 +186,7 @@ export class ExecutionService {
       resources: { volume_ref: sandbox.volume_ref, container_ref: sandbox.container_ref },
       tracked_paths: trackedPaths,
       object_format: objectFormat,
+      ignore_rules: ignoreRules,
     });
   }
 
