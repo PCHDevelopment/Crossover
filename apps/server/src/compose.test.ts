@@ -37,6 +37,7 @@ class RecordingExecutionDriver implements ExecutionDriver {
   readonly stopped: string[] = [];
   readonly destroyed: string[] = [];
   readonly working = new Map<string, Map<string, { mode: string; content: Buffer }>>();
+  readonly snapshotRules = new Map<string, { path: string; patterns: string[] }[]>();
 
   async create({ sandbox_id }: { sandbox_id: string; limits: SandboxLimits }) {
     this.working.set(sandbox_id, this.working.get(sandbox_id) ?? new Map());
@@ -49,6 +50,7 @@ class RecordingExecutionDriver implements ExecutionDriver {
     _input: Parameters<NonNullable<ExecutionDriver["materialize"]>>[0],
   ): Promise<void> {}
   async snapshotInventory(input: Parameters<NonNullable<ExecutionDriver["snapshotInventory"]>>[0]) {
+    this.snapshotRules.set(input.sandbox_id, input.ignore_rules ?? []);
     const files = this.working.get(input.sandbox_id) ?? new Map();
     const tracked = new Set(input.tracked_paths);
     return [...files].map(([path, file]) => ({
@@ -433,6 +435,58 @@ describe("composeServer", () => {
       [roomId],
     );
     expect(Number(count.rows[0]!.count)).toBe(0);
+  });
+
+  it("passes canonical ignore rules to snapshot inventory despite sandbox overrides", async () => {
+    const driver = new RecordingExecutionDriver();
+    const { server } = await start({}, new RecordingPublisher(), { executionDriver: driver });
+    const { roomId, owner, cmd } = await walkthrough(server.app, false);
+    await ok(
+      await cmd(
+        envelope("workspace.apply_changeset", {
+          source: "API",
+          message: "Add canonical ignore rule",
+          base_workspace_revision: 0,
+          operations: [{ type: "create", path: ".gitignore", content: "node_modules/\n" }],
+        }),
+        owner.tokens.access_token,
+      ),
+    );
+    const ownerId = await db.pool.query<{ id: string }>(
+      "SELECT id FROM participants WHERE room_id = $1 AND authority = 'OWNER'",
+      [roomId],
+    );
+    const sandbox = await server.execution.ensure(roomId, ownerId.rows[0]!.id);
+    const working = driver.working.get(sandbox.id)!;
+    working.set(".gitignore", { mode: "100644", content: Buffer.from("!node_modules/\n") });
+    working.set("src/app.ts", { mode: "100644", content: Buffer.from("export {};\n") });
+    working.set("node_modules/pkg/index.js", {
+      mode: "100644",
+      content: Buffer.from("ignored dependency"),
+    });
+
+    const submitted = await ok(
+      await cmd(
+        envelope("changes.submit", { message: "Submit with canonical ignores" }),
+        owner.tokens.access_token,
+      ),
+    );
+    expect(submitted.response.status).toBe("APPLIED");
+    expect(driver.snapshotRules.get(sandbox.id)).toEqual([
+      { path: ".gitignore", patterns: ["node_modules/", ""] },
+    ]);
+    const workspace = await db.pool.query<{ repo_path: string; commit_sha: string }>(
+      `SELECT w.repo_path, wr.commit_sha FROM workspaces w
+       JOIN workspace_revisions wr ON wr.workspace_id = w.id AND wr.room_id = w.room_id
+       WHERE w.room_id = $1 AND wr.revision = 2`,
+      [roomId],
+    );
+    await expect(
+      git(["cat-file", "-e", `${workspace.rows[0]!.commit_sha}:node_modules/pkg/index.js`], {
+        gitDir: workspace.rows[0]!.repo_path,
+        timeoutMs: 10_000,
+      }),
+    ).rejects.toThrow();
   });
 
   it("refuses selected symlinks and leaves unrelated links untouched by filtered submits", async () => {
