@@ -22,10 +22,11 @@ describe("CrossoverError", () => {
     expect(Object.keys(body.error).sort()).toEqual(["code", "message", "retryable"]);
   });
 
-  it("defaults CONFLICT_VERSION, RATE_LIMITED and BUDGET_EXCEEDED to retryable, FORBIDDEN not", () => {
+  it("defaults transient failures to retryable and FORBIDDEN not", () => {
     expect(new CrossoverError("CONFLICT_VERSION", "x").retryable).toBe(true);
     expect(new CrossoverError("RATE_LIMITED", "x").retryable).toBe(true);
     expect(new CrossoverError("BUDGET_EXCEEDED", "x").retryable).toBe(true);
+    expect(new CrossoverError("UNAVAILABLE", "x").retryable).toBe(true);
     expect(new CrossoverError("FORBIDDEN", "x").retryable).toBe(false);
   });
 
@@ -40,7 +41,7 @@ describe("CrossoverError", () => {
   });
 
   it("covers every §16.3 code plus the internal STALE_FENCE", () => {
-    expect([...PUBLIC_ERROR_CODES]).toHaveLength(12);
+    expect([...PUBLIC_ERROR_CODES]).toHaveLength(13);
     expect(ERROR_CODES).toContain("STALE_FENCE");
     expect(PUBLIC_ERROR_CODES).not.toContain("STALE_FENCE" as never);
   });

@@ -28,7 +28,12 @@ class FakeExecutionDriver implements ExecutionDriver {
   readonly provisioned = new Map<string, SandboxResources>();
   readonly running = new Set<string>();
   readonly statusCalls: string[] = [];
-  changes = { modified: [] as string[], added: [] as string[], deleted: [] as string[] };
+  changes = {
+    modified: [] as string[],
+    added: [] as string[],
+    deleted: [] as string[],
+    truncated: false,
+  };
   failCreateAfterProvision = false;
   failDestroyOnce = false;
   stopGate: { entered: Deferred; release: Deferred } | undefined;
@@ -223,6 +228,7 @@ describe("ExecutionService", () => {
       modified: ["src/changed.ts"],
       added: ["notes/new.md"],
       deleted: ["old.txt"],
+      truncated: false,
     };
     const execution = new ExecutionService(db.pool, driver);
     const sandbox = await execution.ensure(roomId, participantIds[0]!);
@@ -239,6 +245,7 @@ describe("ExecutionService", () => {
       modified: ["src/changed.ts"],
       added: ["notes/new.md"],
       deleted: ["old.txt"],
+      truncated: false,
     });
     expect(driver.statusCalls).toEqual([sandbox.id]);
   });

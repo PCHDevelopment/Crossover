@@ -5,6 +5,7 @@ import {
   createSandboxReadToken,
   SANDBOX_READ_TOKEN_MAX_TTL_MS,
 } from "@crossover/security";
+import { CrossoverError } from "@crossover/protocol";
 import type { ExecutionDriver, SandboxLimits, SandboxResources } from "./execution.js";
 import { parsePorcelainStatus, type SandboxFileChanges } from "./sandbox-status.js";
 
@@ -317,53 +318,67 @@ export class DockerExecutionDriver implements ExecutionDriver {
     resources: SandboxResources;
   }): Promise<SandboxFileChanges> {
     this.assertResources(input.sandbox_id, input.resources);
-    const result = await this.invoke(
-      [
-        "run",
-        "--rm",
-        "--init",
-        "--network=none",
-        "--read-only",
-        "--user=1000:1000",
-        "--cap-drop=ALL",
-        "--security-opt=no-new-privileges",
-        "--memory=512m",
-        "--cpus=1",
-        "--pids-limit=32",
-        "--tmpfs",
-        "/tmp:rw,nosuid,noexec,size=16m",
-        "--env",
-        "HOME=/tmp",
-        "--env",
-        "GIT_CONFIG_NOSYSTEM=1",
-        "--env",
-        "GIT_CONFIG_GLOBAL=/dev/null",
-        "--env",
-        "GIT_OPTIONAL_LOCKS=0",
-        "--mount",
-        `type=volume,source=${input.resources.volume_ref},target=/workspace,readonly,volume-nocopy`,
-        "--workdir",
-        "/workspace",
-        "--entrypoint",
-        "git",
-        this.gitFetcherImage,
-        "-C",
-        "/workspace",
-        "-c",
-        "core.excludesFile=/workspace/.roomignore",
-        "-c",
-        "core.fsmonitor=false",
-        "status",
-        "--porcelain=v1",
-        "-z",
-        "--untracked-files=all",
-        "--no-renames",
-      ],
-      { timeoutMs: 20_000, maxBuffer: 8 * 1024 * 1024 },
-    );
-    if (result.code !== 0)
-      throw new Error(`ERROR: workspace status failed: ${result.stderr.trim()}`);
-    return parsePorcelainStatus(result.stdout);
+    try {
+      const result = await this.invoke(
+        [
+          "run",
+          "--rm",
+          "--init",
+          "--network=none",
+          "--read-only",
+          "--user=1000:1000",
+          "--cap-drop=ALL",
+          "--security-opt=no-new-privileges",
+          "--memory=512m",
+          "--cpus=1",
+          "--pids-limit=32",
+          "--tmpfs",
+          "/tmp:rw,nosuid,noexec,size=16m",
+          "--env",
+          "HOME=/tmp",
+          "--env",
+          "GIT_CONFIG_NOSYSTEM=1",
+          "--env",
+          "GIT_CONFIG_GLOBAL=/dev/null",
+          "--env",
+          "GIT_OPTIONAL_LOCKS=0",
+          "--mount",
+          `type=volume,source=${input.resources.volume_ref},target=/workspace,readonly,volume-nocopy`,
+          "--workdir",
+          "/workspace",
+          "--entrypoint",
+          "git",
+          this.gitFetcherImage,
+          "-C",
+          "/workspace",
+          "-c",
+          "core.excludesFile=/workspace/.roomignore",
+          "-c",
+          "core.fsmonitor=false",
+          "status",
+          "--porcelain=v1",
+          "-z",
+          "--untracked-files=all",
+          "--no-renames",
+        ],
+        { timeoutMs: 20_000, maxBuffer: 8 * 1024 * 1024 },
+      );
+      if (result.code !== 0)
+        throw new CrossoverError(
+          "UNAVAILABLE",
+          "Sandbox status could not be read; retry the request",
+        );
+      return parsePorcelainStatus(result.stdout);
+    } catch (cause) {
+      if (cause instanceof CrossoverError) throw cause;
+      throw new CrossoverError(
+        "UNAVAILABLE",
+        "Sandbox status could not be read; retry the request",
+        {
+          cause,
+        },
+      );
+    }
   }
 
   async stop(input: { sandbox_id: string; resources: SandboxResources }): Promise<void> {

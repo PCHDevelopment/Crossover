@@ -969,6 +969,7 @@ Idempotency keys are stored for 24 hours per participant. A duplicate returns th
 | `UNAUTHENTICATED` | Missing or invalid token |
 | `FORBIDDEN` | Policy denied the action (details name the missing capability) |
 | `NOT_FOUND` | Resource missing |
+| `UNAVAILABLE` | A transient service or workspace helper failure; retry the request |
 | `VALIDATION` | Malformed request |
 | `CONFLICT_VERSION` | Optimistic concurrency failure (tasks, memory, decisions) |
 | `CONFLICT_MERGE` | ChangeSet could not apply; details carry the Conflict id |

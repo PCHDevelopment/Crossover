@@ -40,7 +40,7 @@ class RecordingExecutionDriver implements ExecutionDriver {
     return { volume_ref: `volume:${sandbox_id}`, container_ref: `container:${sandbox_id}` };
   }
   async status(_input: Parameters<ExecutionDriver["status"]>[0]) {
-    return { modified: [], added: [], deleted: [] };
+    return { modified: [], added: [], deleted: [], truncated: false };
   }
   async materialize(
     _input: Parameters<NonNullable<ExecutionDriver["materialize"]>>[0],
@@ -236,6 +236,7 @@ describe("composeServer", () => {
       modified: [],
       added: [],
       deleted: [],
+      truncated: false,
     });
   });
 

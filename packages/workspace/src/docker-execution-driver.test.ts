@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
-import { newId } from "@crossover/protocol";
+import { CrossoverError, newId } from "@crossover/protocol";
 import { createSandboxProxyCredential, verifySandboxReadToken } from "@crossover/security";
 import { DockerExecutionDriver, type DockerInvoker } from "./docker-execution-driver.js";
 
@@ -138,6 +138,7 @@ describe("DockerExecutionDriver", () => {
       modified: ["src/changed.ts"],
       added: ["notes/new.md"],
       deleted: ["old.txt"],
+      truncated: false,
     });
 
     expect(calls).toHaveLength(1);
@@ -154,6 +155,27 @@ describe("DockerExecutionDriver", () => {
     expect(calls[0]).toContain("core.fsmonitor=false");
     expect(calls[0]).toContain("--no-renames");
     expect(calls[0]).toContain("crossover-git-fetcher:test");
+  });
+
+  it("returns a retryable generic error when Git status fails without exposing stderr", async () => {
+    const driver = new DockerExecutionDriver({
+      invoke: async () => ({ code: 128, stdout: "", stderr: "private helper details" }),
+      gitFetcherImage: "crossover-git-fetcher:test",
+    });
+    const sandboxId = newId("sandbox");
+    const error = await driver
+      .status({
+        sandbox_id: sandboxId,
+        resources: {
+          volume_ref: `crossover-sbx-${sandboxId.toLowerCase()}`,
+          container_ref: `crossover-sbx-${sandboxId.toLowerCase()}`,
+        },
+      })
+      .catch((cause: unknown) => cause);
+
+    expect(error).toBeInstanceOf(CrossoverError);
+    expect(error).toMatchObject({ code: "UNAVAILABLE", retryable: true });
+    expect((error as Error).message).not.toContain("private helper details");
   });
 
   it("creates a hard-quota volume and container with deterministic names", async () => {

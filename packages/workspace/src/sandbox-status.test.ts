@@ -56,7 +56,15 @@ describe("parsePorcelainStatus", () => {
       modified: ["modified.txt"],
       added: ["added.txt", "renamed-new.txt"],
       deleted: ["deleted.txt", "renamed-old.txt"],
+      truncated: false,
     });
+  });
+
+  it("caps large synthetic status output and reports truncation", () => {
+    const output = Array.from({ length: 10_005 }, (_, index) => ` M file-${index}.txt`).join("\0");
+    const parsed = parsePorcelainStatus(output);
+    expect(parsed.modified).toHaveLength(10_000);
+    expect(parsed.truncated).toBe(true);
   });
 });
 
@@ -73,6 +81,7 @@ describe("registerSandboxStatusCommand", () => {
       modified: ["src/app.ts"],
       added: [],
       deleted: [],
+      truncated: false,
     };
     const status = vi.fn(async () => response);
 

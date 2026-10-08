@@ -224,17 +224,30 @@ export class ExecutionService {
   async status(roomId: string, participantId: string): Promise<SandboxWorkingCopyStatus> {
     const sandbox = await this.ensure(roomId, participantId);
     if (sandbox.base_revision === null)
-      throw new Error("Sandbox workspace has not been materialized");
+      throw new CrossoverError("CONFLICT_VERSION", "Sandbox workspace is not ready");
     if (!sandbox.volume_ref || !sandbox.container_ref)
-      throw new Error("Sandbox workspace resources are unavailable");
+      throw new CrossoverError("NOT_FOUND", "Sandbox workspace resources are unavailable");
 
-    const [workspace, changes] = await Promise.all([
-      this.workspaceHead(roomId),
-      this.driver.status({
-        sandbox_id: sandbox.id,
-        resources: { volume_ref: sandbox.volume_ref, container_ref: sandbox.container_ref },
-      }),
-    ]);
+    let workspace: SandboxWorkspaceHead;
+    let changes: SandboxFileChanges;
+    try {
+      [workspace, changes] = await Promise.all([
+        this.workspaceHead(roomId),
+        this.driver.status({
+          sandbox_id: sandbox.id,
+          resources: { volume_ref: sandbox.volume_ref, container_ref: sandbox.container_ref },
+        }),
+      ]);
+    } catch (cause) {
+      if (cause instanceof CrossoverError) throw cause;
+      throw new CrossoverError(
+        "UNAVAILABLE",
+        "Sandbox status could not be read; retry the request",
+        {
+          cause,
+        },
+      );
+    }
     return {
       base_revision: sandbox.base_revision,
       head_revision: workspace.revision,

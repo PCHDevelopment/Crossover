@@ -6,11 +6,14 @@ export interface SandboxFileChanges {
   modified: string[];
   added: string[];
   deleted: string[];
+  truncated: boolean;
 }
+
+const MAX_STATUS_ENTRIES = 10_000;
 
 /** Parse `git status --porcelain=v1 -z --untracked-files=all --no-renames`. */
 export function parsePorcelainStatus(output: string): SandboxFileChanges {
-  const changes: SandboxFileChanges = { modified: [], added: [], deleted: [] };
+  const changes: SandboxFileChanges = { modified: [], added: [], deleted: [], truncated: false };
   for (const record of output.split("\0")) {
     if (!record) continue;
     if (record.length < 4 || record[2] !== " ")
@@ -23,6 +26,13 @@ export function parsePorcelainStatus(output: string): SandboxFileChanges {
     if (state.includes("R") || state.includes("C"))
       throw new Error("Git rename detection must be disabled for sandbox status");
 
+    if (
+      changes.modified.length + changes.added.length + changes.deleted.length >=
+      MAX_STATUS_ENTRIES
+    ) {
+      changes.truncated = true;
+      break;
+    }
     if (state === "??" || state.includes("A")) changes.added.push(path);
     else if (state.includes("D")) changes.deleted.push(path);
     else changes.modified.push(path);

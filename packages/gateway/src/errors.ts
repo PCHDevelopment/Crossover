@@ -20,6 +20,8 @@ export const HTTP_STATUS: Readonly<Record<ErrorCode, number>> = {
   BUDGET_EXCEEDED: 429,
   /** Not in the spec: the ChangeSet is held, which is a conflict with the current state. */
   CIRCUIT_BREAKER: 409,
+  /** A transient service or workspace helper failure; the client may retry. */
+  UNAVAILABLE: 503,
   /** Internal; never sent as-is (see {@link toHttpError}). The caller may retry. */
   STALE_FENCE: 503,
 };

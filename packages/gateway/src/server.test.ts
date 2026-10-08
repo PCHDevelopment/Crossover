@@ -326,6 +326,7 @@ describe("error mapping", () => {
       UNAUTHENTICATED: 401,
       FORBIDDEN: 403,
       NOT_FOUND: 404,
+      UNAVAILABLE: 503,
       VALIDATION: 400,
       CONFLICT_VERSION: 409,
       CONFLICT_MERGE: 409,
