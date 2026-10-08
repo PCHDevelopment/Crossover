@@ -76,9 +76,11 @@ const PRIVATE_KEY = new RegExp(
 );
 // The keyword may be preceded by identifier characters (gitleaks-style), so
 // `.env`-style names like DB_PASSWORD, GITHUB_TOKEN, AWS_SECRET_ACCESS_KEY and
-// stripe_api_key are matched, not just bare `token`/`password`.
+// stripe_api_key are matched, not just bare `token`/`password`. The prefix is
+// bounded to 32 chars: an unbounded `[A-Za-z0-9_.-]*` backtracks once per
+// character per start position, which is quadratic on a long identifier run.
 const ASSIGNMENT =
-  /[A-Za-z0-9_.-]*(?:api[_-]?key|apikey|secret|access[_-]?key|token|password|passwd|auth[_-]?token|client[_-]?secret|private[_-]?key)\s*[:=]\s*["']?([A-Za-z0-9+/_-]{16,128})["']?/dgi;
+  /[A-Za-z0-9_.-]{0,32}(?:api[_-]?key|apikey|secret|access[_-]?key|token|password|passwd|auth[_-]?token|client[_-]?secret|private[_-]?key)\s*[:=]\s*["']?([A-Za-z0-9+/_-]{16,128})["']?/dgi;
 
 // Documented example values are not secrets: the AWS docs key and anything
 // ending in EXAMPLE.

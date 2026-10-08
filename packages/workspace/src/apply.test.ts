@@ -1209,4 +1209,48 @@ describe("workspace.apply_changeset — secret scanning (T901)", () => {
       ).not.toContain(secret);
     }
   });
+
+  it("scans an added line that starts with ++ (not mistaken for a file header)", async () => {
+    const f = await fixture();
+    // Set up a file via an upstream pull so the initial content isn't blocked.
+    await f.applyDirect([{ type: "create", path: "inc.txt", content: "line1\n" }], 0, {
+      actorId: UPSTREAM_ACTOR,
+    });
+    const { rows: revRows } = await db.pool.query(
+      "SELECT MAX(revision)::int AS rev FROM workspace_revisions WHERE room_id = $1",
+      [f.room],
+    );
+    const rev = revRows[0].rev;
+    // A patch whose added line's content itself starts with `++`. Before the
+    // hunk-state fix, `+++…` was skipped as a file header and the secret
+    // escaped the scan.
+    const patch = [
+      "--- a/inc.txt",
+      "+++ b/inc.txt",
+      "@@ -1 +1,2 @@",
+      " line1",
+      `+++${AWS_KEY}`,
+      "",
+    ].join("\n");
+    await expect(
+      f.applyDirect([{ type: "modify", path: "inc.txt", patch }], rev, {}),
+    ).rejects.toMatchObject({
+      code: "VALIDATION",
+      details: {
+        findings: [expect.objectContaining({ path: "inc.txt" })],
+      },
+    });
+  });
+
+  it("surfaces scan_skipped in the inbox for a file too large to scan", async () => {
+    const f = await fixture();
+    const big = "x".repeat(5 * 1024 * 1024 + 1);
+    await f.applyDirect([{ type: "create", path: "big.txt", content: big }], 0, {});
+    const { rows } = await db.pool.query(
+      "SELECT summary FROM inbox_items WHERE room_id = $1 AND kind = 'SECRET_SCAN'",
+      [f.room],
+    );
+    expect(rows.length).toBe(1);
+    expect(rows[0].summary).toContain("too large to scan");
+  });
 });

@@ -124,20 +124,26 @@ const allLines = (text: string): Set<number> => {
  * new-file line N, and return the set of added (`+`) line numbers. Context lines
  * are kept so multi-line structures (a private-key block) stay intact; removals
  * are dropped, so a patch that deletes a secret no longer trips the scanner.
+ *
+ * `---`/`+++` are file headers only before the first hunk; once a hunk has
+ * started, a line beginning with `+` is an added line even if its content
+ * itself starts with `+` (e.g. `+++foo`), so it is not mistaken for a header.
  */
 function patchAddedText(patch: string): { text: string; addedLines: Set<number> } {
   const out: string[] = [];
   const addedLines = new Set<number>();
   let newLine = 0;
+  let inHunk = false;
   for (const raw of patch.split("\n")) {
     const hunk = raw.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
     if (hunk) {
       const start = Number(hunk[1]);
       while (out.length < start - 1) out.push("");
       newLine = start - 1;
+      inHunk = true;
       continue;
     }
-    if (raw.startsWith("+++") || raw.startsWith("---")) continue;
+    if (!inHunk) continue; // file headers (and any preamble) before the first hunk
     if (raw.startsWith("+")) {
       newLine++;
       out.push(raw.slice(1));
@@ -235,14 +241,18 @@ async function scanChangeSet(
 
 /**
  * Inbox summary for flagged findings. Names the file, line and rule — never the
- * matched value, which the scanner already withholds. `omitted` counts findings
+ * matched value, which the scanner already withholds. `scan_skipped` files are
+ * noted separately (too large to scan, so unchecked); `omitted` counts findings
  * dropped by the per-ChangeSet cap.
  */
 function secretScanSummary(findings: PathFinding[], omitted: number): string {
-  const shown = findings.slice(0, 5).map((f) => `${f.path}:${f.line} (${f.rule})`);
-  const more = findings.length > 5 ? ` (+${findings.length - 5} more)` : "";
+  const secrets = findings.filter((f) => f.rule !== "scan_skipped");
+  const skipped = findings.filter((f) => f.rule === "scan_skipped");
+  const shown = secrets.slice(0, 5).map((f) => `${f.path}:${f.line} (${f.rule})`);
+  const more = secrets.length > 5 ? ` (+${secrets.length - 5} more)` : "";
+  const skippedNote = skipped.length > 0 ? ` ${skipped.length} file(s) too large to scan.` : "";
   const omittedNote = omitted > 0 ? ` ${omitted} more omitted.` : "";
-  return `Secret scan: ${shown.join(", ")}${more}${omittedNote} Review before this change ships.`;
+  return `Secret scan: ${shown.join(", ")}${more}${skippedNote}${omittedNote} Review before this change ships.`;
 }
 
 export async function apply(
@@ -268,14 +278,50 @@ export async function apply(
     operations.flatMap((op) => (op.type === "rename" ? [op.from, op.to] : [op.path])),
   );
   for (const path of touched) await ctx.authorize("workspace.write", { path });
-  // Step 2: secret scan (§23.3, T901). The workspace row and base revision are
-  // read first so the scan can diff full-content writes against the base version
-  // and report only the lines this ChangeSet adds. High confidence blocks the
-  // ChangeSet with VALIDATION naming the file and line; low confidence is
-  // applied, then flagged to the author and the room owner via inbox. Upstream
-  // pulls are never blocked — the room doesn't control upstream content — so
-  // every finding there is flagged instead, and never addressed to the
-  // non-participant `system:upstream` actor. The value is never echoed.
+  // Step 2: secret scan (§23.3, T901). The base commit and repo path are read
+  // WITHOUT the workspace lock, so a slow scan (a large file, a long identifier
+  // run) does not hold the FOR UPDATE lock and block other writers. The base
+  // commit is fixed by params.base_workspace_revision and the repo path is set
+  // at provisioning, so neither changes between the unlocked read and the locked
+  // write below. High confidence blocks the ChangeSet with VALIDATION naming the
+  // file and line; low confidence is applied, then flagged to the author and the
+  // room owner via inbox. Upstream pulls are never blocked — the room doesn't
+  // control upstream content — so every finding there is flagged instead, and
+  // never addressed to the non-participant `system:upstream` actor. The value is
+  // never echoed.
+  const ws0 = await client.query<{ id: string; repo_path: string }>(
+    "SELECT id, repo_path FROM workspaces WHERE room_id = $1",
+    [room_id],
+  );
+  const ws0row = ws0.rows[0];
+  if (!ws0row) throw new CrossoverError("NOT_FOUND", "Workspace not provisioned");
+  const base0 = await client.query<{ commit_sha: string }>(
+    `SELECT commit_sha FROM workspace_revisions
+     WHERE room_id = $1 AND workspace_id = $2 AND revision = $3`,
+    [room_id, ws0row.id, params.base_workspace_revision],
+  );
+  const base0row = base0.rows[0];
+  if (!base0row) throw new CrossoverError("VALIDATION", "Unknown workspace revision");
+  const secrets = await scanChangeSet(operations, base0row.commit_sha, ws0row.repo_path);
+  const isUpstream = actorId === UPSTREAM_ACTOR;
+  if (!isUpstream && secrets.high.length > 0) {
+    const shown = secrets.high.slice(0, MAX_FINDINGS_PER_CHANGESET);
+    const omitted = secrets.high.length - shown.length;
+    throw new CrossoverError("VALIDATION", "ChangeSet contains a high-confidence secret", {
+      details: {
+        reason: "secret_detected",
+        findings: shown.map((f) => ({
+          rule: f.rule,
+          path: f.path,
+          line: f.line,
+          col: f.col,
+          fingerprint: f.fingerprint,
+        })),
+        ...(omitted > 0 ? { omitted } : {}),
+      },
+    });
+  }
+  // Now acquire the workspace lock for the write.
   const workspace = await client.query<{ id: string; repo_path: string }>(
     "SELECT id, repo_path FROM workspaces WHERE room_id = $1 FOR UPDATE",
     [room_id],
@@ -295,25 +341,6 @@ export async function apply(
   const head = headRow.rows[0];
   const base = baseRow.rows[0];
   if (!head || !base) throw new CrossoverError("VALIDATION", "Unknown workspace revision");
-  const secrets = await scanChangeSet(operations, base.commit_sha, ws.repo_path);
-  const isUpstream = actorId === UPSTREAM_ACTOR;
-  if (!isUpstream && secrets.high.length > 0) {
-    const shown = secrets.high.slice(0, MAX_FINDINGS_PER_CHANGESET);
-    const omitted = secrets.high.length - shown.length;
-    throw new CrossoverError("VALIDATION", "ChangeSet contains a high-confidence secret", {
-      details: {
-        reason: "secret_detected",
-        findings: shown.map((f) => ({
-          rule: f.rule,
-          path: f.path,
-          line: f.line,
-          col: f.col,
-          fingerprint: f.fingerprint,
-        })),
-        ...(omitted > 0 ? { omitted } : {}),
-      },
-    });
-  }
   let resolution:
     | {
         conflictId: string;
@@ -599,11 +626,10 @@ export async function apply(
   );
   // Flagged secrets: for a normal apply, the low-confidence findings (high
   // confidence already threw); for an upstream pull, every finding, since the
-  // pull is never blocked. `scan_skipped` is a size note, not a secret, so it
-  // never reaches the inbox. The summary names file and line, never the value.
-  const toFlag = (isUpstream ? [...secrets.high, ...secrets.low] : secrets.low).filter(
-    (f) => f.rule !== "scan_skipped",
-  );
+  // pull is never blocked. `scan_skipped` is included so a file too large to
+  // scan is not silently unchecked. The summary names file and line, never the
+  // value.
+  const toFlag = isUpstream ? [...secrets.high, ...secrets.low] : secrets.low;
   if (toFlag.length > 0) {
     const { rows } = await client.query<{ owner_id: string }>(
       "SELECT owner_id FROM rooms WHERE id = $1",

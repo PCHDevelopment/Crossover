@@ -155,6 +155,21 @@ describe("security.scanSecrets", () => {
     expect(findings.length).toBeLessThanOrEqual(MAX_FINDINGS_PER_FILE);
   });
 
+  it("scans a 40k-char identifier run within a time bound (no quadratic regex)", () => {
+    // A long run of identifier characters used to make the generic rule's
+    // unbounded [A-Za-z0-9_.-]* prefix backtrack once per character per start
+    // position — O(n^2), ~2.9 s at 40k. The prefix is now bounded to 32 chars,
+    // so the scan is linear.
+    const text = `password = ${"a".repeat(40_000)}`;
+    const start = Date.now();
+    const findings = scanSecrets(text);
+    const ms = Date.now() - start;
+    expect(ms).toBeLessThan(500);
+    // The 40k-char value exceeds the 128-char cap, so no finding — but the scan
+    // itself must be fast.
+    expect(findings).toEqual([]);
+  });
+
   it("is total: it never throws", () => {
     for (const text of [
       "",
