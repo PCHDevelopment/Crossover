@@ -19,7 +19,7 @@ jobs:
           POSTGRES_PASSWORD: crossover
           POSTGRES_DB: crossover
         ports:
-          - 5432:5432
+          - 5434:5432
         options: >-
           --health-cmd "pg_isready -U crossover"
           --health-interval 2s
@@ -27,7 +27,7 @@ jobs:
       redis:
         image: redis:7
         ports:
-          - 6379:6379
+          - 6380:6379
     env:
       DATABASE_URL: postgres://crossover:crossover@localhost:5432/crossover
       REDIS_URL: redis://localhost:6379
@@ -62,7 +62,7 @@ jobs:
           POSTGRES_USER: crossover
           POSTGRES_PASSWORD: crossover
           POSTGRES_DB: crossover
-        ports: ["5432:5432"]
+        ports: ["5434:5432"]
         options: >-
           --health-cmd "pg_isready -U crossover"
           --health-interval 2s
