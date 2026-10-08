@@ -23,6 +23,12 @@ class Contract(unittest.IsolatedAsyncioTestCase):
         self.client = CrossoverClient(h.BASE_URL, connect=self.connections)
         self.addAsyncCleanup(self.client.aclose)
 
+    def http(self, transport: httpx.AsyncBaseTransport) -> httpx.AsyncClient:
+        """An HTTP client over `transport`, closed after the test: the SDK closes only clients it made."""
+        client = httpx.AsyncClient(transport=transport)
+        self.addAsyncCleanup(client.aclose)
+        return client
+
     async def test_commands_are_typed_calls_replay_on_the_same_key_and_errors_are_crossover_errors(self) -> None:
         r = await h.new_room(self.client)
         first = await r["dev"].api.messages.send({"body": "hello"}, idempotency_key="k-1")
@@ -53,7 +59,7 @@ class Contract(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_response_lost_on_the_way_back_is_retried_with_the_same_key_and_runs_once(self) -> None:
         spy = h.Spy()
-        client = CrossoverClient(h.BASE_URL, http=httpx.AsyncClient(transport=spy), retry=h.fast_retry())
+        client = CrossoverClient(h.BASE_URL, http=self.http(spy), retry=h.fast_retry())
         r = await h.new_room(client)
         spy.lose_next = "/commands|only once"
         sent = await r["dev"].api.messages.send({"body": "only once"})
@@ -115,7 +121,7 @@ class Contract(unittest.IsolatedAsyncioTestCase):
 
     async def test_an_expired_access_token_is_renewed_once_for_many_calls_and_on_tokens_gets_the_pair(self) -> None:
         spy = h.Spy()
-        client = CrossoverClient(h.BASE_URL, http=httpx.AsyncClient(transport=spy), retry=h.fast_retry())
+        client = CrossoverClient(h.BASE_URL, http=self.http(spy), retry=h.fast_retry())
         r = await h.new_room(client)
         pairs: list[dict] = []
         dev = client.room(r["room_id"], r["dev_tokens"], on_tokens=pairs.append)
@@ -140,7 +146,7 @@ class Contract(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_refresh_response_lost_on_the_way_back_is_not_retried_by_the_sdk(self) -> None:
         spy = h.Spy()
-        client = CrossoverClient(h.BASE_URL, http=httpx.AsyncClient(transport=spy), retry=h.fast_retry())
+        client = CrossoverClient(h.BASE_URL, http=self.http(spy), retry=h.fast_retry())
         r = await h.new_room(client)
         dev = client.room(r["room_id"], r["dev_tokens"])
         h.expire_agent_tokens(r["room_id"])
@@ -184,7 +190,7 @@ class Contract(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_subscription_outlives_its_access_token(self) -> None:
         spy = h.Spy()
-        client = CrossoverClient(h.BASE_URL, http=httpx.AsyncClient(transport=spy), connect=self.connections)
+        client = CrossoverClient(h.BASE_URL, http=self.http(spy), connect=self.connections)
         r = await h.new_room(client)
         pairs: list[dict] = []
         dev = client.room(r["room_id"], r["dev_tokens"], on_tokens=pairs.append)

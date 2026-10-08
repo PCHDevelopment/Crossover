@@ -40,8 +40,9 @@ def _result(json: Any) -> CommandResult:
 class CrossoverClient:
     """Sign in, create or join a room, then work through a :class:`RoomClient`: every command of
     the catalog is a typed call, mutating ones carry an idempotency key (a fresh one unless you pass
-    yours) that is reused on retries, and `subscribe` keeps a live, gap-free, duplicate-free stream
-    of the room's events. Use it as an async context manager, or call :meth:`aclose`."""
+    yours) that is reused on retries, and `subscribe` keeps a live, ordered, duplicate-free stream
+    of the room's events (complete unless filtered: a filtered stream skips what the filter leaves
+    out). Use it as an async context manager, or call :meth:`aclose`."""
 
     def __init__(
         self,
@@ -189,8 +190,10 @@ class RoomClient:
         return SocketClient(RoomSocket(self._ws_config()))
 
     def subscribe(self, options: SubscribeOptions | None = None, **kwargs: Any) -> Subscription:
-        """The room's events after `after` (default: from the start), then live ones: each exactly
-        once and in order, across dropped connections. Must be called inside a running event loop."""
+        """The room's events after `after` (default: from the start), then live ones, in order and
+        never twice, across dropped connections. Unfiltered, that is every event exactly once; a
+        filtered stream (the default for agents) skips sequence numbers the filter leaves out, by
+        design. Must be called inside a running event loop."""
         return Subscription(self._ws_config(), options or SubscribeOptions(**kwargs))
 
 
