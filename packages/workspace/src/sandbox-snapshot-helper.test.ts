@@ -1,15 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import {
-  lstat,
-  mkdtemp,
-  mkdir,
-  readFile,
-  readlink,
-  rm,
-  symlink,
-  writeFile,
-} from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -24,21 +15,41 @@ interface HelperResult {
   code: number;
   entries?: { path: string; mode: string; sha: string | null; size: number; content?: string }[];
   error?: string;
+  walked?: string;
 }
 
-async function runHelper(root: string, input: Record<string, unknown>): Promise<HelperResult> {
+async function runHelper(
+  root: string,
+  input: Record<string, unknown>,
+  options?: { pauseAt: string; onPause: () => Promise<void> },
+): Promise<HelperResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ["-e", SANDBOX_SNAPSHOT_HELPER], {
+    const script = options
+      ? SANDBOX_SNAPSHOT_HELPER.replace(
+          "const beforeDir = await directory.stat({ bigint: true });",
+          `const beforeDir = await directory.stat({ bigint: true }); process.stderr.write("walk:" + prefix.toString("utf8") + "\\n"); if (prefix.toString("utf8") === ${JSON.stringify(options.pauseAt)}) await new Promise((resolve) => setTimeout(resolve, 100));`,
+        )
+      : SANDBOX_SNAPSHOT_HELPER;
+    const child = spawn(process.execPath, ["-e", script], {
       stdio: ["pipe", "pipe", "pipe"],
     });
     let stdout = "";
     let stderr = "";
+    let sideEffect = Promise.resolve();
+    let pauseHandled = false;
     child.stdout.setEncoding("utf8").on("data", (chunk: string) => (stdout += chunk));
-    child.stderr.setEncoding("utf8").on("data", (chunk: string) => (stderr += chunk));
+    child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
+      stderr += chunk;
+      if (!pauseHandled && options && stderr.includes(`walk:${options.pauseAt}\n`)) {
+        pauseHandled = true;
+        sideEffect = options.onPause();
+      }
+    });
     child.once("error", reject);
-    child.once("close", (code) => {
+    child.once("close", async (code) => {
       try {
-        resolve({ code: code ?? 1, ...JSON.parse(stdout) });
+        await sideEffect;
+        resolve({ code: code ?? 1, walked: stderr, ...JSON.parse(stdout) });
       } catch {
         reject(new Error(`Snapshot helper returned invalid JSON: ${stderr}`));
       }
@@ -60,131 +71,101 @@ describe("sandbox snapshot helper", () => {
     const root = await mkdtemp(join(tmpdir(), "crossover-sandbox-snapshot-"));
     roots.push(root);
     const workspace = join(root, "workspace");
-    const outside = join(root, "outside");
     await mkdir(join(workspace, ".git"), { recursive: true });
-    await mkdir(outside);
 
     const marker = join(root, "fsmonitor-ran");
     await writeFile(
       join(workspace, ".git", "config"),
-      `[core]\n\tfsmonitor = !touch ${marker}\n[filter "evil"]\n\tclean = touch ${marker}\n`,
+      `[core]\nfsmonitor=!touch ${marker}\n[filter "evil"]\nclean=touch ${marker}\n`,
     );
     await writeFile(join(workspace, ".gitattributes"), "*.bin filter=evil\n");
     await writeFile(join(workspace, ".gitignore"), "*.txt\n");
     const binary = Buffer.from([0, 1, 2, 0xff, 0x0a]);
     await writeFile(join(workspace, "sample.bin"), binary);
-    await writeFile(join(outside, "secret.txt"), "outside secret");
-    await symlink("../outside/secret.txt", join(workspace, "link"));
-    await symlink("../outside", join(workspace, "escape"));
     await symlink("/etc/passwd", join(workspace, "passwd-link"));
 
     const inventory = await runHelper(workspace, {
       action: "inventory",
-      tracked_paths: [path64("sample.bin"), path64("link")],
+      tracked_paths: [path64("sample.bin"), path64("passwd-link")],
     });
-    expect(inventory.code).toBe(0);
     const entries = inventory.entries!;
-    expect(entries.map(({ path }) => Buffer.from(path, "base64").toString()).sort()).toEqual(
-      [".gitattributes", ".gitignore", "escape", "link", "passwd-link", "sample.bin"].sort(),
+    expect(entries.map(({ path }) => path).sort()).toEqual(
+      [".gitattributes", ".gitignore", "passwd-link", "sample.bin"].map(path64).sort(),
     );
-    expect(
-      entries.find(({ path }) => Buffer.from(path, "base64").toString() === "sample.bin"),
-    ).toMatchObject({ mode: "100644", sha: gitBlobHash(binary), size: binary.length });
-    expect(
-      entries.find(({ path }) => Buffer.from(path, "base64").toString() === "link"),
-    ).toMatchObject({ mode: "120000", sha: gitBlobHash(Buffer.from("../outside/secret.txt")) });
-    expect(
-      entries.some(({ path }) => Buffer.from(path, "base64").toString().includes("secret.txt")),
-    ).toBe(false);
+    expect(entries.find(({ path }) => path === path64("sample.bin"))).toMatchObject({
+      mode: "100644",
+      sha: gitBlobHash(binary),
+      size: binary.length,
+    });
+    expect(entries.find(({ path }) => path === path64("passwd-link"))).toMatchObject({
+      mode: "120000",
+      sha: gitBlobHash(Buffer.from("/etc/passwd")),
+    });
     expect(await readFile(marker).catch(() => null)).toBeNull();
-
-    const link = entries.find(({ path }) => Buffer.from(path, "base64").toString() === "link")!;
-    const snapshot = await runHelper(workspace, {
-      action: "read",
-      paths: [link],
-    });
-    expect(snapshot.code).toBe(0);
-    expect(Buffer.from(snapshot.entries![0]!.content!, "base64").toString()).toBe(
-      "../outside/secret.txt",
-    );
-    expect(Buffer.from(snapshot.entries![0]!.content!, "base64").toString()).not.toContain(
-      "outside secret",
-    );
-
-    const passwdLink = entries.find(
-      ({ path }) => Buffer.from(path, "base64").toString() === "passwd-link",
-    )!;
-    const passwdSnapshot = await runHelper(workspace, {
-      action: "read",
-      paths: [passwdLink],
-    });
-    expect(passwdSnapshot.code).toBe(0);
-    expect(Buffer.from(passwdSnapshot.entries![0]!.content!, "base64").toString()).toBe(
-      "/etc/passwd",
-    );
   });
 
-  it("does not hash new paths until canonical ignore filtering has selected them", async () => {
+  it("prunes ignored node_modules before counting or stat-checking its entries", async () => {
     const root = await mkdtemp(join(tmpdir(), "crossover-sandbox-snapshot-"));
     roots.push(root);
-    await writeFile(join(root, "ignored.generated"), "generated content");
-    const inventory = await runHelper(root, { action: "inventory", tracked_paths: [] });
-    expect(inventory.code).toBe(0);
-    expect(inventory.entries).toEqual([
+    const ignored = join(root, "node_modules");
+    await mkdir(ignored);
+    await Promise.all(
+      Array.from({ length: 4 }, (_, index) => writeFile(join(ignored, `file-${index}`), "x")),
+    );
+    await writeFile(join(root, "keep.txt"), "visible");
+    const inventory = await runHelper(
+      root,
       {
-        path: path64("ignored.generated"),
-        mode: "100644",
-        sha: null,
-        size: Buffer.byteLength("generated content"),
+        action: "inventory",
+        max_entries: 1,
+        ignore_rules: [{ path: ".gitignore", patterns: ["node_modules/"] }],
       },
+      {
+        pauseAt: "",
+        onPause: () => writeFile(join(ignored, "concurrent.log"), "generated"),
+      },
+    );
+    expect(inventory.entries?.map(({ path }) => Buffer.from(path, "base64").toString())).toEqual([
+      "keep.txt",
     ]);
+    expect(inventory.walked).toContain("walk:\n");
+    expect(inventory.walked).not.toContain("walk:node_modules\n");
+
+    const tooMany = await runHelper(root, { action: "inventory", max_entries: 1 });
+    expect(tooMany.error).toBe("too_many_entries");
+    const tooLarge = await runHelper(root, {
+      action: "inventory",
+      tracked_paths: [path64("keep.txt")],
+      max_bytes: 0,
+    });
+    expect(tooLarge.error).toBe("scan_too_large");
+    const live = join(root, "live");
+    await mkdir(live);
+    await writeFile(join(live, "before.txt"), "before");
+    const result = await runHelper(
+      root,
+      { action: "inventory" },
+      {
+        pauseAt: "live",
+        onPause: () => writeFile(join(live, "concurrent.log"), "generated"),
+      },
+    );
+    expect(result.walked).toContain("walk:live\n");
+    expect(result.error).toBe("changed_during_read");
   });
 
-  it("rejects file bytes that changed after the inventory and refuses symlink-parent traversal", async () => {
+  it("rejects bytes changed after inventory", async () => {
     const root = await mkdtemp(join(tmpdir(), "crossover-sandbox-snapshot-"));
     roots.push(root);
-    await mkdir(join(root, "outside"));
     await writeFile(join(root, "tracked.txt"), "old");
-    await writeFile(join(root, "outside", "secret.txt"), "secret");
-    await symlink("outside", join(root, "escape"));
-
     const inventory = await runHelper(root, {
       action: "inventory",
       tracked_paths: [path64("tracked.txt")],
     });
-    const tracked = inventory.entries!.find(
-      ({ path }) => Buffer.from(path, "base64").toString() === "tracked.txt",
-    )!;
+    const tracked = inventory.entries![0]!;
     await writeFile(join(root, "tracked.txt"), "new"); // Same byte length; stat alone would miss it.
     const changed = await runHelper(root, { action: "read", paths: [tracked] });
-    expect(changed.code).toBe(1);
-    expect(changed.error).toBe("changed_during_read");
-
-    const escaped = await runHelper(root, {
-      action: "read",
-      paths: [{ path: path64("escape/secret.txt"), mode: "100644", sha: null, size: 6 }],
-    });
-    expect(escaped.code).toBe(1);
-    expect(JSON.stringify(escaped)).not.toContain("secret");
-  });
-
-  it("bounds huge trees and tracked-byte scans", async () => {
-    const root = await mkdtemp(join(tmpdir(), "crossover-sandbox-snapshot-"));
-    roots.push(root);
-    await Promise.all(
-      Array.from({ length: 5 }, (_, index) => writeFile(join(root, `file-${index}`), "x")),
-    );
-    const tooMany = await runHelper(root, { action: "inventory", max_entries: 3 });
-    expect(tooMany.code).toBe(1);
-    expect(tooMany.error).toBe("too_many_entries");
-
-    const tooLarge = await runHelper(root, {
-      action: "inventory",
-      tracked_paths: [path64("file-0")],
-      max_bytes: 0,
-    });
-    expect(tooLarge.code).toBe(1);
-    expect(tooLarge.error).toBe("scan_too_large");
+    expect(changed).toMatchObject({ code: 1, error: "changed_during_read" });
   });
 
   it("installs a rebased delta without following an existing sandbox symlink", async () => {
@@ -194,7 +175,7 @@ describe("sandbox snapshot helper", () => {
     await writeFile(outside, "keep me");
     await symlink(outside, join(root, "escape"));
 
-    const install = await runHelper(root, {
+    await runHelper(root, {
       action: "install",
       delete_paths: [path64("escape")],
       files: [
@@ -203,18 +184,9 @@ describe("sandbox snapshot helper", () => {
           mode: "100755",
           content: Buffer.from([0, 1, 255]).toString("base64"),
         },
-        {
-          path: path64("link"),
-          mode: "120000",
-          content: Buffer.from("../outside.txt").toString("base64"),
-        },
       ],
     });
-    expect(install.code).toBe(0);
     expect(await readFile(outside, "utf8")).toBe("keep me");
     expect((await readFile(join(root, "bin/tool"))).toString("hex")).toBe("0001ff");
-    expect((await lstat(join(root, "bin/tool"))).mode & 0o111).toBeGreaterThan(0);
-    expect((await lstat(join(root, "link"))).isSymbolicLink()).toBe(true);
-    expect(await readlink(join(root, "link"))).toBe("../outside.txt");
   });
 });

@@ -17,6 +17,7 @@ async function sandboxSnapshotHelper(): Promise<void> {
     action: "inventory" | "read" | "install";
     hash: "sha1" | "sha256";
     tracked_paths?: string[];
+    ignore_rules?: { path: string; patterns: string[] }[];
     paths?: { path: string; mode: string; sha: string | null; size: number }[];
     max_bytes?: number;
     max_entries?: number;
@@ -67,9 +68,69 @@ async function sandboxSnapshotHelper(): Promise<void> {
   try {
     if (input.action === "inventory") {
       const tracked = new Set(input.tracked_paths ?? []);
+      const trackedDirectories = new Set<string>();
+      for (const path of tracked) {
+        const decoded = Buffer.from(path, "base64").toString("utf8");
+        for (let slash = decoded.indexOf("/"); slash >= 0; slash = decoded.indexOf("/", slash + 1))
+          trackedDirectories.add(Buffer.from(decoded.slice(0, slash)).toString("base64"));
+      }
+      const glob = (pattern: string) => {
+        let source = "^";
+        for (let index = 0; index < pattern.length; index++) {
+          const char = pattern[index]!;
+          if (char === "*" && pattern[index + 1] === "*") {
+            source += pattern[index + 2] === "/" ? "(?:.*/)?" : ".*";
+            index += pattern[index + 2] === "/" ? 2 : 1;
+          } else if (char === "*") source += "[^/]*";
+          else if (char === "?") source += "[^/]";
+          else if (char === "[") {
+            const end = pattern.indexOf("]", index + 1);
+            if (end > index + 1) {
+              source += `[${pattern.slice(index + 1, end).replace(/^!/, "^")}]`;
+              index = end;
+            } else source += "\\[";
+          } else if (char === "\\" && index + 1 < pattern.length)
+            source += `\\${pattern[++index]!}`;
+          else source += /[.+^${}()|]/.test(char) ? `\\${char}` : char;
+        }
+        return new RegExp(`${source}$`);
+      };
+      const ignoreRules = (input.ignore_rules ?? []).flatMap(({ path, patterns }) => {
+        const base =
+          path === ".roomignore" || path === ".gitignore"
+            ? ""
+            : path.slice(0, -10).replace(/\/$/, "");
+        return patterns.flatMap((line) => {
+          if (!line || line.startsWith("#")) return [];
+          const negated = line.startsWith("!") && !line.startsWith("\\!");
+          let pattern = negated ? line.slice(1) : line.replace(/^\\([#!])/, "$1");
+          const directoryOnly = pattern.endsWith("/");
+          if (directoryOnly) pattern = pattern.slice(0, -1);
+          const anchored = pattern.startsWith("/");
+          if (anchored) pattern = pattern.slice(1);
+          if (!pattern) return [];
+          const basenameOnly = !anchored && !pattern.includes("/");
+          return [{ base, basenameOnly, directoryOnly, negated, regex: glob(pattern) }];
+        });
+      });
+      const isIgnored = (path: string, isDirectory: boolean) => {
+        let ignored = false;
+        for (const rule of ignoreRules) {
+          if (rule.base && !path.startsWith(`${rule.base}/`)) continue;
+          if (rule.directoryOnly && !isDirectory) continue;
+          const relative = rule.base ? path.slice(rule.base.length + 1) : path;
+          const candidate = rule.basenameOnly ? relative.split("/").at(-1)! : relative;
+          if (rule.regex.test(candidate)) ignored = !rule.negated;
+        }
+        return ignored;
+      };
       const entries: { path: string; mode: string; sha: string | null; size: number }[] = [];
       let scannedBytes = 0;
-      const walk = async (directory: NodeFsPromises.FileHandle, prefix: Buffer): Promise<void> => {
+      const walk = async (
+        directory: NodeFsPromises.FileHandle,
+        prefix: Buffer,
+        ignoredParent = false,
+      ): Promise<void> => {
         const beforeDir = await directory.stat({ bigint: true });
         const listing = await fs.opendir(`/proc/self/fd/${directory.fd}`, {
           encoding: "buffer",
@@ -79,8 +140,27 @@ async function sandboxSnapshotHelper(): Promise<void> {
           if (/^(?:\.git|git~1)$/i.test(name.toString("utf8"))) continue;
           const relative = prefix.length ? Buffer.concat([prefix, Buffer.from("/"), name]) : name;
           checkedPath(relative);
+          const encodedPath = relative.toString("base64");
+          const path = relative.toString("utf8");
+          const directoryEntry = dirent.isDirectory();
+          let ignored = isIgnored(path, directoryEntry);
+          if (
+            (ignoredParent || ignored) &&
+            !tracked.has(encodedPath) &&
+            !trackedDirectories.has(encodedPath)
+          )
+            continue;
           const target = childPath(directory, name);
           const before = await fs.lstat(target, { bigint: true });
+          if (before.isDirectory() && !directoryEntry) {
+            ignored = isIgnored(path, true);
+            if (
+              (ignoredParent || ignored) &&
+              !tracked.has(encodedPath) &&
+              !trackedDirectories.has(encodedPath)
+            )
+              continue;
+          }
           if (before.isDirectory()) {
             const child = await fs.open(
               target,
@@ -89,7 +169,7 @@ async function sandboxSnapshotHelper(): Promise<void> {
             try {
               const opened = await child.stat({ bigint: true });
               if (!sameStat(before, opened)) throw new Error("changed_during_read");
-              await walk(child, relative);
+              await walk(child, relative, ignoredParent || ignored);
             } finally {
               await child.close();
             }
@@ -104,11 +184,11 @@ async function sandboxSnapshotHelper(): Promise<void> {
             const after = await fs.lstat(target, { bigint: true });
             if (!sameStat(before, after)) throw new Error("changed_during_read");
             size = bytes.length;
-            if (tracked.has(relative.toString("base64"))) sha = objectHash(bytes, input.hash);
+            if (tracked.has(encodedPath)) sha = objectHash(bytes, input.hash);
           } else if (before.isFile()) {
             if (before.size > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("file_too_large");
             size = Number(before.size);
-            if (tracked.has(relative.toString("base64"))) {
+            if (tracked.has(encodedPath)) {
               scannedBytes += size;
               if (scannedBytes > (input.max_bytes ?? 1024 * 1024 * 1024))
                 throw new Error("scan_too_large");
@@ -146,7 +226,8 @@ async function sandboxSnapshotHelper(): Promise<void> {
           if (entries.length > maxEntries) throw new Error("too_many_entries");
         }
         const afterDir = await directory.stat({ bigint: true });
-        if (!sameStat(beforeDir, afterDir)) throw new Error("changed_during_read");
+        if (!ignoredParent && !sameStat(beforeDir, afterDir))
+          throw new Error("changed_during_read");
       };
       await walk(root, Buffer.alloc(0));
       process.stdout.write(JSON.stringify({ entries }));
@@ -160,10 +241,6 @@ async function sandboxSnapshotHelper(): Promise<void> {
         directory: NodeFsPromises.FileHandle;
         name: Buffer;
         opened: NodeFsPromises.FileHandle[];
-        ancestors: {
-          parent: NodeFsPromises.FileHandle;
-          name: Buffer;
-        }[];
       }> => {
         const pathBytes = Buffer.from(encodedPath, "base64");
         checkedPath(pathBytes);
@@ -173,12 +250,7 @@ async function sandboxSnapshotHelper(): Promise<void> {
           .map((part) => Buffer.from(part));
         let directory = root;
         const opened: NodeFsPromises.FileHandle[] = [];
-        const ancestors: {
-          parent: NodeFsPromises.FileHandle;
-          name: Buffer;
-        }[] = [];
         for (const part of parts.slice(0, -1)) {
-          const parent = directory;
           const target = childPath(directory, part);
           let next: NodeFsPromises.FileHandle;
           try {
@@ -195,10 +267,9 @@ async function sandboxSnapshotHelper(): Promise<void> {
             );
           }
           opened.push(next);
-          ancestors.push({ parent, name: part });
           directory = next;
         }
-        return { directory, name: parts.at(-1)!, opened, ancestors };
+        return { directory, name: parts.at(-1)!, opened };
       };
       for (const path of input.delete_paths ?? []) {
         const parent = await openParent(path);
@@ -210,16 +281,6 @@ async function sandboxSnapshotHelper(): Promise<void> {
             const code = (error as NodeJS.ErrnoException).code;
             if (code === "EISDIR" || code === "EPERM") await fs.rmdir(target);
             else if (code !== "ENOENT") throw error;
-          }
-          for (const ancestor of parent.ancestors.reverse()) {
-            try {
-              await fs.rmdir(childPath(ancestor.parent, ancestor.name));
-            } catch (error) {
-              const code = (error as NodeJS.ErrnoException).code;
-              if (code === "ENOENT") continue;
-              if (code === "ENOTEMPTY" || code === "EEXIST") break;
-              throw error;
-            }
           }
         } finally {
           for (const opened of parent.opened.reverse()) await opened.close();
