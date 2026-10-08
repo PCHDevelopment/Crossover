@@ -21,6 +21,7 @@ Periodic big-picture reviews by O1: is the merged code building the product in A
 **Against the §30 demo flow.** No change since Review 5, except that step 17 now works. Step 8 (sandbox exec) is still blocked on M10, behind T611. Steps 7 and 9 and the UI wait on T1104/T1105.
 
 **On track.** Review keeps catching real defects before they merge. This round found:
+
 - a ReDoS in subscription type patterns;
 - refresh retries that revoke the whole login when a response is lost;
 - `TRUST_PROXY` trusting a forged `X-Forwarded-For`;
