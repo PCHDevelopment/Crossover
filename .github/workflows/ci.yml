@@ -62,7 +62,7 @@ jobs:
           POSTGRES_USER: crossover
           POSTGRES_PASSWORD: crossover
           POSTGRES_DB: crossover
-        ports: ["5432:5432"]
+        ports: ["5434:5432"]
         options: >-
           --health-cmd "pg_isready -U crossover"
           --health-interval 2s
