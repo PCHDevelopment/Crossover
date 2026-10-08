@@ -29,8 +29,10 @@ jobs:
         ports:
           - 6380:6379
     env:
-      DATABASE_URL: postgres://crossover:crossover@localhost:5432/crossover
-      REDIS_URL: redis://localhost:6379
+      # The service containers publish on 5434/6380 so they don't collide with a Postgres or Redis
+      # already running on the self-hosted runner's host; the URLs must use the same ports.
+      DATABASE_URL: postgres://crossover:crossover@localhost:5434/crossover
+      REDIS_URL: redis://localhost:6380
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -42,7 +44,31 @@ jobs:
       - run: pnpm format:check
       - run: pnpm lint
       - run: pnpm typecheck
-      - run: pnpm --filter @crossover/server exec playwright-core install --with-deps chromium
+      # workspace.search runs ripgrep. A pinned, checksum-verified binary needs no sudo, so it works
+      # on hosted and self-hosted runners alike.
+      - name: Install ripgrep
+        run: |
+          if command -v rg >/dev/null; then rg --version | head -1; exit 0; fi
+          case "$(uname -m)" in
+            x86_64) target=x86_64-unknown-linux-musl; sum=4cf9f2741e6c465ffdb7c26f38056a59e2a2544b51f7cc128ef28337eeae4d8e ;;
+            aarch64) target=aarch64-unknown-linux-gnu; sum=c827481c4ff4ea10c9dc7a4022c8de5db34a5737cb74484d62eb94a95841ab2f ;;
+            *) echo "No pinned ripgrep for $(uname -m)"; exit 1 ;;
+          esac
+          dir="$RUNNER_TEMP/ripgrep"
+          mkdir -p "$dir"
+          curl -fsSL -o "$dir/rg.tar.gz" "https://github.com/BurntSushi/ripgrep/releases/download/14.1.1/ripgrep-14.1.1-$target.tar.gz"
+          echo "$sum  $dir/rg.tar.gz" | sha256sum -c -
+          tar -xzf "$dir/rg.tar.gz" -C "$dir" --strip-components=1
+          echo "$dir" >> "$GITHUB_PATH"
+      # --with-deps installs Chromium's system libraries through sudo, which a self-hosted runner may
+      # not allow without a password. There, the libraries must already be on the machine.
+      - name: Install Chromium
+        run: |
+          if sudo -n true 2>/dev/null; then
+            pnpm --filter @crossover/server exec playwright-core install --with-deps chromium
+          else
+            pnpm --filter @crossover/server exec playwright-core install chromium
+          fi
       - run: docker pull node:22-bookworm-slim
       - run: docker build -f apps/egress-proxy/Dockerfile -t crossover-egress-proxy:test .
       - run: docker build -f apps/git-fetcher/Dockerfile -t crossover-git-fetcher:test .
@@ -67,7 +93,7 @@ jobs:
           --health-interval 2s
           --health-retries 15
     env:
-      DATABASE_URL: postgres://crossover:crossover@localhost:5432/crossover
+      DATABASE_URL: postgres://crossover:crossover@localhost:5434/crossover
       BENCH_OUTPUT: ${{ github.workspace }}/benchmark-results.json
     steps:
       - uses: actions/checkout@v4
