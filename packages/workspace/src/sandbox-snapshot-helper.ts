@@ -47,7 +47,7 @@ async function sandboxSnapshotHelper(): Promise<void> {
   };
   const checkedPath = (bytes: Buffer): string => {
     const text = bytes.toString("utf8");
-    if (!Buffer.from(text, "utf8").equals(bytes)) throw new Error("invalid_path_encoding");
+    if (!Buffer.from(text, "utf8").equals(bytes)) throw new Error(`invalid_path_encoding:${text}`);
     const parts = text.split("/");
     if (
       !text ||
