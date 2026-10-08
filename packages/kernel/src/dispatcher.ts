@@ -54,8 +54,14 @@ export interface CommandContext {
   /**
    * Run the policy check again for a finer-grained resource (e.g. each path of a ChangeSet).
    * Same principal, same transaction; `room_id` is filled in. Throws `FORBIDDEN` to deny.
+   * With `anyScope`, holding a grant of the capability for *some* scope is enough (to list what
+   * someone may use at all, say); the specific scope is checked on use.
    */
-  authorize(action: string, resource?: Record<string, unknown>): Promise<void>;
+  authorize(
+    action: string,
+    resource?: Record<string, unknown>,
+    options?: AuthorizeOptions,
+  ): Promise<void>;
   /**
    * Like {@link authorize}, but asks whether *another participant of this room* could do
    * `action` (say, whether someone offered the lead can accept it). It goes through the same
@@ -202,9 +208,24 @@ export interface CommandDefinition<S extends z.ZodType, R> {
    * commands only.
    */
   prepare?(ctx: PrepareContext, params: z.infer<S>): Promise<unknown>;
+  /**
+   * For a command that must not run inside the approver's transaction (it has a side effect that
+   * can't be rolled back): approving only lifts the gate for the requester's retry of the same
+   * request (same idempotency key and params), which then runs through the ordinary path.
+   */
+  approvalLiftsGate?: boolean;
   /** Release what `prepare` made (a temporary directory), whatever `execute` did. Never throws into the command. */
   disposePrepared?(prepared: unknown): Promise<void>;
   execute(ctx: CommandContext, params: z.infer<S>): Promise<CommandResult<R>>;
+}
+
+export interface AuthorizeOptions {
+  anyScope?: boolean;
+  /**
+   * On a refusal, throw the error this returns instead of the authorizer's, and record the denial
+   * (`capability.denied`) all the same: for an answer that must not say what the authorizer knew.
+   */
+  refuseAs?: (refusal: CrossoverError) => CrossoverError;
 }
 
 /** What {@link CommandDefinition.prepare} gets: no transaction, no lease, just the pool. */
@@ -214,6 +235,18 @@ export interface PrepareContext {
   room_id: string;
   command_id: string;
   idempotency_key: string;
+  /** The hash the dispatcher keeps the envelope's idempotency key under (room, method, raw params). */
+  request_hash: string;
+  /**
+   * Whether the principal may do `action` on `resource` right now, for a check `prepare` needs
+   * before something slow or external. A refusal is just `false`: nothing is recorded, and
+   * `execute` runs the real check in the transaction. `anyScope` as in `CommandContext.authorize`.
+   */
+  isAllowed(
+    action: string,
+    resource?: Record<string, unknown>,
+    options?: { anyScope?: boolean },
+  ): Promise<boolean>;
 }
 
 /** How a read command applies the participant view (§34.5). */
@@ -380,6 +413,21 @@ export class Dispatcher {
       new RoomLeases(options.pool, options.nodeId, options.leaseTtlMs, {
         ...(options.onLeaseAcquire ? { onAcquire: options.onLeaseAcquire } : {}),
       });
+  }
+
+  /** Run an authorization; a refusal may be answered with another error that still records the denial. */
+  private async disguised(run: () => Promise<void>, options?: AuthorizeOptions): Promise<void> {
+    try {
+      await run();
+    } catch (error) {
+      if (options?.refuseAs && error instanceof CrossoverError && error.code === "FORBIDDEN") {
+        const replacement = options.refuseAs(error);
+        const info = this.denials.get(error);
+        if (info) this.denials.set(replacement, info);
+        throw replacement;
+      }
+      throw error;
+    }
   }
 
   /** A denial for someone else's `authorizeAs` check says so, so it isn't read as the caller's own. */
@@ -1047,7 +1095,8 @@ export class Dispatcher {
       room_id,
       command_id: outer.command_id,
       idempotency_key: approval.idempotency_key,
-      authorize: (a, resource) => check(requester, a, resource ?? {}),
+      authorize: (a, resource, options) =>
+        check(requester, a, resource ?? {}, options?.anyScope ? { perPath: true } : {}),
       authorizeAs: async (participantId, a, resource) =>
         check(await this.principalOf(client, room_id, participantId), a, resource ?? {}).catch(
           (error: unknown) => this.onBehalfOf(error, participantId),
@@ -1154,6 +1203,17 @@ export class Dispatcher {
     );
   }
 
+  private requestHashOf(
+    principal: Principal,
+    envelope: { method: string; params?: unknown },
+  ): string {
+    return hashRequest({
+      room_id: principal.room_id,
+      method: envelope.method,
+      params: envelope.params,
+    });
+  }
+
   /** Whether this exact request (same participant, key and content) already ran and has a stored result. */
   private async isReplay(
     principal: Principal,
@@ -1248,12 +1308,21 @@ export class Dispatcher {
         room_id,
         command_id: envelope.id,
         idempotency_key: envelope.idempotency_key,
-        authorize: (a, resource) =>
-          this.authorize(
-            principal,
-            a,
-            { ...resource, room_id },
-            { method: envelope.method, params, client },
+        authorize: (a, resource, options) =>
+          this.disguised(
+            () =>
+              this.authorize(
+                principal,
+                a,
+                { ...resource, room_id },
+                {
+                  method: envelope.method,
+                  params,
+                  client,
+                  ...(options?.anyScope ? { perPath: true } : {}),
+                },
+              ),
+            options,
           ),
         authorizeAs: async (participantId, a, resource) =>
           this.authorize(
@@ -1307,6 +1376,7 @@ export class Dispatcher {
     try {
       // Only for a principal who may run it, and not for a replay of a request that already ran.
       // A refusal here is left for the command's own authorization to report and record.
+      const lifted = await this.gateLifted(principal, envelope, def);
       const allowed = await this.mayPrepare(principal, envelope, action, def, params);
       if (allowed && key !== undefined && !(await this.isReplay(principal, envelope))) {
         ran = true;
@@ -1317,6 +1387,17 @@ export class Dispatcher {
             room_id: principal.room_id,
             command_id: envelope.id,
             idempotency_key: key,
+            request_hash: this.requestHashOf(principal, envelope),
+            isAllowed: (a, resource, options) =>
+              this.isAllowed(
+                principal,
+                envelope.method,
+                params,
+                a,
+                resource,
+                options?.anyScope,
+                lifted,
+              ),
           },
           params,
         );
@@ -1327,6 +1408,84 @@ export class Dispatcher {
         await def.disposePrepared(prepared).catch(() => undefined);
       }
     }
+  }
+
+  /** Whether `principal` may do `action` now, without recording a denial; a failure that isn't a refusal is thrown. */
+  private async isAllowed(
+    principal: Principal,
+    method: string,
+    params: unknown,
+    action: string,
+    resource: Record<string, unknown> = {},
+    anyScope = false,
+    approved = false,
+  ): Promise<boolean> {
+    const client = await this.pool.connect();
+    try {
+      await this.authorizer(
+        principal,
+        action,
+        { ...resource, room_id: principal.room_id },
+        {
+          method,
+          params,
+          client,
+          ...(anyScope ? { perPath: true } : {}),
+          ...(approved ? { approved: true } : {}),
+        },
+      );
+      return true;
+    } catch (error) {
+      if (error instanceof CrossoverError) return false;
+      throw new CrossoverError("STALE_FENCE", "Couldn't check the request just now; retry it", {
+        retryable: true,
+        details: { reason: "prepare_unavailable" },
+        cause: error,
+      });
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Whether an owner or admin approved this very request (same requester, idempotency key and
+   * params) for a command that waits for the requester's retry instead of running on approval.
+   */
+  private async gateLifted(
+    principal: Principal,
+    envelope: { method: string; idempotency_key?: string | undefined; params?: unknown },
+    def: CommandDefinition<z.ZodType, unknown>,
+  ): Promise<boolean> {
+    if (!def.approvalLiftsGate || envelope.idempotency_key === undefined) return false;
+    let hash: string;
+    try {
+      hash = hashRequest({
+        room_id: principal.room_id,
+        method: envelope.method,
+        params: envelope.params,
+      });
+    } catch {
+      return false;
+    }
+    const { rowCount } = await this.pool.query(
+      `SELECT 1 FROM approvals
+       WHERE room_id = $1 AND requester_id = $2 AND idempotency_key = $3 AND idempotency_hash = $4
+         AND status = 'APPROVED'
+         AND decided_at >= clock_timestamp() - make_interval(hours => $5)`,
+      [
+        principal.room_id,
+        principal.participant_id,
+        envelope.idempotency_key,
+        hash,
+        IDEMPOTENCY_TTL_HOURS,
+      ],
+    );
+    return (rowCount ?? 0) > 0;
+  }
+
+  /** Whether `method` runs when an approval is granted (the usual case), or waits for the requester's retry. */
+  runsOnApproval(method: string): boolean {
+    return !this.commands.get(method)?.def.approvalLiftsGate;
   }
 
   /** Whether the principal passes the command's authorization now, without recording a denial. */
@@ -1389,6 +1548,7 @@ export class Dispatcher {
 
     return this.actors.get(room_id).submit(async () => {
       const token = await this.leases.ensure(room_id);
+      const lifted = await this.gateLifted(principal, envelope, def);
       const afterCommit: (() => void | Promise<void>)[] = [];
       let oneTime: unknown;
       let result: DispatchResult;
@@ -1423,12 +1583,22 @@ export class Dispatcher {
                 command_id: envelope.id,
                 idempotency_key: key,
                 ...(prepared === undefined ? {} : { prepared }),
-                authorize: (a, resource) =>
-                  this.authorize(
-                    principal,
-                    a,
-                    { ...resource, room_id },
-                    { method: envelope.method, params, client },
+                authorize: (a, resource, options) =>
+                  this.disguised(
+                    () =>
+                      this.authorize(
+                        principal,
+                        a,
+                        { ...resource, room_id },
+                        {
+                          method: envelope.method,
+                          params,
+                          client,
+                          ...(options?.anyScope ? { perPath: true } : {}),
+                          ...(lifted ? { approved: true } : {}),
+                        },
+                      ),
+                    options,
                   ),
                 authorizeAs: async (participantId, a, resource) =>
                   this.authorize(

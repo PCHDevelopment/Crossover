@@ -974,6 +974,7 @@ Idempotency keys are stored for 24 hours per participant. A duplicate returns th
 | `PARTICIPANT_PAUSED` / `ROOM_PAUSED` | Participant or room frozen |
 | `RATE_LIMITED` / `BUDGET_EXCEEDED` | Throttled (§22.3); details carry retry-after |
 | `CIRCUIT_BREAKER` | ChangeSet held for review (§22.4) |
+| `PROVIDER_UNAVAILABLE` | A plugin's provider is down or timed out (§21.4); retryable unless the runner says not; the platform never retries a tool itself |
 
 ## 16.4 Versioning
 
@@ -1270,7 +1271,8 @@ Full autonomy applies to every tier the agent has been granted. Approval gates (
 ## 21.4 Plugin Runner (D10)
 
 - Plugins (GitHub, AWS, Browser, Slack, Google Drive, Database, Deployment) run **server-side** in the Plugin Runner, each invocation in an isolated child process or container. Platform-hosted MCP servers implement most plugins.
-- Flow: agent calls `tools.invoke` → kernel authorizes → Plugin Runner fetches credentials → executes → returns result labeled `trust: external` where it contains outside content.
+- Flow: agent calls `tools.invoke` → kernel authorizes → Plugin Runner fetches credentials → executes → returns result always labeled `trust: external`.
+- Exactly once (T1201): the idempotency key is claimed (`tool_invocations`) before the tool runs; the same key meanwhile is `CONFLICT_VERSION` "in progress", and another request under it is the key-reuse error. Once the tool has run its outcome is recorded under the key whatever happens next (a grant revoked or a lease lost during the run stops future invocations, not the recording of this one), and a retry replays it. A timeout or doubtful failure of a tool that isn't idempotent is `retryable: false` with `details.outcome: "unknown"`; a failure the runner says happened before any effect (or any failure of an idempotent tool) releases the key. An approval (§22.2) doesn't run a tool inside the approver's transaction: it lifts the gate for the requester's retry of the same request. `tools.list` lists gated tools with `requires_approval: true`. Scopes are canonical before they are matched (no empty, `.` or `..` segments; no `%?#*[]{}\`, whitespace or control characters; at most 200 characters; each tool may normalize further), and the runner acts only on the canonical scope it is given. An unknown tool and a tool the caller holds for no scope are the same `FORBIDDEN` (same message and details, no capability named; the second is recorded as `capability.denied`); the arguments of a tool the caller doesn't hold are never described. A key already used by another command is refused before the tool runs. A run's outcome is returned to its requester before any access check, and `tool.completed`/`tool.failed` are appended by the run itself (not by the command's transaction), so a room frozen or a grant revoked afterwards doesn't lose them; a frozen room can't take the response, and the retry after the resume gets it. A claim whose process was lost is judged stale in SQL from the run's start.
 - **Agents never receive credentials.** A prompt-injected agent can at most misuse its granted capabilities; it cannot exfiltrate keys.
 - Shell access is not a plugin; it is `sandbox.exec`.
 

@@ -12,6 +12,8 @@ export const PUBLIC_ERROR_CODES = [
   "RATE_LIMITED",
   "BUDGET_EXCEEDED",
   "CIRCUIT_BREAKER",
+  /** A plugin or the service behind a tool is down or timed out; trying again later may work. */
+  "PROVIDER_UNAVAILABLE",
 ] as const;
 
 /** Codes that never cross the API boundary as-is; the gateway maps them. */
@@ -38,6 +40,7 @@ export const DEFAULT_RETRYABLE: Readonly<Record<ErrorCode, boolean>> = {
   RATE_LIMITED: true,
   BUDGET_EXCEEDED: true,
   CIRCUIT_BREAKER: false,
+  PROVIDER_UNAVAILABLE: true,
   STALE_FENCE: false,
 };
 

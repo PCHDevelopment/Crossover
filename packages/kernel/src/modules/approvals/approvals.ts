@@ -307,7 +307,8 @@ export function registerApprovalCommands(dispatcher: Dispatcher): void {
       };
       let events: EmittedEvent[] = [];
       let executed: unknown;
-      if (p.decision === "approve") {
+      const runsNow = p.decision === "approve" && dispatcher.runsOnApproval(approval.method);
+      if (runsNow) {
         // Run it under the requester's own idempotency key, so that key now stands for this
         // result: a retry of the original request replays it instead of running it again.
         let inner: CommandResult<unknown> | undefined;
@@ -342,7 +343,13 @@ export function registerApprovalCommands(dispatcher: Dispatcher): void {
         kind: "APPROVAL",
         ref: { kind: "approval", id: approval.id },
         author_id: "system",
-        summary: `Your request to run ${approval.method} was ${p.decision === "approve" ? "approved and has run" : "rejected"}`,
+        summary: `Your request to run ${approval.method} was ${
+          p.decision !== "approve"
+            ? "rejected"
+            : runsNow
+              ? "approved and has run"
+              : "approved: send it again with the same idempotency key to run it"
+        }`,
       });
       return {
         response: {
