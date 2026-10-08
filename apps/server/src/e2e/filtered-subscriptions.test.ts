@@ -196,7 +196,7 @@ describe("filtered subscriptions", () => {
     }
   }, 60_000);
 
-  it("a bad filter is VALIDATION, and a stream resumed with `after` is filtered the same way", async () => {
+  it("a bad filter is VALIDATION", async () => {
     const r = await newRoom();
     const a = await r.agent("AgentA");
     const bad = a.room.subscribe({ profile: "relevant", types: ["task.*"] });
@@ -273,20 +273,142 @@ describe("filtered subscriptions", () => {
     expect(types).toEqual(
       expect.arrayContaining(["task.assigned", "task.updated", "task.released"]),
     );
+    // B replays from the same point: it gets the claim and the update after it, and nothing that
+    // happened while A owned the task.
+    const seenB: SdkEvent[] = [];
+    const bReplay = b.room.subscribe({ after: base, onEvent: (e) => seenB.push(e) });
+    await collect(bReplay, seenB, target);
+    bReplay.close();
+    const bTypes = seenB.map((e) => e.type);
+    expect(bTypes).toEqual(expect.arrayContaining(["task.claimed", "task.updated"]));
+    expect(bTypes.filter((t) => t === "task.updated")).toHaveLength(1);
+    expect(bTypes).not.toContain("task.assigned");
+    expect(bTypes).not.toContain("task.released");
     // B's claim and the update after it are B's: A gets neither, on replay or live.
     expect(types).not.toContain("task.claimed");
     expect(types.filter((t) => t === "task.updated")).toHaveLength(1);
   }, 60_000);
 
-  it("a pathological type pattern doesn't stall the gateway for everyone else", async () => {
+  const apply = (room: RoomClient, path: string) =>
+    room.api.workspace.apply_changeset({
+      source: "API",
+      message: `add ${path}`,
+      base_workspace_revision: 0,
+      operations: [{ type: "create", path, content: "x\n" }],
+    });
+
+  it("a pathological type pattern doesn't stall the gateway: it is matched against a real three-segment event", async () => {
     const r = await newRoom();
     const a = await r.agent("AgentA");
+    const seen: SdkEvent[] = [];
+    const sub = a.room.subscribe({
+      types: [`workspace.changeset.${"*".repeat(60)}x`, "workspace.changeset.app*"],
+      onEvent: (e) => seen.push(e),
+    });
+    for (let i = 0; i < 100 && connections === 0; i++)
+      await new Promise((res) => setTimeout(res, 20));
     const started = Date.now();
-    const sub = a.room.subscribe({ types: [`workspace.changeset.${"*".repeat(60)}x`] });
-    await r.owner.api.messages.send({ body: "still served" });
-    const listed = await r.owner.api.messages.list<{ messages: { body: string }[] }>();
+    await apply(r.owner, "docs/a.md"); // workspace.changeset.applied runs through the matcher
+    const target = await lastSequence(r.owner);
+    await collect(sub, seen, target);
     sub.close();
-    expect(listed.response.messages).toHaveLength(1);
+    expect(seen.map((e) => e.type)).toEqual(["workspace.changeset.applied"]); // the second pattern matches
     expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  it("real events carry what relevance needs: author_id on a ChangeSet, reviewer_id on a submission, mentions on an edit", async () => {
+    const r = await newRoom();
+    const a = await r.agent("AgentA");
+    const b = await r.agent("AgentB");
+    const c = await r.agent("AgentC");
+    const base = await lastSequence(r.owner);
+    const seen = { a: [] as SdkEvent[], b: [] as SdkEvent[], c: [] as SdkEvent[] };
+    const subs = [
+      a.room.subscribe({ after: base, onEvent: (e) => seen.a.push(e) }),
+      b.room.subscribe({ after: base, onEvent: (e) => seen.b.push(e) }),
+      c.room.subscribe({ after: base, onEvent: (e) => seen.c.push(e) }),
+    ];
+
+    // A ChangeSet by B: B is the author, A and C aren't.
+    await apply(b.room, "docs/b.md");
+    // A task A works on, B reviews: submitted names B as the reviewer.
+    const task = (
+      await r.owner.api.tasks.create<{ id: string; version: number }>({
+        title: "Reviewed",
+        requirements: ["done"],
+        reviewer_id: b.id,
+      })
+    ).response;
+    const assigned = (
+      await r.owner.api.tasks.assign<{ version: number }>({
+        task_id: task.id,
+        expected_version: task.version,
+        participant_id: a.id,
+      })
+    ).response;
+    const started = (
+      await a.room.api.tasks.start<{ version: number }>({
+        task_id: task.id,
+        expected_version: assigned.version,
+      })
+    ).response;
+    await a.room.api.tasks.submit({
+      task_id: task.id,
+      expected_version: started.version,
+      evidence: [],
+    });
+    // A message mentioning C, then edited: the edit carries the mentions.
+    const sent = (
+      await a.room.api.messages.send<{ id: string }>({ body: "look", mentions: [c.id] })
+    ).response;
+    await a.room.api.messages.edit({ message_id: sent.id, body: "look, please" });
+
+    const target = await lastSequence(r.owner);
+    await collect(subs[0]!, seen.a, target);
+    await collect(subs[1]!, seen.b, target);
+    await collect(subs[2]!, seen.c, target);
+    for (const sub of subs) sub.close();
+    const types = (events: SdkEvent[]) => events.map((e) => e.type);
+    expect(types(seen.b)).toContain("workspace.changeset.applied"); // author_id
+    expect(types(seen.a)).not.toContain("workspace.changeset.applied");
+    expect(types(seen.c)).not.toContain("workspace.changeset.applied");
+    expect(types(seen.b)).toContain("task.submitted"); // reviewer_id
+    expect(types(seen.c)).not.toContain("task.submitted");
+    expect(types(seen.c)).toEqual(expect.arrayContaining(["message.sent", "message.edited"])); // mentions
+    expect(types(seen.b)).not.toContain("message.edited");
+  }, 60_000);
+
+  it("health RED reaches its suspects only (suspect_ids)", async () => {
+    const r = await newRoom();
+    const a = await r.agent("AgentA");
+    const b = await r.agent("AgentB");
+    const base = await lastSequence(r.owner);
+    const seenA: SdkEvent[] = [];
+    const seenB: SdkEvent[] = [];
+    const subs = [
+      a.room.subscribe({ after: base, onEvent: (e) => seenA.push(e) }),
+      b.room.subscribe({ after: base, onEvent: (e) => seenB.push(e) }),
+    ];
+    // The health service's own event, as it writes it for a RED run with A in the suspect range.
+    await server.dispatcher.runSystem(r.roomId, "workspace.health", async () => ({
+      result: null,
+      events: [
+        {
+          type: "workspace.health" as const,
+          actor_id: "system",
+          payload: {
+            revision: 3,
+            status: "RED",
+            duration: 1,
+            log_ref: "run_x",
+            suspect_ids: [a.id],
+          },
+        },
+      ],
+    }));
+    await new Promise((res) => setTimeout(res, 1_200)); // a quiet stream never "catches up": wait it out
+    for (const sub of subs) sub.close();
+    expect(seenA.map((e) => e.type)).toContain("workspace.health");
+    expect(seenB.map((e) => e.type)).not.toContain("workspace.health");
   });
 });

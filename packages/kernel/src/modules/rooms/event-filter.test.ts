@@ -119,7 +119,25 @@ describe("relevant profile: what travels with the event", () => {
     expect(match(event("workspace.health", { status: "GREEN", suspect_ids: [me] }))).toBe(false);
   });
   it("an edited message that mentions me is relevant", () => {
-    expect(match(event("message.edited", { message: { mentions: [me] } }))).toBe(true);
+    expect(match(event("message.edited", { message_id: "m", mentions: [me] }))).toBe(true);
+    expect(match(event("message.edited", { message_id: "m", mentions: ["part_b"] }))).toBe(false);
+  });
+  it("an escalated conflict goes to whom it names", () => {
+    expect(
+      match(event("workspace.conflict.escalated", { conflict_id: "c", escalated_to: me })),
+    ).toBe(true);
+    expect(
+      match(event("workspace.conflict.escalated", { conflict_id: "c", escalated_to: "part_l" })),
+    ).toBe(false);
+  });
+  it("fails open: an event written before its type carried what the filter needs is delivered", () => {
+    expect(match(event("task.started", { task_id: "t" }))).toBe(true); // no owner_id yet
+    expect(match(event("workspace.changeset.applied", { changeset_id: "c" }))).toBe(true); // no author_id
+    expect(match(event("workspace.health", { status: "RED" }))).toBe(true); // no suspect_ids
+    expect(match(event("message.edited", { message_id: "m", body: "x" }))).toBe(true); // no mentions
+    // …but an event that does carry them is judged by them.
+    expect(match(event("task.started", { task_id: "t", owner_id: null }))).toBe(false);
+    expect(match(event("workspace.health", { status: "GREEN" }))).toBe(false);
   });
   it("never asks anything but the event: the same event gives the same answer whenever it is judged", () => {
     const e = event("task.started", { task_id: "t", owner_id: me });

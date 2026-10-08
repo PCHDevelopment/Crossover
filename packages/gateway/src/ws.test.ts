@@ -776,3 +776,25 @@ describe("backpressure and token lifetime (§20)", () => {
     expect(await c.closed()).toBe(1001);
   });
 });
+
+describe("subscribe: a filter that fails delivers", () => {
+  it("an event whose match throws is delivered and reported, not dropped, and the stream goes on", async () => {
+    const reported: unknown[] = [];
+    let calls = 0;
+    const env = await setup({
+      createMatcher: () => () => {
+        calls += 1;
+        if (calls === 2) throw new Error("matcher bug");
+        return true;
+      },
+      onInternalError: (e: unknown) => void reported.push(e),
+    });
+    await invite(env, 3);
+    const c = await ready(env);
+    c.send({ type: "subscribe", after: 0 });
+    await c.frame("subscribed");
+    await c.until(() => c.sequences().length >= 5, "all the events");
+    expect(c.sequences()).toEqual([1, 2, 3, 4, 5]); // the one whose match threw is among them
+    expect(reported).toHaveLength(1);
+  });
+});

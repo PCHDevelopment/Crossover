@@ -69,8 +69,9 @@ export function resolveFilter(
 }
 
 /**
- * Glob over one dotted-name segment (`*` matches any run of letters/underscores), without a regex:
- * the two-pointer walk is linear in practice and cannot be made to backtrack exponentially.
+ * Glob over one dotted-name segment (`*` matches any run of characters within it), without a
+ * regex: the two-pointer walk never backtracks over more than the last star, so its cost is
+ * bounded by the pattern times the name (quadratic at worst, never exponential).
  */
 function segmentMatches(pattern: string, text: string): boolean {
   let p = 0;
@@ -115,6 +116,7 @@ const ABOUT_KEYS = [
   "resolver_id",
   "to",
   "author_id",
+  "escalated_to",
 ];
 
 /** Payload keys that list participants an event is about. */
@@ -134,10 +136,15 @@ const names = (payload: Record<string, unknown>, me: string): boolean => {
   return false;
 };
 
-const mentions = (payload: Record<string, unknown>, me: string): boolean => {
-  const message = payload["message"] as { mentions?: unknown } | undefined;
-  return Array.isArray(message?.mentions) && message.mentions.includes(me);
+/** The mentions an event carries, or `undefined` when it carries none of the field (written before it existed). */
+const mentionsOf = (payload: Record<string, unknown>): unknown[] | undefined => {
+  const direct = payload["mentions"]; // message.edited
+  if (Array.isArray(direct)) return direct;
+  const message = payload["message"] as { mentions?: unknown } | undefined; // message.sent
+  return Array.isArray(message?.mentions) ? message.mentions : undefined;
 };
+const mentions = (payload: Record<string, unknown>, me: string): boolean =>
+  mentionsOf(payload)?.includes(me) ?? false;
 
 /**
  * Whether an event is about this participant (§17.1 `relevant`): its task changed or was
@@ -147,26 +154,34 @@ const mentions = (payload: Record<string, unknown>, me: string): boolean => {
  * RED where it is a suspect. **Decided from the event alone**: what an event is about travels in
  * its payload as of that moment, so a replay from `after` and the live stream agree, and nothing
  * here asks the database.
+ *
+ * **Fail open.** An event written before its type carried the field this needs (`owner_id` on
+ * task events, `author_id` on ChangeSets, `suspect_ids` on health, `mentions` on edits) is
+ * delivered: a filter is a convenience, not a security boundary, and an agent resuming across an
+ * upgrade must not lose what happened meanwhile. Redaction for the viewer still applies.
  */
 function isRelevant(principal: Principal, event: RoomEvent): boolean {
   const me = principal.participant_id;
   const p = (event.payload ?? {}) as Record<string, unknown>;
   const type = event.type;
+  const lacks = (key: string) => !(key in p);
   if (/^room\./.test(type) || /^lead\./.test(type)) return true;
   if (/^decision\.(decided|vetoed|superseded)$/.test(type)) return true;
-  if (type === "message.sent" || type === "message.edited") return mentions(p, me);
+  if (type === "message.sent") return mentions(p, me);
+  if (type === "message.edited") return mentionsOf(p) === undefined || mentions(p, me);
   if (type === "capability.denied") return event.actor_id === me;
-  if (type === "workspace.health") return p["status"] === "RED" && names(p, me);
+  if (type === "workspace.health") {
+    if (p["status"] !== "RED") return false;
+    return lacks("suspect_ids") || names(p, me);
+  }
   if (type === "task.created") {
     // Unowned tasks are for whoever claims from the open pool.
     const task = p["task"] as { owner_id?: unknown } | undefined;
     return names(p, me) || task?.owner_id === null || task?.owner_id === undefined;
   }
-  if (/^task\./.test(type)) return names(p, me);
-  if (/^workspace\.(changeset|conflict)\./.test(type)) {
-    // An escalated conflict is the lead's to resolve.
-    return names(p, me) || (type === "workspace.conflict.escalated" && principal.role === "LEAD");
-  }
+  if (/^task\./.test(type)) return lacks("owner_id") || names(p, me);
+  if (type === "workspace.changeset.applied") return lacks("author_id") || names(p, me);
+  if (/^workspace\.(changeset|conflict)\./.test(type)) return names(p, me);
   // Participants, approvals, budgets, sandboxes, checkpoints, …: when they name this participant.
   return names(p, me);
 }

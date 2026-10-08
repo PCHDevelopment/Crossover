@@ -34,6 +34,10 @@ export interface WebSocketOptions {
   maxBufferedBytes?: number;
   /** Close a connection that hasn't said hello within this long. Default 10000. */
   helloTimeoutMs?: number;
+  /** Builds the per-subscription event filter. Default: the kernel's (tests substitute one). */
+  createMatcher?: typeof createEventMatcher;
+  /** Told about a failure that is a bug, not a client error (e.g. a filter that threw). */
+  onInternalError?: (error: unknown) => void;
   /** Events fetched per backfill query. Default 200. */
   backfillPageSize?: number;
 }
@@ -52,7 +56,7 @@ interface Stream {
   lastSent: number;
   /** Whether the subscriber wants an event (T704); every event passes for `all`. */
   match: (event: RoomEvent) => boolean;
-  /** Sends in order: a filter that has to ask the database must not reorder the stream. */
+  /** Sends in order, one at a time. */
   out: Promise<void>;
   /** Live events that arrived while a backfill was running. */
   pending: RoomEvent[];
@@ -320,7 +324,7 @@ class Connection {
 
     const stream: Stream = {
       lastSent: after,
-      match: createEventMatcher(this.principal!, filter),
+      match: (this.o.createMatcher ?? createEventMatcher)(this.principal!, filter),
       out: Promise.resolve(),
       pending: [],
       syncing: true,
@@ -361,7 +365,14 @@ class Connection {
     stream.out = stream.out
       .then(() => {
         if (this.stream !== stream || this.closed) return;
-        if (!stream.match(event)) return;
+        let wanted = true;
+        try {
+          wanted = stream.match(event);
+        } catch (error) {
+          // A filter that fails delivers: it may drop noise, never information.
+          this.o.onInternalError?.(error);
+        }
+        if (!wanted) return;
         this.send({ type: "event", event: this.view(event) });
       })
       // One failing send must not leave every later one waiting behind a rejected promise.
