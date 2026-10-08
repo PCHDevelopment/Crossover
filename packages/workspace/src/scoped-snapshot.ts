@@ -5,6 +5,10 @@ import { join } from "node:path";
 import { git } from "./git.js";
 
 const GIT_TIMEOUT_MS = 30_000;
+type SnapshotDirectoryRemover = (
+  path: string,
+  options: { recursive: true; force: true },
+) => Promise<unknown>;
 
 interface BlobEntry {
   mode: string;
@@ -162,15 +166,37 @@ export async function createUnscopedSnapshotRepository(input: {
 }
 
 /** Remove abandoned snapshots on startup; a day of grace avoids touching live fetches. */
-export async function sweepSnapshotRepositories(root = tmpdir(), now = Date.now()): Promise<void> {
-  for (const entry of await readdir(root, { withFileTypes: true })) {
+export async function sweepSnapshotRepositories(
+  root = tmpdir(),
+  now = Date.now(),
+  onError: (error: unknown) => void = (error) =>
+    console.error("[workspace] snapshot cleanup failed", error),
+  removeDirectory: SnapshotDirectoryRemover = rm,
+): Promise<void> {
+  const report = (error: unknown) => {
+    try {
+      onError(error);
+    } catch (reportError) {
+      console.error("[workspace] snapshot cleanup error reporter failed", reportError);
+    }
+  };
+
+  let entries: Array<{ isDirectory(): boolean; name: string }>;
+  try {
+    entries = await readdir(root, { withFileTypes: true });
+  } catch (error) {
+    report(error);
+    return;
+  }
+
+  for (const entry of entries) {
     if (!entry.isDirectory() || !entry.name.startsWith("crossover-sandbox-git-")) continue;
     const directory = join(root, entry.name);
     try {
       if ((await stat(directory)).mtimeMs < now - 24 * 60 * 60 * 1000)
-        await rm(directory, { recursive: true, force: true });
+        await removeDirectory(directory, { recursive: true, force: true });
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") report(error);
     }
   }
 }

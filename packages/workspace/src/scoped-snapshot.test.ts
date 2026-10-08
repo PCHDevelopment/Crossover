@@ -1,7 +1,7 @@
-import { mkdtemp, rm, mkdir, utimes, readdir } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, rm, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { git } from "./git.js";
 import { initRoomRepo } from "./repo.js";
 import {
@@ -200,5 +200,44 @@ describe("createScopedSnapshotRepository", () => {
     await utimes(join(root, "unrelated"), old, old);
     await sweepSnapshotRepositories(root, now);
     expect((await readdir(root)).sort()).toEqual(["crossover-sandbox-git-active", "unrelated"]);
+  });
+
+  it("reports an undeletable snapshot and continues the startup sweep", async () => {
+    const root = await mkdtemp(join(tmpdir(), "crossover-sweep-denied-test-"));
+    roots.push(root);
+    const now = Date.now();
+    const blocked = join(root, "crossover-sandbox-git-blocked");
+    const next = join(root, "crossover-sandbox-git-next");
+    await mkdir(blocked);
+    await mkdir(next);
+    const old = new Date(now - 25 * 60 * 60 * 1000);
+    await utimes(blocked, old, old);
+    await utimes(next, old, old);
+    const failure = Object.assign(new Error("permission denied"), { code: "EACCES" });
+    const onError = vi.fn();
+    const removeDirectory = vi.fn(async (directory: string) => {
+      if (directory === blocked) throw failure;
+      await rm(directory, { recursive: true, force: true });
+    });
+
+    await expect(
+      sweepSnapshotRepositories(root, now, onError, removeDirectory),
+    ).resolves.toBeUndefined();
+
+    expect(onError).toHaveBeenCalledWith(failure);
+    expect(removeDirectory).toHaveBeenCalledTimes(2);
+    expect(await readdir(root)).toEqual(["crossover-sandbox-git-blocked"]);
+  });
+
+  it("reports an unreadable snapshot root without rejecting startup", async () => {
+    const root = await mkdtemp(join(tmpdir(), "crossover-sweep-missing-test-"));
+    roots.push(root);
+    const onError = vi.fn();
+
+    await expect(
+      sweepSnapshotRepositories(join(root, "missing"), Date.now(), onError),
+    ).resolves.toBeUndefined();
+
+    expect(onError).toHaveBeenCalledOnce();
   });
 });

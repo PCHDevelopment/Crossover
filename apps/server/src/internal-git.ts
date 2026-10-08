@@ -50,12 +50,16 @@ export interface InternalGitOptions {
   authorize: Authorizer;
   /** Missing secret keeps the listener closed with 503 responses. */
   tokenSecret?: string;
+  /** Receives snapshot cleanup failures; cleanup never prevents listener startup. */
+  onInternalError?: (error: unknown) => void;
 }
 
 /** A separate, read-only smart-Git listener for short-lived sandbox fetchers. */
 export function buildInternalGitServer(options: InternalGitOptions): FastifyInstance {
   const app = Fastify({ logger: false, bodyLimit: MAX_NEGOTIATION_BYTES });
-  app.addHook("onReady", () => sweepSnapshotRepositories());
+  app.addHook("onReady", () =>
+    sweepSnapshotRepositories(undefined, undefined, options.onInternalError),
+  );
   app.addContentTypeParser(
     UPLOAD_PACK_REQUEST,
     { parseAs: "buffer", bodyLimit: MAX_NEGOTIATION_BYTES },
