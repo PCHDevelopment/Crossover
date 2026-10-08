@@ -1,31 +1,38 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { isAbsolute } from "node:path";
 import {
   createSandboxProxyCredential,
   createSandboxReadToken,
   SANDBOX_READ_TOKEN_MAX_TTL_MS,
 } from "@crossover/security";
+import { CrossoverError } from "@crossover/protocol";
 import type { ExecutionDriver, SandboxLimits, SandboxResources } from "./execution.js";
+import { createPorcelainStatusAccumulator, type SandboxFileChanges } from "./sandbox-status.js";
 
 const DEFAULT_IMAGE = "node:22-bookworm-slim";
 const DEFAULT_GIT_FETCHER_IMAGE = "crossover-git-fetcher:latest";
 const GIT_NETWORK = "crossover-git";
 const FETCH_TIMEOUT_MS = 4 * 60 * 1000;
+const MAX_STATUS_OUTPUT_BYTES = 16 * 1024 * 1024;
 
 export interface DockerInvocationOptions {
   timeoutMs?: number;
   maxBuffer?: number;
   env?: NodeJS.ProcessEnv;
+  /** Stream stdout to the caller; returning false stops the child process. */
+  onStdout?: (chunk: string) => boolean;
+}
+
+export interface DockerInvocationResult {
+  code: number;
+  stdout: string;
+  stderr: string;
 }
 
 export type DockerInvoker = (
   args: readonly string[],
   options?: DockerInvocationOptions,
-) => Promise<{
-  code: number;
-  stdout: string;
-  stderr: string;
-}>;
+) => Promise<DockerInvocationResult>;
 
 export interface DockerExecutionDriverOptions {
   dockerBinary?: string;
@@ -54,12 +61,10 @@ function invokeDocker(
   binary: string,
   args: readonly string[],
   options: DockerInvocationOptions = {},
-): Promise<{
-  code: number;
-  stdout: string;
-  stderr: string;
-}> {
-  return new Promise((resolve) => {
+): Promise<DockerInvocationResult> {
+  if (options.onStdout) return invokeDockerStreaming(binary, args, options, options.onStdout);
+
+  return new Promise<DockerInvocationResult>((resolve) => {
     execFile(
       binary,
       [...args],
@@ -77,6 +82,85 @@ function invokeDocker(
         });
       },
     );
+  });
+}
+
+function invokeDockerStreaming(
+  binary: string,
+  args: readonly string[],
+  options: DockerInvocationOptions,
+  onStdout: (chunk: string) => boolean,
+): Promise<DockerInvocationResult> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(binary, [...args], {
+      env: options.env ? { ...process.env, ...options.env } : process.env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const timeoutMs = options.timeoutMs ?? 20_000;
+    const maxStderrBytes = options.maxBuffer ?? 1024 * 1024;
+    let stderr = "";
+    let stderrBytes = 0;
+    let stoppedEarly = false;
+    let callbackError: unknown;
+    let timedOut = false;
+    let settled = false;
+    let forceKillTimer: NodeJS.Timeout | undefined;
+
+    const terminate = () => {
+      if (child.kill("SIGTERM")) {
+        forceKillTimer = setTimeout(() => child.kill("SIGKILL"), 1_000);
+        forceKillTimer.unref();
+      }
+    };
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      terminate();
+    }, timeoutMs);
+
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      if (stoppedEarly || callbackError !== undefined) return;
+      try {
+        if (!onStdout(chunk)) {
+          stoppedEarly = true;
+          terminate();
+        }
+      } catch (error) {
+        callbackError = error;
+        terminate();
+      }
+    });
+
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      if (stderrBytes >= maxStderrBytes) return;
+      const bytes = Buffer.from(chunk);
+      const saved = bytes.subarray(0, maxStderrBytes - stderrBytes);
+      stderr += saved.toString("utf8");
+      stderrBytes += saved.length;
+    });
+
+    child.once("error", (error) => {
+      settled = true;
+      clearTimeout(timeout);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
+      reject(error);
+    });
+    child.once("close", (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
+      if (callbackError !== undefined) {
+        reject(callbackError);
+        return;
+      }
+      resolve({
+        code: stoppedEarly ? 0 : (code ?? (timedOut ? 124 : 1)),
+        stdout: "",
+        stderr,
+      });
+    });
   });
 }
 
@@ -306,6 +390,105 @@ export class DockerExecutionDriver implements ExecutionDriver {
     } finally {
       await this.removeFetcher(containerName).catch((error: unknown) =>
         console.error("[execution] failed to remove Git fetcher container", error),
+      );
+    }
+  }
+
+  /** Inspect the sandbox volume with Git, even when the agent image has no Git binary. */
+  async status(input: {
+    sandbox_id: string;
+    resources: SandboxResources;
+  }): Promise<SandboxFileChanges> {
+    this.assertResources(input.sandbox_id, input.resources);
+    try {
+      const status = createPorcelainStatusAccumulator();
+      let streamed = false;
+      let stoppedByLimit = false;
+      let statusBytes = 0;
+      const consumeStatusChunk = (chunk: string): boolean => {
+        streamed = true;
+        const chunkBytes = Buffer.byteLength(chunk);
+        const remainingBytes = MAX_STATUS_OUTPUT_BYTES - statusBytes;
+        if (chunkBytes > remainingBytes) {
+          if (remainingBytes > 0) {
+            const prefix = Buffer.from(chunk).subarray(0, remainingBytes).toString("utf8");
+            if (!status.write(prefix)) {
+              stoppedByLimit = true;
+              return false;
+            }
+          }
+          status.truncate();
+          stoppedByLimit = true;
+          return false;
+        }
+        statusBytes += chunkBytes;
+        const keepReading = status.write(chunk);
+        if (!keepReading) stoppedByLimit = true;
+        return keepReading;
+      };
+      const result = await this.invoke(
+        [
+          "run",
+          "--rm",
+          "--init",
+          "--network=none",
+          "--read-only",
+          "--user=1000:1000",
+          "--cap-drop=ALL",
+          "--security-opt=no-new-privileges",
+          "--memory=512m",
+          "--cpus=1",
+          "--pids-limit=32",
+          "--tmpfs",
+          "/tmp:rw,nosuid,noexec,size=16m",
+          "--env",
+          "HOME=/tmp",
+          "--env",
+          "GIT_CONFIG_NOSYSTEM=1",
+          "--env",
+          "GIT_CONFIG_GLOBAL=/dev/null",
+          "--env",
+          "GIT_OPTIONAL_LOCKS=0",
+          "--mount",
+          `type=volume,source=${input.resources.volume_ref},target=/workspace,readonly,volume-nocopy`,
+          "--workdir",
+          "/workspace",
+          "--entrypoint",
+          "git",
+          this.gitFetcherImage,
+          "-C",
+          "/workspace",
+          "-c",
+          "core.excludesFile=/workspace/.roomignore",
+          "-c",
+          "core.fsmonitor=false",
+          "status",
+          "--porcelain=v1",
+          "-z",
+          "--untracked-files=all",
+          "--no-renames",
+        ],
+        {
+          timeoutMs: 20_000,
+          maxBuffer: 8 * 1024 * 1024,
+          onStdout: consumeStatusChunk,
+        },
+      );
+      if (!streamed && result.stdout) consumeStatusChunk(result.stdout);
+      if (result.code !== 0 && !stoppedByLimit)
+        throw new CrossoverError(
+          "UNAVAILABLE",
+          "Sandbox status could not be read; retry the request",
+        );
+      return status.finish();
+    } catch (cause) {
+      if (cause instanceof CrossoverError) throw cause;
+      throw new CrossoverError(
+        "UNAVAILABLE",
+        "Sandbox status could not be read; retry the request",
+        {
+          cause,
+        },
       );
     }
   }

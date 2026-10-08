@@ -60,6 +60,7 @@ import {
   runHealthCheck,
   publishHealthResult,
   normalizePath,
+  registerSandboxStatusCommand,
   type ExecutionDriver,
   type UpstreamDeps,
 } from "@crossover/workspace";
@@ -372,4 +373,5 @@ function registerCommands(
     scheduleHealthCheck: (roomId, revision) => healthQueue.enqueue(roomId, revision),
     ...(upstream ? { upstream } : {}),
   });
+  registerSandboxStatusCommand(dispatcher, execution);
 }

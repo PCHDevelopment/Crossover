@@ -1,6 +1,9 @@
 import { execFileSync } from "node:child_process";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { newId } from "@crossover/protocol";
+import { CrossoverError, newId } from "@crossover/protocol";
 import { createSandboxProxyCredential, verifySandboxReadToken } from "@crossover/security";
 import { DockerExecutionDriver, type DockerInvoker } from "./docker-execution-driver.js";
 
@@ -108,6 +111,147 @@ describe("DockerExecutionDriver", () => {
     });
     expect(run.timeoutMs).toBeLessThanOrEqual(5 * 60 * 1000);
     expect(runArgs.at(-1)).toBe("crossover-git-fetcher:test");
+  });
+
+  it("reads status from the sandbox volume with an isolated Git helper", async () => {
+    const calls: string[][] = [];
+    const driver = new DockerExecutionDriver({
+      invoke: async (args) => {
+        calls.push([...args]);
+        return {
+          code: 0,
+          stdout: " M src/changed.ts\0?? notes/new.md\0 D old.txt\0",
+          stderr: "",
+        };
+      },
+      gitFetcherImage: "crossover-git-fetcher:test",
+    });
+    const sandboxId = newId("sandbox");
+    const suffix = sandboxId.toLowerCase();
+
+    await expect(
+      driver.status({
+        sandbox_id: sandboxId,
+        resources: {
+          volume_ref: `crossover-sbx-${suffix}`,
+          container_ref: `crossover-sbx-${suffix}`,
+        },
+      }),
+    ).resolves.toEqual({
+      modified: ["src/changed.ts"],
+      added: ["notes/new.md"],
+      deleted: ["old.txt"],
+      truncated: false,
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain("--network=none");
+    expect(calls[0]).toContain("--read-only");
+    expect(calls[0]).toContain("--cap-drop=ALL");
+    expect(calls[0]).toContain("--security-opt=no-new-privileges");
+    expect(calls[0]).toContain("--memory=512m");
+    expect(calls[0]).toContain("--cpus=1");
+    expect(calls[0]).toContain(
+      `type=volume,source=crossover-sbx-${suffix},target=/workspace,readonly,volume-nocopy`,
+    );
+    expect(calls[0]).toContain("core.excludesFile=/workspace/.roomignore");
+    expect(calls[0]).toContain("core.fsmonitor=false");
+    expect(calls[0]).toContain("--no-renames");
+    expect(calls[0]).toContain("crossover-git-fetcher:test");
+  });
+
+  it("streams status beyond 8 MiB and stops at the entry limit", async () => {
+    const root = await mkdtemp(join(tmpdir(), "crossover-status-stream-test-"));
+    const fakeDocker = join(root, "docker.mjs");
+    await writeFile(
+      fakeDocker,
+      [
+        "#!/usr/bin/env node",
+        'import { once } from "node:events";',
+        'const longComponent = "x".repeat(180);',
+        "for (let index = 0; index < 20_000; index++) {",
+        '  const path = Array.from({ length: 6 }, (_, part) => index + "-" + part + "-" + longComponent).join("/");',
+        '  if (!process.stdout.write("?? " + path + "\\0")) await once(process.stdout, "drain");',
+        "}",
+        "",
+      ].join("\n"),
+    );
+    await chmod(fakeDocker, 0o755);
+
+    try {
+      const driver = new DockerExecutionDriver({ dockerBinary: fakeDocker });
+      const sandboxId = newId("sandbox");
+      const status = await driver.status({
+        sandbox_id: sandboxId,
+        resources: {
+          volume_ref: `crossover-sbx-${sandboxId.toLowerCase()}`,
+          container_ref: `crossover-sbx-${sandboxId.toLowerCase()}`,
+        },
+      });
+
+      expect(status.added).toHaveLength(10_000);
+      expect(status.truncated).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 10_000);
+
+  it("treats the streamed byte backstop as truncation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "crossover-status-byte-cap-test-"));
+    const fakeDocker = join(root, "docker.mjs");
+    await writeFile(
+      fakeDocker,
+      [
+        "#!/usr/bin/env node",
+        'import { once } from "node:events";',
+        'const longComponent = "x".repeat(240);',
+        "for (let index = 0; index < 20_000; index++) {",
+        '  const path = Array.from({ length: 8 }, (_, part) => index + "-" + part + "-" + longComponent).join("/");',
+        '  if (!process.stdout.write("?? " + path + "\\0")) await once(process.stdout, "drain");',
+        "}",
+        "",
+      ].join("\n"),
+    );
+    await chmod(fakeDocker, 0o755);
+
+    try {
+      const driver = new DockerExecutionDriver({ dockerBinary: fakeDocker });
+      const sandboxId = newId("sandbox");
+      const status = await driver.status({
+        sandbox_id: sandboxId,
+        resources: {
+          volume_ref: `crossover-sbx-${sandboxId.toLowerCase()}`,
+          container_ref: `crossover-sbx-${sandboxId.toLowerCase()}`,
+        },
+      });
+
+      expect(status.added.length).toBeGreaterThan(0);
+      expect(status.added.length).toBeLessThan(10_000);
+      expect(status.truncated).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 10_000);
+
+  it("returns a retryable generic error when Git status fails without exposing stderr", async () => {
+    const driver = new DockerExecutionDriver({
+      invoke: async () => ({ code: 128, stdout: "", stderr: "private helper details" }),
+      gitFetcherImage: "crossover-git-fetcher:test",
+    });
+    const sandboxId = newId("sandbox");
+    const error = await driver
+      .status({
+        sandbox_id: sandboxId,
+        resources: {
+          volume_ref: `crossover-sbx-${sandboxId.toLowerCase()}`,
+          container_ref: `crossover-sbx-${sandboxId.toLowerCase()}`,
+        },
+      })
+      .catch((cause: unknown) => cause);
+
+    expect(error).toBeInstanceOf(CrossoverError);
+    expect(error).toMatchObject({ code: "UNAVAILABLE", retryable: true });
+    expect((error as Error).message).not.toContain("private helper details");
   });
 
   it("creates a hard-quota volume and container with deterministic names", async () => {

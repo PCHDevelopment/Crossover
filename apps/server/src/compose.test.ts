@@ -39,6 +39,12 @@ class RecordingExecutionDriver implements ExecutionDriver {
   async create({ sandbox_id }: { sandbox_id: string; limits: SandboxLimits }) {
     return { volume_ref: `volume:${sandbox_id}`, container_ref: `container:${sandbox_id}` };
   }
+  async status(_input: Parameters<ExecutionDriver["status"]>[0]) {
+    return { modified: [], added: [], deleted: [], truncated: false };
+  }
+  async materialize(
+    _input: Parameters<NonNullable<ExecutionDriver["materialize"]>>[0],
+  ): Promise<void> {}
   async start(_input: { sandbox_id: string }): Promise<void> {}
   async stop(input: { sandbox_id: string }): Promise<void> {
     this.stopped.push(input.sandbox_id);
@@ -215,6 +221,23 @@ describe("composeServer", () => {
     );
     const seqs = publisher.events.filter((e) => e.room_id === roomId).map((e) => e.sequence);
     expect(seqs).toEqual([...seqs].sort((a, b) => a - b));
+  });
+
+  it("serves sandbox.status for the caller's own materialized working copy", async () => {
+    const driver = new RecordingExecutionDriver();
+    const { server } = await start({}, new RecordingPublisher(), { executionDriver: driver });
+    const { owner, cmd } = await walkthrough(server.app, false);
+
+    const status = await ok(await cmd(envelope("sandbox.status"), owner.tokens.access_token));
+    expect(status.response).toEqual({
+      base_revision: 0,
+      head_revision: 0,
+      behind_by: 0,
+      modified: [],
+      added: [],
+      deleted: [],
+      truncated: false,
+    });
   });
 
   it("serves tasks, messages, room events and room lifecycle over HTTP", async () => {

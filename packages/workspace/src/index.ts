@@ -72,6 +72,10 @@ export type {
   DockerInvocationOptions,
   DockerInvoker,
 } from "./docker-execution-driver.js";
+export { parsePorcelainStatus, registerSandboxStatusCommand } from "./sandbox-status.js";
+export { sandboxStatusParamsSchema } from "./sandbox-status.js";
+export type { SandboxFileChanges } from "./sandbox-status.js";
+export type { SandboxWorkingCopyStatus } from "./execution.js";
 export * from "./upstream.js";
 export * from "./upstream-import.js";
 export * from "./health-suggestion.js";

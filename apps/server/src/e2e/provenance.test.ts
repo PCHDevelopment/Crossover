@@ -290,6 +290,7 @@ describe("provenance labels (§16.5)", () => {
       "workspace.history": "commit messages: the MCP provenance framing is T711",
       "workspace.blame": "authors are named per line; the MCP provenance framing is T711",
       "workspace.health.get": "platform-run output",
+      "sandbox.status": "working-copy paths and canonical revision numbers",
       "conflicts.list": "ChangeSet metadata",
       "conflicts.get": "ChangeSet metadata",
       "room.events.list": "events carry actor_id and type, the ledger's own provenance",
