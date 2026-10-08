@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -172,12 +172,12 @@ describe("sandbox snapshot helper", () => {
     const root = await mkdtemp(join(tmpdir(), "crossover-sandbox-snapshot-"));
     roots.push(root);
     const outside = join(root, "outside.txt");
-    await writeFile(outside, "keep me");
-    await symlink(outside, join(root, "escape"));
+    await Promise.all([writeFile(outside, "keep me"), mkdir(join(root, "nested"))]);
+    await symlink(outside, join(root, "nested", "escape"));
 
     await runHelper(root, {
       action: "install",
-      delete_paths: [path64("escape")],
+      delete_paths: [path64("nested/escape")],
       files: [
         {
           path: path64("bin/tool"),
@@ -188,5 +188,6 @@ describe("sandbox snapshot helper", () => {
     });
     expect(await readFile(outside, "utf8")).toBe("keep me");
     expect((await readFile(join(root, "bin/tool"))).toString("hex")).toBe("0001ff");
+    expect(await readdir(join(root, "nested"))).toEqual([]);
   });
 });
