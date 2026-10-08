@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import random
+import time
 import uuid
 import warnings
 from dataclasses import dataclass, field
@@ -21,6 +22,9 @@ from .errors import CrossoverError, TransportError
 CLOSE_UNAUTHENTICATED = 4401
 CLOSE_NOT_FOUND = 4404
 CLOSE_RESYNC_REQUIRED = 4409
+
+#: How long a subscription keeps retrying a failing refresh (the server's grace for a spent token is 30 s).
+REFRESH_PATIENCE_S = 25.0
 
 #: The longest the stream waits because a server asked it to (a budget's `retry_after`).
 MAX_RETRY_AFTER_S = 600.0
@@ -269,6 +273,7 @@ class Subscription:
         self._failure: BaseException | None = None
         self._session: WsSession | None = None
         self._retry_after: float | None = None
+        self._refresh_since: float | None = None
         self._task = asyncio.ensure_future(self._run())
         self._sleeper: asyncio.Future[None] | None = None
 
@@ -317,12 +322,21 @@ class Subscription:
         in a way that may pass: the server busy, the network): wait and connect again."""
         if not self._config.refresh:
             return "refused"
+        # A refresh token is single-use and the server takes a spent one for a retry only briefly,
+        # so keep retrying a failing refresh for REFRESH_PATIENCE_S at most; then the stream ends.
+        since = self._refresh_since
+        if since is not None and time.monotonic() - since > REFRESH_PATIENCE_S:
+            return "refused"
         try:
-            return "renewed" if await self._config.refresh(used) else "refused"
+            outcome = "renewed" if await self._config.refresh(used) else "refused"
+            self._refresh_since = None
+            return outcome
         except CrossoverError as error:
+            self._refresh_since = self._refresh_since or time.monotonic()
             self._retry_after = _retry_after(error)
             return "later"
         except Exception:
+            self._refresh_since = self._refresh_since or time.monotonic()
             return "later"
 
     async def _run(self) -> None:

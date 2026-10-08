@@ -18,6 +18,8 @@ const envSchema = z.object({
   NODE_ID: z.string().min(1).max(200).optional(),
   /** Serve `POST /v1/auth/dev-login`. Development only; off unless set. */
   DEV_LOGIN: flag,
+  /** Serve the built web app (`apps/web/dist`) from this directory next to the API. */
+  WEB_ROOT: z.string().min(1).optional(),
   /** Comma-separated operator-approved images usable by room health checks. */
   HEALTH_IMAGES: z
     .string()
@@ -59,6 +61,8 @@ export interface ServerConfig {
   port: number;
   nodeId: string;
   devLogin: boolean;
+  /** Directory of the built web app, served next to the API. */
+  webRoot?: string;
   /** Operator allowlist for room-selected health container images. */
   healthImages: readonly string[];
   /** Production defaults to hard; development and CI default to soft. */
@@ -142,6 +146,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     port: e.PORT,
     nodeId: e.NODE_ID ?? `${hostname()}-${process.pid}`,
     devLogin: e.DEV_LOGIN,
+    ...(e.WEB_ROOT ? { webRoot: resolve(e.WEB_ROOT) } : {}),
     healthImages: e.HEALTH_IMAGES,
     sandboxDiskEnforcement,
     ...(e.SANDBOX_VOLUME_DRIVER ? { sandboxVolumeDriver: e.SANDBOX_VOLUME_DRIVER } : {}),
