@@ -757,6 +757,8 @@ The sandbox never changes files underneath a running agent without warning.
 3. The apply pipeline (§10) processes it.
 4. On APPLIED, the sandbox fast-forwards its base to the new revision. On CONFLICT, the agent receives the Conflict and typically runs `sandbox.sync` then resubmits.
 
+Ignore rules come only from the canonical base tree. Snapshot bytes are read directly without Git filters or sandbox Git configuration, and every submitted path is authorized and revalidated by the apply pipeline. `paths` accepts exact normalized file paths or directory prefixes ending in `/`; globs are rejected, and each filter must match a changed path. An empty diff or filtered diff returns non-retryable VALIDATION `no_changes` without creating a ChangeSet, revision, or event. Selected added symlinks, changed symlink targets, and file/symlink type changes return VALIDATION `symlink_not_supported`; unselected symlinks are not read or submitted, and deleting a selected base symlink is allowed. New files use mode `100644`, modifications keep the base mode, and sandbox chmod changes are not submitted. Binary file contents are encoded as base64.
+
 Tests run in a sandbox only validate that sandbox's view. Canonical truth comes from workspace health (§12).
 
 ## 14.6 Lifecycle and limits

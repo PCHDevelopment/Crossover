@@ -1,9 +1,10 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 import { createTestDatabase, type TestDatabase } from "@crossover/db/testing";
-import type { EventPublisher } from "@crossover/kernel";
-import { newId, type RoomEvent } from "@crossover/protocol";
+import type { Authorizer, EventPublisher } from "@crossover/kernel";
+import { CrossoverError, newId, type RoomEvent } from "@crossover/protocol";
 import { git, type ExecutionDriver, type SandboxLimits } from "@crossover/workspace";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { composeServer, type ComposeOverrides, type CrossoverServer } from "./compose.js";
@@ -35,8 +36,10 @@ class RecordingPublisher implements EventPublisher {
 class RecordingExecutionDriver implements ExecutionDriver {
   readonly stopped: string[] = [];
   readonly destroyed: string[] = [];
+  readonly working = new Map<string, Map<string, { mode: string; content: Buffer }>>();
 
   async create({ sandbox_id }: { sandbox_id: string; limits: SandboxLimits }) {
+    this.working.set(sandbox_id, this.working.get(sandbox_id) ?? new Map());
     return { volume_ref: `volume:${sandbox_id}`, container_ref: `container:${sandbox_id}` };
   }
   async status(_input: Parameters<ExecutionDriver["status"]>[0]) {
@@ -45,6 +48,47 @@ class RecordingExecutionDriver implements ExecutionDriver {
   async materialize(
     _input: Parameters<NonNullable<ExecutionDriver["materialize"]>>[0],
   ): Promise<void> {}
+  async snapshotInventory(input: Parameters<NonNullable<ExecutionDriver["snapshotInventory"]>>[0]) {
+    const files = this.working.get(input.sandbox_id) ?? new Map();
+    const tracked = new Set(input.tracked_paths);
+    return [...files].map(([path, file]) => ({
+      path,
+      mode: file.mode,
+      sha: tracked.has(path) ? gitBlobHash(file.content, input.object_format) : null,
+      size: file.content.length,
+    }));
+  }
+  async readSnapshotFiles(input: Parameters<NonNullable<ExecutionDriver["readSnapshotFiles"]>>[0]) {
+    const files = this.working.get(input.sandbox_id) ?? new Map();
+    return input.files.map((expected) => {
+      const file = files.get(expected.path);
+      if (!file) throw new Error("test sandbox path disappeared");
+      const sha = gitBlobHash(file.content, input.object_format);
+      if (
+        file.mode !== expected.mode ||
+        file.content.length !== expected.size ||
+        (expected.sha !== null && expected.sha !== sha)
+      ) {
+        throw new CrossoverError("CONFLICT_VERSION", "test sandbox changed during snapshot");
+      }
+      return {
+        path: expected.path,
+        mode: file.mode,
+        sha,
+        size: file.content.length,
+        content: file.content,
+      };
+    });
+  }
+  async updateSnapshot(
+    input: Parameters<NonNullable<ExecutionDriver["updateSnapshot"]>>[0],
+  ): Promise<void> {
+    const files = this.working.get(input.sandbox_id) ?? new Map();
+    for (const path of input.delete_paths) files.delete(path);
+    for (const file of input.files)
+      files.set(file.path, { mode: file.mode, content: Buffer.from(file.content) });
+    this.working.set(input.sandbox_id, files);
+  }
   async start(_input: { sandbox_id: string }): Promise<void> {}
   async stop(input: { sandbox_id: string }): Promise<void> {
     this.stopped.push(input.sandbox_id);
@@ -52,6 +96,10 @@ class RecordingExecutionDriver implements ExecutionDriver {
   async destroy(input: { sandbox_id: string }): Promise<void> {
     this.destroyed.push(input.sandbox_id);
   }
+}
+
+function gitBlobHash(content: Buffer, format: "sha1" | "sha256"): string {
+  return createHash(format).update(`blob ${content.length}\0`).update(content).digest("hex");
 }
 
 function config(extra: Partial<ServerConfig> = {}): ServerConfig {
@@ -237,6 +285,391 @@ describe("composeServer", () => {
       added: [],
       deleted: [],
       truncated: false,
+    });
+  });
+
+  it("submits a raw sandbox diff, advances the base only after apply, and refuses a no-op", async () => {
+    const driver = new RecordingExecutionDriver();
+    const { server, publisher } = await start({}, new RecordingPublisher(), {
+      executionDriver: driver,
+    });
+    const { roomId, owner, cmd } = await walkthrough(server.app, false);
+    const ownerRow = await db.pool.query<{ id: string }>(
+      "SELECT id FROM participants WHERE room_id = $1 AND authority = 'OWNER'",
+      [roomId],
+    );
+    const sandbox = await server.execution.ensure(roomId, ownerRow.rows[0]!.id);
+    driver.working.get(sandbox.id)!.set("submitted.bin", {
+      mode: "100644",
+      content: Buffer.from([0, 1, 0xff, 10]),
+    });
+
+    const request = envelope("changes.submit", { message: "Submit binary output" });
+    const first = await ok(await cmd(request, owner.tokens.access_token));
+    expect(first.response).toMatchObject({
+      status: "APPLIED",
+      applied_revision: 1,
+      base_revision: 1,
+    });
+    expect(driver.working.get(sandbox.id)!.get("submitted.bin")?.content).toEqual(
+      Buffer.from([0, 1, 0xff, 10]),
+    );
+    expect(await server.execution.get(roomId, ownerRow.rows[0]!.id)).toMatchObject({
+      base_revision: 1,
+    });
+
+    const replay = await ok(await cmd(request, owner.tokens.access_token));
+    expect(replay.response).toMatchObject({
+      status: "APPLIED",
+      applied_revision: 1,
+      base_revision: 1,
+    });
+    const priorEventCount = publisher.events.filter((event) => event.room_id === roomId).length;
+    const noChanges = await cmd(
+      envelope("changes.submit", { message: "Nothing to submit" }),
+      owner.tokens.access_token,
+    );
+    expect(noChanges.statusCode).toBe(400);
+    expect(noChanges.json().error).toMatchObject({
+      code: "VALIDATION",
+      retryable: false,
+      details: { reason: "no_changes" },
+    });
+    expect(publisher.events.filter((event) => event.room_id === roomId)).toHaveLength(
+      priorEventCount,
+    );
+    const count = await db.pool.query<{ count: string }>(
+      "SELECT count(*) FROM changesets WHERE room_id = $1",
+      [roomId],
+    );
+    expect(Number(count.rows[0]!.count)).toBe(1);
+  });
+
+  it("rejects path filters that match nothing and applies directory prefixes only", async () => {
+    const driver = new RecordingExecutionDriver();
+    const { server } = await start({}, new RecordingPublisher(), { executionDriver: driver });
+    const { roomId, owner, cmd } = await walkthrough(server.app, false);
+    const ownerRow = await db.pool.query<{ id: string }>(
+      "SELECT id FROM participants WHERE room_id = $1 AND authority = 'OWNER'",
+      [roomId],
+    );
+    const sandbox = await server.execution.ensure(roomId, ownerRow.rows[0]!.id);
+    const working = driver.working.get(sandbox.id)!;
+    working.set("src/main.ts", { mode: "100644", content: Buffer.from("export {};") });
+    working.set("root.txt", { mode: "100644", content: Buffer.from("local only") });
+
+    const typo = await cmd(
+      envelope("changes.submit", {
+        paths: ["src/mian.ts"],
+        message: "Catch a path filter typo",
+      }),
+      owner.tokens.access_token,
+    );
+    expect(typo.statusCode).toBe(400);
+    expect(typo.json().error).toMatchObject({
+      code: "VALIDATION",
+      details: { reason: "path_not_changed", path: "src/mian.ts" },
+    });
+
+    const submitted = await ok(
+      await cmd(
+        envelope("changes.submit", { paths: ["src/"], message: "Submit src files only" }),
+        owner.tokens.access_token,
+      ),
+    );
+    expect(submitted.response).toMatchObject({ status: "APPLIED", applied_revision: 1 });
+    const workspace = await db.pool.query<{ repo_path: string; commit_sha: string }>(
+      `SELECT w.repo_path, wr.commit_sha FROM workspaces w
+       JOIN workspace_revisions wr ON wr.workspace_id = w.id AND wr.room_id = w.room_id
+       WHERE w.room_id = $1 AND wr.revision = 1`,
+      [roomId],
+    );
+    await expect(
+      git(["cat-file", "-e", `${workspace.rows[0]!.commit_sha}:src/main.ts`], {
+        gitDir: workspace.rows[0]!.repo_path,
+        timeoutMs: 10_000,
+      }),
+    ).resolves.toBeDefined();
+    await expect(
+      git(["cat-file", "-e", `${workspace.rows[0]!.commit_sha}:root.txt`], {
+        gitDir: workspace.rows[0]!.repo_path,
+        timeoutMs: 10_000,
+      }),
+    ).rejects.toThrow();
+  });
+
+  it("revalidates every submitted path in the apply transaction", async () => {
+    const driver = new RecordingExecutionDriver();
+    const denyBlockedPath: Authorizer = async (_principal, action, resource) => {
+      if (action === "workspace.write" && resource.path === "blocked.txt")
+        throw new CrossoverError("FORBIDDEN", "The path is outside the write grant");
+    };
+    const { server } = await start({}, new RecordingPublisher(), {
+      executionDriver: driver,
+      authorize: denyBlockedPath,
+    });
+    const { roomId, owner, cmd } = await walkthrough(server.app, false);
+    const ownerRow = await db.pool.query<{ id: string }>(
+      "SELECT id FROM participants WHERE room_id = $1 AND authority = 'OWNER'",
+      [roomId],
+    );
+    const sandbox = await server.execution.ensure(roomId, ownerRow.rows[0]!.id);
+    driver.working.get(sandbox.id)!.set("blocked.txt", {
+      mode: "100644",
+      content: Buffer.from("do not apply"),
+    });
+
+    const denied = await cmd(
+      envelope("changes.submit", { message: "Submit blocked path" }),
+      owner.tokens.access_token,
+    );
+    expect(denied.statusCode).toBe(403);
+    expect(denied.json().error.code).toBe("FORBIDDEN");
+    expect(await server.execution.get(roomId, ownerRow.rows[0]!.id)).toMatchObject({
+      base_revision: 0,
+    });
+    const count = await db.pool.query<{ count: string }>(
+      "SELECT count(*) FROM changesets WHERE room_id = $1",
+      [roomId],
+    );
+    expect(Number(count.rows[0]!.count)).toBe(0);
+  });
+
+  it("refuses selected symlinks and leaves unrelated links untouched by filtered submits", async () => {
+    const driver = new RecordingExecutionDriver();
+    const { server } = await start({}, new RecordingPublisher(), { executionDriver: driver });
+    const { roomId, owner, cmd } = await walkthrough(server.app, false);
+    const ownerRow = await db.pool.query<{ id: string }>(
+      "SELECT id FROM participants WHERE room_id = $1 AND authority = 'OWNER'",
+      [roomId],
+    );
+    const sandbox = await server.execution.ensure(roomId, ownerRow.rows[0]!.id);
+    const working = driver.working.get(sandbox.id)!;
+
+    working.set("etc-passwd-link", { mode: "120000", content: Buffer.from("/etc/passwd") });
+    const passwdLink = await cmd(
+      envelope("changes.submit", { message: "Submit a link" }),
+      owner.tokens.access_token,
+    );
+    expect(passwdLink.statusCode).toBe(400);
+    expect(passwdLink.json().error).toMatchObject({
+      code: "VALIDATION",
+      details: { reason: "symlink_not_supported", path: "etc-passwd-link" },
+    });
+
+    working.delete("etc-passwd-link");
+    working.set("src/a.ts", { mode: "100644", content: Buffer.from("export {};\n") });
+    working.set("outside/symlink", {
+      mode: "120000",
+      content: Buffer.from("../../outside-scope.txt"),
+    });
+    const filtered = await ok(
+      await cmd(
+        envelope("changes.submit", {
+          paths: ["src/"],
+          message: "Submit src while leaving an unrelated link alone",
+        }),
+        owner.tokens.access_token,
+      ),
+    );
+    expect(filtered.response).toMatchObject({ status: "APPLIED", applied_revision: 1 });
+    expect(working.get("outside/symlink")).toMatchObject({
+      mode: "120000",
+      content: Buffer.from("../../outside-scope.txt"),
+    });
+
+    const workspace = await db.pool.query<{ repo_path: string; commit_sha: string }>(
+      `SELECT w.repo_path, wr.commit_sha FROM workspaces w
+       JOIN workspace_revisions wr ON wr.workspace_id = w.id AND wr.room_id = w.room_id
+       WHERE w.room_id = $1 AND wr.revision = 1`,
+      [roomId],
+    );
+    await expect(
+      git(["cat-file", "-e", `${workspace.rows[0]!.commit_sha}:outside/symlink`], {
+        gitDir: workspace.rows[0]!.repo_path,
+        timeoutMs: 10_000,
+      }),
+    ).rejects.toThrow();
+
+    const selectedLink = await cmd(
+      envelope("changes.submit", {
+        paths: ["outside/symlink"],
+        message: "Submit the link itself",
+      }),
+      owner.tokens.access_token,
+    );
+    expect(selectedLink.statusCode).toBe(400);
+    expect(selectedLink.json().error).toMatchObject({
+      code: "VALIDATION",
+      details: { reason: "symlink_not_supported", path: "outside/symlink" },
+    });
+
+    const count = await db.pool.query<{ count: string }>(
+      "SELECT count(*) FROM changesets WHERE room_id = $1",
+      [roomId],
+    );
+    expect(Number(count.rows[0]!.count)).toBe(1);
+    expect(await server.execution.get(roomId, ownerRow.rows[0]!.id)).toMatchObject({
+      base_revision: 1,
+    });
+  });
+
+  it("ignores sandbox chmod-only changes and preserves the base mode on content edits", async () => {
+    const driver = new RecordingExecutionDriver();
+    const { server } = await start({}, new RecordingPublisher(), { executionDriver: driver });
+    const { roomId, owner, cmd } = await walkthrough(server.app);
+    const ownerRow = await db.pool.query<{ id: string }>(
+      "SELECT id FROM participants WHERE room_id = $1 AND authority = 'OWNER'",
+      [roomId],
+    );
+    const sandbox = await server.execution.ensure(roomId, ownerRow.rows[0]!.id);
+    const working = driver.working.get(sandbox.id)!;
+    working.set("README.md", { mode: "100755", content: Buffer.from("# Alpha\n") });
+
+    const chmodOnly = await cmd(
+      envelope("changes.submit", { message: "Submit chmod only" }),
+      owner.tokens.access_token,
+    );
+    expect(chmodOnly.statusCode).toBe(400);
+    expect(chmodOnly.json().error.details).toMatchObject({ reason: "no_changes" });
+
+    working.set("README.md", { mode: "100755", content: Buffer.from("updated\n") });
+    const edited = await ok(
+      await cmd(
+        envelope("changes.submit", { message: "Submit content edit" }),
+        owner.tokens.access_token,
+      ),
+    );
+    expect(edited.response).toMatchObject({ status: "APPLIED", applied_revision: 2 });
+
+    const workspace = await db.pool.query<{ repo_path: string; commit_sha: string }>(
+      `SELECT w.repo_path, wr.commit_sha FROM workspaces w
+       JOIN workspace_revisions wr ON wr.workspace_id = w.id AND wr.room_id = w.room_id
+       WHERE w.room_id = $1 AND wr.revision = 2`,
+      [roomId],
+    );
+    const treeEntry = await git(["ls-tree", workspace.rows[0]!.commit_sha, "--", "README.md"], {
+      gitDir: workspace.rows[0]!.repo_path,
+      timeoutMs: 10_000,
+    });
+    expect(treeEntry.stdout).toMatch(/^100644 blob /);
+  });
+
+  it("keeps unselected local edits out of canonical and advances the rebased sandbox base", async () => {
+    const driver = new RecordingExecutionDriver();
+    const { server } = await start({}, new RecordingPublisher(), { executionDriver: driver });
+    const { roomId, owner, cmd } = await walkthrough(server.app, false);
+    const ownerRow = await db.pool.query<{ id: string }>(
+      "SELECT id FROM participants WHERE room_id = $1 AND authority = 'OWNER'",
+      [roomId],
+    );
+    const participantId = ownerRow.rows[0]!.id;
+    const sandbox = await server.execution.ensure(roomId, participantId);
+    driver.working.get(sandbox.id)!.set("submitted.txt", {
+      mode: "100644",
+      content: Buffer.from("canonical content"),
+    });
+    driver.working.get(sandbox.id)!.set("local.txt", {
+      mode: "100644",
+      content: Buffer.from("keep editing"),
+    });
+
+    const applied = await ok(
+      await cmd(
+        envelope("changes.submit", {
+          paths: ["submitted.txt"],
+          message: "Submit one file",
+        }),
+        owner.tokens.access_token,
+      ),
+    );
+    expect(applied.response).toMatchObject({
+      status: "APPLIED",
+      applied_revision: 1,
+      base_revision: 1,
+    });
+    expect(driver.working.get(sandbox.id)!.get("local.txt")?.content.toString()).toBe(
+      "keep editing",
+    );
+
+    const workspace = await db.pool.query<{ repo_path: string; commit_sha: string }>(
+      `SELECT w.repo_path, wr.commit_sha FROM workspaces w
+       JOIN workspace_revisions wr ON wr.workspace_id = w.id AND wr.room_id = w.room_id
+       WHERE w.room_id = $1 AND wr.revision = 1`,
+      [roomId],
+    );
+    await expect(
+      git(["cat-file", "-e", `${workspace.rows[0]!.commit_sha}:local.txt`], {
+        gitDir: workspace.rows[0]!.repo_path,
+        timeoutMs: 10_000,
+      }),
+    ).rejects.toThrow();
+    await expect(
+      git(["cat-file", "-e", `${workspace.rows[0]!.commit_sha}:submitted.txt`], {
+        gitDir: workspace.rows[0]!.repo_path,
+        timeoutMs: 10_000,
+      }),
+    ).resolves.toBeDefined();
+  });
+
+  it("keeps the old base and emits sandbox.behind when local rebasing conflicts", async () => {
+    const driver = new RecordingExecutionDriver();
+    const { server, publisher } = await start({}, new RecordingPublisher(), {
+      executionDriver: driver,
+    });
+    const { roomId, owner, cmd } = await walkthrough(server.app, false);
+    const ownerRow = await db.pool.query<{ id: string }>(
+      "SELECT id FROM participants WHERE room_id = $1 AND authority = 'OWNER'",
+      [roomId],
+    );
+    const participantId = ownerRow.rows[0]!.id;
+    const sandbox = await server.execution.ensure(roomId, participantId);
+    driver.working.get(sandbox.id)!.set("local.txt", {
+      mode: "100644",
+      content: Buffer.from("sandbox version"),
+    });
+    driver.working.get(sandbox.id)!.set("submitted.txt", {
+      mode: "100644",
+      content: Buffer.from("submitted content"),
+    });
+    await ok(
+      await cmd(
+        envelope("workspace.apply_changeset", {
+          source: "API",
+          message: "Concurrent canonical edit",
+          base_workspace_revision: 0,
+          operations: [{ type: "create", path: "local.txt", content: "canonical version" }],
+        }),
+        owner.tokens.access_token,
+      ),
+    );
+
+    const submitted = await ok(
+      await cmd(
+        envelope("changes.submit", {
+          paths: ["submitted.txt"],
+          message: "Submit disjoint file",
+        }),
+        owner.tokens.access_token,
+      ),
+    );
+    expect(submitted.response).toMatchObject({
+      status: "APPLIED",
+      applied_revision: 2,
+      base_revision: 0,
+    });
+    expect(await server.execution.get(roomId, participantId)).toMatchObject({ base_revision: 0 });
+    expect(driver.working.get(sandbox.id)!.get("local.txt")?.content.toString()).toBe(
+      "sandbox version",
+    );
+    const behind = publisher.events.find(
+      (event) => event.room_id === roomId && event.type === "sandbox.behind",
+    );
+    expect(behind?.payload).toMatchObject({
+      behind_by: 2,
+      changed_paths: ["local.txt", "submitted.txt"],
+      overlaps_local_changes: true,
+      intents: [],
     });
   });
 

@@ -61,8 +61,10 @@ import {
   publishHealthResult,
   normalizePath,
   registerSandboxStatusCommand,
+  registerSandboxSubmitCommand,
   type ExecutionDriver,
   type UpstreamDeps,
+  type WorkspaceCommandDeps,
 } from "@crossover/workspace";
 import type { ServerConfig } from "./config.js";
 
@@ -369,9 +371,11 @@ function registerCommands(
   registerDecisionDecideCommands(dispatcher);
 
   // apply_changeset plus reads; schedule health for every committed revision.
-  registerWorkspaceCommands(dispatcher, {
+  const workspaceDeps: WorkspaceCommandDeps = {
     scheduleHealthCheck: (roomId, revision) => healthQueue.enqueue(roomId, revision),
     ...(upstream ? { upstream } : {}),
-  });
+  };
+  registerWorkspaceCommands(dispatcher, workspaceDeps);
   registerSandboxStatusCommand(dispatcher, execution);
+  registerSandboxSubmitCommand(dispatcher, execution, workspaceDeps);
 }
