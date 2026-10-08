@@ -1,10 +1,14 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile, readdir, stat } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { git } from "./git.js";
 
 const GIT_TIMEOUT_MS = 30_000;
+type SnapshotDirectoryRemover = (
+  path: string,
+  options: { recursive: true; force: true },
+) => Promise<unknown>;
 
 interface BlobEntry {
   mode: string;
@@ -21,13 +25,13 @@ interface TreeNode {
 export interface ScopedSnapshotRepository {
   /** A temporary bare repository whose only advertised branch is the filtered snapshot. */
   repo_path: string;
-  /** Canonical object database used as an alternate only for unscoped snapshots. */
+  /** Canonical alternate for unscoped advertisements only; never for negotiation. */
   reference_repository?: string;
   /** Synthetic commit SHA for the filtered tree; the canonical revision remains numeric. */
   commit: string;
   /** Stable digest of the readable path set represented by the snapshot. */
   scope_hash: string;
-  /** Remove the temporary repository and its object alternate. */
+  /** Remove the temporary repository. */
   dispose(): Promise<void>;
 }
 
@@ -43,6 +47,8 @@ export async function createScopedSnapshotRepository(input: {
   revision: number;
   canonicalTimestamp: number;
   canRead(path: string): Promise<boolean>;
+  /** Advertisement only: no object negotiation may use an unpacked snapshot. */
+  advertisementOnly?: boolean;
 }): Promise<ScopedSnapshotRepository> {
   const directory = await mkdtemp(join(tmpdir(), "crossover-sandbox-git-"));
   const repoPath = join(directory, "snapshot.git");
@@ -95,12 +101,13 @@ export async function createScopedSnapshotRepository(input: {
       gitDir: repoPath,
       timeoutMs: GIT_TIMEOUT_MS,
     });
-    await git(["pack-objects", "--revs", join(repoPath, "objects", "pack", "snapshot")], {
-      gitDir: repoPath,
-      timeoutMs: GIT_TIMEOUT_MS,
-      env,
-      input: `${syntheticCommit}\n`,
-    });
+    if (!input.advertisementOnly)
+      await git(["pack-objects", "--revs", join(repoPath, "objects", "pack", "snapshot")], {
+        gitDir: repoPath,
+        timeoutMs: GIT_TIMEOUT_MS,
+        env,
+        input: `${syntheticCommit}\n`,
+      });
 
     return {
       repo_path: repoPath,
@@ -118,6 +125,7 @@ export async function createScopedSnapshotRepository(input: {
 export async function createUnscopedSnapshotRepository(input: {
   referenceRepository: string;
   canonicalCommit: string;
+  advertisementOnly?: boolean;
 }): Promise<ScopedSnapshotRepository> {
   const directory = await mkdtemp(join(tmpdir(), "crossover-sandbox-git-"));
   const repoPath = join(directory, "snapshot.git");
@@ -135,9 +143,18 @@ export async function createUnscopedSnapshotRepository(input: {
       gitDir: repoPath,
       timeoutMs: GIT_TIMEOUT_MS,
     });
+    // The boundary keeps the real head SHA while excluding all parent commits and their blobs.
+    await writeFile(join(repoPath, "shallow"), `${input.canonicalCommit}\n`);
+    if (!input.advertisementOnly)
+      await git(["pack-objects", "--revs", join(repoPath, "objects", "pack", "snapshot")], {
+        gitDir: repoPath,
+        timeoutMs: GIT_TIMEOUT_MS,
+        env,
+        input: `${input.canonicalCommit}\n`,
+      });
     return {
       repo_path: repoPath,
-      reference_repository: input.referenceRepository,
+      ...(input.advertisementOnly ? { reference_repository: input.referenceRepository } : {}),
       commit: input.canonicalCommit,
       scope_hash: "unscoped",
       dispose: () => rm(directory, { recursive: true, force: true }),
@@ -145,6 +162,42 @@ export async function createUnscopedSnapshotRepository(input: {
   } catch (error) {
     await rm(directory, { recursive: true, force: true });
     throw error;
+  }
+}
+
+/** Remove abandoned snapshots on startup; a day of grace avoids touching live fetches. */
+export async function sweepSnapshotRepositories(
+  root = tmpdir(),
+  now = Date.now(),
+  onError: (error: unknown) => void = (error) =>
+    console.error("[workspace] snapshot cleanup failed", error),
+  removeDirectory: SnapshotDirectoryRemover = rm,
+): Promise<void> {
+  const report = (error: unknown) => {
+    try {
+      onError(error);
+    } catch (reportError) {
+      console.error("[workspace] snapshot cleanup error reporter failed", reportError);
+    }
+  };
+
+  let entries: Array<{ isDirectory(): boolean; name: string }>;
+  try {
+    entries = await readdir(root, { withFileTypes: true });
+  } catch (error) {
+    report(error);
+    return;
+  }
+
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !entry.name.startsWith("crossover-sandbox-git-")) continue;
+    const directory = join(root, entry.name);
+    try {
+      if ((await stat(directory)).mtimeMs < now - 24 * 60 * 60 * 1000)
+        await removeDirectory(directory, { recursive: true, force: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") report(error);
+    }
   }
 }
 

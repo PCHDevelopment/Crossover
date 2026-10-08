@@ -5,6 +5,7 @@ export { initRoomRepo } from "./repo.js";
 export { materialize } from "./materialize.js";
 export {
   createScopedSnapshotRepository,
+  sweepSnapshotRepositories,
   createUnscopedSnapshotRepository,
   hashSnapshotScope,
 } from "./scoped-snapshot.js";
