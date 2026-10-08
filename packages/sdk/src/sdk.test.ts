@@ -475,9 +475,9 @@ describe("subscribe", () => {
       ).room("room_1", { access_token: "old", refresh_token: "rt" });
       const sub = room.subscribe({ reconnect: { minMs: 1, maxMs: 2 } });
       await expect(take(sub, 1)).rejects.toBeInstanceOf(Error);
-      // Failures at +10 s, +20 s and +30 s (20 s after the first) are retried; the next try would
-      // fall outside the 25 s patience, so it isn't sent: a retry past the server's grace window
-      // would revoke the login.
+      // The first failure starts the clock. Retries checked 0, 10 and 20 s after it are inside the
+      // 25 s patience; the one at 30 s is not sent (it could land outside the server's 30 s grace
+      // and revoke the login), so four refreshes go out and the stream ends.
       expect(refreshes).toBe(4);
     } finally {
       clock.mockRestore();
