@@ -197,10 +197,36 @@ async function prepareSandboxSubmit(
       throw new CrossoverError("UNAVAILABLE", "Workspace Git object format is unsupported");
 
     const baseEntries = await readTree(workspace.repo_path, workspace.commit_sha);
+    const ignoreRules = await Promise.all(
+      [...baseEntries]
+        .filter(
+          ([path, entry]) =>
+            entry.mode.startsWith("100") &&
+            (path === ".roomignore" || path === ".gitignore" || path.endsWith("/.gitignore")),
+        )
+        .sort(
+          ([a], [b]) =>
+            Number(b === ".roomignore") - Number(a === ".roomignore") ||
+            a.split("/").length - b.split("/").length,
+        )
+        .map(async ([path, { sha }]) => ({
+          path,
+          patterns: (
+            await git(["cat-file", "blob", sha], {
+              gitDir: workspace.repo_path,
+              timeoutMs: 10_000,
+              encoding: "buffer",
+            })
+          ).stdout
+            .toString("utf8")
+            .split(/\r?\n/),
+        })),
+    );
     const inventory = await execution.snapshotInventory(
       sandbox,
       [...baseEntries.keys()],
       objectFormat,
+      ignoreRules,
     );
     const newPaths = inventory
       .filter((entry) => !baseEntries.has(entry.path))
