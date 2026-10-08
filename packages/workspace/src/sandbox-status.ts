@@ -14,6 +14,8 @@ const MAX_STATUS_ENTRIES = 10_000;
 export interface PorcelainStatusAccumulator {
   /** Consume one stdout chunk; false means the consumer reached its output limit. */
   write(chunk: string): boolean;
+  /** Mark unconsumed status as truncated when the byte budget is exhausted. */
+  truncate(): void;
   /** Flush the final unterminated record and return the accumulated bounded result. */
   finish(): SandboxFileChanges;
 }
@@ -64,6 +66,11 @@ export function createPorcelainStatusAccumulator(): PorcelainStatusAccumulator {
       }
       pending += chunk.slice(start);
       return true;
+    },
+    truncate() {
+      pending = "";
+      stopped = true;
+      changes.truncated = true;
     },
     finish() {
       if (!stopped && pending) addRecord(pending);

@@ -196,6 +196,43 @@ describe("DockerExecutionDriver", () => {
     }
   }, 10_000);
 
+  it("treats the streamed byte backstop as truncation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "crossover-status-byte-cap-test-"));
+    const fakeDocker = join(root, "docker.mjs");
+    await writeFile(
+      fakeDocker,
+      [
+        "#!/usr/bin/env node",
+        'import { once } from "node:events";',
+        'const longComponent = "x".repeat(240);',
+        "for (let index = 0; index < 20_000; index++) {",
+        '  const path = Array.from({ length: 8 }, (_, part) => index + "-" + part + "-" + longComponent).join("/");',
+        '  if (!process.stdout.write("?? " + path + "\\0")) await once(process.stdout, "drain");',
+        "}",
+        "",
+      ].join("\n"),
+    );
+    await chmod(fakeDocker, 0o755);
+
+    try {
+      const driver = new DockerExecutionDriver({ dockerBinary: fakeDocker });
+      const sandboxId = newId("sandbox");
+      const status = await driver.status({
+        sandbox_id: sandboxId,
+        resources: {
+          volume_ref: `crossover-sbx-${sandboxId.toLowerCase()}`,
+          container_ref: `crossover-sbx-${sandboxId.toLowerCase()}`,
+        },
+      });
+
+      expect(status.added.length).toBeGreaterThan(0);
+      expect(status.added.length).toBeLessThan(10_000);
+      expect(status.truncated).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 10_000);
+
   it("returns a retryable generic error when Git status fails without exposing stderr", async () => {
     const driver = new DockerExecutionDriver({
       invoke: async () => ({ code: 128, stdout: "", stderr: "private helper details" }),

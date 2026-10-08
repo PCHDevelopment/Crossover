@@ -13,6 +13,7 @@ const DEFAULT_IMAGE = "node:22-bookworm-slim";
 const DEFAULT_GIT_FETCHER_IMAGE = "crossover-git-fetcher:latest";
 const GIT_NETWORK = "crossover-git";
 const FETCH_TIMEOUT_MS = 4 * 60 * 1000;
+const MAX_STATUS_OUTPUT_BYTES = 16 * 1024 * 1024;
 
 export interface DockerInvocationOptions {
   timeoutMs?: number;
@@ -403,6 +404,28 @@ export class DockerExecutionDriver implements ExecutionDriver {
       const status = createPorcelainStatusAccumulator();
       let streamed = false;
       let stoppedByLimit = false;
+      let statusBytes = 0;
+      const consumeStatusChunk = (chunk: string): boolean => {
+        streamed = true;
+        const chunkBytes = Buffer.byteLength(chunk);
+        const remainingBytes = MAX_STATUS_OUTPUT_BYTES - statusBytes;
+        if (chunkBytes > remainingBytes) {
+          if (remainingBytes > 0) {
+            const prefix = Buffer.from(chunk).subarray(0, remainingBytes).toString("utf8");
+            if (!status.write(prefix)) {
+              stoppedByLimit = true;
+              return false;
+            }
+          }
+          status.truncate();
+          stoppedByLimit = true;
+          return false;
+        }
+        statusBytes += chunkBytes;
+        const keepReading = status.write(chunk);
+        if (!keepReading) stoppedByLimit = true;
+        return keepReading;
+      };
       const result = await this.invoke(
         [
           "run",
@@ -448,15 +471,10 @@ export class DockerExecutionDriver implements ExecutionDriver {
         {
           timeoutMs: 20_000,
           maxBuffer: 8 * 1024 * 1024,
-          onStdout: (chunk) => {
-            streamed = true;
-            const keepReading = status.write(chunk);
-            if (!keepReading) stoppedByLimit = true;
-            return keepReading;
-          },
+          onStdout: consumeStatusChunk,
         },
       );
-      if (!streamed && result.stdout) status.write(result.stdout);
+      if (!streamed && result.stdout) consumeStatusChunk(result.stdout);
       if (result.code !== 0 && !stoppedByLimit)
         throw new CrossoverError(
           "UNAVAILABLE",
