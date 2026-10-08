@@ -135,9 +135,17 @@ describe("relevant profile: what travels with the event", () => {
     expect(match(event("workspace.changeset.applied", { changeset_id: "c" }))).toBe(true); // no author_id
     expect(match(event("workspace.health", { status: "RED" }))).toBe(true); // no suspect_ids
     expect(match(event("message.edited", { message_id: "m", body: "x" }))).toBe(true); // no mentions
+    expect(
+      match(event("workspace.conflict.resolved", { conflict_id: "c", resolver_id: "part_l" })),
+    ).toBe(true); // no submitter_id
     // …but an event that does carry them is judged by them.
     expect(match(event("task.started", { task_id: "t", owner_id: null }))).toBe(false);
     expect(match(event("workspace.health", { status: "GREEN" }))).toBe(false);
+    expect(
+      match(
+        event("workspace.conflict.resolved", { resolver_id: "part_l", submitter_id: "part_b" }),
+      ),
+    ).toBe(false);
   });
   it("never asks anything but the event: the same event gives the same answer whenever it is judged", () => {
     const e = event("task.started", { task_id: "t", owner_id: me });

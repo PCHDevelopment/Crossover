@@ -156,7 +156,8 @@ const mentions = (payload: Record<string, unknown>, me: string): boolean =>
  * here asks the database.
  *
  * **Fail open.** An event written before its type carried the field this needs (`owner_id` on
- * task events, `author_id` on ChangeSets, `suspect_ids` on health, `mentions` on edits) is
+ * task events, `author_id` on ChangeSets, `submitter_id` on resolved conflicts, `suspect_ids` on
+ * health, `mentions` on edits) is
  * delivered: a filter is a convenience, not a security boundary, and an agent resuming across an
  * upgrade must not lose what happened meanwhile. Redaction for the viewer still applies.
  */
@@ -181,6 +182,7 @@ function isRelevant(principal: Principal, event: RoomEvent): boolean {
   }
   if (/^task\./.test(type)) return lacks("owner_id") || names(p, me);
   if (type === "workspace.changeset.applied") return lacks("author_id") || names(p, me);
+  if (type === "workspace.conflict.resolved") return lacks("submitter_id") || names(p, me);
   if (/^workspace\.(changeset|conflict)\./.test(type)) return names(p, me);
   // Participants, approvals, budgets, sandboxes, checkpoints, …: when they name this participant.
   return names(p, me);
