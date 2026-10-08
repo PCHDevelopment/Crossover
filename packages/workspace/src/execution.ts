@@ -47,6 +47,20 @@ export interface SandboxWorkingCopyStatus extends SandboxFileChanges {
   behind_by: number;
 }
 
+/** A no-follow inventory entry read directly from the sandbox volume. `sha` is null if new. */
+export interface SandboxSnapshotEntry {
+  path: string;
+  mode: string;
+  sha: string | null;
+  size: number;
+}
+
+/** File bytes from the same mode/hash/size observed during snapshot inventory. */
+export interface SandboxSnapshotFile extends SandboxSnapshotEntry {
+  sha: string;
+  content: Buffer;
+}
+
 export interface ExecutionDriver {
   /**
    * Every operation is repeatable by sandbox ID: create adopts deterministic existing resources;
@@ -67,6 +81,28 @@ export interface ExecutionDriver {
     workspace: SandboxWorkspaceHead;
   }): Promise<void>;
   status(input: { sandbox_id: string; resources: SandboxResources }): Promise<SandboxFileChanges>;
+  /** Hash tracked files and enumerate paths without consulting any sandbox Git metadata. */
+  snapshotInventory?(input: {
+    sandbox_id: string;
+    resources: SandboxResources;
+    tracked_paths: readonly string[];
+    object_format: "sha1" | "sha256";
+  }): Promise<SandboxSnapshotEntry[]>;
+  /** Read only selected files, refusing a path that changed since inventory. */
+  readSnapshotFiles?(input: {
+    sandbox_id: string;
+    resources: SandboxResources;
+    files: readonly SandboxSnapshotEntry[];
+    object_format: "sha1" | "sha256";
+    max_bytes: number;
+  }): Promise<SandboxSnapshotFile[]>;
+  /** Apply a server-computed rebase delta without following any path from the sandbox. */
+  updateSnapshot?(input: {
+    sandbox_id: string;
+    resources: SandboxResources;
+    files: readonly Pick<SandboxSnapshotFile, "path" | "mode" | "content">[];
+    delete_paths: readonly string[];
+  }): Promise<void>;
   start(input: { sandbox_id: string; resources: SandboxResources }): Promise<void>;
   stop(input: { sandbox_id: string; resources: SandboxResources }): Promise<void>;
   destroy(input: { sandbox_id: string; resources?: SandboxResources }): Promise<void>;
@@ -110,6 +146,110 @@ export class ExecutionService {
 
   /** Create lazily, or resume, the one sandbox owned by this room participant. */
   async ensure(roomId: string, participantId: string): Promise<SandboxRecord> {
+    return this.withEnsureLock(roomId, participantId, () =>
+      this.ensureExclusive(roomId, participantId),
+    );
+  }
+
+  /** Serialize snapshot preparation with lifecycle transitions, while keeping I/O off SQL locks. */
+  async withSandboxLock<T>(
+    roomId: string,
+    participantId: string,
+    work: (sandbox: SandboxRecord) => Promise<T>,
+  ): Promise<T> {
+    return this.withEnsureLock(roomId, participantId, async () => {
+      const sandbox = await this.ensureExclusive(roomId, participantId);
+      return work(sandbox);
+    });
+  }
+
+  supportsSandboxSubmit(): boolean {
+    return Boolean(
+      this.driver.snapshotInventory && this.driver.readSnapshotFiles && this.driver.updateSnapshot,
+    );
+  }
+
+  async snapshotInventory(
+    sandbox: SandboxRecord,
+    trackedPaths: readonly string[],
+    objectFormat: "sha1" | "sha256",
+  ): Promise<SandboxSnapshotEntry[]> {
+    if (!this.driver.snapshotInventory || !sandbox.volume_ref || !sandbox.container_ref)
+      throw new CrossoverError(
+        "UNAVAILABLE",
+        "Sandbox snapshot is not supported by this execution driver",
+      );
+    return this.driver.snapshotInventory({
+      sandbox_id: sandbox.id,
+      resources: { volume_ref: sandbox.volume_ref, container_ref: sandbox.container_ref },
+      tracked_paths: trackedPaths,
+      object_format: objectFormat,
+    });
+  }
+
+  async readSnapshotFiles(
+    sandbox: SandboxRecord,
+    files: readonly SandboxSnapshotEntry[],
+    objectFormat: "sha1" | "sha256",
+    maxBytes: number,
+  ): Promise<SandboxSnapshotFile[]> {
+    if (!this.driver.readSnapshotFiles || !sandbox.volume_ref || !sandbox.container_ref)
+      throw new CrossoverError(
+        "UNAVAILABLE",
+        "Sandbox snapshot is not supported by this execution driver",
+      );
+    return this.driver.readSnapshotFiles({
+      sandbox_id: sandbox.id,
+      resources: { volume_ref: sandbox.volume_ref, container_ref: sandbox.container_ref },
+      files,
+      object_format: objectFormat,
+      max_bytes: maxBytes,
+    });
+  }
+
+  /** Install a server-computed submit rebase, then move the sandbox base only after the write. */
+  async advanceWorkingCopy(
+    roomId: string,
+    participantId: string,
+    expectedBaseRevision: number,
+    nextBaseRevision: number,
+    files: readonly Pick<SandboxSnapshotFile, "path" | "mode" | "content">[],
+    deletePaths: readonly string[],
+  ): Promise<void> {
+    await this.withSandboxLock(roomId, participantId, async (sandbox) => {
+      if (sandbox.base_revision !== expectedBaseRevision)
+        throw new CrossoverError(
+          "CONFLICT_VERSION",
+          "Sandbox base changed; sync before submitting",
+        );
+      if (!sandbox.volume_ref || !sandbox.container_ref || !this.driver.updateSnapshot)
+        throw new CrossoverError("UNAVAILABLE", "Sandbox working copy cannot be advanced");
+      await this.driver.updateSnapshot({
+        sandbox_id: sandbox.id,
+        resources: { volume_ref: sandbox.volume_ref, container_ref: sandbox.container_ref },
+        files,
+        delete_paths: deletePaths,
+      });
+      const { rowCount } = await withTransaction(this.pool, (client) =>
+        client.query(
+          `UPDATE sandboxes SET base_revision = $4, updated_at = clock_timestamp()
+           WHERE id = $1 AND room_id = $2 AND participant_id = $3 AND base_revision = $5`,
+          [sandbox.id, roomId, participantId, nextBaseRevision, expectedBaseRevision],
+        ),
+      );
+      if (rowCount !== 1)
+        throw new CrossoverError(
+          "CONFLICT_VERSION",
+          "Sandbox base changed while it was being advanced",
+        );
+    });
+  }
+
+  private async withEnsureLock<T>(
+    roomId: string,
+    participantId: string,
+    work: () => Promise<T>,
+  ): Promise<T> {
     const key = `${roomId}\0${participantId}`;
     const previous = this.ensureLocks.get(key) ?? Promise.resolve();
     let release!: () => void;
@@ -117,7 +257,7 @@ export class ExecutionService {
     this.ensureLocks.set(key, current);
     await previous;
     try {
-      return await this.ensureExclusive(roomId, participantId);
+      return await work();
     } finally {
       release();
       if (this.ensureLocks.get(key) === current) this.ensureLocks.delete(key);

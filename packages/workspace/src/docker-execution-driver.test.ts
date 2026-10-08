@@ -160,6 +160,82 @@ describe("DockerExecutionDriver", () => {
     expect(calls[0]).toContain("crossover-git-fetcher:test");
   });
 
+  it("isolates snapshot reads and installs behind a bounded no-network helper", async () => {
+    const calls: Array<{ args: string[]; input: string }> = [];
+    const driver = new DockerExecutionDriver({
+      invoke: async (args, options) => {
+        const input = String(options?.input ?? "");
+        calls.push({ args: [...args], input });
+        const request = JSON.parse(input) as { action: string };
+        return {
+          code: 0,
+          stdout:
+            request.action === "inventory"
+              ? JSON.stringify({
+                  entries: [
+                    {
+                      path: Buffer.from("src/a.txt").toString("base64"),
+                      mode: "100644",
+                      sha: null,
+                      size: 0,
+                    },
+                  ],
+                })
+              : JSON.stringify({ installed: true }),
+          stderr: "",
+        };
+      },
+      image: "node:test-image",
+    });
+    const sandboxId = newId("sandbox");
+    const suffix = sandboxId.toLowerCase();
+    const resources = {
+      volume_ref: `crossover-sbx-${suffix}`,
+      container_ref: `crossover-sbx-${suffix}`,
+    };
+
+    await expect(
+      driver.snapshotInventory({
+        sandbox_id: sandboxId,
+        resources,
+        tracked_paths: ["src/a.txt"],
+        object_format: "sha1",
+      }),
+    ).resolves.toMatchObject([{ path: "src/a.txt", mode: "100644", sha: null, size: 0 }]);
+    await driver.updateSnapshot({
+      sandbox_id: sandboxId,
+      resources,
+      files: [{ path: "src/a.txt", mode: "100644", content: Buffer.from("safe") }],
+      delete_paths: ["old.txt"],
+    });
+
+    expect(calls).toHaveLength(2);
+    const [read, install] = calls;
+    expect(read!.args).toContain("--network=none");
+    expect(read!.args).toContain("--read-only");
+    expect(read!.args).toContain(
+      `type=volume,source=crossover-sbx-${suffix},target=/workspace,readonly,volume-nocopy`,
+    );
+    expect(JSON.parse(read!.input)).toMatchObject({
+      action: "inventory",
+      tracked_paths: [Buffer.from("src/a.txt").toString("base64")],
+    });
+    expect(install!.args).toContain("--network=none");
+    expect(install!.args).not.toContain(
+      `type=volume,source=crossover-sbx-${suffix},target=/workspace,readonly,volume-nocopy`,
+    );
+    expect(JSON.parse(install!.input)).toMatchObject({
+      action: "install",
+      files: [
+        {
+          path: Buffer.from("src/a.txt").toString("base64"),
+          content: Buffer.from("safe").toString("base64"),
+        },
+      ],
+      delete_paths: [Buffer.from("old.txt").toString("base64")],
+    });
+  });
+
   it("streams status beyond 8 MiB and stops at the entry limit", async () => {
     const root = await mkdtemp(join(tmpdir(), "crossover-status-stream-test-"));
     const fakeDocker = join(root, "docker.mjs");

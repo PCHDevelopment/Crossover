@@ -31,7 +31,7 @@ workspace.upstream_synced
 
 checkpoint.created / checkpoint.exported
 
-sandbox.created / sandbox.hibernated / sandbox.synced
+sandbox.created / sandbox.behind / sandbox.hibernated / sandbox.synced
 sandbox.exec.started / sandbox.exec.finished
 
 tool.invoked / tool.completed / tool.failed
@@ -57,7 +57,7 @@ const valid = {
 
 describe("EVENT_TYPES", () => {
   it("contains every type in the §19.5 catalog, and nothing else", () => {
-    expect(catalogTypes).toHaveLength(64);
+    expect(catalogTypes).toHaveLength(65);
     expect([...EVENT_TYPES].sort()).toEqual([...catalogTypes].sort());
   });
 
