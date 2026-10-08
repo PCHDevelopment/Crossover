@@ -27,7 +27,7 @@ jobs:
       redis:
         image: redis:7
         ports:
-          - 6379:6379
+          - 6380:6379
     env:
       DATABASE_URL: postgres://crossover:crossover@localhost:5432/crossover
       REDIS_URL: redis://localhost:6379
