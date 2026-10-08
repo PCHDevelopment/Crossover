@@ -10,6 +10,7 @@ import { merge } from "./merge.js";
 import type { ContentEncoding, Operation } from "./operations.js";
 import { treeChanges } from "./tree-changes.js";
 import { updateCanonicalRef } from "./reconcile.js";
+import { UPSTREAM_ACTOR } from "./upstream-import.js";
 import { registerWorkspaceReads } from "./reads.js";
 import { registerWorkspaceHistory } from "./history.js";
 import { registerWorkspaceBlame } from "./blame.js";
@@ -100,46 +101,131 @@ interface PathFinding extends SecretFinding {
   path: string;
 }
 
+/** At most this many findings are reported per ChangeSet (details and inbox). */
+const MAX_FINDINGS_PER_CHANGESET = 100;
+
 /** Decode an operation's content to the text the scanner reads. */
 function decodeContent(content: string | Buffer, encoding?: ContentEncoding): string {
   if (Buffer.isBuffer(content)) return content.toString("utf8");
-  if (encoding === "base64") {
-    try {
-      return Buffer.from(content, "base64").toString("utf8");
-    } catch {
-      return content;
-    }
-  }
+  if (encoding === "base64") return Buffer.from(content, "base64").toString("utf8");
   return content;
 }
 
-/** The scannable text of one operation, tagged with the path it lands on. */
-function operationTexts(op: Operation): Array<{ path: string; text: string }> {
+/** Every line of `text` is added (a new file has no base to differ from). */
+const allLines = (text: string): Set<number> => {
+  const n = text === "" ? 0 : text.split("\n").length;
+  const s = new Set<number>();
+  for (let i = 1; i <= n; i++) s.add(i);
+  return s;
+};
+
+/**
+ * Reconstruct the new-file text from a unified diff, padded so text line N is
+ * new-file line N, and return the set of added (`+`) line numbers. Context lines
+ * are kept so multi-line structures (a private-key block) stay intact; removals
+ * are dropped, so a patch that deletes a secret no longer trips the scanner.
+ */
+function patchAddedText(patch: string): { text: string; addedLines: Set<number> } {
+  const out: string[] = [];
+  const addedLines = new Set<number>();
+  let newLine = 0;
+  for (const raw of patch.split("\n")) {
+    const hunk = raw.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+    if (hunk) {
+      const start = Number(hunk[1]);
+      while (out.length < start - 1) out.push("");
+      newLine = start - 1;
+      continue;
+    }
+    if (raw.startsWith("+++") || raw.startsWith("---")) continue;
+    if (raw.startsWith("+")) {
+      newLine++;
+      out.push(raw.slice(1));
+      addedLines.add(newLine);
+    } else if (raw.startsWith(" ") || raw === "") {
+      newLine++;
+      out.push(raw.startsWith(" ") ? raw.slice(1) : "");
+    }
+  }
+  return { text: out.join("\n"), addedLines };
+}
+
+/**
+ * The new-file line numbers that differ from the base version. A common prefix
+ * and suffix are unchanged; everything between is treated as added. Keeps a
+ * pre-existing secret (an imported repo, a fixture) from wedging an edit that
+ * doesn't touch it.
+ */
+function addedLinesForContent(base: string, next: string): Set<number> {
+  const baseLines = base.split("\n");
+  const nextLines = next.split("\n");
+  let prefix = 0;
+  const minLen = Math.min(baseLines.length, nextLines.length);
+  while (prefix < minLen && baseLines[prefix] === nextLines[prefix]) prefix++;
+  let suffix = 0;
+  while (
+    suffix < minLen - prefix &&
+    baseLines[baseLines.length - 1 - suffix] === nextLines[nextLines.length - 1 - suffix]
+  )
+    suffix++;
+  const added = new Set<number>();
+  for (let i = prefix; i < nextLines.length - suffix; i++) added.add(i + 1);
+  return added;
+}
+
+/** The base version of a file, or "" when it has none (treated as all-added). */
+async function readBaseFile(repoPath: string, commit: string, path: string): Promise<string> {
+  try {
+    const { stdout } = await git(["show", `${commit}:${path}`], {
+      cwd: repoPath,
+      timeoutMs: 5000,
+      encoding: "utf8",
+    });
+    return stdout;
+  } catch {
+    return "";
+  }
+}
+
+/** The scannable text of one operation, with the lines the ChangeSet adds. */
+async function operationScanTargets(
+  op: Operation,
+  baseCommit: string,
+  repoPath: string,
+): Promise<Array<{ path: string; text: string; addedLines: Set<number> }>> {
   if (op.type === "delete") return [];
   if (op.type === "rename") {
-    return op.content === undefined
-      ? []
-      : [{ path: op.to, text: decodeContent(op.content, op.encoding) }];
+    if (op.content === undefined) return [];
+    const text = decodeContent(op.content, op.encoding);
+    return [{ path: op.to, text, addedLines: allLines(text) }];
   }
   if (op.type === "modify") {
-    if (op.patch !== undefined) return [{ path: op.path, text: op.patch }];
-    return op.content === undefined
-      ? []
-      : [{ path: op.path, text: decodeContent(op.content, op.encoding) }];
+    if (op.patch !== undefined) {
+      const { text, addedLines } = patchAddedText(op.patch);
+      return [{ path: op.path, text, addedLines }];
+    }
+    if (op.content === undefined) return [];
+    const text = decodeContent(op.content, op.encoding);
+    const base = await readBaseFile(repoPath, baseCommit, op.path);
+    return [{ path: op.path, text, addedLines: addedLinesForContent(base, text) }];
   }
   // create
-  return op.content === undefined
-    ? []
-    : [{ path: op.path, text: decodeContent(op.content, op.encoding) }];
+  if (op.content === undefined) return [];
+  const text = decodeContent(op.content, op.encoding);
+  return [{ path: op.path, text, addedLines: allLines(text) }];
 }
 
 /** Scan every operation; split findings by confidence, each tagged with its path. */
-function scanChangeSet(operations: Operation[]): { high: PathFinding[]; low: PathFinding[] } {
+async function scanChangeSet(
+  operations: Operation[],
+  baseCommit: string,
+  repoPath: string,
+): Promise<{ high: PathFinding[]; low: PathFinding[] }> {
   const high: PathFinding[] = [];
   const low: PathFinding[] = [];
   for (const op of operations) {
-    for (const { path, text } of operationTexts(op)) {
-      for (const finding of scanSecrets(text, { path })) {
+    for (const { path, text, addedLines } of await operationScanTargets(op, baseCommit, repoPath)) {
+      for (const finding of scanSecrets(text, { path, addedLines })) {
         (finding.confidence === "high" ? high : low).push({ ...finding, path });
       }
     }
@@ -148,13 +234,15 @@ function scanChangeSet(operations: Operation[]): { high: PathFinding[]; low: Pat
 }
 
 /**
- * Inbox summary for low-confidence findings. Names the file, line and rule —
- * never the matched value, which the scanner already withholds.
+ * Inbox summary for flagged findings. Names the file, line and rule — never the
+ * matched value, which the scanner already withholds. `omitted` counts findings
+ * dropped by the per-ChangeSet cap.
  */
-function secretScanSummary(findings: PathFinding[]): string {
+function secretScanSummary(findings: PathFinding[], omitted: number): string {
   const shown = findings.slice(0, 5).map((f) => `${f.path}:${f.line} (${f.rule})`);
   const more = findings.length > 5 ? ` (+${findings.length - 5} more)` : "";
-  return `Low-confidence secret scan: ${shown.join(", ")}${more}. Review before this change ships.`;
+  const omittedNote = omitted > 0 ? ` ${omitted} more omitted.` : "";
+  return `Secret scan: ${shown.join(", ")}${more}${omittedNote} Review before this change ships.`;
 }
 
 export async function apply(
@@ -180,30 +268,52 @@ export async function apply(
     operations.flatMap((op) => (op.type === "rename" ? [op.from, op.to] : [op.path])),
   );
   for (const path of touched) await ctx.authorize("workspace.write", { path });
-  // Step 2: secret scan (§23.3, T901). High confidence blocks the ChangeSet with
-  // VALIDATION naming the file and line; low confidence is applied, then flagged
-  // to the author and the room owner via inbox. The value is never echoed.
-  const secrets = scanChangeSet(operations);
-  if (secrets.high.length > 0) {
-    throw new CrossoverError("VALIDATION", "ChangeSet contains a high-confidence secret", {
-      details: {
-        reason: "secret_detected",
-        findings: secrets.high.map((f) => ({
-          rule: f.rule,
-          path: f.path,
-          line: f.line,
-          col: f.col,
-          fingerprint: f.fingerprint,
-        })),
-      },
-    });
-  }
+  // Step 2: secret scan (§23.3, T901). The workspace row and base revision are
+  // read first so the scan can diff full-content writes against the base version
+  // and report only the lines this ChangeSet adds. High confidence blocks the
+  // ChangeSet with VALIDATION naming the file and line; low confidence is
+  // applied, then flagged to the author and the room owner via inbox. Upstream
+  // pulls are never blocked — the room doesn't control upstream content — so
+  // every finding there is flagged instead, and never addressed to the
+  // non-participant `system:upstream` actor. The value is never echoed.
   const workspace = await client.query<{ id: string; repo_path: string }>(
     "SELECT id, repo_path FROM workspaces WHERE room_id = $1 FOR UPDATE",
     [room_id],
   );
   const ws = workspace.rows[0];
   if (!ws) throw new CrossoverError("NOT_FOUND", "Workspace not provisioned");
+  const headRow = await client.query<{ revision: string; commit_sha: string }>(
+    `SELECT revision, commit_sha FROM workspace_revisions
+     WHERE room_id = $1 AND workspace_id = $2 ORDER BY revision DESC LIMIT 1`,
+    [room_id, ws.id],
+  );
+  const baseRow = await client.query<{ commit_sha: string }>(
+    `SELECT commit_sha FROM workspace_revisions
+     WHERE room_id = $1 AND workspace_id = $2 AND revision = $3`,
+    [room_id, ws.id, params.base_workspace_revision],
+  );
+  const head = headRow.rows[0];
+  const base = baseRow.rows[0];
+  if (!head || !base) throw new CrossoverError("VALIDATION", "Unknown workspace revision");
+  const secrets = await scanChangeSet(operations, base.commit_sha, ws.repo_path);
+  const isUpstream = actorId === UPSTREAM_ACTOR;
+  if (!isUpstream && secrets.high.length > 0) {
+    const shown = secrets.high.slice(0, MAX_FINDINGS_PER_CHANGESET);
+    const omitted = secrets.high.length - shown.length;
+    throw new CrossoverError("VALIDATION", "ChangeSet contains a high-confidence secret", {
+      details: {
+        reason: "secret_detected",
+        findings: shown.map((f) => ({
+          rule: f.rule,
+          path: f.path,
+          line: f.line,
+          col: f.col,
+          fingerprint: f.fingerprint,
+        })),
+        ...(omitted > 0 ? { omitted } : {}),
+      },
+    });
+  }
   let resolution:
     | {
         conflictId: string;
@@ -258,19 +368,6 @@ export async function apply(
       leadParticipantId: conflict.lead_participant_id,
     };
   }
-  const headRow = await client.query<{ revision: string; commit_sha: string }>(
-    `SELECT revision, commit_sha FROM workspace_revisions
-     WHERE room_id = $1 AND workspace_id = $2 ORDER BY revision DESC LIMIT 1`,
-    [room_id, ws.id],
-  );
-  const baseRow = await client.query<{ commit_sha: string }>(
-    `SELECT commit_sha FROM workspace_revisions
-     WHERE room_id = $1 AND workspace_id = $2 AND revision = $3`,
-    [room_id, ws.id, params.base_workspace_revision],
-  );
-  const head = headRow.rows[0];
-  const base = baseRow.rows[0];
-  if (!head || !base) throw new CrossoverError("VALIDATION", "Unknown workspace revision");
   const revision = Number(head.revision) + 1;
   if (!Number.isSafeInteger(revision))
     throw new CrossoverError("VALIDATION", "Workspace revision limit reached");
@@ -500,20 +597,30 @@ export async function apply(
      WHERE room_id = $1 AND id = $2`,
     [room_id, id, revision],
   );
-  // Low-confidence secrets are applied but flagged to the author and the room
-  // owner (§23.3). The summary names file and line, never the value.
-  if (secrets.low.length > 0) {
+  // Flagged secrets: for a normal apply, the low-confidence findings (high
+  // confidence already threw); for an upstream pull, every finding, since the
+  // pull is never blocked. `scan_skipped` is a size note, not a secret, so it
+  // never reaches the inbox. The summary names file and line, never the value.
+  const toFlag = (isUpstream ? [...secrets.high, ...secrets.low] : secrets.low).filter(
+    (f) => f.rule !== "scan_skipped",
+  );
+  if (toFlag.length > 0) {
     const { rows } = await client.query<{ owner_id: string }>(
       "SELECT owner_id FROM rooms WHERE id = $1",
       [room_id],
     );
     const owner_id = rows[0]?.owner_id;
-    const recipients = new Set([actorId, owner_id].filter((x): x is string => Boolean(x)));
+    // Never address an item to a non-participant actor (e.g. system:upstream);
+    // for an upstream pull the recipient is the participant who triggered it.
+    const actor = isUpstream ? ctx.principal.participant_id : actorId;
+    const recipients = new Set([actor, owner_id].filter((x): x is string => Boolean(x)));
+    const shown = toFlag.slice(0, MAX_FINDINGS_PER_CHANGESET);
+    const omitted = toFlag.length - shown.length;
     for (const recipient of recipients) {
       await deliverInbox(client, room_id, recipient, {
         kind: "SECRET_SCAN",
         ref: { kind: "changeset", id },
-        summary: secretScanSummary(secrets.low),
+        summary: secretScanSummary(shown, omitted),
         author_id: "system",
       });
     }

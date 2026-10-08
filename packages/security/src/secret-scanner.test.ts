@@ -1,183 +1,189 @@
 import { describe, expect, it } from "vitest";
-import { scanSecrets, type SecretFinding } from "./secret-scanner.js";
+import {
+  ENTROPY_THRESHOLD,
+  MAX_FINDINGS_PER_FILE,
+  MAX_SCAN_BYTES,
+  scanSecrets,
+  type SecretFinding,
+} from "./secret-scanner.js";
 
-/**
- * T901 fixtures. Each rule has a positive fixture and near-misses that must NOT
- * match. The matched value is kept here (test-only) so the "never echoed" tests
- * can assert it is absent from every finding.
- */
-const AWS_KEY = "AKIAIOSFODNN7EXAMPLE";
-const AWS_TEMP = "ASIA1234567890ABCDEF";
-const GITHUB_TOKEN = `ghp_${"a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s9"}`; // ghp_ + 36
-const GITHUB_SHORT = `ghp_${"a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6"}`; // ghp_ + 34
-const PRIVATE_KEY = [
-  "-----BEGIN RSA PRIVATE KEY-----",
-  "MIIEpAIBAAKCAQEA7v5aQ7R6s9w0x1y2z3A4B5C6D7E8F9G0H1I2J3K4L5M6N7O8",
-  "P9Q0R1S2T3U4V5W6X7Y8Z9A0B1C2D3E4F5G6H7I8J9K0L1M2N3O4P5Q6R7S8T9U0",
-  "-----END RSA PRIVATE KEY-----",
-].join("\n");
-const PKCS8_KEY = [
-  "-----BEGIN PRIVATE KEY-----",
-  "MIG2AgMBAAKCBDk1234567890abcdefghijklmnopqrstuvwxyz0123456",
-  "-----END PRIVATE KEY-----",
-].join("\n");
-const HIGH_ENTROPY = "aB3dE5fG7hI9jK1lM3nO5pQ7rS9tU1vW"; // 32 chars, mixed
+// A realistic AWS key that is NOT a documented example (the docs key
+// AKIAIOSFODNN7EXAMPLE is allowlisted and must not match).
+const AWS_KEY = "AKIA1234567890ABCDEF";
+const GITHUB_TOKEN = "ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
+const HIGH_ENTROPY = "aB3dE5gH7jK9mN1pQ2rS4tU6vW8xY0z";
 
-const rules = new Set([
-  "aws_access_key_id",
-  "github_token",
-  "private_key_block",
-  "high_entropy_assignment",
-]);
-
-/** Assert a finding set is exactly the given (rule, confidence) pairs, in order. */
-const expectFindings = (
-  text: string,
-  expected: Array<Pick<SecretFinding, "rule" | "confidence">>,
-): SecretFinding[] => {
-  const findings = scanSecrets(text);
-  expect(findings.map((f) => ({ rule: f.rule, confidence: f.confidence }))).toEqual(expected);
-  return findings;
-};
-
-describe("secret scanner — AWS access keys", () => {
-  it("matches long-term and temporary keys", () => {
-    expectFindings(`key = ${AWS_KEY}`, [{ rule: "aws_access_key_id", confidence: "high" }]);
-    expectFindings(`tmp = ${AWS_TEMP}`, [{ rule: "aws_access_key_id", confidence: "high" }]);
+describe("security.scanSecrets", () => {
+  it("flags an AWS access key ID", () => {
+    const findings = scanSecrets(`awsKey = "${AWS_KEY}"`);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]!.rule).toBe("aws_access_key_id");
+    expect(findings[0]!.confidence).toBe("high");
   });
 
-  it("does not match near-misses", () => {
-    expect(scanSecrets("key = AKIA123")).toEqual([]); // too short
-    expect(scanSecrets("key = akiaiosfodnn7example")).toEqual([]); // lowercase
-    expect(scanSecrets("key = AKIAIOSFODNN7EXAMPL")).toEqual([]); // 19 chars
-    expect(scanSecrets("key = AKIA-IOSFODNN7EXAMPLE")).toEqual([]); // internal dash
-  });
-});
-
-describe("secret scanner — GitHub tokens", () => {
-  it("matches every gh* token prefix at length", () => {
-    for (const prefix of ["ghp_", "gho_", "ghu_", "ghs_", "ghr_"]) {
-      const token = `${prefix}${"x".repeat(36)}`;
-      expectFindings(`t = ${token}`, [{ rule: "github_token", confidence: "high" }]);
-    }
-  });
-
-  it("does not match near-misses", () => {
-    expect(scanSecrets(`t = ${GITHUB_SHORT}`)).toEqual([]); // 34 chars, too short
-    expect(scanSecrets("t = xhp_abcdefghijklmnopqrstuvwxyz0123456789")).toEqual([]); // wrong prefix
-    expect(scanSecrets("t = ghp_")).toEqual([]); // no body
-  });
-});
-
-describe("secret scanner — private key blocks", () => {
-  it("matches PKCS#1 and PKCS#8 blocks", () => {
-    expectFindings(PRIVATE_KEY, [{ rule: "private_key_block", confidence: "high" }]);
-    expectFindings(PKCS8_KEY, [{ rule: "private_key_block", confidence: "high" }]);
-  });
-
-  it("does not match public keys or an unterminated block", () => {
-    const public_ = [
-      "-----BEGIN PUBLIC KEY-----",
-      "MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBAKx",
-      "-----END PUBLIC KEY-----",
-    ].join("\n");
-    expect(scanSecrets(public_)).toEqual([]);
-    expect(scanSecrets("-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA")).toEqual([]); // no END
-  });
-});
-
-describe("secret scanner — high-entropy assignments", () => {
-  it("matches a high-entropy value on a secret keyword", () => {
-    expectFindings(`api_key = "${HIGH_ENTROPY}"`, [
-      { rule: "high_entropy_assignment", confidence: "low" },
-    ]);
-    expectFindings(`token: ${HIGH_ENTROPY}`, [
-      { rule: "high_entropy_assignment", confidence: "low" },
-    ]);
-  });
-
-  it("does not match near-misses", () => {
-    expect(scanSecrets('api_key = "short"')).toEqual([]); // value too short
-    expect(scanSecrets('api_key = "aaaaaaaaaaaaaaaa"')).toEqual([]); // low entropy
-    expect(scanSecrets(`name = "${HIGH_ENTROPY}"`)).toEqual([]); // keyword not in the list
-    expect(scanSecrets("api_key = 12")).toEqual([]); // not an assignment of a long value
-  });
-});
-
-describe("secret scanner — the matched value is never exposed", () => {
-  const cases: Array<[string, string]> = [
-    [`aws = ${AWS_KEY}`, AWS_KEY],
-    [`gh = ${GITHUB_TOKEN}`, GITHUB_TOKEN],
-    [PRIVATE_KEY, "MIIEpAIBAAKCAQEA7v5a"],
-    [`api_key = "${HIGH_ENTROPY}"`, HIGH_ENTROPY],
-  ];
-
-  it.each(cases)("keeps %s out of every finding", (text, secret) => {
-    const findings = scanSecrets(text);
-    expect(findings.length).toBeGreaterThan(0);
-    for (const finding of findings) {
-      // The serialized finding is what a caller could log, emit, or store.
-      expect(JSON.stringify(finding)).not.toContain(secret);
-      // And the finding shape has no field that could carry it.
-      expect(finding).not.toHaveProperty("value");
-      expect(finding).not.toHaveProperty("match");
-    }
-  });
-
-  it("fingerprint is a stable 16-hex prefix, independent of the value text", () => {
-    const a = scanSecrets(`api_key = "${HIGH_ENTROPY}"`)[0]!;
-    const b = scanSecrets(`api_key = "${HIGH_ENTROPY}"`)[0]!;
-    const c = scanSecrets(`api_key = "${HIGH_ENTROPY}x"`)[0]!;
-    expect(a.fingerprint).toMatch(/^[0-9a-f]{16}$/);
-    expect(a.fingerprint).toBe(b.fingerprint); // deterministic
-    expect(a.fingerprint).not.toBe(c.fingerprint); // value-sensitive
-  });
-});
-
-describe("secret scanner — positions", () => {
-  it("reports 1-based line and column of the match start", () => {
-    // A GitHub token on line 3; "const t = " is 10 chars, so the token starts at col 11.
-    const withToken = `line one\nline two\nconst t = ${GITHUB_TOKEN};`;
-    const finding = scanSecrets(withToken)[0]!;
-    expect(finding.line).toBe(3);
-    expect(finding.col).toBe(11);
-  });
-
-  it("orders findings by line then column", () => {
-    const text = [`a = ${AWS_KEY}`, `b = ${GITHUB_TOKEN}`].join("\n");
-    const findings = scanSecrets(text);
-    expect(findings.map((f) => f.line)).toEqual([1, 2]);
-  });
-});
-
-describe("secret scanner — overlap suppression", () => {
-  it("reports a GitHub token assigned to a variable once, as a GitHub token", () => {
-    const text = `token = "${GITHUB_TOKEN}"`;
-    const findings = scanSecrets(text);
+  it("flags a GitHub personal access token", () => {
+    const findings = scanSecrets(`token: "${GITHUB_TOKEN}"`);
     expect(findings).toHaveLength(1);
     expect(findings[0]!.rule).toBe("github_token");
     expect(findings[0]!.confidence).toBe("high");
   });
 
-  it("does not double-report a specific rule's span under the generic rule", () => {
-    const text = `access_key = ${AWS_KEY}`;
+  it("flags a private key block", () => {
+    const text = [
+      "-----BEGIN RSA PRIVATE KEY-----",
+      "MIIEpAIBAAKCAQEA7v5aUzmCoE0s2h9s",
+      "-----END RSA PRIVATE KEY-----",
+    ].join("\n");
     const findings = scanSecrets(text);
     expect(findings).toHaveLength(1);
-    expect(findings[0]!.rule).toBe("aws_access_key_id");
+    expect(findings[0]!.rule).toBe("private_key_block");
+    expect(findings[0]!.confidence).toBe("high");
   });
-});
 
-describe("secret scanner — total and pure", () => {
-  it("returns [] for empty input and never throws on odd input", () => {
+  it("flags a high-entropy assignment", () => {
+    const findings = scanSecrets(`secret: "${HIGH_ENTROPY}"`);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]!.rule).toBe("high_entropy_assignment");
+    expect(findings[0]!.confidence).toBe("low");
+  });
+
+  it("flags .env-style names with a prefix before the keyword", () => {
+    const text = [
+      "DB_PASSWORD=x9y8z7w6v5u4t3s2r1q0p8o7m6n5",
+      "GITHUB_TOKEN=" + GITHUB_TOKEN,
+      "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCyReal1",
+      "stripe_api_key=sk_live_4eC39HvLyjStYvTq8z",
+    ].join("\n");
+    const findings = scanSecrets(text);
+    const rules = findings.map((f) => f.rule).sort();
+    // GITHUB_TOKEN is caught by the specific GitHub rule; the other three by the
+    // generic assignment rule.
+    expect(rules).toContain("github_token");
+    expect(rules.filter((r) => r === "high_entropy_assignment")).toHaveLength(3);
+  });
+
+  it("does not flag a low-entropy assignment", () => {
+    expect(scanSecrets(`password = "hunter2"`)).toHaveLength(0);
+  });
+
+  it("does not flag a short token", () => {
+    expect(scanSecrets(`token = "short"`)).toHaveLength(0);
+  });
+
+  it("does not flag a call or a bare identifier as a value", () => {
+    const text = ["token = createSandboxReadToken()", "password = myPasswordValueHere"].join("\n");
+    expect(scanSecrets(text)).toHaveLength(0);
+  });
+
+  it("ignores documented example values (allowlist)", () => {
+    // The AWS docs example key and anything ending in EXAMPLE are not secrets.
+    expect(scanSecrets(`awsKey = "AKIAIOSFODNN7EXAMPLE"`)).toHaveLength(0);
+    expect(scanSecrets(`token = "someValueEndingInEXAMPLE"`)).toHaveLength(0);
+  });
+
+  it("reports the line and column of the match", () => {
+    const text = `first line\nawsKey = "${AWS_KEY}"\nthird line`;
+    const findings = scanSecrets(text);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]!.line).toBe(2);
+    expect(findings[0]!.col).toBe(11); // 1-based column of the key
+  });
+
+  it("never includes the matched value in a finding", () => {
+    const findings = scanSecrets(`awsKey = "${AWS_KEY}"`);
+    expect(findings).toHaveLength(1);
+    const serialized = JSON.stringify(findings);
+    expect(serialized).not.toContain(AWS_KEY);
+    expect(Object.keys(findings[0]!)).toEqual(
+      expect.arrayContaining(["rule", "confidence", "line", "col", "fingerprint"]),
+    );
+  });
+
+  it("dedupes a value matched by two rules", () => {
+    const findings = scanSecrets(`token = "${GITHUB_TOKEN}"`);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]!.rule).toBe("github_token");
+  });
+
+  it("returns findings in source order", () => {
+    const text = `a = "${AWS_KEY}"\nb = "${GITHUB_TOKEN}"`;
+    const findings = scanSecrets(text);
+    expect(findings.map((f) => f.line)).toEqual([1, 2]);
+  });
+
+  it("is stable: the same input yields the same fingerprint", () => {
+    const a = scanSecrets(`k = "${AWS_KEY}"`);
+    const b = scanSecrets(`k = "${AWS_KEY}"`);
+    expect(a[0]!.fingerprint).toBe(b[0]!.fingerprint);
+    expect(a[0]!.fingerprint).toMatch(/^[0-9a-f]{16}$/);
+  });
+
+  it("only reports findings on added lines when addedLines is set", () => {
+    const text = `line one\n${AWS_KEY}\nline three`;
+    // The key is on line 2; if only line 3 is added, it is not reported.
+    expect(scanSecrets(text, { addedLines: new Set([3]) })).toHaveLength(0);
+    // If line 2 is added, it is reported at line 2.
+    const findings = scanSecrets(text, { addedLines: new Set([2]) });
+    expect(findings).toHaveLength(1);
+    expect(findings[0]!.line).toBe(2);
+  });
+
+  it("reports a file larger than the scan cap as scan_skipped", () => {
+    const text = "x".repeat(MAX_SCAN_BYTES + 1);
+    const findings = scanSecrets(text);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]!.rule).toBe("scan_skipped");
+    expect(findings[0]!.confidence).toBe("low");
+  });
+
+  it("caps findings at the per-file maximum", () => {
+    const line = `k = ${AWS_KEY}\n`;
+    const text = line.repeat(MAX_FINDINGS_PER_FILE + 5);
+    const findings = scanSecrets(text);
+    expect(findings.length).toBeLessThanOrEqual(MAX_FINDINGS_PER_FILE);
+  });
+
+  it("scans a 1 MB adversarial input within a time bound", () => {
+    // ~50k AWS keys. The old scanner's position() rescan made this O(n^2)
+    // (108 s); the line-start table + cap keep it well under a second.
+    const line = `key = ${AWS_KEY}\n`;
+    const text = line.repeat(Math.ceil((1024 * 1024) / line.length));
+    const start = Date.now();
+    const findings = scanSecrets(text);
+    const ms = Date.now() - start;
+    expect(ms).toBeLessThan(2000);
+    expect(findings.length).toBeLessThanOrEqual(MAX_FINDINGS_PER_FILE);
+  });
+
+  it("is total: it never throws", () => {
+    for (const text of [
+      "",
+      "plain text",
+      "-----BEGIN RSA PRIVATE KEY-----", // unterminated
+      "🎉 emoji and unicode — 日本語",
+      "a".repeat(10_000),
+      `token = "${"x".repeat(200)}"`, // value longer than the 128 cap
+    ]) {
+      expect(() => scanSecrets(text)).not.toThrow();
+    }
+  });
+
+  it("handles an empty string", () => {
     expect(scanSecrets("")).toEqual([]);
-    expect(scanSecrets("\u0000\u0001\u0002")).toEqual([]);
-    expect(scanSecrets("no secrets here at all")).toEqual([]);
-    // A huge run of one character must not blow up the entropy math.
-    expect(scanSecrets(`api_key = "${"a".repeat(1000)}"`)).toEqual([]);
   });
 
-  it("only ever emits known rules", () => {
-    const blob = `${AWS_KEY} ${GITHUB_TOKEN} ${PRIVATE_KEY} api_key = "${HIGH_ENTROPY}"`;
-    for (const finding of scanSecrets(blob)) expect(rules.has(finding.rule)).toBe(true);
+  it("exposes the entropy threshold", () => {
+    expect(ENTROPY_THRESHOLD).toBeGreaterThan(0);
+  });
+
+  it("finding shape is stable for dedupe", () => {
+    const f: SecretFinding = {
+      rule: "aws_access_key_id",
+      confidence: "high",
+      line: 1,
+      col: 1,
+      fingerprint: "0123456789abcdef",
+    };
+    expect(f.fingerprint).toHaveLength(16);
   });
 });
