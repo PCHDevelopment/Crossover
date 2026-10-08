@@ -19,11 +19,11 @@ Conventions are in `docs/ENGINEERING.md`. Section references (§) point to `docs
 | M4 Messages, inbox, decisions, memory | T401–T412   | S1 (moved from S2 for T404–T409, T411–T412 in Review 3) |
 | M5 Workspace engine                   | T501–T520   | S2                                                      |
 | M6 Conflicts and health               | T601–T610   | S2                                                      |
-| M7 Gateway, MCP, end-to-end           | T701–T713   | S1 (T701–T709, T713), S2 (T710–T711), O1 (T712)         |
+| M7 Gateway, MCP, end-to-end           | T701–T713   | S1 (T701–T709, T713), S2 (T710), Q1 (T705, T711), O1 (T712) |
 | M8 Git interoperability (§24)         | T801–T807   | S1 (moved from S2 in Review 4)                          |
-| M9 Safety controls (§22–23)           | T901–T906   | S1 (T902, T904–T906), S2 (T901, T903)                   |
+| M9 Safety controls (§22–23)           | T901–T906   | S1 (T904–T906), Q1 (T901–T903; moved in Review 6)        |
 | M10 Execution sandboxes (§14)         | T1001–T1008 | S2 (T1007 split into T1007 + T1007b in Review 5)        |
-| M11 Clients (§27, §29)                | T1101–T1106 | S1                                                      |
+| M11 Clients (§27, §29)                | T1101–T1106 | S1 (T1102 → Q1)                                          |
 | M12 Plugins (§21.4–21.5)              | T1201–T1206 | S1 (T1201, moved in Review 5), S2 (T1202–T1206)         |
 | M13 Lessons from building (§34)       | T1301–T1303 | S1                                                      |
 
@@ -856,8 +856,12 @@ Deps: T703 · Migration: —
 Profiles `relevant` (default for agents), `all`, `custom` per §17.1.
 
 - `relevant` delivers a task assignment to the assignee and not to an unrelated agent.
+- Relevance is decided from the event alone: task and workspace events carry the inputs (`owner_id`, `reviewer_id`, author) as of the event, so a replay with `after` delivers exactly what live delivery would have. Tested across an ownership change.
+- `relevant` includes `task.created` for unassigned tasks, review requests for the reviewer, and mentions in `message.sent` and `message.edited`.
+- Type patterns match per dotted segment without building a regex (no backtracking); a pathological pattern is tested with a time bound.
+- An event that lacks the inputs the matcher needs (for example, one written before these fields existed) is delivered: filters fail open, and redaction still applies.
 
-### T705 · Backpressure — S1
+### T705 · Backpressure — Q1
 
 Deps: T703 · Migration: —
 
@@ -865,7 +869,7 @@ Per-connection buffer limit (1,000 events or 5 MB) → close with `resync_requir
 
 ### T706 · Wake webhooks — S1
 
-Deps: T402, T205 · Migration: —
+Deps: T402, T205 · Migration: 0027 (`wake_outbox`)
 
 POST to the manifest's `wake_webhook_url` on new inbox items, HMAC-SHA256 signed, at most one per agent per 30 s with batching (§17.4).
 
@@ -897,7 +901,7 @@ Deps: T707, T517 · Migration: —
 
 `read_file`, `list_dir`, `grep`, `diff`, `apply_changeset` against the canonical workspace (the sandbox-backed coding tools come with the sandbox milestone).
 
-### T711 · MCP provenance framing — S2
+### T711 · MCP provenance framing — Q1
 
 Deps: T709, T412 · Migration: —
 
@@ -993,7 +997,7 @@ Added in Review 5. `git.import` and `git.pull_upstream` fetch over the network i
 
 ## M9 Safety controls (§22–23)
 
-### T901 · Secret scanning on ChangeSets — S2
+### T901 · Secret scanning on ChangeSets — Q1
 
 Deps: T512 · Migration: —
 
@@ -1001,7 +1005,7 @@ Gitleaks-compatible rule subset (AWS keys, GitHub tokens, private key blocks, ge
 
 - Fixtures for each rule; no plaintext secret is echoed back in errors or events.
 
-### T902 · Secret scanning on messages and memory — S1
+### T902 · Secret scanning on messages and memory — Q1
 
 Deps: T901, T401, T408 · Migration: —
 
@@ -1009,9 +1013,9 @@ Same scanner on `messages.send/edit` and `memory.put`.
 
 - A message containing a private key block is rejected; a low-confidence match is flagged.
 
-### T903 · Circuit breakers — S2
+### T903 · Circuit breakers — Q1
 
-Deps: T512, T402 · Migration: `0021_changeset_held` (adds `HELD` to the status CHECK)
+Deps: T512, T402 · Migration: next free number at merge time (adds `HELD` to the status CHECK; `0021` is taken)
 
 Hold a ChangeSet (`CIRCUIT_BREAKER`, status `HELD`) that deletes > 50 files or > 30% of lines, touches protected patterns (default `.github/workflows/**`, `**/*.pem`, `**/.env*`, `infra/prod/**`), or comes from an agent with > 5 rejected/abandoned ChangeSets in 30 min (§22.4). Lead/owner approve or reject via inbox.
 
@@ -1138,7 +1142,7 @@ Deps: T702, T703 · Migration: —
 
 - Contract tests against a real `apps/server`. A reconnect after a dropped socket loses no event and duplicates none.
 
-### T1102 · CLI (`room`, Go) — S1
+### T1102 · CLI (`room`, Go) — Q1
 
 Deps: T702, T703 · Migration: —
 
