@@ -784,12 +784,15 @@ describe("GET /v1/rooms and the static web app (T1104)", () => {
   });
 
   it("serves the built app from staticRoot: files, the app's routes as index.html, never outside the root or under /v1", async () => {
-    const root = await mkdtemp(join(tmpdir(), "static-"));
-    await mkdir(join(root, "assets"));
+    // The file "outside the root" sits next to it inside a private temp directory, not in the shared
+    // tmpdir, where a fixed name can collide with another user's file.
+    const parent = await mkdtemp(join(tmpdir(), "static-"));
+    const root = join(parent, "root");
+    await mkdir(join(root, "assets"), { recursive: true });
     await writeFile(join(root, "index.html"), "<!doctype html><title>app</title>");
     await writeFile(join(root, "assets", "app-abc.js"), "console.log(1)");
     await writeFile(join(root, "secret.txt"), "not served");
-    const outside = join(root, "..", `outside-${n}.js`);
+    const outside = join(parent, "outside.js");
     await writeFile(outside, "outside");
     const s = await setup(undefined, false, { staticRoot: root });
     const get = (url: string) => s.app.inject({ method: "GET", url });
@@ -804,8 +807,8 @@ describe("GET /v1/rooms and the static web app (T1104)", () => {
     expect(asset.headers["content-type"]).toContain("text/javascript");
     expect((await get("/secret.txt")).statusCode).toBe(404); // not a type the app has
     for (const url of [
-      `/..%2foutside-${n}.js`,
-      `/assets/..%2f..%2foutside-${n}.js`,
+      "/..%2foutside.js",
+      "/assets/..%2f..%2foutside.js",
       "/%2e%2e/%2e%2e/etc/passwd.js",
       "/v1/nothing",
       "/v1/rooms/x/unknown",
