@@ -8,6 +8,7 @@ import {
   createScopedSnapshotRepository,
   createUnscopedSnapshotRepository,
   git,
+  sweepSnapshotRepositories,
   type ScopedSnapshotRepository,
 } from "@crossover/workspace";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
@@ -54,6 +55,7 @@ export interface InternalGitOptions {
 /** A separate, read-only smart-Git listener for short-lived sandbox fetchers. */
 export function buildInternalGitServer(options: InternalGitOptions): FastifyInstance {
   const app = Fastify({ logger: false, bodyLimit: MAX_NEGOTIATION_BYTES });
+  app.addHook("onReady", () => sweepSnapshotRepositories());
   app.addContentTypeParser(
     UPLOAD_PACK_REQUEST,
     { parseAs: "buffer", bodyLimit: MAX_NEGOTIATION_BYTES },
@@ -76,7 +78,7 @@ export function buildInternalGitServer(options: InternalGitOptions): FastifyInst
       if (request.query.service !== "git-upload-pack")
         throw new CrossoverError("NOT_FOUND", "Git service not found");
       const revision = parseRevision(request.params.revision);
-      const snapshot = await prepareSnapshot(options, request, revision);
+      const snapshot = await prepareSnapshot(options, request, revision, true);
       try {
         const protocol = requestedProtocol(request);
         const { stdout } = await git(
@@ -121,6 +123,7 @@ async function prepareSnapshot(
   options: InternalGitOptions,
   request: FastifyRequest<{ Params: GitRouteParams; Querystring: GitRouteQuery }>,
   revision: number,
+  advertisementOnly = false,
 ): Promise<ScopedSnapshotRepository> {
   if (!options.tokenSecret || Buffer.byteLength(options.tokenSecret) < 32)
     throw new CrossoverError("ROOM_PAUSED", "Internal Git is not configured");
@@ -134,13 +137,14 @@ async function prepareSnapshot(
   ) {
     throw new CrossoverError("UNAUTHENTICATED", "Invalid sandbox read token");
   }
-  return prepareAuthorizedSnapshot(options, claims, revision);
+  return prepareAuthorizedSnapshot(options, claims, revision, advertisementOnly);
 }
 
 async function prepareAuthorizedSnapshot(
   options: InternalGitOptions,
   claims: SandboxReadTokenClaims,
   revision: number,
+  advertisementOnly: boolean,
 ): Promise<ScopedSnapshotRepository> {
   const client = await options.pool.connect();
   let transactionOpen = false;
@@ -215,6 +219,7 @@ async function prepareAuthorizedSnapshot(
       return createUnscopedSnapshotRepository({
         referenceRepository: row.repo_path,
         canonicalCommit: row.commit_sha,
+        advertisementOnly,
       });
 
     return createScopedSnapshotRepository({
@@ -223,6 +228,7 @@ async function prepareAuthorizedSnapshot(
       revision: Number(row.revision),
       canonicalTimestamp: timestamp,
       canRead: async (path) => readablePaths.has(path),
+      advertisementOnly,
     });
   } catch (error) {
     if (transactionOpen) {

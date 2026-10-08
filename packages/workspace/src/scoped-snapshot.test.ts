@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, utimes, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -7,6 +7,7 @@ import { initRoomRepo } from "./repo.js";
 import {
   createScopedSnapshotRepository,
   createUnscopedSnapshotRepository,
+  sweepSnapshotRepositories,
 } from "./scoped-snapshot.js";
 
 const roots: string[] = [];
@@ -147,11 +148,57 @@ describe("createScopedSnapshotRepository", () => {
 
     expect(view.commit).toBe(source.canonicalCommit);
     expect(view.scope_hash).toBe("unscoped");
+    expect(view.reference_repository).toBeUndefined();
     const { stdout } = await git(["rev-parse", "refs/heads/main"], {
       gitDir: view.repo_path,
       timeoutMs: 10_000,
-      env: { GIT_ALTERNATE_OBJECT_DIRECTORIES: join(source.referenceRepository, "objects") },
     });
     expect(stdout.trim()).toBe(source.canonicalCommit);
+    expect(
+      (
+        await git(["cat-file", "blob", source.secretBlob], {
+          gitDir: view.repo_path,
+          timeoutMs: 10_000,
+        })
+      ).stdout,
+    ).toBe("private content");
+  });
+
+  it("skips packs for an advertisement but packs negotiation snapshots", async () => {
+    const source = await fixture();
+    for (const advertisementOnly of [true, false]) {
+      const view = await createScopedSnapshotRepository({
+        ...source,
+        revision: 1,
+        canonicalTimestamp: 1_700_000_000,
+        canRead: async () => true,
+        advertisementOnly,
+      });
+      try {
+        const packs = await readdir(join(view.repo_path, "objects", "pack"));
+        expect(packs.some((name) => name.endsWith(".pack"))).toBe(!advertisementOnly);
+        await expect(
+          git(["upload-pack", "--stateless-rpc", "--advertise-refs", view.repo_path], {
+            timeoutMs: 10_000,
+          }),
+        ).resolves.toMatchObject({ stdout: expect.stringContaining(view.commit) });
+      } finally {
+        await view.dispose();
+      }
+    }
+  });
+
+  it("sweeps only old snapshot directories", async () => {
+    const root = await mkdtemp(join(tmpdir(), "crossover-sweep-test-"));
+    roots.push(root);
+    const now = Date.now();
+    for (const name of ["crossover-sandbox-git-old", "crossover-sandbox-git-active", "unrelated"]) {
+      await mkdir(join(root, name));
+    }
+    const old = new Date(now - 25 * 60 * 60 * 1000);
+    await utimes(join(root, "crossover-sandbox-git-old"), old, old);
+    await utimes(join(root, "unrelated"), old, old);
+    await sweepSnapshotRepositories(root, now);
+    expect((await readdir(root)).sort()).toEqual(["crossover-sandbox-git-active", "unrelated"]);
   });
 });
