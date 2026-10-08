@@ -5,7 +5,11 @@ import type { CommandContext, CommandDefinition, Dispatcher } from "@crossover/k
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { git } from "./git.js";
 import type { SandboxWorkingCopyStatus } from "./execution.js";
-import { parsePorcelainStatus, registerSandboxStatusCommand } from "./sandbox-status.js";
+import {
+  createPorcelainStatusAccumulator,
+  parsePorcelainStatus,
+  registerSandboxStatusCommand,
+} from "./sandbox-status.js";
 import type { sandboxStatusParamsSchema } from "./sandbox-status.js";
 
 const roots: string[] = [];
@@ -64,6 +68,23 @@ describe("parsePorcelainStatus", () => {
     const output = Array.from({ length: 10_005 }, (_, index) => ` M file-${index}.txt`).join("\0");
     const parsed = parsePorcelainStatus(output);
     expect(parsed.modified).toHaveLength(10_000);
+    expect(parsed.truncated).toBe(true);
+  });
+
+  it("parses status records across chunks and stops reading at the combined entry limit", () => {
+    const parser = createPorcelainStatusAccumulator();
+    expect(parser.write(" M split/")).toBe(true);
+    expect(parser.write("name.txt\0?? added.txt\0")).toBe(true);
+
+    const remaining = Array.from({ length: 9_998 }, (_, index) => ` M file-${index}.txt\0`).join(
+      "",
+    );
+    expect(parser.write(remaining)).toBe(true);
+    expect(parser.write("?? overflow.txt\0ignored-after-cap\0")).toBe(false);
+
+    const parsed = parser.finish();
+    expect(parsed.modified).toHaveLength(9_999);
+    expect(parsed.added).toEqual(["added.txt"]);
     expect(parsed.truncated).toBe(true);
   });
 });

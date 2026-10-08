@@ -22,6 +22,8 @@ export const HTTP_STATUS: Readonly<Record<ErrorCode, number>> = {
   CIRCUIT_BREAKER: 409,
   /** A transient service or workspace helper failure; the client may retry. */
   UNAVAILABLE: 503,
+  /** Not in the spec: a plugin's provider is down; the caller may retry. */
+  PROVIDER_UNAVAILABLE: 503,
   /** Internal; never sent as-is (see {@link toHttpError}). The caller may retry. */
   STALE_FENCE: 503,
 };

@@ -1,4 +1,7 @@
 import { execFileSync } from "node:child_process";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { CrossoverError, newId } from "@crossover/protocol";
 import { createSandboxProxyCredential, verifySandboxReadToken } from "@crossover/security";
@@ -156,6 +159,42 @@ describe("DockerExecutionDriver", () => {
     expect(calls[0]).toContain("--no-renames");
     expect(calls[0]).toContain("crossover-git-fetcher:test");
   });
+
+  it("streams status beyond 8 MiB and stops at the entry limit", async () => {
+    const root = await mkdtemp(join(tmpdir(), "crossover-status-stream-test-"));
+    const fakeDocker = join(root, "docker.mjs");
+    await writeFile(
+      fakeDocker,
+      [
+        "#!/usr/bin/env node",
+        'import { once } from "node:events";',
+        'const longComponent = "x".repeat(180);',
+        "for (let index = 0; index < 20_000; index++) {",
+        '  const path = Array.from({ length: 6 }, (_, part) => index + "-" + part + "-" + longComponent).join("/");',
+        '  if (!process.stdout.write("?? " + path + "\\0")) await once(process.stdout, "drain");',
+        "}",
+        "",
+      ].join("\n"),
+    );
+    await chmod(fakeDocker, 0o755);
+
+    try {
+      const driver = new DockerExecutionDriver({ dockerBinary: fakeDocker });
+      const sandboxId = newId("sandbox");
+      const status = await driver.status({
+        sandbox_id: sandboxId,
+        resources: {
+          volume_ref: `crossover-sbx-${sandboxId.toLowerCase()}`,
+          container_ref: `crossover-sbx-${sandboxId.toLowerCase()}`,
+        },
+      });
+
+      expect(status.added).toHaveLength(10_000);
+      expect(status.truncated).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 10_000);
 
   it("returns a retryable generic error when Git status fails without exposing stderr", async () => {
     const driver = new DockerExecutionDriver({
