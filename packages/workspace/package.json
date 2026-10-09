@@ -12,6 +12,7 @@
   "dependencies": {
     "@crossover/db": "workspace:*",
     "@crossover/kernel": "workspace:*",
+    "@crossover/policy": "workspace:*",
     "@crossover/protocol": "workspace:*",
     "@crossover/security": "workspace:*",
     "@vscode/tree-sitter-wasm": "^0.3.1",
@@ -20,8 +21,5 @@
   "scripts": {
     "build": "tsc -b",
     "bench": "vitest run --config ../../vitest.bench.config.ts"
-  },
-  "devDependencies": {
-    "@crossover/policy": "workspace:*"
   }
 }
