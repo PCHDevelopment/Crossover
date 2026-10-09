@@ -13,9 +13,9 @@ afterEach(async () => {
 
 interface HelperResult {
   code: number;
-  entries?: { path: string; mode: string; sha: string | null; size: number; content?: string }[];
+  entries?: { path: string; mode: string; sha: string | null; size: number }[];
   error?: string;
-  walked?: string;
+  pruned_directories?: string[];
 }
 
 async function runHelper(
@@ -49,7 +49,7 @@ async function runHelper(
     child.once("close", async (code) => {
       try {
         await sideEffect;
-        resolve({ code: code ?? 1, walked: stderr, ...JSON.parse(stdout) });
+        resolve({ code: code ?? 1, ...JSON.parse(stdout) });
       } catch {
         reject(new Error(`Snapshot helper returned invalid JSON: ${stderr}`));
       }
@@ -57,14 +57,11 @@ async function runHelper(
     child.stdin.end(JSON.stringify({ root, hash: "sha1", ...input }));
   });
 }
-
 function gitBlobHash(bytes: Buffer): string {
   return createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
 }
-
-function path64(path: string): string {
-  return Buffer.from(path).toString("base64");
-}
+const path64 = (path: string) => Buffer.from(path).toString("base64");
+const decodePath = (path: string) => Buffer.from(path, "base64").toString();
 
 describe("sandbox snapshot helper", () => {
   it("reads raw bytes, ignores sandbox Git configuration, and never follows symlinks", async () => {
@@ -72,7 +69,6 @@ describe("sandbox snapshot helper", () => {
     roots.push(root);
     const workspace = join(root, "workspace");
     await mkdir(join(workspace, ".git"), { recursive: true });
-
     const marker = join(root, "fsmonitor-ran");
     await writeFile(
       join(workspace, ".git", "config"),
@@ -118,27 +114,23 @@ describe("sandbox snapshot helper", () => {
       {
         action: "inventory",
         max_entries: 1,
-        ignore_rules: [{ path: ".gitignore", patterns: ["node_modules/"] }],
+        ignore_rules: [{ path: ".gitignore", patterns: ["node_modules/", "*.txt"] }],
       },
       {
         pauseAt: "",
         onPause: () => writeFile(join(ignored, "concurrent.log"), "generated"),
       },
     );
-    expect(inventory.entries?.map(({ path }) => Buffer.from(path, "base64").toString())).toEqual([
-      "keep.txt",
-    ]);
-    expect(inventory.walked).toContain("walk:\n");
-    expect(inventory.walked).not.toContain("walk:node_modules\n");
-
+    expect(inventory.entries?.map(({ path }) => decodePath(path))).toEqual(["keep.txt"]);
+    expect(inventory.pruned_directories?.map(decodePath)).toEqual(["node_modules"]);
     const tooMany = await runHelper(root, { action: "inventory", max_entries: 1 });
     expect(tooMany.error).toBe("too_many_entries");
-    const tooLarge = await runHelper(root, {
+    const tooLargeInput = {
       action: "inventory",
       tracked_paths: [path64("keep.txt")],
       max_bytes: 0,
-    });
-    expect(tooLarge.error).toBe("scan_too_large");
+    };
+    expect((await runHelper(root, tooLargeInput)).error).toBe("scan_too_large");
     const live = join(root, "live");
     await mkdir(live);
     await writeFile(join(live, "before.txt"), "before");
@@ -150,7 +142,6 @@ describe("sandbox snapshot helper", () => {
         onPause: () => writeFile(join(live, "concurrent.log"), "generated"),
       },
     );
-    expect(result.walked).toContain("walk:live\n");
     expect(result.error).toBe("changed_during_read");
   });
 

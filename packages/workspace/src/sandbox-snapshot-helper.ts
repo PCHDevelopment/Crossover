@@ -1,13 +1,24 @@
 import type * as NodeCrypto from "node:crypto";
 import type * as NodeFs from "node:fs";
 import type * as NodeFsPromises from "node:fs/promises";
+import {
+  pathGlobMatch as sharedPathGlobMatch,
+  wildcardMatch as sharedWildcardMatch,
+} from "@crossover/policy";
 
-/**
- * Code run by a short-lived, read-only Docker helper to inspect a sandbox volume. It intentionally
- * uses only Node's filesystem APIs: the sandbox's .git/config, attributes and executable hooks are
- * never consulted. The helper is also executed by tests with a temporary directory as its root.
- */
-async function sandboxSnapshotHelper(): Promise<void> {
+export const SNAPSHOT_HELPER_LIMITS = {
+  maxIgnorePatterns: 1024,
+  maxIgnorePatternLength: 1024,
+  maxPrunedDirectories: 10_000,
+} as const;
+
+type IgnoreRule = { base: string; negated: boolean; pattern: string };
+
+/** Read-only helper that ignores sandbox Git configuration, attributes and hooks. */
+async function sandboxSnapshotHelper(
+  pathGlobMatch: typeof sharedPathGlobMatch,
+  limits: typeof SNAPSHOT_HELPER_LIMITS,
+): Promise<void> {
   const fs = process.getBuiltinModule("node:fs/promises") as typeof NodeFsPromises;
   const constants = (process.getBuiltinModule("node:fs") as typeof NodeFs).constants;
   const crypto = process.getBuiltinModule("node:crypto") as typeof NodeCrypto;
@@ -25,13 +36,10 @@ async function sandboxSnapshotHelper(): Promise<void> {
     files?: { path: string; mode: string; content: string }[];
     delete_paths?: string[];
   };
-  const rootPath = input.root ?? "/workspace";
   const root = await fs.open(
-    rootPath,
+    input.root ?? "/workspace",
     constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
   );
-  const maxEntries = input.max_entries ?? 100_000;
-
   const sameStat = (left: NodeFs.BigIntStats, right: NodeFs.BigIntStats) =>
     left.dev === right.dev &&
     left.ino === right.ino &&
@@ -39,23 +47,16 @@ async function sandboxSnapshotHelper(): Promise<void> {
     left.size === right.size &&
     left.mtimeNs === right.mtimeNs &&
     left.ctimeNs === right.ctimeNs;
-  const objectHash = (bytes: Buffer, format: "sha1" | "sha256") => {
-    const hash = crypto.createHash(format);
-    hash.update(`blob ${bytes.length}\0`);
-    hash.update(bytes);
-    return hash.digest("hex") as string;
-  };
+  const objectHash = (bytes: Buffer, format: "sha1" | "sha256") =>
+    crypto
+      .createHash(format)
+      .update(`blob ${bytes.length}\0`)
+      .update(bytes)
+      .digest("hex") as string;
   const checkedPath = (bytes: Buffer): string => {
     const text = bytes.toString("utf8");
     if (!Buffer.from(text, "utf8").equals(bytes)) throw new Error(`invalid_path_encoding:${text}`);
-    const parts = text.split("/");
-    if (
-      !text ||
-      text.startsWith("/") ||
-      parts.some(
-        (part) => !part || part === "." || part === ".." || /^(?:\.git|git~1)$/i.test(part),
-      )
-    ) {
+    if (!text || text.startsWith("/") || /(^|\/)(?:\.|\.\.|\.git|git~1)(?:\/|$)/i.test(text)) {
       throw new Error("invalid_path");
     }
     return text;
@@ -64,7 +65,6 @@ async function sandboxSnapshotHelper(): Promise<void> {
     Buffer.concat([Buffer.from(`/proc/self/fd/${directory.fd}/`), name]);
   const gitMode = (stat: NodeFs.BigIntStats): string =>
     stat.isSymbolicLink() ? "120000" : (stat.mode & 0o111n) !== 0n ? "100755" : "100644";
-
   try {
     if (input.action === "inventory") {
       const tracked = new Set(input.tracked_paths ?? []);
@@ -74,57 +74,54 @@ async function sandboxSnapshotHelper(): Promise<void> {
         for (let slash = decoded.indexOf("/"); slash >= 0; slash = decoded.indexOf("/", slash + 1))
           trackedDirectories.add(Buffer.from(decoded.slice(0, slash)).toString("base64"));
       }
-      const glob = (pattern: string) => {
-        let source = "^";
-        for (let index = 0; index < pattern.length; index++) {
-          const char = pattern[index]!;
-          if (char === "*" && pattern[index + 1] === "*") {
-            source += pattern[index + 2] === "/" ? "(?:.*/)?" : ".*";
-            index += pattern[index + 2] === "/" ? 2 : 1;
-          } else if (char === "*") source += "[^/]*";
-          else if (char === "?") source += "[^/]";
-          else if (char === "[") {
-            const end = pattern.indexOf("]", index + 1);
-            if (end > index + 1) {
-              source += `[${pattern.slice(index + 1, end).replace(/^!/, "^")}]`;
-              index = end;
-            } else source += "\\[";
-          } else if (char === "\\" && index + 1 < pattern.length)
-            source += `\\${pattern[++index]!}`;
-          else source += /[.+^${}()|]/.test(char) ? `\\${char}` : char;
-        }
-        return new RegExp(`${source}$`);
-      };
-      const ignoreRules = (input.ignore_rules ?? []).flatMap(({ path, patterns }) => {
+      const ignoreRules: IgnoreRule[] = [];
+      let patternCount = 0;
+      for (const { path, patterns } of input.ignore_rules ?? []) {
         const base =
           path === ".roomignore" || path === ".gitignore"
             ? ""
             : path.slice(0, -10).replace(/\/$/, "");
-        return patterns.flatMap((line) => {
-          if (!line || line.startsWith("#")) return [];
+        for (const line of patterns) {
+          if (
+            ++patternCount > limits.maxIgnorePatterns ||
+            line.length > limits.maxIgnorePatternLength
+          )
+            throw new Error("ignore_rules_too_large");
+          if (!line || line.startsWith("#")) continue;
           const negated = line.startsWith("!") && !line.startsWith("\\!");
           let pattern = negated ? line.slice(1) : line.replace(/^\\([#!])/, "$1");
-          const directoryOnly = pattern.endsWith("/");
-          if (directoryOnly) pattern = pattern.slice(0, -1);
+          if (pattern.endsWith("/")) pattern = pattern.slice(0, -1);
           const anchored = pattern.startsWith("/");
           if (anchored) pattern = pattern.slice(1);
-          if (!pattern) return [];
+          if (!pattern) continue;
           const basenameOnly = !anchored && !pattern.includes("/");
-          return [{ base, basenameOnly, directoryOnly, negated, regex: glob(pattern) }];
-        });
-      });
-      const isIgnored = (path: string, isDirectory: boolean) => {
+          pattern = pattern
+            .split("/")
+            .map((segment) =>
+              segment === "**" && !basenameOnly ? segment : segment.replace(/\*{2,}/g, "*"),
+            )
+            .join("/");
+          if (basenameOnly) pattern = `**/${pattern}`;
+          ignoreRules.push({ base, negated, pattern });
+        }
+      }
+      const isIgnored = (path: string) => {
         let ignored = false;
         for (const rule of ignoreRules) {
           if (rule.base && !path.startsWith(`${rule.base}/`)) continue;
-          if (rule.directoryOnly && !isDirectory) continue;
           const relative = rule.base ? path.slice(rule.base.length + 1) : path;
-          const candidate = rule.basenameOnly ? relative.split("/").at(-1)! : relative;
-          if (rule.regex.test(candidate)) ignored = !rule.negated;
+          if (pathGlobMatch(rule.pattern, relative)) ignored = !rule.negated;
         }
         return ignored;
       };
       const entries: { path: string; mode: string; sha: string | null; size: number }[] = [];
+      const prunedDirectories: string[] = [];
+      const prune = (ignored: boolean, path: string) => {
+        if (!ignored || tracked.has(path) || trackedDirectories.has(path)) return false;
+        if (prunedDirectories.push(path) > limits.maxPrunedDirectories)
+          throw new Error("too_many_pruned_directories");
+        return true;
+      };
       let scannedBytes = 0;
       const walk = async (
         directory: NodeFsPromises.FileHandle,
@@ -143,25 +140,18 @@ async function sandboxSnapshotHelper(): Promise<void> {
           const encodedPath = relative.toString("base64");
           const path = relative.toString("utf8");
           const directoryEntry = dirent.isDirectory();
-          let ignored = isIgnored(path, directoryEntry);
-          if (
-            (ignoredParent || ignored) &&
-            !tracked.has(encodedPath) &&
-            !trackedDirectories.has(encodedPath)
-          )
-            continue;
           const target = childPath(directory, name);
-          const before = await fs.lstat(target, { bigint: true });
-          if (before.isDirectory() && !directoryEntry) {
-            ignored = isIgnored(path, true);
-            if (
-              (ignoredParent || ignored) &&
-              !tracked.has(encodedPath) &&
-              !trackedDirectories.has(encodedPath)
-            )
-              continue;
+          let ignored = ignoredParent;
+          if (directoryEntry) {
+            ignored ||= isIgnored(path);
+            if (prune(ignored, encodedPath)) continue;
           }
+          const before = await fs.lstat(target, { bigint: true });
           if (before.isDirectory()) {
+            if (!directoryEntry) {
+              ignored ||= isIgnored(path);
+              if (prune(ignored, encodedPath)) continue;
+            }
             const child = await fs.open(
               target,
               constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
@@ -223,17 +213,16 @@ async function sandboxSnapshotHelper(): Promise<void> {
             sha,
             size,
           });
-          if (entries.length > maxEntries) throw new Error("too_many_entries");
+          if (entries.length > (input.max_entries ?? 100_000)) throw new Error("too_many_entries");
         }
         const afterDir = await directory.stat({ bigint: true });
         if (!ignoredParent && !sameStat(beforeDir, afterDir))
           throw new Error("changed_during_read");
       };
       await walk(root, Buffer.alloc(0));
-      process.stdout.write(JSON.stringify({ entries }));
+      process.stdout.write(JSON.stringify({ entries, pruned_directories: prunedDirectories }));
       return;
     }
-
     if (input.action === "install") {
       const openParent = async (
         encodedPath: string,
@@ -399,8 +388,9 @@ async function sandboxSnapshotHelper(): Promise<void> {
   }
 }
 
-/** Standalone script for `node -e`; keep it free of module-scope dependencies. */
-export const SANDBOX_SNAPSHOT_HELPER = `(${sandboxSnapshotHelper.toString()})().catch((error) => {
+export const SANDBOX_SNAPSHOT_HELPER = `const wildcardMatch = ${sharedWildcardMatch.toString()};
+const pathGlobMatch = ${sharedPathGlobMatch.toString()};
+(${sandboxSnapshotHelper.toString()})(pathGlobMatch, ${JSON.stringify(SNAPSHOT_HELPER_LIMITS)}).catch((error) => {
   const code = typeof error?.message === "string" ? error.message : "snapshot_failed";
   process.stdout.write(JSON.stringify({ error: code }));
   process.exitCode = 1;
