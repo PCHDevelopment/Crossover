@@ -7,6 +7,7 @@ import {
 } from "@crossover/security";
 import { CrossoverError } from "@crossover/protocol";
 import { normalizePath } from "./path.js";
+import { ignoredPrunedDirectories } from "./ignore.js";
 import type {
   ExecutionDriver,
   SandboxLimits,
@@ -534,7 +535,32 @@ export class DockerExecutionDriver implements ExecutionDriver {
       ignore_rules: input.ignore_rules ?? [],
       max_bytes: 1024 * 1024 * 1024,
     });
-    if (!Array.isArray(payload.entries)) throw snapshotUnavailable();
+    if (!Array.isArray(payload.entries) || !Array.isArray(payload.pruned_directories))
+      throw snapshotUnavailable();
+    const prunedDirectories = payload.pruned_directories.map((path) => {
+      if (typeof path !== "string") throw snapshotUnavailable();
+      return decodeSnapshotPath(path);
+    });
+    let ignoredDirectories: ReadonlySet<string>;
+    try {
+      ignoredDirectories = await ignoredPrunedDirectories(
+        input.ignore_rules ?? [],
+        prunedDirectories,
+      );
+    } catch (cause) {
+      throw new CrossoverError(
+        "UNAVAILABLE",
+        "Canonical Git ignore rules could not verify sandbox pruning; retry the request",
+        { cause, retryable: true, details: { reason: "ignore_pruning_verification_failed" } },
+      );
+    }
+    const mismatch = prunedDirectories.find((path) => !ignoredDirectories.has(path));
+    if (mismatch)
+      throw new CrossoverError(
+        "UNAVAILABLE",
+        "Sandbox ignore pruning disagreed with canonical Git rules; retry the request",
+        { retryable: true, details: { reason: "ignore_pruning_mismatch", path: mismatch } },
+      );
     return payload.entries.map((entry: unknown) => {
       if (
         !entry ||
@@ -652,7 +678,12 @@ export class DockerExecutionDriver implements ExecutionDriver {
     resources: SandboxResources,
     input: Record<string, unknown>,
     readOnly = true,
-  ): Promise<{ entries?: unknown[]; error?: string; installed?: boolean }> {
+  ): Promise<{
+    entries?: unknown[];
+    pruned_directories?: unknown[];
+    error?: string;
+    installed?: boolean;
+  }> {
     let stdout = "";
     let outputTooLarge = false;
     const result = await this.invoke(
@@ -700,22 +731,40 @@ export class DockerExecutionDriver implements ExecutionDriver {
     if (!stdout && result.stdout) stdout = result.stdout;
     if (outputTooLarge)
       throw new CrossoverError("VALIDATION", "Sandbox snapshot exceeds the bounded output limit");
-    let payload: { entries?: unknown[]; error?: string; installed?: boolean };
+    let payload: {
+      entries?: unknown[];
+      pruned_directories?: unknown[];
+      error?: string;
+      installed?: boolean;
+    };
     try {
-      payload = JSON.parse(stdout) as { entries?: unknown[]; error?: string; installed?: boolean };
+      payload = JSON.parse(stdout) as {
+        entries?: unknown[];
+        pruned_directories?: unknown[];
+        error?: string;
+        installed?: boolean;
+      };
     } catch {
       throw snapshotUnavailable();
     }
     if (payload.error) {
       if (payload.error === "changed_during_read") throw snapshotChanged();
+      if (payload.error.startsWith("invalid_path_encoding:"))
+        throw new CrossoverError("VALIDATION", "Sandbox contains an unsupported path encoding", {
+          details: {
+            reason: "invalid_path_encoding",
+            path: payload.error.slice("invalid_path_encoding:".length),
+          },
+        });
       if (
         [
           "file_too_large",
           "invalid_path",
-          "invalid_path_encoding",
+          "ignore_rules_too_large",
           "scan_too_large",
           "too_large",
           "too_many_entries",
+          "too_many_pruned_directories",
           "unsupported_file_type",
         ].includes(payload.error)
       ) {

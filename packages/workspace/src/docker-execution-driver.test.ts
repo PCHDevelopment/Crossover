@@ -180,6 +180,7 @@ describe("DockerExecutionDriver", () => {
                       size: 0,
                     },
                   ],
+                  pruned_directories: [Buffer.from("node_modules").toString("base64")],
                 })
               : JSON.stringify({ installed: true }),
           stderr: "",
@@ -203,6 +204,19 @@ describe("DockerExecutionDriver", () => {
         ignore_rules: [{ path: ".gitignore", patterns: ["node_modules/"] }],
       }),
     ).resolves.toMatchObject([{ path: "src/a.txt", mode: "100644", sha: null, size: 0 }]);
+    await expect(
+      driver.snapshotInventory({
+        sandbox_id: sandboxId,
+        resources,
+        tracked_paths: [],
+        object_format: "sha1",
+        ignore_rules: [{ path: ".gitignore", patterns: ["*.txt"] }],
+      }),
+    ).rejects.toMatchObject({
+      code: "UNAVAILABLE",
+      retryable: true,
+      details: { reason: "ignore_pruning_mismatch", path: "node_modules" },
+    });
     await driver.updateSnapshot({
       sandbox_id: sandboxId,
       resources,
@@ -210,8 +224,8 @@ describe("DockerExecutionDriver", () => {
       delete_paths: ["old.txt"],
     });
 
-    expect(calls).toHaveLength(2);
-    const [read, install] = calls;
+    expect(calls).toHaveLength(3);
+    const [read, mismatch, install] = calls;
     expect(read!.args).toContain("--network=none");
     expect(read!.args).toContain("--read-only");
     expect(read!.args).toContain(
@@ -221,6 +235,9 @@ describe("DockerExecutionDriver", () => {
       action: "inventory",
       tracked_paths: [Buffer.from("src/a.txt").toString("base64")],
       ignore_rules: [{ path: ".gitignore", patterns: ["node_modules/"] }],
+    });
+    expect(JSON.parse(mismatch!.input)).toMatchObject({
+      ignore_rules: [{ path: ".gitignore", patterns: ["*.txt"] }],
     });
     expect(install!.args).toContain("--network=none");
     expect(install!.args).not.toContain(
