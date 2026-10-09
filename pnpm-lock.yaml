@@ -205,9 +205,6 @@ importers:
       '@crossover/kernel':
         specifier: workspace:*
         version: link:../kernel
-      '@crossover/policy':
-        specifier: workspace:*
-        version: link:../policy
       '@crossover/protocol':
         specifier: workspace:*
         version: link:../protocol
@@ -259,6 +256,9 @@ importers:
       '@crossover/kernel':
         specifier: workspace:*
         version: link:../kernel
+      '@crossover/policy':
+        specifier: workspace:*
+        version: link:../policy
       '@crossover/protocol':
         specifier: workspace:*
         version: link:../protocol
