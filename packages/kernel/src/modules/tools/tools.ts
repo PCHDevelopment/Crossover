@@ -336,7 +336,8 @@ export function registerToolCommands(dispatcher: Dispatcher, options: ToolComman
         }),
       ]);
       const result = output.result ?? null;
-      if (Buffer.byteLength(JSON.stringify(result)) > MAX_TOOL_RESULT_BYTES) {
+      const resultLimit = def.execution?.maxOutputBytes ?? MAX_TOOL_RESULT_BYTES;
+      if (Buffer.byteLength(JSON.stringify(result)) > resultLimit) {
         return failed({
           code: "PROVIDER_UNAVAILABLE",
           message: `${def.name} returned more than the limit allows`,
@@ -357,10 +358,10 @@ export function registerToolCommands(dispatcher: Dispatcher, options: ToolComman
       }
       if (error instanceof ToolProviderError) {
         return failed({
-          code: "PROVIDER_UNAVAILABLE",
+          code: error.options.code ?? "PROVIDER_UNAVAILABLE",
           message: error.message,
           retryable: error.options.retryable,
-          details: { tool: def.name },
+          details: { tool: def.name, ...(error.options.details ?? {}) },
         });
       }
       // What a runner throws by accident may carry anything: say only that it failed.

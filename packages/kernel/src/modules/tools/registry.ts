@@ -1,4 +1,4 @@
-import { CrossoverError } from "@crossover/protocol";
+import { CrossoverError, type ErrorCode } from "@crossover/protocol";
 import type { z } from "zod";
 
 /** A tool's risk tier (§21.2, D14). Tier 3 is never in a role bundle. */
@@ -40,7 +40,10 @@ export interface ToolExecutionSpec {
   command: readonly string[];
   /** Exact hosts or `*.suffix` patterns this plugin invocation may reach through the proxy. */
   egressHosts: readonly string[];
+  /** Broker credentials required by the tool; GitHub declarations need explicit permissions. */
   integrations?: readonly ToolIntegrationRequirement[];
+  /** Optional per-tool output bound in bytes; it cannot exceed the platform's 256 KiB cap. */
+  maxOutputBytes?: number;
 }
 
 export interface ToolIntegrationRequirement {
@@ -78,7 +81,11 @@ export interface ToolRunner {
 export class ToolProviderError extends Error {
   constructor(
     message: string,
-    readonly options: { retryable: boolean } = { retryable: true },
+    readonly options: {
+      retryable: boolean;
+      code?: ErrorCode;
+      details?: Record<string, unknown>;
+    } = { retryable: true },
   ) {
     super(message);
     this.name = "ToolProviderError";
@@ -104,7 +111,7 @@ export class ToolRegistry {
     if (this.tools.has(tool.name)) throw bad("already registered");
     if (!NAME.test(tool.capability)) throw bad("the capability must be <resource>.<action>");
     if (tool.execution) {
-      const { image, command, egressHosts, integrations = [] } = tool.execution;
+      const { image, command, egressHosts, integrations = [], maxOutputBytes } = tool.execution;
       if (!/^[A-Za-z0-9][A-Za-z0-9._/:+-]{0,254}@sha256:[a-f0-9]{64}$/.test(image))
         throw bad("the execution image must be pinned by a sha256 digest");
       if (
@@ -128,6 +135,12 @@ export class ToolRegistry {
         )
       ) {
         throw bad("the execution host allowlist is invalid");
+      }
+      if (
+        maxOutputBytes !== undefined &&
+        (!Number.isSafeInteger(maxOutputBytes) || maxOutputBytes < 1 || maxOutputBytes > 256 * 1024)
+      ) {
+        throw bad("the execution output limit must be from 1 to 262144 bytes");
       }
       const providers = new Set<string>();
       for (const integration of integrations) {

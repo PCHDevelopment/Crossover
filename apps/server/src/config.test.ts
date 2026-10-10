@@ -187,4 +187,12 @@ describe("GitHub integration configuration", () => {
       privateKey: expect.stringContaining("\n"),
     });
   });
+
+  it("accepts only a digest-pinned GitHub plugin worker image", () => {
+    expect(() =>
+      loadConfig({ ...env, GITHUB_PLUGIN_IMAGE: "crossover-github-plugin:latest" }),
+    ).toThrow(/GITHUB_PLUGIN_IMAGE/);
+    const image = `ghcr.io/peterheo/crossover-github-plugin@sha256:${"a".repeat(64)}`;
+    expect(loadConfig({ ...env, GITHUB_PLUGIN_IMAGE: image }).githubPluginImage).toBe(image);
+  });
 });

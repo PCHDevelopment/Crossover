@@ -8,6 +8,7 @@ import { registerMcp } from "@crossover/mcp";
 import { buildInternalGitServer } from "./internal-git.js";
 import { IntegrationCredentialBroker } from "./integration-broker.js";
 import { GitHubPullRequestProvider } from "./github-pull-request.js";
+import { registerGitHubTools } from "./github-plugin.js";
 import {
   Dispatcher,
   RedisBudgetLimiter,
@@ -68,7 +69,9 @@ import {
   workspaceHealthGate,
   provisionWorkspace,
   reconcileRef,
+  githubRepositoryFromUrl,
   registerWorkspaceCommands,
+  type GitCredentialProvider,
   runHealthCheck,
   publishHealthResult,
   normalizePath,
@@ -278,6 +281,8 @@ export async function composeServer(
       },
     });
     const toolRegistry = overrides.tools?.registry ?? new ToolRegistry({ tierOf });
+    if (!overrides.tools?.registry && config.githubPluginImage)
+      registerGitHubTools(toolRegistry, config.githubPluginImage);
     kmsOperations = config.integrationKmsKeyId ? new AwsKmsDataKeyOperations() : undefined;
     const integrationSecretStore =
       overrides.integrations?.secretStore ??
@@ -295,6 +300,20 @@ export async function composeServer(
           ...(config.githubApp ? { github: config.githubApp } : {}),
         })
       : undefined;
+    const githubCredentials: GitCredentialProvider = {
+      credentialFor: async (url, request) => {
+        if (url.hostname.toLowerCase() !== "github.com" || !credentialBroker) return null;
+        return credentialBroker.githubCredentialForRoom({
+          ...request,
+          repository: githubRepositoryFromUrl(url),
+        });
+      },
+    };
+    const upstream = {
+      ...overrides.upstream,
+      credentials: overrides.upstream?.credentials ?? githubCredentials,
+      pullRequests: overrides.upstream?.pullRequests ?? new GitHubPullRequestProvider(),
+    };
     const toolRunner =
       overrides.tools?.runner ??
       (pluginRunner = new DockerToolRunner({
@@ -340,10 +359,7 @@ export async function composeServer(
         registry: toolRegistry,
         runner: toolRunner,
       },
-      {
-        ...overrides.upstream,
-        pullRequests: overrides.upstream?.pullRequests ?? new GitHubPullRequestProvider(),
-      },
+      upstream,
       integrationOptions,
     );
 

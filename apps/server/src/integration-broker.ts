@@ -1,15 +1,16 @@
 import { sign } from "node:crypto";
 import { STSClient, AssumeRoleCommand } from "@aws-sdk/client-sts";
 import type { Pool } from "@crossover/db";
+import { CrossoverError } from "@crossover/protocol";
 import {
   readConnectedIntegrationSecretConfig,
   type AwsRoleVerifier,
   type GitHubConnectionVerifier,
   type SecretStore,
   type ToolExecutionSpec,
-  type ToolIntegrationRequirement,
   type ToolInvocation,
 } from "@crossover/kernel";
+import type { GitCredentialLease, GitCredentialRequest } from "@crossover/workspace";
 import type { PluginCredentialLease } from "./plugin-runner.js";
 import type { ServerConfig } from "./config.js";
 
@@ -123,7 +124,13 @@ export class IntegrationCredentialBroker {
           environment.AWS_SECRET_ACCESS_KEY = credentials.secretAccessKey;
           environment.AWS_SESSION_TOKEN = credentials.sessionToken;
         } else if (requirement.provider === "github") {
-          const lease = await this.mintGitHubToken(invocation, requirement, config);
+          const lease = await this.mintGitHubToken({
+            room_id: invocation.room_id,
+            repository: invocation.scope,
+            invocation_id: invocation.invocation_id,
+            permissions: requirement.permissions,
+            configuration: config,
+          });
           environment.GITHUB_TOKEN = lease.token;
           revokers.push(lease.revoke);
         } else if (requirement.provider.startsWith("oauth:")) {
@@ -145,6 +152,35 @@ export class IntegrationCredentialBroker {
         if (outcomes.some((outcome) => outcome.status === "rejected"))
           throw new Error("Integration credential revocation failed");
       },
+    };
+  }
+
+  /** Mint the same selected-repository lease for Git import/export operations. */
+  async githubCredentialForRoom(
+    request: GitCredentialRequest & { repository: string },
+  ): Promise<GitCredentialLease | null> {
+    let configuration: Readonly<Record<string, string>>;
+    try {
+      ({ configuration } = await readConnectedIntegrationSecretConfig(
+        this.options.pool,
+        this.options.secretStore,
+        request.room_id,
+        "github",
+      ));
+    } catch (error) {
+      if (error instanceof CrossoverError && error.code === "PROVIDER_UNAVAILABLE") return null;
+      throw error;
+    }
+    const lease = await this.mintGitHubToken({
+      room_id: request.room_id,
+      repository: request.repository,
+      invocation_id: request.invocation_id,
+      permissions: request.permissions,
+      configuration,
+    });
+    return {
+      credential: { type: "bearer", token: lease.token },
+      revoke: lease.revoke,
     };
   }
 
@@ -172,24 +208,26 @@ export class IntegrationCredentialBroker {
     });
   }
 
-  private async mintGitHubToken(
-    invocation: ToolInvocation,
-    requirement: ToolIntegrationRequirement,
-    config: Readonly<Record<string, string>>,
-  ): Promise<{ token: string; revoke: () => Promise<void> }> {
+  private async mintGitHubToken(input: {
+    room_id: string;
+    repository: string | undefined;
+    invocation_id: string;
+    permissions: Readonly<Record<string, "read" | "write">> | undefined;
+    configuration: Readonly<Record<string, string>>;
+  }): Promise<{ token: string; revoke: () => Promise<void> }> {
     const app = this.options.github;
-    const repository = invocation.scope?.toLowerCase();
+    const repository = input.repository?.toLowerCase();
     let names: unknown;
     let ids: unknown;
     try {
-      names = JSON.parse(config.repositories_json ?? "null") as unknown;
-      ids = JSON.parse(config.repository_ids_json ?? "null") as unknown;
+      names = JSON.parse(input.configuration.repositories_json ?? "null") as unknown;
+      ids = JSON.parse(input.configuration.repository_ids_json ?? "null") as unknown;
     } catch {
       throw new Error("GitHub integration configuration is invalid");
     }
     if (
       !app ||
-      !config.installation_id ||
+      !input.configuration.installation_id ||
       !repository ||
       !Array.isArray(names) ||
       !Array.isArray(ids) ||
@@ -202,17 +240,17 @@ export class IntegrationCredentialBroker {
     const repoId = Number(ids[index]);
     if (!Number.isSafeInteger(repoId) || repoId <= 0)
       throw new Error("GitHub integration configuration is invalid");
-    if (!Object.keys(requirement.permissions ?? {}).length)
+    if (!Object.keys(input.permissions ?? {}).length)
       throw new Error("GitHub tool permissions are unavailable");
 
     const response = await this.request(
-      `${API}/app/installations/${encodeURIComponent(config.installation_id)}/access_tokens`,
+      `${API}/app/installations/${encodeURIComponent(input.configuration.installation_id)}/access_tokens`,
       {
         method: "POST",
         headers: this.appHeaders(app),
         body: JSON.stringify({
           repository_ids: [repoId],
-          permissions: requirement.permissions,
+          permissions: input.permissions,
         }),
       },
     );

@@ -112,6 +112,22 @@ describe("ToolRegistry", () => {
       ),
     ).toThrow(/more than once/);
   });
+
+  it("validates per-plugin output bounds", () => {
+    const base = {
+      image: `busybox:1.36.1-musl@sha256:${"a".repeat(64)}`,
+      command: ["/bin/busybox", "true"],
+      egressHosts: [],
+    };
+    expect(() =>
+      new ToolRegistry().register(tool({ execution: { ...base, maxOutputBytes: 256 * 1024 } })),
+    ).not.toThrow();
+    for (const maxOutputBytes of [0, 256 * 1024 + 1, Number.NaN]) {
+      expect(() =>
+        new ToolRegistry().register(tool({ execution: { ...base, maxOutputBytes } })),
+      ).toThrow(/execution output limit/);
+    }
+  });
 });
 
 describe("capabilityFor", () => {

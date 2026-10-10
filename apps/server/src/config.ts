@@ -86,6 +86,11 @@ const envSchema = z.object({
   GITHUB_CLIENT_ID: z.string().trim().min(1).max(200).optional(),
   GITHUB_CLIENT_SECRET: z.string().min(1).max(4096).optional(),
   GITHUB_APP_PRIVATE_KEY: z.string().min(100).max(16_384).optional(),
+  /** Operator-provisioned immutable GitHub plugin worker image. */
+  GITHUB_PLUGIN_IMAGE: z
+    .string()
+    .regex(/^[A-Za-z0-9][A-Za-z0-9._/:+-]{0,254}@sha256:[a-f0-9]{64}$/)
+    .optional(),
   GIT_INTERNAL_HOST: z.string().trim().min(1).optional(),
   GIT_INTERNAL_PORT: z.coerce.number().int().min(1).max(65_535).default(8081),
   GIT_INTERNAL_CONTAINER: z
@@ -130,6 +135,8 @@ export interface ServerConfig {
   /** KMS key id or ARN for production room-scoped integration secret encryption. */
   integrationKmsKeyId?: string;
   githubApp?: { appId: string; clientId: string; clientSecret: string; privateKey: string };
+  /** Digest-pinned isolated GitHub worker image; GitHub tools are unavailable when unset. */
+  githubPluginImage?: string;
   /** Bind address and private, unpublished port of the internal Git-only listener. */
   gitInternalHost?: string;
   gitInternalPort?: number;
@@ -252,6 +259,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
           },
         }
       : {}),
+    ...(e.GITHUB_PLUGIN_IMAGE ? { githubPluginImage: e.GITHUB_PLUGIN_IMAGE } : {}),
     ...(e.GIT_INTERNAL_HOST ? { gitInternalHost: e.GIT_INTERNAL_HOST } : {}),
     gitInternalPort: e.GIT_INTERNAL_PORT,
     ...(e.GIT_INTERNAL_CONTAINER ? { gitInternalContainer: e.GIT_INTERNAL_CONTAINER } : {}),

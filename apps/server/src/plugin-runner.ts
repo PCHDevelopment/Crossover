@@ -29,6 +29,7 @@ export type {
 
 const DEFAULT_TIMEOUT_MS = 55_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 256 * 1024;
+const MAX_OUTPUT_BYTES = 256 * 1024;
 const MAX_STDERR_BYTES = 8 * 1024;
 const MAX_CREDENTIALS = 16;
 const MAX_CREDENTIAL_BYTES = 16 * 1024;
@@ -91,7 +92,7 @@ export class DockerToolRunner implements ToolRunner {
     this.egressProxyContainer = options.egressProxyContainer?.trim() || undefined;
     this.egressProxyPort = options.egressProxyPort ?? 3128;
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-    this.maxOutputBytes = options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
+    this.maxOutputBytes = options.maxOutputBytes ?? MAX_OUTPUT_BYTES;
     this.credentials = options.credentials ?? (async () => ({}));
     this.invoke = options.invoke ?? invokeDocker;
 
@@ -121,9 +122,9 @@ export class DockerToolRunner implements ToolRunner {
     if (
       !Number.isSafeInteger(this.maxOutputBytes) ||
       this.maxOutputBytes < 1 ||
-      this.maxOutputBytes > 1024 * 1024
+      this.maxOutputBytes > MAX_OUTPUT_BYTES
     ) {
-      throw new Error("Plugin runner output limit must be from 1 to 1048576 bytes");
+      throw new Error(`Plugin runner output limit must be from 1 to ${MAX_OUTPUT_BYTES} bytes`);
     }
 
     const shouldSweep = options.sweepResources ?? options.invoke === undefined;
@@ -144,6 +145,10 @@ export class DockerToolRunner implements ToolRunner {
     const execution = definition?.execution;
     if (!definition || !execution) throw new Error("Plugin runtime is not configured");
     if (signal.aborted) throw new Error("Plugin invocation was aborted");
+    const outputLimit = Math.min(
+      execution.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES,
+      this.maxOutputBytes,
+    );
 
     const hosts = normalizeHosts(execution.egressHosts);
     const runId = randomBytes(12).toString("hex");
@@ -250,7 +255,7 @@ export class DockerToolRunner implements ToolRunner {
 
       const result = await this.invoke(this.dockerBinary, args, {
         timeoutMs: this.timeoutMs,
-        maxOutputBytes: this.maxOutputBytes,
+        maxOutputBytes: outputLimit,
         maxStderrBytes: MAX_STDERR_BYTES,
         input: `${JSON.stringify({ invocation })}\n`,
         signal,
@@ -262,9 +267,16 @@ export class DockerToolRunner implements ToolRunner {
       }
       if (result.aborted || signal.aborted) throw new Error("Plugin invocation was aborted");
       if (result.outputOverflow) throw new Error("Plugin output exceeded the size limit");
-      if (result.code !== 0) throw new Error("Plugin execution failed");
+      if (result.code !== 0) {
+        rejectCredentialOutput(result.stdout, sensitiveValues);
+        throw parsePluginError(
+          result.stdout,
+          definition.idempotent,
+          definition.name.split(".")[0] || "plugin",
+        );
+      }
       rejectCredentialOutput(result.stdout, sensitiveValues);
-      output = parsePluginOutput(result.stdout, this.maxOutputBytes);
+      output = parsePluginOutput(result.stdout, outputLimit);
     } catch (error) {
       thrown = error;
     } finally {
@@ -427,6 +439,53 @@ function parsePluginOutput(output: string, maxBytes: number): ToolOutput {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || !("result" in parsed))
     throw new Error("Plugin output was invalid");
   return { result: (parsed as { result: unknown }).result ?? null };
+}
+
+function parsePluginError(
+  output: string,
+  idempotent: boolean,
+  provider: string,
+): ToolProviderError {
+  const fallback = () =>
+    new ToolProviderError("Plugin execution failed", { retryable: idempotent });
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(output.trim()) as unknown;
+  } catch {
+    return fallback();
+  }
+  if (!parsed || typeof parsed !== "object" || !("error" in parsed)) return fallback();
+  const error = (parsed as { error?: unknown }).error;
+  if (!error || typeof error !== "object") return fallback();
+  const record = error as { code?: unknown; retryable?: unknown; retry_after?: unknown };
+  const codes = {
+    not_found: { code: "NOT_FOUND" as const, message: "Plugin resource not found" },
+    forbidden: { code: "FORBIDDEN" as const, message: "Plugin access denied" },
+    rate_limited: { code: "RATE_LIMITED" as const, message: "Plugin rate limit reached" },
+    validation: { code: "VALIDATION" as const, message: "Plugin rejected the request" },
+    unavailable: { code: "PROVIDER_UNAVAILABLE" as const, message: "Plugin service unavailable" },
+  } as const;
+  if (typeof record.code !== "string" || !Object.hasOwn(codes, record.code)) return fallback();
+  const mapped = codes[record.code as keyof typeof codes];
+  const retryable = record.code === "rate_limited" || (record.retryable === true && idempotent);
+  const retryAfter =
+    typeof record.retry_after === "number" &&
+    Number.isSafeInteger(record.retry_after) &&
+    record.retry_after >= 0 &&
+    record.retry_after <= 86_400
+      ? record.retry_after
+      : undefined;
+  return new ToolProviderError(mapped.message, {
+    code: mapped.code,
+    retryable,
+    details: {
+      provider,
+      provider_code: record.code,
+      ...(record.code === "rate_limited" && retryAfter !== undefined
+        ? { retry_after: retryAfter }
+        : {}),
+    },
+  });
 }
 
 function serializeEnvironment(environment: Readonly<Record<string, string>>): string {
