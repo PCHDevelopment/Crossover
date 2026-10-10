@@ -16,6 +16,15 @@ import { toHttpError } from "./errors.js";
 import { staticSite } from "./static.js";
 import { attachWebSocket, type WebSocketOptions } from "./ws.js";
 
+/** Counts hits per key in fixed windows (Redis in production). */
+export interface RouteRateLimiter {
+  hit(
+    key: string,
+    limit: number,
+    windowMs: number,
+  ): Promise<{ allowed: true } | { allowed: false; retry_after_ms: number }>;
+}
+
 export interface GatewayOptions {
   dispatcher: Dispatcher;
   pool: Pool;
@@ -29,6 +38,19 @@ export interface GatewayOptions {
    * logins (later) plug into the same `users` table.
    */
   devLogin?: boolean;
+  /**
+   * Take the client address from `X-Forwarded-For`, trusting only the proxies listed here (addresses
+   * or CIDRs, e.g. `["10.0.0.0/8"]`): each hop is checked against the list from the server
+   * outwards, so the address is the first entry that is not a listed proxy and nothing the client
+   * wrote to the left of it counts. `true` trusts every hop and is for tests only. Default: none.
+   */
+  trustProxy?: boolean | string[];
+  /**
+   * Limit `POST /v1/auth/refresh` per client address (a stolen or guessed token can't be ground
+   * through at wire speed): `perMinute` attempts (default 30) then `RATE_LIMITED` with
+   * `Retry-After`. If the limiter fails, requests go ahead. Off unless given.
+   */
+  refreshLimit?: { limiter: RouteRateLimiter; perMinute?: number };
   /**
    * Serve the built web app from this directory (`index.html` and its assets, the app's routes
    * falling back to `index.html`) next to the API. Off unless given; never serves anything under
@@ -93,6 +115,7 @@ export function buildGateway(options: GatewayOptions): FastifyInstance {
   const app = Fastify({
     logger: false,
     bodyLimit: options.bodyLimit ?? 1024 * 1024,
+    trustProxy: options.trustProxy ?? false,
   });
 
   app.setErrorHandler((error, request, reply) => {
@@ -220,6 +243,17 @@ export function buildGateway(options: GatewayOptions): FastifyInstance {
   });
 
   app.post("/v1/auth/refresh", async (request, reply) => {
+    const limit = options.refreshLimit;
+    if (limit) {
+      const decision = await limit.limiter
+        .hit(`refresh:${clientKey(request.ip)}`, limit.perMinute ?? 30, 60_000)
+        .catch(() => ({ allowed: true as const }));
+      if (!decision.allowed) {
+        throw new CrossoverError("RATE_LIMITED", "Too many refresh attempts", {
+          details: { retry_after: Math.max(1, Math.ceil(decision.retry_after_ms / 1000)) },
+        });
+      }
+    }
     const parsed = refreshBody.safeParse(expectObject(request.body));
     if (!parsed.success) {
       throw new CrossoverError("VALIDATION", "Invalid refresh request", {
@@ -280,4 +314,24 @@ function normalize(error: unknown): unknown {
     });
   }
   return error;
+}
+
+/**
+ * The key a client address is limited under: an IPv6 address by its /64 (one subscriber holds a
+ * whole /64, so a per-address limit would be no limit), an IPv4 address as it is.
+ */
+export function clientKey(ip: string): string {
+  const v4mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(ip);
+  if (v4mapped) return v4mapped[1]!;
+  if (!ip.includes(":")) return ip;
+  const [head = "", tail = ""] = ip.toLowerCase().split("::");
+  const front = head === "" ? [] : head.split(":");
+  const back = tail === "" ? [] : tail.split(":");
+  const groups = ip.includes("::")
+    ? [...front, ...Array<string>(Math.max(0, 8 - front.length - back.length)).fill("0"), ...back]
+    : front;
+  return `${groups
+    .slice(0, 4)
+    .map((g) => g.replace(/^0+(?=.)/, ""))
+    .join(":")}::/64`;
 }

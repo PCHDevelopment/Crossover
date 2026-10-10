@@ -18,7 +18,7 @@ import type { FastifyInstance } from "fastify";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { HTTP_STATUS, toHttpError } from "./errors.js";
-import { buildGateway } from "./server.js";
+import { buildGateway, clientKey } from "./server.js";
 
 let db: TestDatabase;
 let pool: Pool;
@@ -725,6 +725,10 @@ describe("POST /v1/auth/refresh", () => {
     const s = await setup();
     const first = await post(s, "/v1/auth/refresh", { refresh_token: s.owner.refresh_token });
     const pair = first.json() as TokenPair;
+    // Past the grace window for a lost response, a spent token is a replay.
+    await pool.query(
+      "UPDATE auth_tokens SET used_at = used_at - interval '31 seconds', created_at = created_at - interval '31 seconds'",
+    );
     const again = await post(s, "/v1/auth/refresh", { refresh_token: s.owner.refresh_token });
     errorShape(again.json(), "UNAUTHENTICATED", 401, again);
     // The family is revoked: even the newest pair no longer works.
@@ -736,6 +740,88 @@ describe("POST /v1/auth/refresh", () => {
     errorShape(access.json(), "UNAUTHENTICATED", 401, access);
     const bad = await post(s, "/v1/auth/refresh", { nope: 1 });
     errorShape(bad.json(), "VALIDATION", 400, bad);
+  });
+});
+
+describe("POST /v1/auth/refresh rate limit", () => {
+  /** Fixed-window counter per key, in memory. */
+  const counter = () => {
+    const counts = new Map<string, number>();
+    return {
+      hit: async (key: string, limit: number) => {
+        const next = (counts.get(key) ?? 0) + 1;
+        counts.set(key, next);
+        return next <= limit
+          ? { allowed: true as const }
+          : { allowed: false as const, retry_after_ms: 12_500 };
+      },
+    };
+  };
+  const junk = { refresh_token: "rt_nonsense" };
+
+  it("refuses attempts over the limit per client address with RATE_LIMITED and Retry-After, junk or not", async () => {
+    const s = await setup(undefined, false, { refreshLimit: { limiter: counter(), perMinute: 3 } });
+    for (let i = 0; i < 3; i++) {
+      const res = await post(s, "/v1/auth/refresh", junk);
+      expect(res.statusCode).toBe(401);
+    }
+    const limited = await post(s, "/v1/auth/refresh", { refresh_token: s.owner.refresh_token });
+    errorShape(limited.json(), "RATE_LIMITED", 429, limited);
+    expect(limited.headers["retry-after"]).toBe("13");
+    // Only this route is limited.
+    const read = await command(s, { id: newId("cmd"), method: "room.get_state", params: {} });
+    expect(read.statusCode).toBe(200);
+  });
+
+  it("is per address: X-Forwarded-For counts only behind a trusted proxy", async () => {
+    const via = (ip: string) => ({ "x-forwarded-for": ip });
+    const trusted = await setup(undefined, false, {
+      trustProxy: ["127.0.0.1"],
+      refreshLimit: { limiter: counter(), perMinute: 1 },
+    });
+    expect((await post(trusted, "/v1/auth/refresh", junk, via("203.0.113.1"))).statusCode).toBe(
+      401,
+    );
+    expect((await post(trusted, "/v1/auth/refresh", junk, via("203.0.113.1"))).statusCode).toBe(
+      429,
+    );
+    expect((await post(trusted, "/v1/auth/refresh", junk, via("203.0.113.2"))).statusCode).toBe(
+      401,
+    );
+    // Behind one trusted hop, what the client wrote on the left is not its address: the entry the
+    // proxy added is. Each forged value must not buy a fresh allowance.
+    const forged = await setup(undefined, false, {
+      trustProxy: ["127.0.0.1"],
+      refreshLimit: { limiter: counter(), perMinute: 1 },
+    });
+    expect(
+      (await post(forged, "/v1/auth/refresh", junk, via("1.1.1.1, 203.0.113.9"))).statusCode,
+    ).toBe(401);
+    expect(
+      (await post(forged, "/v1/auth/refresh", junk, via("2.2.2.2, 203.0.113.9"))).statusCode,
+    ).toBe(429);
+    const direct = await setup(undefined, false, {
+      refreshLimit: { limiter: counter(), perMinute: 1 },
+    });
+    expect((await post(direct, "/v1/auth/refresh", junk, via("203.0.113.1"))).statusCode).toBe(401);
+    // A spoofed header doesn't get a fresh allowance.
+    expect((await post(direct, "/v1/auth/refresh", junk, via("203.0.113.9"))).statusCode).toBe(429);
+  });
+
+  it("limits an IPv6 client by its /64 and an IPv4-mapped address as IPv4", () => {
+    expect(clientKey("2001:db8:abcd:12:1:2:3:4")).toBe(clientKey("2001:db8:abcd:12:ffff::9"));
+    expect(clientKey("2001:db8:abcd:12::1")).toBe("2001:db8:abcd:12::/64");
+    expect(clientKey("2001:db8:abcd:13::1")).not.toBe(clientKey("2001:db8:abcd:12::1"));
+    expect(clientKey("::1")).toBe("0:0:0:0::/64");
+    expect(clientKey("::ffff:203.0.113.5")).toBe("203.0.113.5");
+    expect(clientKey("203.0.113.5")).toBe("203.0.113.5");
+  });
+
+  it("a limiter that fails doesn't take refreshing down", async () => {
+    const broken = { hit: async () => Promise.reject(new Error("redis is down")) };
+    const s = await setup(undefined, false, { refreshLimit: { limiter: broken, perMinute: 1 } });
+    const res = await post(s, "/v1/auth/refresh", { refresh_token: s.owner.refresh_token });
+    expect(res.statusCode).toBe(200);
   });
 });
 

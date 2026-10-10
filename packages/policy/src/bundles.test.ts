@@ -145,16 +145,15 @@ describe("role bundles (§6.1)", () => {
   });
 
   it("no role bundle holds an authority power, except documented shared capabilities", () => {
-    // Leads may pause, resume and set roles (T211/T212 enforce the §6.3 limits). The sole
-    // shared role/authority capability is conflicts.abandon: submitter-capable roles get it,
-    // while owner authority grants it regardless of project role.
+    // Leads may pause, resume and set roles (T211/T212 enforce the §6.3 limits). Shared
+    // role/authority capabilities are conflicts.abandon and sandbox.output.
     const leadOnly = ["participants.pause", "participants.resume", "participants.set_role"];
     const powers = new Set([...AUTHORITY_POWERS.OWNER, ...AUTHORITY_POWERS.ADMIN]);
     for (const role of ROLES) {
       for (const c of ROLE_BUNDLES[role]) {
         const allowed =
           (role === "LEAD" && leadOnly.includes(c)) ||
-          (c === "conflicts.abandon" && role !== "OBSERVER");
+          ((c === "conflicts.abandon" || c === "sandbox.output") && role !== "OBSERVER");
         expect(powers.has(c) && !allowed, `${role} ${c}`).toBe(false);
       }
     }
@@ -167,6 +166,7 @@ describe("role bundles (§6.1)", () => {
 
 describe("authority powers (§6.2)", () => {
   const ADMIN = [
+    "sandbox.output",
     "room.invite",
     "room.set_lead",
     "participants.set_role",

@@ -241,7 +241,8 @@ export function registerTaskLifecycleCommands(
           { details: { missing_evidence: missing, requirements: task.requirements.length } },
         );
       }
-      if (to === "REVIEW") await requestReview(ctx, task, actor.id, missing.length);
+      const reviewer =
+        to === "REVIEW" ? await requestReview(ctx, task, actor.id, missing.length) : null;
       return transition(ctx, task, to, {
         eventType: "task.submitted",
         set: "lease_expires_at = NULL, evidence = $5::jsonb",
@@ -249,6 +250,7 @@ export function registerTaskLifecycleCommands(
         renewLease: false,
         payload: {
           status: to,
+          reviewer_id: reviewer ?? task.reviewer_id ?? null,
           review_required: task.review_required,
           evidence,
           missing_evidence: missing,
@@ -464,6 +466,8 @@ async function transition(
           task_id: task.id,
           from_version: task.version,
           version: updated.version,
+          // Who owns it as of this event: a subscriber's relevance is judged from the event alone.
+          owner_id: updated.owner_id,
           ...o.payload,
         },
       },
@@ -532,7 +536,7 @@ async function requestReview(
   task: TaskRow,
   submitterId: string,
   missingCount: number,
-) {
+): Promise<string | null> {
   let recipient: string | null = null;
   if (task.reviewer_id) {
     const { rows } = await ctx.client.query(
@@ -542,7 +546,7 @@ async function requestReview(
     if (rows.length > 0) recipient = task.reviewer_id;
   }
   recipient ??= await currentLeadId(ctx.client, ctx.room_id);
-  if (recipient === null || recipient === submitterId) return;
+  if (recipient === null || recipient === submitterId) return recipient;
   await deliverInbox(ctx.client, ctx.room_id, recipient, {
     kind: "REVIEW_REQUEST",
     ref: { kind: "task", id: task.id },
@@ -552,4 +556,5 @@ async function requestReview(
         : `Review requested: ${task.title} (${missingCount} of ${task.requirements.length} requirements have no evidence)`,
     author_id: task.created_by, // the title is the task creator's
   });
+  return recipient;
 }

@@ -60,6 +60,9 @@ export type {
   DiskEnforcementMode,
   ExecutionDriver,
   ExecutionServiceOptions,
+  SandboxExecOutcome,
+  SandboxExecProcess,
+  SandboxExecTermination,
   SandboxLimits,
   SandboxRecord,
   SandboxResources,
@@ -74,6 +77,16 @@ export type {
   DockerInvocationOptions,
   DockerInvoker,
 } from "./docker-execution-driver.js";
+export { registerSandboxExecCommands } from "./sandbox-exec.js";
+export type { SandboxExecCommandDeps } from "./sandbox-exec.js";
+export { FileLogStore, MemoryLogStore, SandboxOutputHub } from "./sandbox-log-store.js";
+export type {
+  LogStore,
+  SandboxExecLogMetadata,
+  SandboxExecReason,
+  SandboxOutputChunk,
+  SandboxOutputUpdate,
+} from "./sandbox-log-store.js";
 export { parsePorcelainStatus, registerSandboxStatusCommand } from "./sandbox-status.js";
 export { sandboxStatusParamsSchema } from "./sandbox-status.js";
 export type { SandboxFileChanges } from "./sandbox-status.js";

@@ -7,3 +7,4 @@ export * from "./redact.js";
 export * from "./redact-event.js";
 export * from "./subscribe.js";
 export * from "./digest.js";
+export * from "./event-filter.js";
