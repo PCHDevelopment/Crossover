@@ -5,6 +5,7 @@ export { initRoomRepo } from "./repo.js";
 export { materialize } from "./materialize.js";
 export {
   createScopedSnapshotRepository,
+  sweepSnapshotRepositories,
   createUnscopedSnapshotRepository,
   hashSnapshotScope,
 } from "./scoped-snapshot.js";
@@ -64,6 +65,8 @@ export type {
   SandboxResources,
   SandboxStatus,
   SandboxWorkspaceHead,
+  SandboxSnapshotEntry,
+  SandboxSnapshotFile,
 } from "./execution.js";
 export { DockerExecutionDriver } from "./docker-execution-driver.js";
 export type {
@@ -71,6 +74,12 @@ export type {
   DockerInvocationOptions,
   DockerInvoker,
 } from "./docker-execution-driver.js";
+export { parsePorcelainStatus, registerSandboxStatusCommand } from "./sandbox-status.js";
+export { sandboxStatusParamsSchema } from "./sandbox-status.js";
+export type { SandboxFileChanges } from "./sandbox-status.js";
+export type { SandboxWorkingCopyStatus } from "./execution.js";
+export { changesSubmitParamsSchema, registerSandboxSubmitCommand } from "./sandbox-submit.js";
+export type { SandboxSubmitResponse } from "./sandbox-submit.js";
 export * from "./upstream.js";
 export * from "./upstream-import.js";
 export * from "./health-suggestion.js";

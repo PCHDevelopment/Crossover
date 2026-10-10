@@ -128,5 +128,10 @@ export async function purgeIdempotencyKeys(db: Pool | PoolClient): Promise<numbe
     "DELETE FROM idempotency_keys WHERE created_at < clock_timestamp() - make_interval(hours => $1)",
     [IDEMPOTENCY_TTL_HOURS],
   );
+  // The claims tools take before a side effect (T1201) live as long.
+  await db.query(
+    "DELETE FROM tool_invocations WHERE claimed_at < clock_timestamp() - make_interval(hours => $1)",
+    [IDEMPOTENCY_TTL_HOURS],
+  );
   return rowCount ?? 0;
 }

@@ -256,7 +256,7 @@ Room
 | Lead | Exactly 1 | Developer bundle + task assign/cancel/reopen, conflict resolve, decision decide, review, checkpoint create |
 | Developer | 0..n | messages, tasks (claim/update own), workspace read/write, conflict abandon (submitter only), memory read/write, sandbox exec, decisions propose |
 | Reviewer | 0..n | Read everything, messages, tasks review, conflict abandon (submitter only), decisions propose, memory write |
-| Observer | 0..n | Read everything except sandbox output; no mutations other than presence |
+| Observer | 0..n | Read everything except sandbox output (Owner/Admin authority can view it); no mutations other than presence |
 
 A participant has one authority level and one project role. Example: Peter = Owner + Developer while ArchitectAgent = Member + Lead.
 
@@ -728,10 +728,13 @@ Each sandbox tracks:
 - local modifications relative to that base (computed with `git status`/`git diff` inside the sandbox; the sandbox clone is ordinary Git internally),
 - ignored and generated files, which never leave the sandbox.
 
+`sandbox.status` returns `{ base_revision, head_revision, behind_by, modified, added, deleted }`. `head_revision` is the latest canonical workspace revision; `behind_by` is the nonnegative difference from `base_revision`. File lists come from porcelain Git status with rename detection disabled, so a rename is reported as a deletion plus an addition. An isolated Git helper reads the sandbox volume with no network access and a read-only mount; `.gitignore` and `.roomignore` paths are omitted.
+
 ## 14.3 Materialization
 
 - On first use (`sandbox.*` or a coding tool call through MCP), the Execution Service starts a container and materializes the workspace through a short-lived fetcher container. The fetcher alone joins the unpublished `crossover-git` Docker network, mounts the sandbox workspace, and reads from a separate internal Git listener on the workspace node. The server binds `GIT_INTERNAL_HOST` to its configured address on that private network; the deployment connects the server to the network before startup and never publishes `GIT_INTERNAL_PORT`.
-- Each fetch carries an HMAC read token bound to the room, participant, sandbox, canonical workspace revision, and an expiry no more than five minutes away. The agent container never joins `crossover-git` and never receives the token. The listener accepts upload-pack only. For path-scoped readers it creates a deterministic synthetic root commit, packs only that commit's reachable objects, and serves it without canonical object alternates; for unscoped readers it serves the real canonical commit shallowly.
+- Each fetch carries an HMAC read token bound to the room, participant, sandbox, canonical workspace revision, and an expiry no more than five minutes away. The agent container never joins `crossover-git` and never receives the token. The listener accepts upload-pack only. For path-scoped readers it creates a deterministic synthetic root commit, packs only that commit's reachable objects, and serves it without canonical object alternates; for unscoped readers it packs the real canonical commit with a shallow boundary, excluding its parents and historical blobs. Advertisements skip packing; object negotiation always uses an isolated packed repository. Startup removes abandoned temporary snapshots older than a day.
+- The bearer value is passed through the Docker CLI environment rather than its arguments. It remains in the short-lived fetcher's Docker `Config.Env`, visible to Docker administrators until that container is removed; it never enters the agent container.
 - The fetcher uses the canonical per-room repository as a read-only clone reference. Its `repo_path` must be visible at the same source path to the Docker daemon that runs the fetcher. The clone is dissociated before it is copied into the sandbox volume, so the sandbox never retains that alternate.
 
 ## 14.4 Staying current
@@ -753,6 +756,8 @@ The sandbox never changes files underneath a running agent without warning.
 2. It packages the diff as a ChangeSet with `base_workspace_revision = base_revision` and `source = SANDBOX`.
 3. The apply pipeline (§10) processes it.
 4. On APPLIED, the sandbox fast-forwards its base to the new revision. On CONFLICT, the agent receives the Conflict and typically runs `sandbox.sync` then resubmits.
+
+Ignore rules come only from the canonical base tree. Snapshot bytes are read directly without Git filters or sandbox Git configuration, and every submitted path is authorized and revalidated by the apply pipeline. `paths` accepts exact normalized file paths or directory prefixes ending in `/`; globs are rejected, and each filter must match a changed path. An empty diff or filtered diff returns non-retryable VALIDATION `no_changes` without creating a ChangeSet, revision, or event. Selected added symlinks, changed symlink targets, and file/symlink type changes return VALIDATION `symlink_not_supported`; unselected symlinks are not read or submitted, and deleting a selected base symlink is allowed. New files use mode `100644`, modifications keep the base mode, and sandbox chmod changes are not submitted. Binary file contents are encoded as base64.
 
 Tests run in a sandbox only validate that sandbox's view. Canonical truth comes from workspace health (§12).
 
@@ -967,6 +972,7 @@ Idempotency keys are stored for 24 hours per participant. A duplicate returns th
 | `UNAUTHENTICATED` | Missing or invalid token |
 | `FORBIDDEN` | Policy denied the action (details name the missing capability) |
 | `NOT_FOUND` | Resource missing |
+| `UNAVAILABLE` | A transient service or workspace helper failure; retry the request |
 | `VALIDATION` | Malformed request |
 | `CONFLICT_VERSION` | Optimistic concurrency failure (tasks, memory, decisions) |
 | `CONFLICT_MERGE` | ChangeSet could not apply; details carry the Conflict id |
@@ -974,10 +980,11 @@ Idempotency keys are stored for 24 hours per participant. A duplicate returns th
 | `PARTICIPANT_PAUSED` / `ROOM_PAUSED` | Participant or room frozen |
 | `RATE_LIMITED` / `BUDGET_EXCEEDED` | Throttled (§22.3); details carry retry-after |
 | `CIRCUIT_BREAKER` | ChangeSet held for review (§22.4) |
+| `PROVIDER_UNAVAILABLE` | A plugin's provider is down or timed out (§21.4); retryable unless the runner says not; the platform never retries a tool itself |
 
 ## 16.4 Versioning
 
-REST paths are prefixed `/v1/`. WebSocket clients send `hello { protocol_version, client, client_version }`; the server replies with the negotiated version. Events carry `schema_version`. Breaking changes require a new major version with a 6-month overlap.
+REST paths are prefixed `/v1/`. WebSocket clients send `hello { protocol_version, client, client_version }`; the server replies with the negotiated version. Events carry `schema_version`. Breaking changes require a new major version with a 6-month overlap. Sandbox output uses the same cursor pattern as room events. A client subscribes with `sandbox.output.subscribe { exec_id, after }` and unsubscribes with `sandbox.output.unsubscribe { exec_id }`. The server replies `sandbox.output.subscribed { exec_id, after, last_sequence }`, then sends `sandbox.output { exec_id, sequence, stream, encoding: "base64", data }` chunks, followed by `sandbox.output.finished { exec_id, sequence, exit_code, duration_ms, reason, truncated }`. A truncation sentinel is `sandbox.output.truncated { exec_id, sequence }`. If a subscriber's 1 MiB buffer fills, the server drops queued output and sends `sandbox.output.resync_required { exec_id, after }`; the client subscribes again from that cursor. One socket may hold up to eight output subscriptions. Output is visible only to the sandbox participant, lead, room owner and admins, subject to the `sandbox.output` capability.
 
 ## 16.5 Provenance on every returned item
 
@@ -1188,7 +1195,7 @@ workspace.upstream_synced
 
 checkpoint.created / checkpoint.exported
 
-sandbox.created / sandbox.hibernated / sandbox.synced
+sandbox.created / sandbox.behind / sandbox.hibernated / sandbox.synced
 sandbox.exec.started / sandbox.exec.finished
 
 tool.invoked / tool.completed / tool.failed
@@ -1272,7 +1279,8 @@ Full autonomy applies to every tier the agent has been granted. Approval gates (
 ## 21.4 Plugin Runner (D10)
 
 - Plugins (GitHub, AWS, Browser, Slack, Google Drive, Database, Deployment) run **server-side** in the Plugin Runner, each invocation in an isolated child process or container. Platform-hosted MCP servers implement most plugins.
-- Flow: agent calls `tools.invoke` → kernel authorizes → Plugin Runner fetches credentials → executes → returns result labeled `trust: external` where it contains outside content.
+- Flow: agent calls `tools.invoke` → kernel authorizes → Plugin Runner fetches credentials → executes → returns result always labeled `trust: external`.
+- Exactly once (T1201): the idempotency key is claimed (`tool_invocations`) before the tool runs; the same key meanwhile is `CONFLICT_VERSION` "in progress", and another request under it is the key-reuse error. Once the tool has run its outcome is recorded under the key whatever happens next (a grant revoked or a lease lost during the run stops future invocations, not the recording of this one), and a retry replays it. A timeout or doubtful failure of a tool that isn't idempotent is `retryable: false` with `details.outcome: "unknown"`; a failure the runner says happened before any effect (or any failure of an idempotent tool) releases the key. An approval (§22.2) doesn't run a tool inside the approver's transaction: it lifts the gate for the requester's retry of the same request. `tools.list` lists gated tools with `requires_approval: true`. Scopes are canonical before they are matched (no empty, `.` or `..` segments; no `%?#*[]{}\`, whitespace or control characters; at most 200 characters; each tool may normalize further), and the runner acts only on the canonical scope it is given. An unknown tool and a tool the caller holds for no scope are the same `FORBIDDEN` (same message and details, no capability named; the second is recorded as `capability.denied`); the arguments of a tool the caller doesn't hold are never described. A key already used by another command is refused before the tool runs. A run's outcome is returned to its requester before any access check, and `tool.completed`/`tool.failed` are appended by the run itself (not by the command's transaction), so a room frozen or a grant revoked afterwards doesn't lose them; a frozen room can't take the response, and the retry after the resume gets it. A claim whose process was lost is judged stale in SQL from the run's start.
 - **Agents never receive credentials.** A prompt-injected agent can at most misuse its granted capabilities; it cannot exfiltrate keys.
 - Shell access is not a plugin; it is `sandbox.exec`.
 

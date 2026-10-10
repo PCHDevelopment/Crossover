@@ -5,6 +5,9 @@ import { newId } from "@crossover/protocol";
 import {
   ExecutionService,
   type ExecutionDriver,
+  type SandboxExecOutcome,
+  type SandboxExecProcess,
+  type SandboxExecTermination,
   type SandboxLimits,
   type SandboxResources,
 } from "./execution.js";
@@ -27,6 +30,15 @@ class FakeExecutionDriver implements ExecutionDriver {
   readonly limits: SandboxLimits[] = [];
   readonly provisioned = new Map<string, SandboxResources>();
   readonly running = new Set<string>();
+  readonly statusCalls: string[] = [];
+  readonly execCancellations: SandboxExecTermination[] = [];
+  readonly execStarted: string[] = [];
+  changes = {
+    modified: [] as string[],
+    added: [] as string[],
+    deleted: [] as string[],
+    truncated: false,
+  };
   failCreateAfterProvision = false;
   failDestroyOnce = false;
   stopGate: { entered: Deferred; release: Deferred } | undefined;
@@ -64,6 +76,10 @@ class FakeExecutionDriver implements ExecutionDriver {
     this.running.delete(input.sandbox_id);
   }
 
+  async restart(input: { sandbox_id: string; resources: SandboxResources }): Promise<void> {
+    this.stopped.push(input.sandbox_id);
+  }
+
   async destroy(input: { sandbox_id: string; resources?: SandboxResources }): Promise<void> {
     this.destroyCalls.push(input.sandbox_id);
     const resources = this.provisioned.get(input.sandbox_id);
@@ -74,6 +90,24 @@ class FakeExecutionDriver implements ExecutionDriver {
       this.failDestroyOnce = false;
       throw new Error("injected Docker destroy failure after removal");
     }
+  }
+
+  async status(input: { sandbox_id: string; resources: SandboxResources }) {
+    this.statusCalls.push(input.sandbox_id);
+    return this.changes;
+  }
+
+  async exec(input: { exec_id: string }): Promise<SandboxExecProcess> {
+    this.execStarted.push(input.exec_id);
+    let finish!: (outcome: SandboxExecOutcome) => void;
+    const finished = new Promise<SandboxExecOutcome>((resolve) => (finish = resolve));
+    return {
+      finished,
+      cancel: async (reason) => {
+        this.execCancellations.push(reason);
+        finish({ exit_code: null, duration_ms: 1, reason });
+      },
+    };
   }
 }
 
@@ -161,6 +195,36 @@ async function makeParticipants(count = 1, kind: "HUMAN" | "AGENT" = "AGENT") {
 }
 
 describe("ExecutionService", () => {
+  it("cancels a pending reservation without launching its driver process", async () => {
+    const { roomId, participantIds } = await makeParticipants(1, "AGENT");
+    const participantId = participantIds[0]!;
+    const driver = new FakeExecutionDriver();
+    const execution = new ExecutionService(db.pool, driver);
+    const execId = newId("exec");
+    const cancelledBy = newId("part");
+    await execution.reserveExec(roomId, participantId, execId);
+
+    expect(
+      await execution.cancelExec(roomId, participantId, execId, "cancelled", cancelledBy),
+    ).toBe(true);
+    const process = await execution.startExec({
+      room_id: roomId,
+      participant_id: participantId,
+      exec_id: execId,
+      command: "sleep 5",
+      cwd: "/workspace",
+      timeoutMs: 60_000,
+      onOutput: async () => {},
+    });
+
+    expect(driver.execStarted).toEqual([]);
+    expect(process.cancelled_by).toBe(cancelledBy);
+    await expect(process.finished).resolves.toMatchObject({
+      exit_code: null,
+      reason: "cancelled",
+    });
+  });
+
   it("materializes the canonical revision before starting and records the numeric base", async () => {
     const { roomId, participantIds } = await makeParticipants();
     const workspaceId = newId("ws");
@@ -196,6 +260,46 @@ describe("ExecutionService", () => {
     ]);
     expect(driver.order[0]).toBe("materialize");
     expect(driver.order[1]).toBe("start");
+  });
+
+  it("reports the canonical base and head with local working-copy changes", async () => {
+    const { roomId, participantIds } = await makeParticipants();
+    const workspaceId = newId("ws");
+    await db.pool.query("INSERT INTO workspaces (id, room_id, repo_path) VALUES ($1, $2, $3)", [
+      workspaceId,
+      roomId,
+      `/workspace/${roomId}.git`,
+    ]);
+    await db.pool.query(
+      `INSERT INTO workspace_revisions (workspace_id, room_id, revision, commit_sha)
+       VALUES ($1, $2, 7, $3)`,
+      [workspaceId, roomId, "a".repeat(40)],
+    );
+    const driver = new MaterializingExecutionDriver();
+    driver.changes = {
+      modified: ["src/changed.ts"],
+      added: ["notes/new.md"],
+      deleted: ["old.txt"],
+      truncated: false,
+    };
+    const execution = new ExecutionService(db.pool, driver);
+    const sandbox = await execution.ensure(roomId, participantIds[0]!);
+    await db.pool.query(
+      `INSERT INTO workspace_revisions (workspace_id, room_id, revision, commit_sha)
+       VALUES ($1, $2, 10, $3)`,
+      [workspaceId, roomId, "b".repeat(40)],
+    );
+
+    await expect(execution.status(roomId, participantIds[0]!)).resolves.toEqual({
+      base_revision: 7,
+      head_revision: 10,
+      behind_by: 3,
+      modified: ["src/changed.ts"],
+      added: ["notes/new.md"],
+      deleted: ["old.txt"],
+      truncated: false,
+    });
+    expect(driver.statusCalls).toEqual([sandbox.id]);
   });
 
   it("creates one sandbox per room participant and records the selected disk policy", async () => {
@@ -313,6 +417,30 @@ describe("ExecutionService", () => {
     });
     expect(driver.stopped).toEqual([created.id]);
     expect(driver.started).toEqual([created.id, created.id]);
+  });
+
+  it("cancels a running agent exec before hibernating its sandbox", async () => {
+    const { roomId, participantIds } = await makeParticipants(1, "AGENT");
+    const driver = new FakeExecutionDriver();
+    const execution = new ExecutionService(db.pool, driver);
+    const participantId = participantIds[0]!;
+    await execution.ensure(roomId, participantId);
+    await execution.cancelParticipantExecs(roomId, participantId, "revoked");
+    expect(driver.stopped).toHaveLength(1);
+    const execId = newId("exec");
+    await execution.reserveExec(roomId, participantId, execId);
+    await execution.startExec({
+      room_id: roomId,
+      participant_id: participantId,
+      exec_id: execId,
+      command: "long-running agent task",
+      cwd: "/workspace",
+      timeoutMs: 60_000,
+      onOutput: async () => {},
+    });
+    await execution.hibernateRoom(roomId, true);
+    expect(driver.execCancellations).toEqual(["sandbox_stopped"]);
+    expect(await execution.get(roomId, participantId)).toMatchObject({ status: "HIBERNATED" });
   });
 
   it("restores a stopped container when hibernation's database write fails", async () => {

@@ -14,7 +14,7 @@
  */
 
 /** Whole-string match of a single wildcard pattern (`*`, `?`) against `text`. */
-function wildcardMatch(pattern: string, text: string): boolean {
+export function wildcardMatch(pattern: string, text: string): boolean {
   // Iterative two-pointer matching with one backtrack point: O(pattern × text), no recursion.
   let p = 0;
   let t = 0;

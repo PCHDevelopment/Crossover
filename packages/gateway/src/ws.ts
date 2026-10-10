@@ -9,6 +9,7 @@ import {
   type SubscriptionFilter,
 } from "@crossover/kernel";
 import { listEvents } from "@crossover/ledger";
+import { authorize } from "@crossover/policy";
 import { CrossoverError, isId, newId, type RoomEvent } from "@crossover/protocol";
 import type { FastifyInstance } from "fastify";
 import type { IncomingMessage } from "node:http";
@@ -18,6 +19,33 @@ import { toHttpError } from "./errors.js";
 
 /** The WebSocket protocol versions this server speaks (§16.4). */
 export const SUPPORTED_PROTOCOL_VERSIONS = [1] as const;
+
+export interface SandboxOutputMetadata {
+  exec_id: string;
+  room_id: string;
+  sandbox_id: string;
+  participant_id: string;
+  finished_at?: string;
+  exit_code?: number | null;
+  duration_ms?: number;
+  reason?: string;
+  truncated: boolean;
+}
+
+export type SandboxOutputChunk =
+  | { cursor: number; kind: "data"; stream: "stdout" | "stderr"; data: Uint8Array }
+  | { cursor: number; kind: "truncated" };
+
+export type SandboxOutputUpdate =
+  | { kind: "chunk"; chunk: SandboxOutputChunk }
+  | { kind: "finished"; metadata: SandboxOutputMetadata };
+
+export interface SandboxOutputSource {
+  get(execId: string): Promise<SandboxOutputMetadata | undefined>;
+  lastSequence(execId: string): Promise<number>;
+  read(execId: string, afterCursor: number, limit: number): Promise<SandboxOutputChunk[]>;
+  subscribe(execId: string, listener: (update: SandboxOutputUpdate) => void): () => void;
+}
 
 export interface WebSocketOptions {
   dispatcher: Dispatcher;
@@ -40,6 +68,10 @@ export interface WebSocketOptions {
   onInternalError?: (error: unknown) => void;
   /** Events fetched per backfill query. Default 200. */
   backfillPageSize?: number;
+  /** Private sandbox logs plus their in-process live fanout, wired by the composition root. */
+  sandboxOutput?: SandboxOutputSource;
+  /** Maximum queued output per subscriber before it must replay from its cursor. Default 1 MiB. */
+  maxSandboxOutputBufferedBytes?: number;
 }
 
 /** Close codes (4000-range, application defined). */
@@ -63,6 +95,23 @@ interface Stream {
   syncing: boolean;
   unsubscribe: () => Promise<void>;
   poll: ReturnType<typeof setInterval>;
+}
+
+interface SandboxStream {
+  execId: string;
+  lastCursor: number;
+  syncing: boolean;
+  pending: SandboxOutputUpdate[];
+  pendingBytes: number;
+  bufferedBytes: number;
+  replayRequired: boolean;
+  unsubscribe: () => void;
+}
+
+function sandboxUpdateBytes(update: SandboxOutputUpdate): number {
+  if (update.kind === "chunk" && update.chunk.kind === "data")
+    return Math.ceil(update.chunk.data.byteLength / 3) * 4 + 256;
+  return 256;
 }
 
 /**
@@ -120,6 +169,7 @@ class Connection {
   private token: string | undefined;
   private helloDone = false;
   private stream: Stream | undefined;
+  private readonly sandboxStreams = new Map<string, SandboxStream>();
   private closed = false;
   /** Commands run one at a time, in the order they arrived. */
   private queue: Promise<void> = Promise.resolve();
@@ -204,6 +254,10 @@ class Connection {
         return this.command(frame);
       case "subscribe":
         return this.subscribe(frame);
+      case "sandbox.output.subscribe":
+        return this.subscribeSandboxOutput(frame);
+      case "sandbox.output.unsubscribe":
+        return this.unsubscribeSandboxOutput(frame);
       case "hello":
         return this.send({
           type: "error",
@@ -257,8 +311,9 @@ class Connection {
     this.helloDone = true;
     this.revalidate = setInterval(() => {
       authenticate(this.o.pool, this.token!).then(
-        (principal) => {
+        async (principal) => {
           this.principal = principal; // a changed role changes what the stream shows
+          await this.revalidateSandboxOutput();
         },
         (error: unknown) => this.fail(CLOSE.UNAUTHENTICATED, error),
       );
@@ -340,6 +395,326 @@ class Connection {
     await this.backfill(stream);
     stream.syncing = false;
     this.drain(stream);
+  }
+
+  private async subscribeSandboxOutput(frame: Record<string, unknown>): Promise<void> {
+    const execId = frame.exec_id;
+    const afterCursor = frame.after;
+    if (
+      !isId(execId, "exec") ||
+      typeof afterCursor !== "number" ||
+      !Number.isSafeInteger(afterCursor) ||
+      afterCursor < 0
+    ) {
+      this.send({
+        type: "error",
+        error: new CrossoverError(
+          "VALIDATION",
+          "Invalid sandbox output cursor or exec_id",
+        ).toErrorBody().error,
+      });
+      return;
+    }
+    if (!this.o.sandboxOutput) {
+      this.send({
+        type: "error",
+        error: new CrossoverError("NOT_FOUND", "Sandbox output not found").toErrorBody().error,
+      });
+      return;
+    }
+    const previous = this.sandboxStreams.get(execId);
+    if (previous) this.stopSandboxOutput(previous);
+    const source = this.o.sandboxOutput;
+    let lastSequence: number;
+    try {
+      await this.authorizeSandboxOutput(execId);
+      lastSequence = await source.lastSequence(execId);
+    } catch (error) {
+      this.send({ type: "error", error: toHttpError(error).body.error });
+      return;
+    }
+    if (afterCursor > lastSequence) {
+      this.send({
+        type: "error",
+        error: new CrossoverError(
+          "VALIDATION",
+          "after is past the sandbox output sequence",
+        ).toErrorBody().error,
+      });
+      return;
+    }
+    if (!previous && this.sandboxStreams.size >= 8) {
+      this.send({
+        type: "error",
+        error: new CrossoverError(
+          "VALIDATION",
+          "At most 8 sandbox outputs may be subscribed",
+        ).toErrorBody().error,
+      });
+      return;
+    }
+    const stream: SandboxStream = {
+      execId,
+      lastCursor: afterCursor,
+      syncing: true,
+      pending: [],
+      pendingBytes: 0,
+      bufferedBytes: 0,
+      replayRequired: false,
+      unsubscribe: () => {},
+    };
+    this.sandboxStreams.set(execId, stream);
+    this.send({
+      type: "sandbox.output.subscribed",
+      exec_id: execId,
+      after: afterCursor,
+      last_sequence: lastSequence,
+    });
+    if (this.closed || this.sandboxStreams.get(execId) !== stream) return;
+    const unsubscribe = source.subscribe(execId, (update) => this.onSandboxOutput(stream, update));
+    stream.unsubscribe = unsubscribe;
+    if (stream.replayRequired) {
+      unsubscribe();
+      return;
+    }
+    await this.backfillSandboxOutput(stream);
+  }
+
+  private unsubscribeSandboxOutput(frame: Record<string, unknown>): void {
+    const execId = frame.exec_id;
+    if (!isId(execId, "exec")) {
+      this.send({
+        type: "error",
+        error: new CrossoverError("VALIDATION", "Unsubscribe needs an exec_ ID").toErrorBody()
+          .error,
+      });
+      return;
+    }
+    const stream = this.sandboxStreams.get(execId);
+    if (stream) this.stopSandboxOutput(stream);
+  }
+
+  private async authorizeSandboxOutput(execId: string): Promise<SandboxOutputMetadata> {
+    const source = this.o.sandboxOutput!;
+    const metadata = await source.get(execId);
+    if (!metadata || metadata.room_id !== this.roomId)
+      throw new CrossoverError("NOT_FOUND", "Sandbox output not found");
+    try {
+      await authorize(
+        this.principal!,
+        "sandbox.output",
+        { room_id: this.roomId, sandbox_id: metadata.sandbox_id },
+        { method: "sandbox.output.subscribe", params: { exec_id: execId }, client: this.o.pool },
+      );
+    } catch (error) {
+      if (
+        error instanceof CrossoverError &&
+        [
+          "FORBIDDEN",
+          "APPROVAL_REQUIRED",
+          "PARTICIPANT_PAUSED",
+          "ROOM_PAUSED",
+          "NOT_FOUND",
+        ].includes(error.code)
+      )
+        throw new CrossoverError("NOT_FOUND", "Sandbox output not found");
+      throw error;
+    }
+    const { rows } = await this.o.pool.query<{ role: string; authority: string }>(
+      `SELECT role, authority FROM participants
+       WHERE id = $1 AND room_id = $2 AND status = 'ACTIVE'`,
+      [this.principal!.participant_id, this.roomId],
+    );
+    const viewer = rows[0];
+    if (
+      !viewer ||
+      (metadata.participant_id !== this.principal!.participant_id &&
+        viewer.role !== "LEAD" &&
+        viewer.authority !== "OWNER" &&
+        viewer.authority !== "ADMIN")
+    )
+      throw new CrossoverError("NOT_FOUND", "Sandbox output not found");
+    return metadata;
+  }
+
+  private onSandboxOutput(stream: SandboxStream, update: SandboxOutputUpdate): void {
+    if (this.sandboxStreams.get(stream.execId) !== stream || this.closed || stream.replayRequired)
+      return;
+    if (stream.syncing) {
+      if (
+        (update.kind === "chunk" &&
+          (update.chunk.cursor <= stream.lastCursor ||
+            stream.pending.some(
+              (pending) => pending.kind === "chunk" && pending.chunk.cursor === update.chunk.cursor,
+            ))) ||
+        (update.kind === "finished" &&
+          stream.pending.some((pending) => pending.kind === "finished"))
+      )
+        return;
+      const bytes = sandboxUpdateBytes(update);
+      if (
+        stream.pendingBytes + stream.bufferedBytes + bytes >
+        (this.o.maxSandboxOutputBufferedBytes ?? 1024 * 1024)
+      ) {
+        this.requireSandboxReplay(stream);
+        return;
+      }
+      stream.pending.push(update);
+      stream.pendingBytes += bytes;
+      return;
+    }
+    this.deliverSandboxOutput(stream, update);
+  }
+
+  private async backfillSandboxOutput(stream: SandboxStream): Promise<void> {
+    const source = this.o.sandboxOutput!;
+    const pageSize = 32;
+    for (;;) {
+      if (this.sandboxStreams.get(stream.execId) !== stream || stream.replayRequired || this.closed)
+        return;
+      const chunks = await source.read(stream.execId, stream.lastCursor, pageSize);
+      if (this.sandboxStreams.get(stream.execId) !== stream || stream.replayRequired || this.closed)
+        return;
+      for (const chunk of chunks) {
+        if (!this.sendSandboxChunk(stream, chunk)) return;
+      }
+      if (chunks.length < pageSize) break;
+    }
+    while (stream.pending.length > 0) {
+      const pending = stream.pending.splice(0).sort((a, b) => {
+        if (a.kind === "finished") return 1;
+        if (b.kind === "finished") return -1;
+        return a.chunk.cursor - b.chunk.cursor;
+      });
+      stream.pendingBytes = 0;
+      for (const update of pending) {
+        if (
+          this.sandboxStreams.get(stream.execId) !== stream ||
+          stream.replayRequired ||
+          this.closed
+        )
+          return;
+        this.deliverSandboxOutput(stream, update);
+      }
+    }
+    stream.syncing = false;
+    const metadata = await source.get(stream.execId);
+    if (
+      this.sandboxStreams.get(stream.execId) === stream &&
+      !stream.replayRequired &&
+      !this.closed &&
+      metadata?.finished_at !== undefined
+    )
+      this.deliverSandboxOutput(stream, { kind: "finished", metadata });
+  }
+
+  private deliverSandboxOutput(stream: SandboxStream, update: SandboxOutputUpdate): void {
+    if (update.kind === "finished") {
+      const sent = this.sendSandboxFrame(stream, {
+        type: "sandbox.output.finished",
+        exec_id: stream.execId,
+        sequence: stream.lastCursor,
+        exit_code: update.metadata.exit_code ?? null,
+        duration_ms: update.metadata.duration_ms ?? null,
+        reason: update.metadata.reason ?? null,
+        truncated: update.metadata.truncated,
+      });
+      if (sent) this.stopSandboxOutput(stream);
+      return;
+    }
+    if (update.chunk.cursor <= stream.lastCursor) return;
+    this.sendSandboxChunk(stream, update.chunk);
+  }
+
+  private sendSandboxChunk(stream: SandboxStream, chunk: SandboxOutputChunk): boolean {
+    if (chunk.cursor <= stream.lastCursor) return true;
+    if (chunk.kind === "truncated") {
+      return this.sendSandboxFrame(
+        stream,
+        { type: "sandbox.output.truncated", exec_id: stream.execId, sequence: chunk.cursor },
+        chunk.cursor,
+      );
+    }
+    return this.sendSandboxFrame(
+      stream,
+      {
+        type: "sandbox.output",
+        exec_id: stream.execId,
+        sequence: chunk.cursor,
+        stream: chunk.stream,
+        encoding: "base64",
+        data: Buffer.from(chunk.data).toString("base64"),
+      },
+      chunk.cursor,
+    );
+  }
+
+  private sendSandboxFrame(
+    stream: SandboxStream,
+    frame: Record<string, unknown>,
+    cursor?: number,
+  ): boolean {
+    if (this.sandboxStreams.get(stream.execId) !== stream || this.closed || stream.replayRequired)
+      return false;
+    const serialized = JSON.stringify(frame);
+    const bytes = Buffer.byteLength(serialized);
+    if (
+      this.ws.readyState !== this.ws.OPEN ||
+      stream.bufferedBytes + stream.pendingBytes + bytes >
+        (this.o.maxSandboxOutputBufferedBytes ?? 1024 * 1024)
+    ) {
+      this.requireSandboxReplay(stream);
+      return false;
+    }
+    stream.bufferedBytes += bytes;
+    this.ws.send(serialized, (error) => {
+      stream.bufferedBytes = Math.max(0, stream.bufferedBytes - bytes);
+      if (error) void this.cleanup();
+    });
+    if (cursor !== undefined) stream.lastCursor = cursor;
+    return this.sandboxStreams.get(stream.execId) === stream && !stream.replayRequired;
+  }
+
+  private requireSandboxReplay(stream: SandboxStream): void {
+    if (this.sandboxStreams.get(stream.execId) !== stream || stream.replayRequired || this.closed)
+      return;
+    stream.replayRequired = true;
+    stream.pending = [];
+    stream.pendingBytes = 0;
+    stream.unsubscribe();
+    this.sandboxStreams.delete(stream.execId);
+    if (this.ws.readyState === this.ws.OPEN)
+      this.ws.send(
+        JSON.stringify({
+          type: "sandbox.output.resync_required",
+          exec_id: stream.execId,
+          after: stream.lastCursor,
+        }),
+      );
+  }
+
+  private stopSandboxOutput(stream?: SandboxStream): void {
+    if (stream) {
+      if (this.sandboxStreams.get(stream.execId) === stream)
+        this.sandboxStreams.delete(stream.execId);
+      stream.unsubscribe();
+      return;
+    }
+    for (const current of this.sandboxStreams.values()) {
+      this.sandboxStreams.delete(current.execId);
+      current.unsubscribe();
+    }
+  }
+
+  private async revalidateSandboxOutput(): Promise<void> {
+    for (const stream of [...this.sandboxStreams.values()]) {
+      try {
+        await this.authorizeSandboxOutput(stream.execId);
+      } catch (error) {
+        this.stopSandboxOutput(stream);
+        this.send({ type: "error", error: toHttpError(error).body.error });
+      }
+    }
   }
 
   private async stopStream(): Promise<void> {
@@ -436,5 +811,6 @@ class Connection {
     for (const t of this.timers) clearTimeout(t);
     if (this.revalidate) clearInterval(this.revalidate);
     await this.stopStream();
+    this.stopSandboxOutput();
   }
 }

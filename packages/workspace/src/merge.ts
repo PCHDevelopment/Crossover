@@ -72,7 +72,7 @@ export async function merge(
   head: string,
   candidate: string,
 ): Promise<MergeResult> {
-  const options = { gitDir: repo, timeoutMs: 10_000 };
+  const options = { gitDir: repo, timeoutMs: 10_000, env: { GIT_CONFIG_GLOBAL: "/dev/null" } };
   // Resolve revisions before building commands, preventing options or moving refs in arguments.
   const [baseOid, headOid, candidateOid] = await Promise.all(
     [base, head, candidate].map(async (revision) =>

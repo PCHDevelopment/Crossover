@@ -1,31 +1,53 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { isAbsolute } from "node:path";
+import type { Readable } from "node:stream";
 import {
   createSandboxProxyCredential,
   createSandboxReadToken,
   SANDBOX_READ_TOKEN_MAX_TTL_MS,
 } from "@crossover/security";
-import type { ExecutionDriver, SandboxLimits, SandboxResources } from "./execution.js";
+import { CrossoverError, isId } from "@crossover/protocol";
+import { normalizePath } from "./path.js";
+import { ignoredPrunedDirectories } from "./ignore.js";
+import type {
+  ExecutionDriver,
+  SandboxLimits,
+  SandboxResources,
+  SandboxExecOutcome,
+  SandboxExecProcess,
+  SandboxExecTermination,
+  SandboxSnapshotEntry,
+  SandboxSnapshotFile,
+} from "./execution.js";
+import { createPorcelainStatusAccumulator, type SandboxFileChanges } from "./sandbox-status.js";
+import { SANDBOX_SNAPSHOT_HELPER } from "./sandbox-snapshot-helper.js";
 
 const DEFAULT_IMAGE = "node:22-bookworm-slim";
 const DEFAULT_GIT_FETCHER_IMAGE = "crossover-git-fetcher:latest";
 const GIT_NETWORK = "crossover-git";
 const FETCH_TIMEOUT_MS = 4 * 60 * 1000;
+const MAX_STATUS_OUTPUT_BYTES = 16 * 1024 * 1024;
+const MAX_SNAPSHOT_OUTPUT_BYTES = 96 * 1024 * 1024;
 
 export interface DockerInvocationOptions {
   timeoutMs?: number;
   maxBuffer?: number;
   env?: NodeJS.ProcessEnv;
+  input?: string | Buffer;
+  /** Stream stdout to the caller; returning false stops the child process. */
+  onStdout?: (chunk: string) => boolean;
+}
+
+export interface DockerInvocationResult {
+  code: number;
+  stdout: string;
+  stderr: string;
 }
 
 export type DockerInvoker = (
   args: readonly string[],
   options?: DockerInvocationOptions,
-) => Promise<{
-  code: number;
-  stdout: string;
-  stderr: string;
-}>;
+) => Promise<DockerInvocationResult>;
 
 export interface DockerExecutionDriverOptions {
   dockerBinary?: string;
@@ -54,12 +76,11 @@ function invokeDocker(
   binary: string,
   args: readonly string[],
   options: DockerInvocationOptions = {},
-): Promise<{
-  code: number;
-  stdout: string;
-  stderr: string;
-}> {
-  return new Promise((resolve) => {
+): Promise<DockerInvocationResult> {
+  if (options.onStdout || options.input !== undefined)
+    return invokeDockerStreaming(binary, args, options, options.onStdout ?? (() => true));
+
+  return new Promise<DockerInvocationResult>((resolve) => {
     execFile(
       binary,
       [...args],
@@ -77,6 +98,97 @@ function invokeDocker(
         });
       },
     );
+  });
+}
+
+function invokeDockerStreaming(
+  binary: string,
+  args: readonly string[],
+  options: DockerInvocationOptions,
+  onStdout: (chunk: string) => boolean,
+): Promise<DockerInvocationResult> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(binary, [...args], {
+      env: options.env ? { ...process.env, ...options.env } : process.env,
+      stdio: [options.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
+    });
+    const timeoutMs = options.timeoutMs ?? 20_000;
+    const maxStderrBytes = options.maxBuffer ?? 1024 * 1024;
+    let stderr = "";
+    let stderrBytes = 0;
+    let stoppedEarly = false;
+    let callbackError: unknown;
+    let timedOut = false;
+    let settled = false;
+    let forceKillTimer: NodeJS.Timeout | undefined;
+
+    const terminate = () => {
+      if (child.kill("SIGTERM")) {
+        forceKillTimer = setTimeout(() => child.kill("SIGKILL"), 1_000);
+        forceKillTimer.unref();
+      }
+    };
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      terminate();
+    }, timeoutMs);
+
+    const stdout = child.stdout;
+    const stderrStream = child.stderr;
+    if (!stdout || !stderrStream) {
+      settled = true;
+      clearTimeout(timeout);
+      reject(new Error("Docker process streams are unavailable"));
+      return;
+    }
+    stdout.setEncoding("utf8");
+    stdout.on("data", (chunk: string) => {
+      if (stoppedEarly || callbackError !== undefined) return;
+      try {
+        if (!onStdout(chunk)) {
+          stoppedEarly = true;
+          terminate();
+        }
+      } catch (error) {
+        callbackError = error;
+        terminate();
+      }
+    });
+
+    stderrStream.setEncoding("utf8");
+    stderrStream.on("data", (chunk: string) => {
+      if (stderrBytes >= maxStderrBytes) return;
+      const bytes = Buffer.from(chunk);
+      const saved = bytes.subarray(0, maxStderrBytes - stderrBytes);
+      stderr += saved.toString("utf8");
+      stderrBytes += saved.length;
+    });
+    if (child.stdin) {
+      child.stdin.on("error", () => {});
+      child.stdin.end(options.input);
+    }
+
+    child.once("error", (error) => {
+      settled = true;
+      clearTimeout(timeout);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
+      reject(error);
+    });
+    child.once("close", (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
+      if (callbackError !== undefined) {
+        reject(callbackError);
+        return;
+      }
+      resolve({
+        code: stoppedEarly ? 0 : (code ?? (timedOut ? 124 : 1)),
+        stdout: "",
+        stderr,
+      });
+    });
   });
 }
 
@@ -214,6 +326,195 @@ export class DockerExecutionDriver implements ExecutionDriver {
     }
   }
 
+  /** Run a shell command in a fresh process group and capture stdout and stderr separately. */
+  async exec(input: {
+    sandbox_id: string;
+    resources: SandboxResources;
+    exec_id: string;
+    command: string;
+    cwd: string;
+    timeoutMs: number;
+    onOutput: (stream: "stdout" | "stderr", chunk: Buffer) => Promise<void>;
+  }): Promise<SandboxExecProcess> {
+    this.assertResources(input.sandbox_id, input.resources);
+    if (!isId(input.exec_id, "exec")) throw new Error("Invalid sandbox execution id");
+    if (input.command.includes("\0") || input.command.length === 0)
+      throw new CrossoverError("VALIDATION", "Command must be nonempty text without NUL");
+    if (
+      !Number.isSafeInteger(input.timeoutMs) ||
+      input.timeoutMs < 1 ||
+      input.timeoutMs > 3_600_000
+    )
+      throw new CrossoverError(
+        "VALIDATION",
+        "Sandbox command timeout must be from 1 to 3600000 ms",
+      );
+    if (!isAbsolute(input.cwd) || input.cwd.includes("\0"))
+      throw new CrossoverError("VALIDATION", "Sandbox working directory must be absolute");
+
+    const processGroupMarker = `CROSSOVER_EXEC_PGID:${input.exec_id}:`;
+    const wrapper =
+      `printf '%s%s\\n' '${processGroupMarker}' "$$" >&2; ` +
+      `physical=$(pwd -P); case "$physical" in /workspace|/workspace/*) base64 -d | sh ;; ` +
+      `*) base64 -d >/dev/null; printf 'Sandbox cwd escaped /workspace\\n' >&2; exit 126 ;; esac`;
+    const child = spawn(
+      this.dockerBinary,
+      [
+        "exec",
+        "-i",
+        "--workdir",
+        input.cwd,
+        input.resources.container_ref,
+        "setsid",
+        "sh",
+        "-lc",
+        wrapper,
+      ],
+      { stdio: ["pipe", "pipe", "pipe"] },
+    );
+
+    const start = Date.now();
+    let reason: SandboxExecTermination | undefined;
+    let closed = false;
+    let settled = false;
+    let childCode: number | null = null;
+    let outputError: unknown;
+    let launchError: unknown;
+    let outputTail = Promise.resolve();
+    let cancelPromise: Promise<void> | undefined;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let processGroupId: number | undefined;
+    let pendingStderr = Buffer.alloc(0);
+    let resolveFinished!: (outcome: SandboxExecOutcome) => void;
+    const finished = new Promise<SandboxExecOutcome>((resolve) => (resolveFinished = resolve));
+
+    const deliverOutput = async (stream: "stdout" | "stderr", value: Buffer): Promise<void> => {
+      if (stream !== "stderr" || processGroupId !== undefined) {
+        if (value.byteLength > 0) await input.onOutput(stream, value);
+        return;
+      }
+
+      pendingStderr = Buffer.concat([pendingStderr, value]);
+      const newline = pendingStderr.indexOf(0x0a);
+      if (newline < 0) {
+        if (pendingStderr.byteLength > 256)
+          throw new Error("Sandbox exec did not report its process group");
+        return;
+      }
+
+      const line = pendingStderr.subarray(0, newline).toString("utf8");
+      const rest = pendingStderr.subarray(newline + 1);
+      const rawPid = line.startsWith(processGroupMarker)
+        ? line.slice(processGroupMarker.length)
+        : "";
+      const pid = Number(rawPid);
+      if (!/^[1-9][0-9]*$/.test(rawPid) || !Number.isSafeInteger(pid) || pid <= 1) {
+        throw new Error("Sandbox exec returned an invalid process-group marker");
+      }
+
+      processGroupId = pid;
+      pendingStderr = Buffer.alloc(0);
+      if (rest.byteLength > 0) await input.onOutput("stderr", rest);
+    };
+    const queueOutput = (stream: "stdout" | "stderr", source: Readable) => {
+      source.on("data", (value: Buffer) => {
+        source.pause();
+        outputTail = outputTail
+          .then(() => deliverOutput(stream, value))
+          .catch((error: unknown) => {
+            outputError = error;
+          })
+          .finally(() => source.resume());
+      });
+    };
+    if (child.stdout) queueOutput("stdout", child.stdout);
+    if (child.stderr) queueOutput("stderr", child.stderr);
+
+    const signalGroup = async (signal: "TERM" | "KILL"): Promise<void> => {
+      const deadline = Date.now() + 5_000;
+      while (!closed && processGroupId === undefined && Date.now() < deadline)
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      const pid = processGroupId;
+      if (pid === undefined) return;
+      await this.invoke(
+        [
+          "exec",
+          input.resources.container_ref,
+          "sh",
+          "-lc",
+          `kill -${signal} -${pid} 2>/dev/null || true`,
+        ],
+        { timeoutMs: 5_000, maxBuffer: 1024 },
+      );
+    };
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      if (timeout) clearTimeout(timeout);
+      void outputTail
+        .then(async () => {
+          if (pendingStderr.byteLength > 0) {
+            const tail = pendingStderr;
+            pendingStderr = Buffer.alloc(0);
+            await input.onOutput("stderr", tail);
+          }
+        })
+        .catch((error: unknown) => {
+          outputError = error;
+        })
+        .finally(() => {
+          if (outputError) console.error("[execution] sandbox exec stream failed", outputError);
+          const finalReason: SandboxExecOutcome["reason"] = launchError
+            ? "start_failed"
+            : outputError
+              ? "output_failed"
+              : (reason ?? "exit");
+          resolveFinished({
+            exit_code: finalReason === "exit" ? childCode : null,
+            duration_ms: Date.now() - start,
+            reason: finalReason,
+          });
+        });
+    };
+
+    const cancel = (why: SandboxExecTermination): Promise<void> => {
+      if (why === "revoked" || why === "sandbox_stopped") reason = why;
+      else reason ??= why;
+      if (closed) return Promise.resolve();
+      if (cancelPromise) return cancelPromise;
+      cancelPromise = (async () => {
+        await signalGroup("TERM");
+        const stopped = await Promise.race([
+          finished.then(() => true),
+          new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 5_000)),
+        ]);
+        if (!stopped && !closed) await signalGroup("KILL");
+      })();
+      return cancelPromise;
+    };
+    const process: SandboxExecProcess = { finished, cancel };
+
+    child.once("error", (error) => {
+      launchError = error;
+      closed = true;
+      finish();
+    });
+    child.stdin?.on("error", (error) => {
+      launchError = error;
+    });
+    child.once("close", (code) => {
+      closed = true;
+      childCode = code;
+      finish();
+    });
+    child.once("spawn", () => {
+      timeout = setTimeout(() => void cancel("timed_out"), input.timeoutMs);
+      timeout.unref();
+    });
+    child.stdin?.end(Buffer.from(input.command).toString("base64"));
+    return process;
+  }
+
   /** Fetch one scoped shallow checkout through a short-lived, isolated Git fetcher. */
   async materialize(input: {
     sandbox_id: string;
@@ -310,6 +611,379 @@ export class DockerExecutionDriver implements ExecutionDriver {
     }
   }
 
+  /** Inspect the sandbox volume with Git, even when the agent image has no Git binary. */
+  async status(input: {
+    sandbox_id: string;
+    resources: SandboxResources;
+  }): Promise<SandboxFileChanges> {
+    this.assertResources(input.sandbox_id, input.resources);
+    try {
+      const status = createPorcelainStatusAccumulator();
+      let streamed = false;
+      let stoppedByLimit = false;
+      let statusBytes = 0;
+      const consumeStatusChunk = (chunk: string): boolean => {
+        streamed = true;
+        const chunkBytes = Buffer.byteLength(chunk);
+        const remainingBytes = MAX_STATUS_OUTPUT_BYTES - statusBytes;
+        if (chunkBytes > remainingBytes) {
+          if (remainingBytes > 0) {
+            const prefix = Buffer.from(chunk).subarray(0, remainingBytes).toString("utf8");
+            if (!status.write(prefix)) {
+              stoppedByLimit = true;
+              return false;
+            }
+          }
+          status.truncate();
+          stoppedByLimit = true;
+          return false;
+        }
+        statusBytes += chunkBytes;
+        const keepReading = status.write(chunk);
+        if (!keepReading) stoppedByLimit = true;
+        return keepReading;
+      };
+      const result = await this.invoke(
+        [
+          "run",
+          "--rm",
+          "--init",
+          "--network=none",
+          "--read-only",
+          "--user=1000:1000",
+          "--cap-drop=ALL",
+          "--security-opt=no-new-privileges",
+          "--memory=512m",
+          "--cpus=1",
+          "--pids-limit=32",
+          "--tmpfs",
+          "/tmp:rw,nosuid,noexec,size=16m",
+          "--env",
+          "HOME=/tmp",
+          "--env",
+          "GIT_CONFIG_NOSYSTEM=1",
+          "--env",
+          "GIT_CONFIG_GLOBAL=/dev/null",
+          "--env",
+          "GIT_OPTIONAL_LOCKS=0",
+          "--mount",
+          `type=volume,source=${input.resources.volume_ref},target=/workspace,readonly,volume-nocopy`,
+          "--workdir",
+          "/workspace",
+          "--entrypoint",
+          "git",
+          this.gitFetcherImage,
+          "-C",
+          "/workspace",
+          "-c",
+          "core.excludesFile=/workspace/.roomignore",
+          "-c",
+          "core.fsmonitor=false",
+          "status",
+          "--porcelain=v1",
+          "-z",
+          "--untracked-files=all",
+          "--no-renames",
+        ],
+        {
+          timeoutMs: 20_000,
+          maxBuffer: 8 * 1024 * 1024,
+          onStdout: consumeStatusChunk,
+        },
+      );
+      if (!streamed && result.stdout) consumeStatusChunk(result.stdout);
+      if (result.code !== 0 && !stoppedByLimit)
+        throw new CrossoverError(
+          "UNAVAILABLE",
+          "Sandbox status could not be read; retry the request",
+        );
+      return status.finish();
+    } catch (cause) {
+      if (cause instanceof CrossoverError) throw cause;
+      throw new CrossoverError(
+        "UNAVAILABLE",
+        "Sandbox status could not be read; retry the request",
+        {
+          cause,
+        },
+      );
+    }
+  }
+
+  /** Inventory file bytes without calling Git or traversing a symlink from the sandbox. */
+  async snapshotInventory(input: {
+    sandbox_id: string;
+    resources: SandboxResources;
+    tracked_paths: readonly string[];
+    object_format: "sha1" | "sha256";
+    ignore_rules?: { path: string; patterns: string[] }[];
+  }): Promise<SandboxSnapshotEntry[]> {
+    this.assertResources(input.sandbox_id, input.resources);
+    const request = {
+      action: "inventory",
+      hash: input.object_format,
+      tracked_paths: input.tracked_paths.map((path) =>
+        Buffer.from(path, "utf8").toString("base64"),
+      ),
+      ignore_rules: input.ignore_rules ?? [],
+      max_bytes: 1024 * 1024 * 1024,
+    };
+    let payload = await this.runSnapshotHelper(input.resources, request);
+    if (!Array.isArray(payload.entries) || !Array.isArray(payload.pruned_directories))
+      throw snapshotUnavailable();
+    const verifiedPrunedDirectories = async (reported: unknown[]) => {
+      const paths = reported.map((path) => {
+        if (typeof path !== "string") throw snapshotUnavailable();
+        return decodeSnapshotPath(path);
+      });
+      let ignored: ReadonlySet<string>;
+      try {
+        ignored = await ignoredPrunedDirectories(input.ignore_rules ?? [], paths);
+      } catch (cause) {
+        throw new CrossoverError(
+          "UNAVAILABLE",
+          "Canonical Git ignore rules could not verify sandbox pruning; retry the request",
+          { cause, retryable: true, details: { reason: "ignore_pruning_verification_failed" } },
+        );
+      }
+      return paths.filter((path) => !ignored.has(path));
+    };
+    let mismatches = await verifiedPrunedDirectories(payload.pruned_directories);
+    if (mismatches.length) {
+      const path = mismatches[0]!;
+      try {
+        payload = await this.runSnapshotHelper(input.resources, {
+          ...request,
+          unprune_directories: mismatches.map((entry) =>
+            Buffer.from(entry, "utf8").toString("base64"),
+          ),
+        });
+        if (!Array.isArray(payload.entries) || !Array.isArray(payload.pruned_directories))
+          throw new Error("invalid_inventory");
+        mismatches = await verifiedPrunedDirectories(payload.pruned_directories);
+        if (mismatches.length) throw new Error(`pruning_mismatch:${mismatches[0]}`);
+      } catch (cause) {
+        if (cause instanceof CrossoverError && cause.retryable) throw cause;
+        throw snapshotPruningRetryFailed(path, cause);
+      }
+    }
+    return payload.entries.map((entry: unknown) => {
+      if (
+        !entry ||
+        typeof entry !== "object" ||
+        !("path" in entry) ||
+        typeof entry.path !== "string" ||
+        !("mode" in entry) ||
+        typeof entry.mode !== "string" ||
+        !("sha" in entry) ||
+        (entry.sha !== null && typeof entry.sha !== "string") ||
+        !("size" in entry) ||
+        typeof entry.size !== "number" ||
+        !Number.isSafeInteger(entry.size) ||
+        entry.size < 0
+      ) {
+        throw snapshotUnavailable();
+      }
+      return {
+        path: decodeSnapshotPath(entry.path),
+        mode: entry.mode,
+        sha: entry.sha,
+        size: entry.size,
+      };
+    });
+  }
+
+  /** Return exact bytes for the selected inventory paths, rejecting changes between the two reads. */
+  async readSnapshotFiles(input: {
+    sandbox_id: string;
+    resources: SandboxResources;
+    files: readonly SandboxSnapshotEntry[];
+    object_format: "sha1" | "sha256";
+    max_bytes: number;
+  }): Promise<SandboxSnapshotFile[]> {
+    this.assertResources(input.sandbox_id, input.resources);
+    const payload = await this.runSnapshotHelper(input.resources, {
+      action: "read",
+      hash: input.object_format,
+      paths: input.files.map((file) => ({
+        path: Buffer.from(file.path, "utf8").toString("base64"),
+        mode: file.mode,
+        sha: file.sha,
+        size: file.size,
+      })),
+      max_bytes: input.max_bytes,
+    });
+    if (!Array.isArray(payload.entries) || payload.entries.length !== input.files.length)
+      throw snapshotUnavailable();
+    return payload.entries.map((entry: unknown, index: number) => {
+      if (
+        !entry ||
+        typeof entry !== "object" ||
+        !("path" in entry) ||
+        typeof entry.path !== "string" ||
+        !("mode" in entry) ||
+        typeof entry.mode !== "string" ||
+        !("sha" in entry) ||
+        typeof entry.sha !== "string" ||
+        !("size" in entry) ||
+        typeof entry.size !== "number" ||
+        !Number.isSafeInteger(entry.size) ||
+        !("content" in entry) ||
+        typeof entry.content !== "string"
+      ) {
+        throw snapshotUnavailable();
+      }
+      const expected = input.files[index]!;
+      const content = Buffer.from(entry.content, "base64");
+      if (
+        decodeSnapshotPath(entry.path) !== expected.path ||
+        entry.mode !== expected.mode ||
+        (expected.sha !== null && entry.sha !== expected.sha) ||
+        content.length !== entry.size ||
+        entry.size !== expected.size
+      ) {
+        throw snapshotChanged();
+      }
+      return {
+        path: expected.path,
+        mode: entry.mode,
+        sha: entry.sha,
+        size: entry.size,
+        content,
+      };
+    });
+  }
+
+  /** Apply the rebased tree delta with a read/write, no-network helper mounted only to the volume. */
+  async updateSnapshot(input: {
+    sandbox_id: string;
+    resources: SandboxResources;
+    files: readonly Pick<SandboxSnapshotFile, "path" | "mode" | "content">[];
+    delete_paths: readonly string[];
+  }): Promise<void> {
+    this.assertResources(input.sandbox_id, input.resources);
+    const payload = await this.runSnapshotHelper(
+      input.resources,
+      {
+        action: "install",
+        files: input.files.map((file) => ({
+          path: Buffer.from(file.path, "utf8").toString("base64"),
+          mode: file.mode,
+          content: file.content.toString("base64"),
+        })),
+        delete_paths: input.delete_paths.map((path) =>
+          Buffer.from(path, "utf8").toString("base64"),
+        ),
+      },
+      false,
+    );
+    if (payload.installed !== true) throw snapshotUnavailable();
+  }
+
+  private async runSnapshotHelper(
+    resources: SandboxResources,
+    input: Record<string, unknown>,
+    readOnly = true,
+  ): Promise<{
+    entries?: unknown[];
+    pruned_directories?: unknown[];
+    error?: string;
+    installed?: boolean;
+  }> {
+    let stdout = "";
+    let outputTooLarge = false;
+    const result = await this.invoke(
+      [
+        "run",
+        "--rm",
+        "--init",
+        "-i",
+        "--network=none",
+        "--read-only",
+        "--user=1000:1000",
+        "--cap-drop=ALL",
+        "--security-opt=no-new-privileges",
+        "--memory=1g",
+        "--cpus=1",
+        "--pids-limit=64",
+        "--tmpfs",
+        "/tmp:rw,nosuid,noexec,size=16m",
+        "--env",
+        "HOME=/tmp",
+        "--mount",
+        `type=volume,source=${resources.volume_ref},target=/workspace,${readOnly ? "readonly," : ""}volume-nocopy`,
+        "--workdir",
+        "/workspace",
+        "--entrypoint",
+        "node",
+        this.image,
+        "-e",
+        SANDBOX_SNAPSHOT_HELPER,
+      ],
+      {
+        timeoutMs: 120_000,
+        maxBuffer: 1024 * 1024,
+        input: JSON.stringify(input),
+        onStdout: (chunk) => {
+          if (Buffer.byteLength(stdout) + Buffer.byteLength(chunk) > MAX_SNAPSHOT_OUTPUT_BYTES) {
+            outputTooLarge = true;
+            return false;
+          }
+          stdout += chunk;
+          return true;
+        },
+      },
+    );
+    if (!stdout && result.stdout) stdout = result.stdout;
+    if (outputTooLarge)
+      throw new CrossoverError("VALIDATION", "Sandbox snapshot exceeds the bounded output limit");
+    let payload: {
+      entries?: unknown[];
+      pruned_directories?: unknown[];
+      error?: string;
+      installed?: boolean;
+    };
+    try {
+      payload = JSON.parse(stdout) as {
+        entries?: unknown[];
+        pruned_directories?: unknown[];
+        error?: string;
+        installed?: boolean;
+      };
+    } catch {
+      throw snapshotUnavailable();
+    }
+    if (payload.error) {
+      if (payload.error === "changed_during_read") throw snapshotChanged();
+      if (payload.error.startsWith("invalid_path_encoding:"))
+        throw new CrossoverError("VALIDATION", "Sandbox contains an unsupported path encoding", {
+          details: {
+            reason: "invalid_path_encoding",
+            path: payload.error.slice("invalid_path_encoding:".length),
+          },
+        });
+      if (
+        [
+          "file_too_large",
+          "invalid_path",
+          "ignore_rules_too_large",
+          "scan_too_large",
+          "too_large",
+          "too_many_entries",
+          "too_many_pruned_directories",
+          "unsupported_file_type",
+        ].includes(payload.error)
+      ) {
+        throw new CrossoverError("VALIDATION", "Sandbox working copy cannot be submitted", {
+          details: { reason: payload.error },
+        });
+      }
+      throw snapshotUnavailable();
+    }
+    if (result.code !== 0) throw snapshotUnavailable();
+    return payload;
+  }
+
   async stop(input: { sandbox_id: string; resources: SandboxResources }): Promise<void> {
     this.assertResources(input.sandbox_id, input.resources);
     const inspected = await this.inspectContainer(input.resources.container_ref);
@@ -322,6 +996,14 @@ export class DockerExecutionDriver implements ExecutionDriver {
     } catch (error) {
       if ((await this.inspectContainer(input.resources.container_ref))?.running) throw error;
     }
+  }
+
+  async restart(input: { sandbox_id: string; resources: SandboxResources }): Promise<void> {
+    this.assertResources(input.sandbox_id, input.resources);
+    await this.mustSucceed(
+      ["container", "restart", "--time", "0", input.resources.container_ref],
+      "ERROR: Docker container restart failed",
+    );
   }
 
   async destroy(input: { sandbox_id: string; resources?: SandboxResources }): Promise<void> {
@@ -740,6 +1422,47 @@ export class DockerExecutionDriver implements ExecutionDriver {
     if (result.code !== 0) throw new Error(`${message}: ${result.stderr.trim()}`);
     return result.stdout.trim();
   }
+}
+
+function decodeSnapshotPath(encoded: string): string {
+  const bytes = Buffer.from(encoded, "base64");
+  if (bytes.toString("base64") !== encoded)
+    throw new CrossoverError("VALIDATION", "Sandbox contains an unsupported path encoding");
+  let path: string;
+  try {
+    path = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new CrossoverError("VALIDATION", "Sandbox contains an unsupported path encoding");
+  }
+  if (normalizePath(path) !== path)
+    throw new CrossoverError("VALIDATION", "Sandbox contains a non-canonical path");
+  return path;
+}
+
+function snapshotChanged(): CrossoverError {
+  return new CrossoverError(
+    "CONFLICT_VERSION",
+    "Sandbox working copy changed while it was being snapshotted; retry the submission",
+    { retryable: true, details: { reason: "sandbox_changed_during_snapshot" } },
+  );
+}
+
+function snapshotUnavailable(): CrossoverError {
+  return new CrossoverError(
+    "UNAVAILABLE",
+    "Sandbox working copy could not be read; retry the request",
+    {
+      retryable: true,
+    },
+  );
+}
+
+function snapshotPruningRetryFailed(path: string, cause: unknown): CrossoverError {
+  return new CrossoverError(
+    "VALIDATION",
+    `Gitignore matcher disagreed for ${path}; unpruned re-inventory failed`,
+    { cause, retryable: false, details: { reason: "ignore_pruning_retry_failed", path } },
+  );
 }
 
 function sandboxResources(sandboxId: string): SandboxResources {
