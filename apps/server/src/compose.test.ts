@@ -347,7 +347,7 @@ describe("composeServer", () => {
     expect(Number(count.rows[0]!.count)).toBe(1);
   });
 
-  it("rejects path filters that match nothing and applies directory prefixes only", async () => {
+  it("rejects unmatched filters and selects exact files or directory prefixes only", async () => {
     const driver = new RecordingExecutionDriver();
     const { server } = await start({}, new RecordingPublisher(), { executionDriver: driver });
     const { roomId, owner, cmd } = await walkthrough(server.app, false);
@@ -358,6 +358,7 @@ describe("composeServer", () => {
     const sandbox = await server.execution.ensure(roomId, ownerRow.rows[0]!.id);
     const working = driver.working.get(sandbox.id)!;
     working.set("src/main.ts", { mode: "100644", content: Buffer.from("export {};") });
+    working.set("src/main.tsx", { mode: "100644", content: Buffer.from("export {};\n") });
     working.set("root.txt", { mode: "100644", content: Buffer.from("local only") });
 
     const typo = await cmd(
@@ -373,13 +374,13 @@ describe("composeServer", () => {
       details: { reason: "path_not_changed", path: "src/mian.ts" },
     });
 
-    const submitted = await ok(
+    const exact = await ok(
       await cmd(
-        envelope("changes.submit", { paths: ["src/"], message: "Submit src files only" }),
+        envelope("changes.submit", { paths: ["src/main.ts"], message: "Submit one exact path" }),
         owner.tokens.access_token,
       ),
     );
-    expect(submitted.response).toMatchObject({ status: "APPLIED", applied_revision: 1 });
+    expect(exact.response).toMatchObject({ status: "APPLIED", applied_revision: 1 });
     const workspace = await db.pool.query<{ repo_path: string; commit_sha: string }>(
       `SELECT w.repo_path, wr.commit_sha FROM workspaces w
        JOIN workspace_revisions wr ON wr.workspace_id = w.id AND wr.room_id = w.room_id
@@ -398,6 +399,32 @@ describe("composeServer", () => {
         timeoutMs: 10_000,
       }),
     ).rejects.toThrow();
+    await expect(
+      git(["cat-file", "-e", `${workspace.rows[0]!.commit_sha}:src/main.tsx`], {
+        gitDir: workspace.rows[0]!.repo_path,
+        timeoutMs: 10_000,
+      }),
+    ).rejects.toThrow();
+
+    const directory = await ok(
+      await cmd(
+        envelope("changes.submit", { paths: ["src/"], message: "Submit the remaining src file" }),
+        owner.tokens.access_token,
+      ),
+    );
+    expect(directory.response).toMatchObject({ status: "APPLIED", applied_revision: 2 });
+    const secondRevision = await db.pool.query<{ repo_path: string; commit_sha: string }>(
+      `SELECT w.repo_path, wr.commit_sha FROM workspaces w
+       JOIN workspace_revisions wr ON wr.workspace_id = w.id AND wr.room_id = w.room_id
+       WHERE w.room_id = $1 AND wr.revision = 2`,
+      [roomId],
+    );
+    await expect(
+      git(["cat-file", "-e", `${secondRevision.rows[0]!.commit_sha}:src/main.tsx`], {
+        gitDir: secondRevision.rows[0]!.repo_path,
+        timeoutMs: 10_000,
+      }),
+    ).resolves.toBeDefined();
   });
 
   it("revalidates every submitted path in the apply transaction", async () => {
