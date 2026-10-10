@@ -5,6 +5,9 @@ import { newId } from "@crossover/protocol";
 import {
   ExecutionService,
   type ExecutionDriver,
+  type SandboxExecOutcome,
+  type SandboxExecProcess,
+  type SandboxExecTermination,
   type SandboxLimits,
   type SandboxResources,
 } from "./execution.js";
@@ -28,6 +31,7 @@ class FakeExecutionDriver implements ExecutionDriver {
   readonly provisioned = new Map<string, SandboxResources>();
   readonly running = new Set<string>();
   readonly statusCalls: string[] = [];
+  readonly execCancellations: SandboxExecTermination[] = [];
   changes = {
     modified: [] as string[],
     added: [] as string[],
@@ -86,6 +90,20 @@ class FakeExecutionDriver implements ExecutionDriver {
   async status(input: { sandbox_id: string; resources: SandboxResources }) {
     this.statusCalls.push(input.sandbox_id);
     return this.changes;
+  }
+
+  async exec(
+    _input: Parameters<NonNullable<ExecutionDriver["exec"]>>[0],
+  ): Promise<SandboxExecProcess> {
+    let finish!: (outcome: SandboxExecOutcome) => void;
+    const finished = new Promise<SandboxExecOutcome>((resolve) => (finish = resolve));
+    return {
+      finished,
+      cancel: async (reason) => {
+        this.execCancellations.push(reason);
+        finish({ exit_code: null, duration_ms: 1, reason });
+      },
+    };
   }
 }
 
@@ -365,6 +383,28 @@ describe("ExecutionService", () => {
     });
     expect(driver.stopped).toEqual([created.id]);
     expect(driver.started).toEqual([created.id, created.id]);
+  });
+
+  it("cancels a running agent exec before hibernating its sandbox", async () => {
+    const { roomId, participantIds } = await makeParticipants(1, "AGENT");
+    const driver = new FakeExecutionDriver();
+    const execution = new ExecutionService(db.pool, driver);
+    const participantId = participantIds[0]!;
+    await execution.ensure(roomId, participantId);
+    await execution.startExec({
+      room_id: roomId,
+      participant_id: participantId,
+      exec_id: newId("exec"),
+      command: "long-running agent task",
+      cwd: "/workspace",
+      timeoutMs: 60_000,
+      onOutput: async () => {},
+    });
+
+    await execution.hibernateRoom(roomId, true);
+
+    expect(driver.execCancellations).toEqual(["sandbox_stopped"]);
+    expect(await execution.get(roomId, participantId)).toMatchObject({ status: "HIBERNATED" });
   });
 
   it("restores a stopped container when hibernation's database write fails", async () => {
