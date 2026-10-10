@@ -16,13 +16,16 @@ function registry(
     hosts?: readonly string[];
     idempotent?: boolean;
     integrations?: ToolExecutionSpec["integrations"];
+    maxOutputBytes?: number;
+    name?: string;
+    capability?: string;
   } = {},
 ) {
   const tools = new ToolRegistry();
   tools.register({
-    name: "github.read_repository",
+    name: options.name ?? "github.read_repository",
     description: "Read one repository",
-    capability: "github.read_repository",
+    capability: options.capability ?? "github.read_repository",
     tier: 0,
     input: z.object({ repo: z.string() }),
     scope: (args) => args.repo,
@@ -32,6 +35,7 @@ function registry(
       command: ["node", "dist/worker.js"],
       egressHosts: options.hosts ?? ["API.GITHUB.COM."],
       ...(options.integrations ? { integrations: options.integrations } : {}),
+      ...(options.maxOutputBytes === undefined ? {} : { maxOutputBytes: options.maxOutputBytes }),
     },
   });
   return tools;
@@ -132,6 +136,96 @@ describe("DockerToolRunner", () => {
       true,
     );
     expect(calls.some((call) => call.args[0] === "network" && call.args[1] === "rm")).toBe(true);
+  });
+
+  it("maps a sanitized worker rate-limit response to a retryable stable provider error", async () => {
+    const invoke: PluginDockerInvoker = async (_binary, args) =>
+      args[0] === "run"
+        ? {
+            code: 1,
+            stdout: JSON.stringify({
+              error: { code: "rate_limited", retryable: true, retry_after: 12 },
+            }),
+            stderr: "",
+          }
+        : { code: 0, stdout: "", stderr: "" };
+    const runner = new DockerToolRunner({
+      registry: registry({ hosts: [] }),
+      credentials: async () => ({ GITHUB_TOKEN: TOKEN }),
+      invoke,
+      sweepResources: false,
+    });
+
+    await expect(runner.run(invocation, new AbortController().signal)).rejects.toMatchObject({
+      name: "ToolProviderError",
+      options: {
+        code: "RATE_LIMITED",
+        retryable: true,
+        details: { provider: "github", provider_code: "rate_limited", retry_after: 12 },
+      },
+    });
+  });
+
+  it("maps generic provider errors using the tool namespace", async () => {
+    const invoke: PluginDockerInvoker = async (_binary, args) =>
+      args[0] === "run"
+        ? {
+            code: 1,
+            stdout: JSON.stringify({
+              error: { code: "rate_limited", retryable: true, retry_after: 12 },
+            }),
+            stderr: "",
+          }
+        : { code: 0, stdout: "", stderr: "" };
+    const runner = new DockerToolRunner({
+      registry: registry({
+        hosts: [],
+        name: "calendar.list_events",
+        capability: "calendar.list_events",
+      }),
+      credentials: async () => ({ GITHUB_TOKEN: TOKEN }),
+      invoke,
+      sweepResources: false,
+    });
+    const calendarInvocation = {
+      ...invocation,
+      tool: "calendar.list_events",
+      capability: "calendar.list_events:acme/widgets",
+    } satisfies ToolInvocation;
+
+    await expect(
+      runner.run(calendarInvocation, new AbortController().signal),
+    ).rejects.toMatchObject({
+      name: "ToolProviderError",
+      message: "Plugin rate limit reached",
+      options: {
+        code: "RATE_LIMITED",
+        retryable: true,
+        details: { provider: "calendar", provider_code: "rate_limited", retry_after: 12 },
+      },
+    });
+  });
+
+  it("honors a tool-specific output bound below the platform's 256 KiB cap", async () => {
+    const value = "x".repeat(180 * 1024);
+    let runLimit = 0;
+    const invoke: PluginDockerInvoker = async (_binary, args, options) => {
+      if (args[0] === "run") {
+        runLimit = options.maxOutputBytes;
+        return { code: 0, stdout: JSON.stringify({ result: { content: value } }), stderr: "" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    const runner = new DockerToolRunner({
+      registry: registry({ hosts: [], maxOutputBytes: 200 * 1024 }),
+      invoke,
+      sweepResources: false,
+    });
+
+    await expect(runner.run(invocation, new AbortController().signal)).resolves.toEqual({
+      result: { content: value },
+    });
+    expect(runLimit).toBe(200 * 1024);
   });
 
   it("keeps Docker CLI settings in the server environment, not plugin credentials", async () => {

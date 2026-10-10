@@ -74,6 +74,18 @@ jobs:
       - run: docker pull busybox:1.36.1-musl@sha256:3c6ae8008e2c2eedd141725c30b20d9c36b026eb796688f88205845ef17aa213
       - run: docker build -f apps/egress-proxy/Dockerfile -t crossover-egress-proxy:test .
       - run: docker build -f apps/git-fetcher/Dockerfile -t crossover-git-fetcher:test .
+      - run: docker build -f plugins/github/Dockerfile -t crossover-github-plugin:test .
+      - name: Smoke test GitHub plugin stdin/stdout with network disabled
+        shell: bash
+        run: |
+          image_id="$(docker image inspect crossover-github-plugin:test --format '{{.Id}}')"
+          echo "Built immutable GitHub worker image $image_id"
+          set +e
+          output="$(printf '%s\n' '{"invocation":{"tool":"github.read_repository","scope":"acme/widgets","args":{"repo":"acme/widgets"}}}' | docker run --rm -i --network=none -e GITHUB_TOKEN=fixture-token crossover-github-plugin:test)"
+          status=$?
+          set -e
+          test "$status" -eq 1
+          printf '%s\n' "$output" | node --input-type=module -e 'let input="";for await(const chunk of process.stdin)input+=chunk;const value=JSON.parse(input);if(value.error?.code!=="unavailable"||input.includes("fixture-token"))process.exit(1);'
       - run: docker run --rm --network none --entrypoint git crossover-git-fetcher:test --version
       - run: pnpm test
 

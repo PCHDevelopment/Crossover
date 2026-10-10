@@ -193,6 +193,41 @@ describe("IntegrationCredentialBroker", () => {
     expect(requests.filter(({ url }) => url.endsWith("/installation/token"))).toHaveLength(1);
   });
 
+  it("mints the export lease for the selected repository with only the requested permissions", async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const fetcher: typeof fetch = async (input, init) => {
+      const url = String(input);
+      requests.push({ url, ...(init ? { init } : {}) });
+      if (url.endsWith("/app/installations/41/access_tokens"))
+        return Response.json({ token: "github-export-token" });
+      if (url.endsWith("/installation/token")) return new Response(null, { status: 204 });
+      throw new Error("Unexpected request");
+    };
+    const service = broker({
+      secret: {
+        installation_id: "41",
+        repositories_json: '["example/repo","example/other"]',
+        repository_ids_json: '["9823","9824"]',
+      },
+      fetcher,
+    });
+    const lease = await service.githubCredentialForRoom({
+      room_id: invocation.room_id,
+      invocation_id: "cmd_export",
+      repository: "example/repo",
+      access: "write",
+      permissions: { contents: "write", pull_requests: "write" },
+    });
+
+    expect(lease?.credential).toEqual({ type: "bearer", token: "github-export-token" });
+    expect(JSON.parse(String(requests[0]?.init?.body))).toEqual({
+      repository_ids: [9823],
+      permissions: { contents: "write", pull_requests: "write" },
+    });
+    await lease?.revoke();
+    expect(requests.filter(({ url }) => url.endsWith("/installation/token"))).toHaveLength(1);
+  });
+
   it("mints 15-minute AWS credentials with the invocation id in its session name", async () => {
     const assumeRole = vi.fn(async () => ({
       accessKeyId: "short-access-key",
