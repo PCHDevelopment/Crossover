@@ -64,6 +64,7 @@ export const EVENT_TYPES = [
   "checkpoint.exported",
 
   "sandbox.created",
+  "sandbox.behind",
   "sandbox.hibernated",
   "sandbox.synced",
   "sandbox.exec.started",

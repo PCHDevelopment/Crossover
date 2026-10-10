@@ -11,14 +11,28 @@ export async function validateIntroducedPaths(
   entries: ReadonlyMap<string, { mode: string; sha: string }>,
   paths: readonly string[],
 ): Promise<void> {
-  if (!paths.length) return;
+  const ignored = await ignoredWorkspacePaths(repo, entries, paths);
+  const path = paths.find((candidate) => ignored.has(candidate));
+  if (path)
+    throw new CrossoverError("VALIDATION", `Ignored workspace path: ${path}`, {
+      details: { path, reason: "ignored" },
+    });
+}
+
+/** Find new paths ignored by rules stored in the canonical base tree, never the working copy. */
+export async function ignoredWorkspacePaths(
+  repo: string,
+  entries: ReadonlyMap<string, { mode: string; sha: string }>,
+  paths: readonly string[],
+): Promise<ReadonlySet<string>> {
+  if (!paths.length) return new Set();
   // Like Git, never follow a symlink named .gitignore (or .roomignore).
   const rules = [...entries].filter(
     ([path, entry]) =>
       (entry.mode === "100644" || entry.mode === "100755") &&
       (path === ".roomignore" || path === ".gitignore" || path.endsWith("/.gitignore")),
   );
-  if (!rules.length) return;
+  if (!rules.length) return new Set();
   const dir = await mkdtemp(join(tmpdir(), "crossover-ignore-"));
   const options = {
     cwd: dir,
@@ -54,13 +68,9 @@ export async function validateIntroducedPaths(
       // Exit 1 means no path matched. Engine failures must still propagate.
       if (!(error instanceof GitError) || error.exitCode !== 1 || error.timedOut || error.signal)
         throw error;
-      return;
+      return new Set();
     }
-    const path = output.split("\0")[0];
-    if (path)
-      throw new CrossoverError("VALIDATION", `Ignored workspace path: ${path}`, {
-        details: { path, reason: "ignored" },
-      });
+    return new Set(output.split("\0").filter(Boolean));
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

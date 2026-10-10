@@ -6,19 +6,29 @@ import {
   SANDBOX_READ_TOKEN_MAX_TTL_MS,
 } from "@crossover/security";
 import { CrossoverError } from "@crossover/protocol";
-import type { ExecutionDriver, SandboxLimits, SandboxResources } from "./execution.js";
+import { normalizePath } from "./path.js";
+import type {
+  ExecutionDriver,
+  SandboxLimits,
+  SandboxResources,
+  SandboxSnapshotEntry,
+  SandboxSnapshotFile,
+} from "./execution.js";
 import { createPorcelainStatusAccumulator, type SandboxFileChanges } from "./sandbox-status.js";
+import { SANDBOX_SNAPSHOT_HELPER } from "./sandbox-snapshot-helper.js";
 
 const DEFAULT_IMAGE = "node:22-bookworm-slim";
 const DEFAULT_GIT_FETCHER_IMAGE = "crossover-git-fetcher:latest";
 const GIT_NETWORK = "crossover-git";
 const FETCH_TIMEOUT_MS = 4 * 60 * 1000;
 const MAX_STATUS_OUTPUT_BYTES = 16 * 1024 * 1024;
+const MAX_SNAPSHOT_OUTPUT_BYTES = 96 * 1024 * 1024;
 
 export interface DockerInvocationOptions {
   timeoutMs?: number;
   maxBuffer?: number;
   env?: NodeJS.ProcessEnv;
+  input?: string | Buffer;
   /** Stream stdout to the caller; returning false stops the child process. */
   onStdout?: (chunk: string) => boolean;
 }
@@ -62,7 +72,8 @@ function invokeDocker(
   args: readonly string[],
   options: DockerInvocationOptions = {},
 ): Promise<DockerInvocationResult> {
-  if (options.onStdout) return invokeDockerStreaming(binary, args, options, options.onStdout);
+  if (options.onStdout || options.input !== undefined)
+    return invokeDockerStreaming(binary, args, options, options.onStdout ?? (() => true));
 
   return new Promise<DockerInvocationResult>((resolve) => {
     execFile(
@@ -94,7 +105,7 @@ function invokeDockerStreaming(
   return new Promise((resolve, reject) => {
     const child = spawn(binary, [...args], {
       env: options.env ? { ...process.env, ...options.env } : process.env,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: [options.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
     });
     const timeoutMs = options.timeoutMs ?? 20_000;
     const maxStderrBytes = options.maxBuffer ?? 1024 * 1024;
@@ -117,8 +128,16 @@ function invokeDockerStreaming(
       terminate();
     }, timeoutMs);
 
-    child.stdout.setEncoding("utf8");
-    child.stdout.on("data", (chunk: string) => {
+    const stdout = child.stdout;
+    const stderrStream = child.stderr;
+    if (!stdout || !stderrStream) {
+      settled = true;
+      clearTimeout(timeout);
+      reject(new Error("Docker process streams are unavailable"));
+      return;
+    }
+    stdout.setEncoding("utf8");
+    stdout.on("data", (chunk: string) => {
       if (stoppedEarly || callbackError !== undefined) return;
       try {
         if (!onStdout(chunk)) {
@@ -131,14 +150,18 @@ function invokeDockerStreaming(
       }
     });
 
-    child.stderr.setEncoding("utf8");
-    child.stderr.on("data", (chunk: string) => {
+    stderrStream.setEncoding("utf8");
+    stderrStream.on("data", (chunk: string) => {
       if (stderrBytes >= maxStderrBytes) return;
       const bytes = Buffer.from(chunk);
       const saved = bytes.subarray(0, maxStderrBytes - stderrBytes);
       stderr += saved.toString("utf8");
       stderrBytes += saved.length;
     });
+    if (child.stdin) {
+      child.stdin.on("error", () => {});
+      child.stdin.end(options.input);
+    }
 
     child.once("error", (error) => {
       settled = true;
@@ -491,6 +514,219 @@ export class DockerExecutionDriver implements ExecutionDriver {
         },
       );
     }
+  }
+
+  /** Inventory file bytes without calling Git or traversing a symlink from the sandbox. */
+  async snapshotInventory(input: {
+    sandbox_id: string;
+    resources: SandboxResources;
+    tracked_paths: readonly string[];
+    object_format: "sha1" | "sha256";
+    ignore_rules?: { path: string; patterns: string[] }[];
+  }): Promise<SandboxSnapshotEntry[]> {
+    this.assertResources(input.sandbox_id, input.resources);
+    const payload = await this.runSnapshotHelper(input.resources, {
+      action: "inventory",
+      hash: input.object_format,
+      tracked_paths: input.tracked_paths.map((path) =>
+        Buffer.from(path, "utf8").toString("base64"),
+      ),
+      ignore_rules: input.ignore_rules ?? [],
+      max_bytes: 1024 * 1024 * 1024,
+    });
+    if (!Array.isArray(payload.entries)) throw snapshotUnavailable();
+    return payload.entries.map((entry: unknown) => {
+      if (
+        !entry ||
+        typeof entry !== "object" ||
+        !("path" in entry) ||
+        typeof entry.path !== "string" ||
+        !("mode" in entry) ||
+        typeof entry.mode !== "string" ||
+        !("sha" in entry) ||
+        (entry.sha !== null && typeof entry.sha !== "string") ||
+        !("size" in entry) ||
+        typeof entry.size !== "number" ||
+        !Number.isSafeInteger(entry.size) ||
+        entry.size < 0
+      ) {
+        throw snapshotUnavailable();
+      }
+      return {
+        path: decodeSnapshotPath(entry.path),
+        mode: entry.mode,
+        sha: entry.sha,
+        size: entry.size,
+      };
+    });
+  }
+
+  /** Return exact bytes for the selected inventory paths, rejecting changes between the two reads. */
+  async readSnapshotFiles(input: {
+    sandbox_id: string;
+    resources: SandboxResources;
+    files: readonly SandboxSnapshotEntry[];
+    object_format: "sha1" | "sha256";
+    max_bytes: number;
+  }): Promise<SandboxSnapshotFile[]> {
+    this.assertResources(input.sandbox_id, input.resources);
+    const payload = await this.runSnapshotHelper(input.resources, {
+      action: "read",
+      hash: input.object_format,
+      paths: input.files.map((file) => ({
+        path: Buffer.from(file.path, "utf8").toString("base64"),
+        mode: file.mode,
+        sha: file.sha,
+        size: file.size,
+      })),
+      max_bytes: input.max_bytes,
+    });
+    if (!Array.isArray(payload.entries) || payload.entries.length !== input.files.length)
+      throw snapshotUnavailable();
+    return payload.entries.map((entry: unknown, index: number) => {
+      if (
+        !entry ||
+        typeof entry !== "object" ||
+        !("path" in entry) ||
+        typeof entry.path !== "string" ||
+        !("mode" in entry) ||
+        typeof entry.mode !== "string" ||
+        !("sha" in entry) ||
+        typeof entry.sha !== "string" ||
+        !("size" in entry) ||
+        typeof entry.size !== "number" ||
+        !Number.isSafeInteger(entry.size) ||
+        !("content" in entry) ||
+        typeof entry.content !== "string"
+      ) {
+        throw snapshotUnavailable();
+      }
+      const expected = input.files[index]!;
+      const content = Buffer.from(entry.content, "base64");
+      if (
+        decodeSnapshotPath(entry.path) !== expected.path ||
+        entry.mode !== expected.mode ||
+        (expected.sha !== null && entry.sha !== expected.sha) ||
+        content.length !== entry.size ||
+        entry.size !== expected.size
+      ) {
+        throw snapshotChanged();
+      }
+      return {
+        path: expected.path,
+        mode: entry.mode,
+        sha: entry.sha,
+        size: entry.size,
+        content,
+      };
+    });
+  }
+
+  /** Apply the rebased tree delta with a read/write, no-network helper mounted only to the volume. */
+  async updateSnapshot(input: {
+    sandbox_id: string;
+    resources: SandboxResources;
+    files: readonly Pick<SandboxSnapshotFile, "path" | "mode" | "content">[];
+    delete_paths: readonly string[];
+  }): Promise<void> {
+    this.assertResources(input.sandbox_id, input.resources);
+    const payload = await this.runSnapshotHelper(
+      input.resources,
+      {
+        action: "install",
+        files: input.files.map((file) => ({
+          path: Buffer.from(file.path, "utf8").toString("base64"),
+          mode: file.mode,
+          content: file.content.toString("base64"),
+        })),
+        delete_paths: input.delete_paths.map((path) =>
+          Buffer.from(path, "utf8").toString("base64"),
+        ),
+      },
+      false,
+    );
+    if (payload.installed !== true) throw snapshotUnavailable();
+  }
+
+  private async runSnapshotHelper(
+    resources: SandboxResources,
+    input: Record<string, unknown>,
+    readOnly = true,
+  ): Promise<{ entries?: unknown[]; error?: string; installed?: boolean }> {
+    let stdout = "";
+    let outputTooLarge = false;
+    const result = await this.invoke(
+      [
+        "run",
+        "--rm",
+        "--init",
+        "-i",
+        "--network=none",
+        "--read-only",
+        "--user=1000:1000",
+        "--cap-drop=ALL",
+        "--security-opt=no-new-privileges",
+        "--memory=1g",
+        "--cpus=1",
+        "--pids-limit=64",
+        "--tmpfs",
+        "/tmp:rw,nosuid,noexec,size=16m",
+        "--env",
+        "HOME=/tmp",
+        "--mount",
+        `type=volume,source=${resources.volume_ref},target=/workspace,${readOnly ? "readonly," : ""}volume-nocopy`,
+        "--workdir",
+        "/workspace",
+        "--entrypoint",
+        "node",
+        this.image,
+        "-e",
+        SANDBOX_SNAPSHOT_HELPER,
+      ],
+      {
+        timeoutMs: 120_000,
+        maxBuffer: 1024 * 1024,
+        input: JSON.stringify(input),
+        onStdout: (chunk) => {
+          if (Buffer.byteLength(stdout) + Buffer.byteLength(chunk) > MAX_SNAPSHOT_OUTPUT_BYTES) {
+            outputTooLarge = true;
+            return false;
+          }
+          stdout += chunk;
+          return true;
+        },
+      },
+    );
+    if (!stdout && result.stdout) stdout = result.stdout;
+    if (outputTooLarge)
+      throw new CrossoverError("VALIDATION", "Sandbox snapshot exceeds the bounded output limit");
+    let payload: { entries?: unknown[]; error?: string; installed?: boolean };
+    try {
+      payload = JSON.parse(stdout) as { entries?: unknown[]; error?: string; installed?: boolean };
+    } catch {
+      throw snapshotUnavailable();
+    }
+    if (payload.error) {
+      if (payload.error === "changed_during_read") throw snapshotChanged();
+      if (
+        [
+          "file_too_large",
+          "invalid_path",
+          "invalid_path_encoding",
+          "scan_too_large",
+          "too_large",
+          "too_many_entries",
+          "unsupported_file_type",
+        ].includes(payload.error)
+      ) {
+        throw new CrossoverError("VALIDATION", "Sandbox working copy cannot be submitted", {
+          details: { reason: payload.error },
+        });
+      }
+      throw snapshotUnavailable();
+    }
+    if (result.code !== 0) throw snapshotUnavailable();
+    return payload;
   }
 
   async stop(input: { sandbox_id: string; resources: SandboxResources }): Promise<void> {
@@ -923,6 +1159,39 @@ export class DockerExecutionDriver implements ExecutionDriver {
     if (result.code !== 0) throw new Error(`${message}: ${result.stderr.trim()}`);
     return result.stdout.trim();
   }
+}
+
+function decodeSnapshotPath(encoded: string): string {
+  const bytes = Buffer.from(encoded, "base64");
+  if (bytes.toString("base64") !== encoded)
+    throw new CrossoverError("VALIDATION", "Sandbox contains an unsupported path encoding");
+  let path: string;
+  try {
+    path = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new CrossoverError("VALIDATION", "Sandbox contains an unsupported path encoding");
+  }
+  if (normalizePath(path) !== path)
+    throw new CrossoverError("VALIDATION", "Sandbox contains a non-canonical path");
+  return path;
+}
+
+function snapshotChanged(): CrossoverError {
+  return new CrossoverError(
+    "CONFLICT_VERSION",
+    "Sandbox working copy changed while it was being snapshotted; retry the submission",
+    { retryable: true, details: { reason: "sandbox_changed_during_snapshot" } },
+  );
+}
+
+function snapshotUnavailable(): CrossoverError {
+  return new CrossoverError(
+    "UNAVAILABLE",
+    "Sandbox working copy could not be read; retry the request",
+    {
+      retryable: true,
+    },
+  );
 }
 
 function sandboxResources(sandboxId: string): SandboxResources {

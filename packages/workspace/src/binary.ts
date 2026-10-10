@@ -31,7 +31,11 @@ export async function concurrentBinaryFiles(
 ): Promise<MergeFile[]> {
   const [base, head, candidate] = commits;
   if (!base || !head || !candidate) throw new Error("Binary classification needs three commits");
-  const options = { gitDir: repo, timeoutMs: 10_000, env: { GIT_LITERAL_PATHSPECS: "1" } };
+  const options = {
+    gitDir: repo,
+    timeoutMs: 10_000,
+    env: { GIT_CONFIG_GLOBAL: "/dev/null", GIT_LITERAL_PATHSPECS: "1" },
+  };
   const raw = (stdout: string) => {
     const changes = new Map<
       string,

@@ -6,7 +6,7 @@ import { git } from "./git.js";
 import { materialize } from "./materialize.js";
 import type { Operation } from "./operations.js";
 import { initRoomRepo } from "./repo.js";
-import { validateIntroducedPaths } from "./ignore.js";
+import { ignoredWorkspacePaths, validateIntroducedPaths } from "./ignore.js";
 import * as gitModule from "./git.js";
 import { GitError } from "./git.js";
 
@@ -127,6 +127,31 @@ describe("workspace ignore rules", () => {
       { type: "modify", path: ".gitignore", content: "" },
     ]);
     await materialize(f.repo, unignored, [{ type: "create", path: "new.log", content: "x" }]);
+  });
+
+  it("filters sandbox additions using only ignore files from the canonical base tree", async () => {
+    const f = await fixture({ ".gitignore": "*.generated\n", ".roomignore": "private/\n" });
+    const listing = await git(["ls-tree", "-rz", "--full-tree", f.base], f.options);
+    const entries = new Map<string, { mode: string; sha: string }>();
+    for (const record of listing.stdout.split("\0")) {
+      if (!record) continue;
+      const tab = record.indexOf("\t");
+      const [mode, , sha] = record.slice(0, tab).split(" ");
+      entries.set(record.slice(tab + 1), { mode: mode!, sha: sha! });
+    }
+    const sandbox = join(f.root, "sandbox");
+    await mkdir(sandbox);
+    // These working-copy rules would allow both paths, but are never passed to the checker.
+    await writeFile(join(sandbox, ".gitignore"), "!*.generated\n");
+    await writeFile(join(sandbox, ".roomignore"), "!private/\n");
+
+    await expect(
+      ignoredWorkspacePaths(f.repo, entries, [
+        "allowed.txt",
+        "blocked.generated",
+        "private/new.txt",
+      ]),
+    ).resolves.toEqual(new Set(["blocked.generated", "private/new.txt"]));
   });
 
   it("handles literal escapes and unusual filenames without line parsing", async () => {
