@@ -830,4 +830,147 @@ describe("DockerExecutionDriver", () => {
     },
     15_000,
   );
+
+  it.skipIf(skipDockerIntegration)(
+    "snapshots and installs files from a real unprivileged sandbox volume",
+    async () => {
+      const driver = new DockerExecutionDriver();
+      const sandboxId = newId("sandbox");
+      const resources = await driver.create({
+        sandbox_id: sandboxId,
+        room_id: newId("room"),
+        participant_id: newId("part"),
+        limits: { disk_enforcement: "soft" },
+      });
+      try {
+        await driver.start({ sandbox_id: sandboxId, resources });
+
+        const sandboxBytes = Buffer.from([0x00, 0x01, 0x7f, 0xff, 0x0a]);
+        const sandboxFiles = `
+          const fs = require("node:fs");
+          fs.writeFileSync("/workspace/text.txt", "written by uid 1000\\n");
+          fs.writeFileSync("/workspace/binary.bin", Buffer.from([0, 1, 127, 255, 10]));
+          fs.mkdirSync("/workspace/private", { recursive: true });
+          fs.writeFileSync("/workspace/private/mode-600.txt", "owner-readable");
+          fs.chmodSync("/workspace/private/mode-600.txt", 0o600);
+          fs.writeFileSync("/workspace/.gitignore", "node_modules/\\n");
+          fs.mkdirSync("/workspace/node_modules/pkg", { recursive: true });
+          fs.writeFileSync("/workspace/node_modules/pkg/index.js", "ignored");
+          fs.symlinkSync("text.txt", "/workspace/text-link");
+          fs.writeFileSync("/workspace/delete-me.txt", "remove in install delta");
+          process.stdout.write(JSON.stringify({
+            uid: process.getuid(),
+            mode600: fs.statSync("/workspace/private/mode-600.txt").mode & 0o777,
+          }));
+        `;
+        const sandboxWrite = JSON.parse(
+          execFileSync("docker", ["exec", resources.container_ref, "node", "-e", sandboxFiles], {
+            encoding: "utf8",
+            timeout: 10_000,
+          }),
+        ) as { uid: number; mode600: number };
+        expect(sandboxWrite).toEqual({ uid: 1000, mode600: 0o600 });
+
+        // Model a readable root-owned parent and file from a fresh volume alongside sandbox writes.
+        execFileSync(
+          "docker",
+          [
+            "run",
+            "--rm",
+            "--network=none",
+            "--user=0:0",
+            "--mount",
+            `type=volume,source=${resources.volume_ref},target=/workspace,volume-nocopy`,
+            "--entrypoint",
+            "sh",
+            "node:22-bookworm-slim",
+            "-c",
+            "mkdir -p /workspace/root-owned && printf 'readable as uid 1000\\n' > /workspace/root-owned/file.txt && chmod 0755 /workspace/root-owned && chmod 0644 /workspace/root-owned/file.txt",
+          ],
+          { stdio: "ignore", timeout: 20_000 },
+        );
+        const rootOwnership = JSON.parse(
+          execFileSync(
+            "docker",
+            [
+              "exec",
+              resources.container_ref,
+              "node",
+              "-e",
+              'const fs=require("node:fs");process.stdout.write(JSON.stringify({uid:process.getuid(),directory:fs.statSync("/workspace/root-owned").uid,file:fs.statSync("/workspace/root-owned/file.txt").uid}));',
+            ],
+            { encoding: "utf8", timeout: 10_000 },
+          ),
+        ) as { uid: number; directory: number; file: number };
+        expect(rootOwnership).toEqual({ uid: 1000, directory: 0, file: 0 });
+
+        const expected = new Map<string, Buffer>([
+          ["text.txt", Buffer.from("written by uid 1000\n")],
+          ["binary.bin", sandboxBytes],
+          ["private/mode-600.txt", Buffer.from("owner-readable")],
+          [".gitignore", Buffer.from("node_modules/\n")],
+          ["text-link", Buffer.from("text.txt")],
+          ["delete-me.txt", Buffer.from("remove in install delta")],
+          ["root-owned/file.txt", Buffer.from("readable as uid 1000\n")],
+        ]);
+        const inventory = await driver.snapshotInventory({
+          sandbox_id: sandboxId,
+          resources,
+          tracked_paths: [...expected.keys()],
+          object_format: "sha1",
+          ignore_rules: [{ path: ".gitignore", patterns: ["node_modules/"] }],
+        });
+        const inventoryByPath = new Map(inventory.map((file) => [file.path, file]));
+        expect([...inventoryByPath.keys()].sort()).toEqual([...expected.keys()].sort());
+        expect(inventoryByPath.has("node_modules/pkg/index.js")).toBe(false);
+        expect(inventoryByPath.get("private/mode-600.txt")?.mode).toBe("100644");
+        expect(inventoryByPath.get("root-owned/file.txt")?.mode).toBe("100644");
+        expect(inventoryByPath.get("text-link")).toMatchObject({ mode: "120000" });
+
+        const snapshot = await driver.readSnapshotFiles({
+          sandbox_id: sandboxId,
+          resources,
+          files: inventory,
+          object_format: "sha1",
+          max_bytes: 1024 * 1024,
+        });
+        const readByPath = new Map(snapshot.map((file) => [file.path, file]));
+        for (const [path, bytes] of expected) expect(readByPath.get(path)?.content).toEqual(bytes);
+
+        const installedText = Buffer.from("installed through the helper\n");
+        const installedBinary = Buffer.from([0x00, 0xfe, 0xff, 0x0a]);
+        await driver.updateSnapshot({
+          sandbox_id: sandboxId,
+          resources,
+          files: [
+            { path: "installed.txt", mode: "100644", content: installedText },
+            { path: "installed.bin", mode: "100644", content: installedBinary },
+          ],
+          delete_paths: ["delete-me.txt"],
+        });
+        const afterInstall = JSON.parse(
+          execFileSync(
+            "docker",
+            [
+              "exec",
+              resources.container_ref,
+              "node",
+              "-e",
+              'const fs=require("node:fs");process.stdout.write(JSON.stringify({uid:process.getuid(),text:fs.readFileSync("/workspace/installed.txt","utf8"),binary:fs.readFileSync("/workspace/installed.bin").toString("base64"),deleted:fs.existsSync("/workspace/delete-me.txt")}));',
+            ],
+            { encoding: "utf8", timeout: 10_000 },
+          ),
+        ) as { uid: number; text: string; binary: string; deleted: boolean };
+        expect(afterInstall).toEqual({
+          uid: 1000,
+          text: installedText.toString("utf8"),
+          binary: installedBinary.toString("base64"),
+          deleted: false,
+        });
+      } finally {
+        await driver.destroy({ sandbox_id: sandboxId, resources });
+      }
+    },
+    120_000,
+  );
 });
