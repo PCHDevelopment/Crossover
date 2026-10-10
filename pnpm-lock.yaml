@@ -60,6 +60,9 @@ importers:
       '@crossover/gateway':
         specifier: workspace:*
         version: link:../../packages/gateway
+      '@crossover/github-api':
+        specifier: workspace:*
+        version: link:../../packages/github-api
       '@crossover/kernel':
         specifier: workspace:*
         version: link:../../packages/kernel
@@ -169,6 +172,8 @@ importers:
       '@types/ws':
         specifier: ^8.18.2
         version: 8.18.2
+
+  packages/github-api: {}
 
   packages/kernel:
     dependencies:

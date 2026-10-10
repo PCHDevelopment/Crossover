@@ -7,6 +7,7 @@ import {
 import { registerMcp } from "@crossover/mcp";
 import { buildInternalGitServer } from "./internal-git.js";
 import { IntegrationCredentialBroker } from "./integration-broker.js";
+import { GitHubPullRequestProvider } from "./github-pull-request.js";
 import {
   Dispatcher,
   RedisBudgetLimiter,
@@ -339,7 +340,10 @@ export async function composeServer(
         registry: toolRegistry,
         runner: toolRunner,
       },
-      overrides.upstream,
+      {
+        ...overrides.upstream,
+        pullRequests: overrides.upstream?.pullRequests ?? new GitHubPullRequestProvider(),
+      },
       integrationOptions,
     );
 

@@ -191,7 +191,7 @@ export async function disposeFetched(prepared: PreparedFetch | undefined): Promi
  * doesn't work, and cleans up after itself if anything past the fetch fails.
  */
 export async function fetchIntoRoomRepo(
-  ctx: { command_id: string },
+  ctx: { room_id: string; command_id: string },
   repo_path: string,
   request: { url: string; branch: string },
   fetcher: UpstreamFetcher,
@@ -199,8 +199,26 @@ export async function fetchIntoRoomRepo(
   deps: UpstreamDeps,
 ): Promise<PreparedFetch> {
   const url = await assertPublicHttpsUrl(request.url, deps.resolve);
-  const credential = await credentials.credentialFor(url);
-  const fetched = await fetcher.fetch({ url: url.href, branch: request.branch, credential });
+  const lease = await credentials.credentialFor(url, {
+    room_id: ctx.room_id,
+    invocation_id: ctx.command_id,
+    access: "read",
+    permissions: { contents: "read" },
+  });
+  const credential = lease?.credential ?? null;
+  let fetched: FetchedUpstream;
+  try {
+    fetched = await fetcher.fetch({ url: url.href, branch: request.branch, credential });
+  } catch (error) {
+    await lease?.revoke().catch(() => undefined);
+    throw error;
+  }
+  try {
+    await lease?.revoke();
+  } catch {
+    await fetched.cleanup().catch(() => undefined);
+    throw new CrossoverError("PROVIDER_UNAVAILABLE", "Upstream credential revocation failed");
+  }
   const ref = `refs/upstream/prepare/${ctx.command_id.replace(/[^A-Za-z0-9_-]/g, "_")}`;
   const prepared: PreparedFetch = { fetched, repo_path, ref, url, sha: fetched.sha };
   try {

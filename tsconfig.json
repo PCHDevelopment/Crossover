@@ -17,6 +17,9 @@
       "path": "packages/gateway"
     },
     {
+      "path": "packages/github-api"
+    },
+    {
       "path": "packages/kernel"
     },
     {

@@ -390,8 +390,14 @@ describe("git.import (§24.1, T801)", () => {
 
 describe("credentials never leak (§24.1)", () => {
   const SECRET = "ghs_s3cr3tTokenValue";
+  let revocations = 0;
   const provider: GitCredentialProvider = {
-    credentialFor: async () => ({ type: "bearer", token: SECRET }),
+    credentialFor: async () => ({
+      credential: { type: "bearer", token: SECRET },
+      revoke: async () => {
+        revocations += 1;
+      },
+    }),
   };
 
   it("the provider's credential reaches the fetcher, and nothing the room can read", async () => {
@@ -400,6 +406,7 @@ describe("credentials never leak (§24.1)", () => {
     const r = await room({ fetcher, credentials: provider });
     const out = await r.importIt();
     expect(fetcher.requests[0]!.credential).toEqual({ type: "bearer", token: SECRET });
+    expect(revocations).toBe(1);
     const everything = JSON.stringify({
       response: out.response,
       events: (await db.pool.query("SELECT payload FROM events WHERE room_id = $1", [r.roomId]))
