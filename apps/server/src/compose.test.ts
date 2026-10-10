@@ -326,7 +326,10 @@ describe("composeServer", () => {
     });
     await server.dispatcher.actors.get(roomId).idle();
     expect(publisher.events.filter((event) => event.type === "sandbox.synced")).toMatchObject([
-      { actor_id: "system", payload: { base_revision: 1 } },
+      {
+        actor_id: "system",
+        payload: { participant_id: participantId, base_revision: 1 },
+      },
     ]);
     expect(driver.working.get(sandbox.id)!.get("submitted.bin")?.content).toEqual(
       Buffer.from([0, 1, 0xff, 10]),
@@ -393,7 +396,7 @@ describe("composeServer", () => {
     await server.dispatcher.actors.get(roomId).idle();
     expect(publisher.events.find((event) => event.type === "sandbox.behind")).toMatchObject({
       actor_id: "system",
-      payload: { behind_by: 1, reason: "advance_failed" },
+      payload: { participant_id: participantId, behind_by: 1, reason: "advance_failed" },
     });
     const status = await ok(await cmd(envelope("sandbox.status"), owner.tokens.access_token));
     expect(status.response).toMatchObject({ base_revision: 0, head_revision: 1, behind_by: 1 });
@@ -482,6 +485,94 @@ describe("composeServer", () => {
         timeoutMs: 10_000,
       }),
     ).resolves.toBeDefined();
+  });
+
+  it("includes sandbox owner identity and redacts changed paths from a scoped reader", async () => {
+    const driver = new RecordingExecutionDriver();
+    const { server } = await start({}, new RecordingPublisher(), { executionDriver: driver });
+    const { roomId, owner, agent, cmd } = await walkthrough(server.app, false);
+    const ownerId = await ownerParticipantId(roomId);
+    const invite = await ok(
+      await cmd(envelope("room.invite", { role: "DEVELOPER" }), owner.tokens.access_token),
+    );
+    const scoped = await ok(
+      await post(server.app, `/v1/rooms/${roomId}/join`, {
+        token: invite.one_time.token,
+        manifest: {
+          name: "Agent-B",
+          operator: { name: "Peter", contact: "peter@example.com" },
+          vendor: "Anthropic",
+          model: "test-model",
+          client: "mcp",
+          client_version: "1.0.0",
+          description: "Reads public files",
+        },
+      }),
+      201,
+    );
+    const scopedId = scoped.participant_id as string;
+    const scopedToken = scoped.tokens.access_token as string;
+    await ok(
+      await cmd(
+        envelope("capabilities.revoke", {
+          participant_id: scopedId,
+          capability: "workspace.read:private/**",
+        }),
+        owner.tokens.access_token,
+      ),
+    );
+
+    const sandbox = await server.execution.ensure(roomId, ownerId);
+    const working = driver.working.get(sandbox.id)!;
+    working.set("private/owner-only.txt", {
+      mode: "100644",
+      content: Buffer.from("sandbox version"),
+    });
+    working.set("submitted.txt", { mode: "100644", content: Buffer.from("submitted") });
+    await ok(
+      await cmd(
+        envelope("workspace.apply_changeset", {
+          source: "API",
+          message: "Create a canonical version of the private path",
+          base_workspace_revision: 0,
+          operations: [
+            { type: "create", path: "private/owner-only.txt", content: "canonical version" },
+          ],
+        }),
+        agent.tokens.access_token,
+      ),
+    );
+    await ok(
+      await cmd(
+        envelope("changes.submit", {
+          paths: ["submitted.txt"],
+          message: "Submit the disjoint sandbox file",
+        }),
+        owner.tokens.access_token,
+      ),
+    );
+
+    const ownerEvents = await ok(
+      await cmd(
+        envelope("room.events.list", { types: ["sandbox.behind"] }),
+        owner.tokens.access_token,
+      ),
+    );
+    const scopedEvents = await ok(
+      await cmd(envelope("room.events.list", { types: ["sandbox.behind"] }), scopedToken),
+    );
+    const ownerEvent = (ownerEvents.response.events as RoomEvent[])[0]!;
+    const scopedEvent = (scopedEvents.response.events as RoomEvent[])[0]!;
+    expect(ownerEvent.payload).toMatchObject({
+      participant_id: ownerId,
+      changed_paths: expect.arrayContaining(["private/owner-only.txt", "submitted.txt"]),
+    });
+    expect(scopedEvent.payload).toMatchObject({
+      participant_id: ownerId,
+      paths_redacted: true,
+    });
+    expect(scopedEvent.payload).not.toHaveProperty("changed_paths");
+    expect(JSON.stringify(scopedEvent)).not.toContain("private/owner-only.txt");
   });
 
   it("revalidates every submitted path in the apply transaction", async () => {
@@ -794,6 +885,7 @@ describe("composeServer", () => {
       (event) => event.room_id === roomId && event.type === "sandbox.behind",
     );
     expect(behind?.payload).toMatchObject({
+      participant_id: participantId,
       behind_by: 2,
       changed_paths: ["local.txt", "submitted.txt"],
       overlaps_local_changes: true,
