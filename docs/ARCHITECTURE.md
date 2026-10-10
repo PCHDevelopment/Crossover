@@ -692,7 +692,9 @@ When `workspace.changeset.applied` touches a file open in the editor:
 | Clean (no unflushed edits) | Replace content; map cursor and selections through the diff |
 | Dirty | Client runs the same diff3 algorithm (base, buffer, new canonical) in the browser |
 | → merges cleanly | Buffer silently rebased to the new base; cursor mapped |
-| → conflicts | Buffer kept; banner "auth.ts changed underneath you"; the next flush returns a Conflict, which opens Monaco's three-way merge view |
+| → conflicts | Buffer kept; banner "auth.ts changed underneath you"; the next flush returns a Conflict, which opens the merge view |
+
+The merge view is a Monaco diff editor. The file as it is now (theirs) is on the left, read-only, and the result is on the right, editable. The result starts as the browser's three-way merge of the draft's base, the draft and the head. Each region both sides changed starts as the draft's version and can be switched to theirs or to both, and the result can also be edited by hand. Submitting sends a `RESOLUTION` ChangeSet with the `conflict_id`, based on the head shown. If the head moved meanwhile, the view reloads against the new head. "Discard my edits" calls `conflicts.abandon` and the buffer takes the head. A result that still has conflict markers isn't submitted.
 
 ## 13.4 Live presence
 

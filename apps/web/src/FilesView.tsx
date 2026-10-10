@@ -10,6 +10,7 @@ import {
   openDraft,
   type Draft,
 } from "./draft.js";
+import MergeView from "./MergeView.js";
 import { monaco } from "./monaco.js";
 import {
   colorOf,
@@ -24,7 +25,8 @@ import {
  * The Files tab (§13, T1105a): a tree from `workspace.list`, a Monaco editor, and one draft per
  * opened file. Drafts flush as `EDITOR` ChangeSets on the §13.2 timers, on Ctrl/Cmd+S, when
  * switching files and when the tab is hidden; someone else's ChangeSet on an open file replaces,
- * rebases or flags the buffer (§13.3). Conflicts get a banner; the merge view is T1105c.
+ * rebases or flags the buffer (§13.3). A flush that comes back as a Conflict opens the merge
+ * view (T1105c) for the file; the banner reopens it.
  *
  * Presence (§13.4, T1105b): this tab reports its open files and cursor, and everyone else's
  * cursors and selections on the open file are drawn in their colour, named on hover; the tree
@@ -65,6 +67,8 @@ export default function FilesView(props: {
   const [expanded, setExpanded] = useState(new Set<string>([""]));
   const [current, setCurrent] = useState<string>();
   const [notice, setNotice] = useState<string>();
+  /** The file whose Conflict is open in the merge view. */
+  const [merging, setMerging] = useState<string>();
   const [, rerender] = useState(0);
   const host = useRef<HTMLDivElement>(null);
   const editor = useRef<monaco.editor.IStandaloneCodeEditor>(undefined);
@@ -155,7 +159,12 @@ export default function FilesView(props: {
           if (read.response.file_revision > now.baseRevision)
             setDraft(flushed(now, sent, read.response.file_revision, revision));
         } else {
-          setDraft({ ...drafts.current.get(path)!, conflicted: true });
+          setDraft({
+            ...drafts.current.get(path)!,
+            conflicted: true,
+            conflictId: applied.response.conflict_id,
+          });
+          if (editor.current?.getModel()?.uri.path.slice(1) === path) setMerging(path);
         }
       } catch (error) {
         failed = true;
@@ -389,7 +398,15 @@ export default function FilesView(props: {
       );
     });
 
+  /** The merge view settled the file: it is `content` at `fileRevision`, with no draft. */
+  const settle = (path: string, content: string, fileRevision: number, workspace: number) => {
+    setDraft(openDraft(path, fileRevision, content, workspace));
+    showText(path, content);
+    setMerging(undefined);
+  };
+
   const draft = current ? drafts.current.get(current) : undefined;
+  const merge = merging && merging === current ? draft : undefined;
   return (
     <section aria-label="Files" className="files">
       <ul className="tree" data-testid="file-tree">
@@ -404,9 +421,17 @@ export default function FilesView(props: {
             </span>
           )}
         </p>
-        {draft?.conflicted && (
+        {draft?.conflicted && !merge && (
           <p role="alert" className="error" data-testid="conflict-banner">
             {name(draft.path)} changed underneath you. Your edits are kept here.
+            {draft.conflictId && (
+              <>
+                {" "}
+                <button data-testid="open-merge" onClick={() => setMerging(draft.path)}>
+                  Resolve
+                </button>
+              </>
+            )}
           </p>
         )}
         {notice && (
@@ -414,7 +439,29 @@ export default function FilesView(props: {
             {notice}
           </p>
         )}
-        <div ref={host} className="editor" data-testid="editor" />
+        {merge?.conflictId && (
+          <MergeView
+            key={merge.conflictId}
+            room={room}
+            path={merge.path}
+            conflictId={merge.conflictId}
+            base={merge.base}
+            mine={merge.text}
+            onResolved={(content, revision, workspace) =>
+              settle(merge.path, content, revision, workspace)
+            }
+            onDiscarded={(content, revision, workspace) =>
+              settle(merge.path, content, revision, workspace)
+            }
+          />
+        )}
+        {/* Hidden, not removed, while merging: the editor keeps its models and view state. */}
+        <div
+          ref={host}
+          className="editor"
+          data-testid="editor"
+          hidden={Boolean(merge?.conflictId)}
+        />
       </div>
     </section>
   );

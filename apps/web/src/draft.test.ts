@@ -8,9 +8,12 @@ import {
   flushParams,
   IDLE_FLUSH_MS,
   isDirty,
+  MAX_MERGE_LINES,
   merge3,
+  mergeRegions,
   nextFlushAt,
   openDraft,
+  resolveRegions,
 } from "./draft.js";
 
 describe("draft flushing (§13.2)", () => {
@@ -123,5 +126,31 @@ describe("merge3", () => {
     expect(merge3("a", "b", "b")).toEqual({ clean: true, text: "b" });
     const huge = "x\n".repeat(25_000);
     expect(merge3(huge, `${huge}y`, `z${huge}`)).toEqual({ clean: false });
+  });
+});
+
+describe("merge regions for the merge view (T1105c)", () => {
+  const base = "a\nb\nc\nd\ne";
+  const ours = "a\nB-ours\nc\nd\nE";
+  const theirs = "A\nB-theirs\nc\nd\ne";
+
+  it("keeps settled lines merged and both sides of a region changed differently", () => {
+    expect(mergeRegions(base, ours, theirs)).toEqual([
+      { kind: "conflict", base: ["a", "b"], ours: ["a", "B-ours"], theirs: ["A", "B-theirs"] },
+      { kind: "merged", lines: ["c", "d", "E"] },
+    ]);
+    expect(mergeRegions("x", "y", "y")).toEqual([{ kind: "merged", lines: ["y"] }]);
+    const huge = Array.from({ length: MAX_MERGE_LINES + 1 }, (_, i) => `${i}`).join("\n");
+    expect(mergeRegions(huge, `${huge}\nx`, `y\n${huge}`)).toBeUndefined();
+  });
+
+  it("resolves each conflict as chosen, ours by default, and agrees with merge3 when clean", () => {
+    const regions = mergeRegions(base, ours, theirs)!;
+    expect(resolveRegions(regions, [])).toBe("a\nB-ours\nc\nd\nE");
+    expect(resolveRegions(regions, ["theirs"])).toBe("A\nB-theirs\nc\nd\nE");
+    expect(resolveRegions(regions, ["both"])).toBe("a\nB-ours\nA\nB-theirs\nc\nd\nE");
+    const clean = mergeRegions("a\nb\nc", "A\nb\nc", "a\nb\nC")!;
+    expect(resolveRegions(clean, [])).toBe("A\nb\nC");
+    expect(merge3("a\nb\nc", "A\nb\nc", "a\nb\nC")).toEqual({ clean: true, text: "A\nb\nC" });
   });
 });
