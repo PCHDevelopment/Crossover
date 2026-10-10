@@ -253,14 +253,13 @@ export async function composeServer(
         : {}),
     });
     leaseSweeper.start();
-    if (config.wakeWebhookKey) {
-      wakeWebhooks = new WakeWebhookService({
-        pool,
-        key: config.wakeWebhookKey,
-        sender: (request) => postWebhook(request),
-      });
-      wakeWebhooks.start();
-    }
+    // Runs without a key too: then it sends nothing and only keeps the outbox from growing.
+    wakeWebhooks = new WakeWebhookService({
+      pool,
+      key: config.wakeWebhookKey,
+      sender: (request) => postWebhook(request),
+    });
+    wakeWebhooks.start();
 
     const app = buildGateway({
       dispatcher,
