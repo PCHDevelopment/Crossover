@@ -226,7 +226,12 @@ export function registerMessageCommands(dispatcher: Dispatcher): void {
         events: [
           {
             type: "message.edited" as const,
-            payload: { message_id: message.id, body: message.body, edited_at: message.edited_at },
+            payload: {
+              message_id: message.id,
+              body: message.body,
+              edited_at: message.edited_at,
+              mentions: message.mentions,
+            },
           },
         ],
       };

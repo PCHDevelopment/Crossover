@@ -258,7 +258,7 @@ describe("egress visibility conformance (§34.5)", () => {
         expect(done(), `${label}: ${frames.join("\n").slice(0, 400)}`).toBe(true);
       };
       await until(() => frames.some((fr) => fr.includes('"hello_ok"')), "hello");
-      sock.send(JSON.stringify({ type: "subscribe", after: 0 }));
+      sock.send(JSON.stringify({ type: "subscribe", after: 0, profile: "all" }));
       await until(() => frames.some((fr) => fr.includes('"subscribed"')), "subscribed");
       return { sock, frames, until };
     };

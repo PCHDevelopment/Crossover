@@ -43,6 +43,7 @@ describe("sandbox output log store", () => {
     });
     await store.append(entry.exec_id, { cursor: 2, kind: "truncated" });
 
+    expect(await store.lastCursor(entry.exec_id)).toBe(2);
     expect(await store.read(entry.exec_id, 1, 10)).toEqual([{ cursor: 2, kind: "truncated" }]);
     expect(await store.get(entry.exec_id)).toEqual(entry);
     const rootStat = await stat(store.root);
@@ -86,6 +87,7 @@ describe("sandbox output log store", () => {
     hub.publishFinished(entry.exec_id, finished);
 
     expect(received).toHaveLength(2);
+    expect(await store.lastCursor(entry.exec_id)).toBe(1);
     expect(await store.sweepExpired(30 * 24 * 60 * 60 * 1000)).toBe(1);
     expect(await store.get(entry.exec_id)).toBeUndefined();
   });

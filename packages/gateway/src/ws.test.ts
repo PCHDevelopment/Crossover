@@ -20,7 +20,13 @@ import type { FastifyInstance } from "fastify";
 import WebSocket from "ws";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildGateway } from "./server.js";
-import type { WebSocketOptions } from "./ws.js";
+import type {
+  SandboxOutputChunk,
+  SandboxOutputMetadata,
+  SandboxOutputSource,
+  SandboxOutputUpdate,
+  WebSocketOptions,
+} from "./ws.js";
 
 const REDIS_URL = process.env["REDIS_URL"] ?? "redis://localhost:6379";
 let db: TestDatabase;
@@ -96,6 +102,7 @@ async function setup(
       pollIntervalMs: 60_000,
       revalidateIntervalMs: 60_000,
       subscriber: redisSub ?? new ManualSubscriber(),
+      sandboxOutput: outputTestSource,
       ...ws,
     },
   });
@@ -207,6 +214,55 @@ async function ready(env: Env, token: string = env.owner.access_token): Promise<
   await c.frame("hello_ok");
   return c;
 }
+
+function outputFeed(
+  roomId: string,
+  participantId: string,
+  onSubscribe?: (listener: (update: SandboxOutputUpdate) => void) => void,
+) {
+  let metadata: SandboxOutputMetadata = {
+    exec_id: newId("exec"),
+    room_id: roomId,
+    sandbox_id: newId("sandbox"),
+    participant_id: participantId,
+    truncated: false,
+  };
+  const chunks: SandboxOutputChunk[] = [];
+  const listeners = new Set<(update: SandboxOutputUpdate) => void>();
+  const source: SandboxOutputSource = {
+    get: async () => metadata,
+    lastSequence: async () => chunks.at(-1)?.cursor ?? 0,
+    read: async (_execId, after, limit) =>
+      chunks.filter((chunk) => chunk.cursor > after).slice(0, limit),
+    subscribe: (_execId, listener) => {
+      listeners.add(listener);
+      onSubscribe?.(listener);
+      return () => listeners.delete(listener);
+    },
+  };
+  const feed = {
+    source,
+    metadata,
+    append(chunk: SandboxOutputChunk) {
+      chunks.push(chunk);
+      for (const listener of listeners) listener({ kind: "chunk", chunk });
+    },
+    finish(patch: Partial<SandboxOutputMetadata>) {
+      metadata = { ...metadata, ...patch };
+      for (const listener of listeners) listener({ kind: "finished", metadata });
+    },
+  };
+  outputFeeds.set(metadata.exec_id, feed);
+  return feed;
+}
+
+const outputFeeds = new Map<string, ReturnType<typeof outputFeed>>();
+const outputTestSource: SandboxOutputSource = {
+  get: async (execId) => outputFeeds.get(execId)?.source.get(execId),
+  lastSequence: (execId) => outputFeeds.get(execId)!.source.lastSequence(execId),
+  read: (execId, after, limit) => outputFeeds.get(execId)!.source.read(execId, after, limit),
+  subscribe: (execId, listener) => outputFeeds.get(execId)!.source.subscribe(execId, listener),
+};
 
 /** Commit events through the dispatcher and return them. */
 async function invite(env: Env, count = 1): Promise<RoomEvent[]> {
@@ -508,7 +564,7 @@ describe("subscribe: ordered, exactly-once events", () => {
 
     const watch = async (token: string) => {
       const c = await ready(env, token);
-      c.send({ type: "subscribe", after: 0 });
+      c.send({ type: "subscribe", after: 0, profile: "all" });
       await c.frame("subscribed");
       await c.until(() => c.events().some((e) => e.type === "capability.denied"), "a denial");
       return c;
@@ -564,7 +620,7 @@ describe("subscribe: ordered, exactly-once events", () => {
     const watcher = await ready(env, lead);
     const leadId = (watcher.frames.find((f) => f.type === "hello_ok") as Frame).participant_id;
     await asOwner("room.set_lead", { participant_id: leadId });
-    watcher.send({ type: "subscribe", after: 0 });
+    watcher.send({ type: "subscribe", after: 0, profile: "all" });
     await watcher.frame("subscribed");
 
     const deny = async () => {
@@ -748,6 +804,146 @@ describe("a client that misses Redis messages still gets every event, in order (
   });
 });
 
+describe("sandbox.output: private cursor replay and backpressure", () => {
+  it("replays from a cursor, deduplicates the live overlap, and frames output and completion", async () => {
+    const env = await setup();
+    const data: SandboxOutputChunk = {
+      cursor: 1,
+      kind: "data",
+      stream: "stdout",
+      data: Buffer.from("hello"),
+    };
+    const feed = outputFeed(env.room, env.ownerId, (listener) =>
+      listener({ kind: "chunk", chunk: data }),
+    );
+    feed.append(data);
+    const c = await ready(env);
+    c.send({ type: "sandbox.output.subscribe", exec_id: feed.metadata.exec_id, after: 0 });
+    expect(await c.frame("sandbox.output.subscribed")).toMatchObject({
+      after: 0,
+      last_sequence: 1,
+    });
+    await c.until(() => c.frames.some((f) => f.type === "sandbox.output"), "replayed output");
+    const outputs = c.frames.filter((f) => f.type === "sandbox.output");
+    expect(outputs).toHaveLength(1);
+    expect(outputs[0]).toMatchObject({
+      sequence: 1,
+      stream: "stdout",
+      encoding: "base64",
+      data: Buffer.from("hello").toString("base64"),
+    });
+
+    feed.append({ cursor: 2, kind: "truncated" });
+    await c.frame("sandbox.output.truncated");
+    feed.finish({
+      finished_at: new Date().toISOString(),
+      exit_code: 0,
+      duration_ms: 12,
+      reason: "exit",
+      truncated: true,
+    });
+    expect(await c.frame("sandbox.output.finished")).toMatchObject({
+      exec_id: feed.metadata.exec_id,
+      sequence: 2,
+      exit_code: 0,
+      duration_ms: 12,
+      reason: "exit",
+      truncated: true,
+    });
+
+    const reconnect = await ready(env);
+    reconnect.send({ type: "sandbox.output.subscribe", exec_id: feed.metadata.exec_id, after: 0 });
+    await reconnect.frame("sandbox.output");
+    await reconnect.frame("sandbox.output.truncated");
+    await reconnect.frame("sandbox.output.finished");
+  });
+
+  it("hides a non-owner's output even when their role bundle includes sandbox.output", async () => {
+    const env = await setup();
+    const inviteResult = await env.dispatcher.dispatch(
+      {
+        participant_id: env.ownerId,
+        room_id: env.room,
+        kind: "HUMAN",
+        authority: "OWNER",
+        role: "LEAD",
+      },
+      {
+        id: newId("cmd"),
+        method: "room.invite",
+        params: { role: "DEVELOPER" },
+        idempotency_key: `k-${++n}`,
+      },
+    );
+    const developer = await newDeveloper(env, inviteResult);
+    const feed = outputFeed(env.room, env.ownerId);
+    const c = await ready(env, developer);
+    c.send({ type: "sandbox.output.subscribe", exec_id: feed.metadata.exec_id, after: 0 });
+    const denied = (await c.frame("error")).error;
+    const missing = await ready(env, developer);
+    missing.send({ type: "sandbox.output.subscribe", exec_id: newId("exec"), after: 0 });
+    expect((await missing.frame("error")).error).toEqual(denied);
+  });
+
+  it("lets an admin observer view output through the authority power and ownership check", async () => {
+    const env = await setup();
+    const adminId = newId("part");
+    await pool.query(
+      `INSERT INTO participants (id, room_id, kind, display_name, authority, role, status)
+       VALUES ($1, $2, 'HUMAN', 'Admin', 'ADMIN', 'OBSERVER', 'ACTIVE')`,
+      [adminId, env.room],
+    );
+    const admin = await issueTokens(pool, adminId);
+    const feed = outputFeed(env.room, env.ownerId);
+    feed.append({ cursor: 1, kind: "data", stream: "stderr", data: Buffer.from("allowed") });
+    const c = await ready(env, admin.access_token);
+    c.send({ type: "sandbox.output.subscribe", exec_id: feed.metadata.exec_id, after: 0 });
+    expect(await c.frame("sandbox.output")).toMatchObject({ sequence: 1, stream: "stderr" });
+  });
+
+  it("drops output past the subscriber buffer and gives the durable replay cursor", async () => {
+    const env = await setup({ maxSandboxOutputBufferedBytes: 1 });
+    const feed = outputFeed(env.room, env.ownerId);
+    const c = await ready(env);
+    c.send({ type: "sandbox.output.subscribe", exec_id: feed.metadata.exec_id, after: 0 });
+    await c.frame("sandbox.output.subscribed");
+    feed.append({ cursor: 1, kind: "data", stream: "stdout", data: Buffer.from("slow") });
+    expect(await c.frame("sandbox.output.resync_required")).toMatchObject({
+      exec_id: feed.metadata.exec_id,
+      after: 0,
+    });
+    expect(c.frames.some((f) => f.type === "sandbox.output")).toBe(false);
+  });
+
+  it("allows eight subscriptions per socket and accepts unsubscribe before another", async () => {
+    const env = await setup();
+    const feeds = Array.from({ length: 9 }, () => outputFeed(env.room, env.ownerId));
+    const c = await ready(env);
+    for (let i = 0; i < 8; i++) {
+      c.send({ type: "sandbox.output.subscribe", exec_id: feeds[i]!.metadata.exec_id, after: 0 });
+      await c.until(
+        () => c.frames.filter((f) => f.type === "sandbox.output.subscribed").length === i + 1,
+        "output subscription",
+      );
+    }
+    const ninth = {
+      type: "sandbox.output.subscribe",
+      exec_id: feeds[8]!.metadata.exec_id,
+      after: 0,
+    };
+    let from = c.frames.length;
+    c.send(ninth);
+    expect((await c.frame("error", from)).error.code).toBe("VALIDATION");
+    c.send({ type: "sandbox.output.unsubscribe", exec_id: feeds[0]!.metadata.exec_id });
+    from = c.frames.length;
+    c.send(ninth);
+    await c.until(
+      () => c.frames.slice(from).some((f) => f.type === "sandbox.output.subscribed"),
+      "ninth output subscription",
+    );
+  });
+});
+
 describe("backpressure and token lifetime (§20)", () => {
   it("a client that falls too far behind is closed with resync_required", async () => {
     const sub = new ManualSubscriber();
@@ -774,5 +970,27 @@ describe("backpressure and token lifetime (§20)", () => {
     const c = await ready(env);
     await env.app.close();
     expect(await c.closed()).toBe(1001);
+  });
+});
+
+describe("subscribe: a filter that fails delivers", () => {
+  it("an event whose match throws is delivered and reported, not dropped, and the stream goes on", async () => {
+    const reported: unknown[] = [];
+    let calls = 0;
+    const env = await setup({
+      createMatcher: () => () => {
+        calls += 1;
+        if (calls === 2) throw new Error("matcher bug");
+        return true;
+      },
+      onInternalError: (e: unknown) => void reported.push(e),
+    });
+    await invite(env, 3);
+    const c = await ready(env);
+    c.send({ type: "subscribe", after: 0 });
+    await c.frame("subscribed");
+    await c.until(() => c.sequences().length >= 5, "all the events");
+    expect(c.sequences()).toEqual([1, 2, 3, 4, 5]); // the one whose match threw is among them
+    expect(reported).toHaveLength(1);
   });
 });

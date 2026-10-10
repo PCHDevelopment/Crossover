@@ -72,7 +72,11 @@ export function registerSandboxExecCommands(
       const execId = prepared.exec_id;
       const response = { exec_id: execId, timeout_s: prepared.timeout_s };
       const events: EmittedEvent[] = [
-        { type: "sandbox.exec.started", payload: { exec_id: execId } },
+        {
+          type: "sandbox.exec.started",
+          // The participant names whose sandbox it is, for subscribers filtering by relevance (§17.1).
+          payload: { exec_id: execId, participant_id: ctx.principal.participant_id },
+        },
       ];
       ctx.afterCommit(() =>
         startPreparedExec(
@@ -250,6 +254,7 @@ async function startPreparedExec(
             actor_id: "system",
             payload: {
               exec_id: prepared.exec_id,
+              participant_id: participantId,
               exit_code: exitCode,
               duration_ms: outcome.duration_ms,
               log_ref: prepared.exec_id,

@@ -201,7 +201,12 @@ describe("sandbox.exec commands", () => {
     const execId = (result.response as { exec_id: string; timeout_s: number }).exec_id;
     expect(prepared).toMatchObject({ cwd: "/workspace/pkg", timeout_s: 3600 });
     expect(result.response).toMatchObject({ timeout_s: 3600 });
-    expect(result.events).toEqual([{ type: "sandbox.exec.started", payload: { exec_id: execId } }]);
+    expect(result.events).toEqual([
+      {
+        type: "sandbox.exec.started",
+        payload: { exec_id: execId, participant_id: s.participantId },
+      },
+    ]);
     await afterCommit[0]!();
 
     await s.output("stdout", Buffer.alloc(10 * 1024 * 1024 + 2, 65));
@@ -218,7 +223,7 @@ describe("sandbox.exec commands", () => {
     });
     expect(s.finishedEvents[0]).toMatchObject({
       type: "sandbox.exec.finished",
-      payload: { exit_code: 0, log_ref: execId },
+      payload: { participant_id: s.participantId, exit_code: 0, log_ref: execId },
     });
   });
 

@@ -50,6 +50,7 @@ export async function publishHealthResult(
       if (result.status === "RED") payload.last_green_revision = lastGreenRevision;
 
       let inboxCount = 0;
+      const suspectIds: string[] = [];
       if (result.status === "RED") {
         const { rows: suspects } = await client.query<{ author_id: string }>(
           `SELECT DISTINCT c.actor_id AS author_id
@@ -71,7 +72,10 @@ export async function publishHealthResult(
             author_id: "system",
           });
           inboxCount += 1;
+          suspectIds.push(author_id);
         }
+        // Whose ChangeSets are in the suspect range travels with the event (subscribers' relevance).
+        payload["suspect_ids"] = suspectIds;
       }
 
       return {

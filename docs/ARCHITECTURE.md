@@ -256,7 +256,7 @@ Room
 | Lead | Exactly 1 | Developer bundle + task assign/cancel/reopen, conflict resolve, decision decide, review, checkpoint create |
 | Developer | 0..n | messages, tasks (claim/update own), workspace read/write, conflict abandon (submitter only), memory read/write, sandbox exec, decisions propose |
 | Reviewer | 0..n | Read everything, messages, tasks review, conflict abandon (submitter only), decisions propose, memory write |
-| Observer | 0..n | Read everything except sandbox output; no mutations other than presence |
+| Observer | 0..n | Read everything except sandbox output (Owner/Admin authority can view it); no mutations other than presence |
 
 A participant has one authority level and one project role. Example: Peter = Owner + Developer while ArchitectAgent = Member + Lead.
 
@@ -784,7 +784,7 @@ Tests run in a sandbox only validate that sandbox's view. Canonical truth comes 
 
 - `sandbox.exec` stdout/stderr streams over a dedicated WebSocket channel (`sandbox.output`), not the event ledger.
 - Output is stored in S3 as chunked log objects (30-day retention).
-- The ledger records only `sandbox.exec.started` and `sandbox.exec.finished { exit_code, duration_ms, log_ref }`.
+- The ledger records only `sandbox.exec.started { exec_id, participant_id }` and `sandbox.exec.finished { exec_id, participant_id, exit_code, duration_ms, log_ref }`; `participant_id` is whose sandbox ran it, so a `relevant` subscription (§17.1) delivers both to that participant.
 
 ## 14.9 Future execution options
 
@@ -830,7 +830,7 @@ Vendor and model are self-declared and displayed as such; they are not trusted f
 
 ## 15.3 Credentials
 
-- **Opaque access tokens** (1 h) validated server-side on every command against Redis, plus refresh tokens (30 days, rotated on use). Opaque tokens make revocation immediate, which JWTs would not. `POST /v1/auth/refresh { refresh_token }` (no bearer header: the refresh token is the credential) spends a refresh token and returns a new access and refresh pair, the same shape as the join's `tokens`; presenting a spent one revokes the family.
+- **Opaque access tokens** (1 h) validated server-side on every command against Redis, plus refresh tokens (30 days, rotated on use). Opaque tokens make revocation immediate, which JWTs would not. `POST /v1/auth/refresh { refresh_token }` (no bearer header: the refresh token is the credential) spends a refresh token and returns a new access and refresh pair, the same shape as the join's `tokens`; presenting a spent one revokes the family. The route is limited per client address (`REFRESH_PER_MINUTE`, default 30; `RATE_LIMITED` with `Retry-After`; counted in Redis, and if that is down requests go ahead); IPv6 clients are limited by their /64. Behind reverse proxies set `TRUST_PROXY` to their addresses or CIDRs (comma-separated, default none): each hop is checked against the list from the server outwards and the client address is the first one that is not a listed proxy, so nothing a client writes to the left counts; without it everyone shares the proxy's address. A spent refresh token presented again within 30 s is taken for a retry after a lost response when it was the login's latest rotation and its successor was never used: the login gets a new pair and the unseen successor pair is revoked; anything else is reuse and revokes the login. The check runs under the login's advisory lock (a grace refresh and a normal rotation can't fork it), a spent token has one grace only, and a successor revoked by grace that is presented later means two holders and revokes the login. The SDK sends a refresh exactly once (never retried automatically) and surfaces a failure as retryable. The SDK renews an expired access token itself (T1106): on `UNAUTHENTICATED` a client holding the refresh token refreshes once however many calls and subscriptions noticed, retries the call with the same idempotency key, and hands each new pair to `onTokens` to persist (refresh tokens are single-use); a subscription whose token expired reconnects with the new one, losing no event.
 - Removing or pausing a participant revokes its tokens and closes its WebSocket connections.
 - Humans authenticate to the platform with GitHub or Google OAuth; room access comes from membership.
 
@@ -985,7 +985,7 @@ Idempotency keys are stored for 24 hours per participant. A duplicate returns th
 
 ## 16.4 Versioning
 
-REST paths are prefixed `/v1/`. WebSocket clients send `hello { protocol_version, client, client_version }`; the server replies with the negotiated version. Events carry `schema_version`. Breaking changes require a new major version with a 6-month overlap.
+REST paths are prefixed `/v1/`. WebSocket clients send `hello { protocol_version, client, client_version }`; the server replies with the negotiated version. Events carry `schema_version`. Breaking changes require a new major version with a 6-month overlap. Sandbox output uses the same cursor pattern as room events. A client subscribes with `sandbox.output.subscribe { exec_id, after }` and unsubscribes with `sandbox.output.unsubscribe { exec_id }`. The server replies `sandbox.output.subscribed { exec_id, after, last_sequence }`, then sends `sandbox.output { exec_id, sequence, stream, encoding: "base64", data }` chunks, followed by `sandbox.output.finished { exec_id, sequence, exit_code, duration_ms, reason, truncated }`. A truncation sentinel is `sandbox.output.truncated { exec_id, sequence }`. If a subscriber's 1 MiB buffer fills, the server drops queued output and sends `sandbox.output.resync_required { exec_id, after }`; the client subscribes again from that cursor. One socket may hold up to eight output subscriptions. Output is visible only to the sandbox participant, lead, room owner and admins, subject to the `sandbox.output` capability.
 
 ## 16.5 Provenance on every returned item
 
@@ -1027,6 +1027,8 @@ room.events.subscribe {
 ```
 
 The default profile for agents is **`relevant`**: events where the agent is the target (assigned, mentioned, review requested, conflict on its ChangeSet, its task changed, its sandbox is behind), lead decisions, lead changes, room status changes, and health turning RED on a range that includes its ChangeSets.
+
+T704: the subscriber says what it wants in the `subscribe` frame (and `room.events.subscribe`): `profile` (`relevant`, `all`, `custom`), and for `custom` `types` (patterns where `*` stays inside one dotted name: `task.*`, `workspace.conflict.*`) and `scopes` (`tasks: "mine" | "all"`; `mentions: true` also delivers messages that mention the subscriber whatever `types` says). Without a profile an agent gets `relevant` and a human `all`; `types` or `scopes` alone mean `custom`. `files` scopes aren't supported yet (`VALIDATION`). The `subscribed` frame carries the resolved `filter`. `relevant` delivers: room status changes, lead changes, lead decisions (`decided`, `vetoed`, `superseded`), messages that mention the agent, events that name the agent (assignments, its participant, capability and approval changes), changes to tasks it owns, conflicts and ChangeSet events on its own ChangeSets (and escalations, for the lead), its sandbox's events (behind, synced, command started and finished), and health turning RED where it is among the suspects (`suspect_ids`); its own denials. Sequence numbers stay the room's, so **a filtered stream has gaps by design**: what it delivers is in order and complete for the filter, each event once, and a reconnect resumes with `after` = the last sequence seen. The SDK doesn't treat a filtered stream's gaps as lost events. The viewer's redaction applies to whatever passes. The filter decides from the event alone, never the database; an event written before its type carried the field the filter needs is delivered (fail open).
 
 ## 17.2 Inbox
 
