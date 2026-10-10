@@ -1,7 +1,7 @@
 import type { CommandContext, CommandResult, Dispatcher, EmittedEvent } from "@crossover/kernel";
 import { deliverInbox } from "@crossover/kernel";
 import { CrossoverError, newId } from "@crossover/protocol";
-import { scanSecrets, type SecretFinding } from "@crossover/security";
+import { fingerprint, scanSecrets, type SecretFinding } from "@crossover/security";
 import { changesetParamsSchema, type ChangesetParams } from "./changeset.js";
 import { classifyConflicts, type ClassifiedConflict } from "./conflicts.js";
 import { git } from "./git.js";
@@ -104,6 +104,14 @@ interface PathFinding extends SecretFinding {
 /** At most this many findings are reported per ChangeSet (details and inbox). */
 const MAX_FINDINGS_PER_CHANGESET = 100;
 
+/**
+ * Total bytes scanned across all files in one ChangeSet. Beyond this the
+ * remaining files are reported as `scan_skipped` so a large ChangeSet cannot
+ * block the event loop for seconds of synchronous regex. Distinct from the
+ * scanner's per-file MAX_SCAN_BYTES (2 MiB): this bounds the whole ChangeSet.
+ */
+const MAX_SCAN_TOTAL_BYTES = 8 * 1024 * 1024;
+
 /** Decode an operation's content to the text the scanner reads. */
 function decodeContent(content: string | Buffer, encoding?: ContentEncoding): string {
   if (Buffer.isBuffer(content)) return content.toString("utf8");
@@ -179,26 +187,67 @@ function addedLinesForContent(base: string, next: string): Set<number> {
   return added;
 }
 
-/** The base version of a file, or "" when it has none (treated as all-added). */
-async function readBaseFile(repoPath: string, commit: string, path: string): Promise<string> {
+/**
+ * Read the base versions of multiple files with two git calls total — one
+ * `ls-tree` to resolve the paths to object ids, one `cat-file --batch` to read
+ * the objects — instead of one `git show` per file. Returns a map of
+ * path → content; paths absent from the base commit map to "".
+ */
+async function readBaseFiles(
+  repoPath: string,
+  commit: string,
+  paths: string[],
+): Promise<Map<string, string>> {
+  const result = new Map<string, string>();
+  for (const p of paths) result.set(p, "");
+  if (paths.length === 0) return result;
+  // Resolve the paths to object ids in one call. ls-tree prints
+  // "<mode> SP <type> SP <oid> TAB <path>" for each path present in the commit.
+  const idByPath = new Map<string, string>();
   try {
-    const { stdout } = await git(["show", `${commit}:${path}`], {
+    const { stdout } = await git(["ls-tree", commit, "--", ...paths], {
       cwd: repoPath,
       timeoutMs: 5000,
       encoding: "utf8",
     });
-    return stdout;
+    for (const line of stdout.split("\n")) {
+      const tab = line.indexOf("\t");
+      if (tab < 0) continue;
+      const oid = line.slice(0, tab).split(" ")[2];
+      if (oid) idByPath.set(line.slice(tab + 1), oid);
+    }
   } catch {
-    return "";
+    // No base versions at all (e.g. the base commit is empty).
   }
+  const entries = [...idByPath.entries()];
+  if (entries.length === 0) return result;
+  // Read every object in one call. cat-file --batch prints
+  // "<oid> SP <type> SP <size> LF <content> LF" per object, in input order;
+  // the content is exactly <size> bytes. A buffer keeps byte offsets exact.
+  const { stdout } = await git(["cat-file", "--batch"], {
+    cwd: repoPath,
+    timeoutMs: 10_000,
+    encoding: "buffer",
+    input: entries.map(([, oid]) => oid).join("\n") + "\n",
+  });
+  const buf = stdout as Buffer;
+  let offset = 0;
+  for (const [path] of entries) {
+    const nl = buf.indexOf(0x0a, offset);
+    if (nl < 0) break;
+    const size = Number(buf.toString("utf8", offset, nl).split(" ")[2]);
+    offset = nl + 1;
+    result.set(path, buf.toString("utf8", offset, offset + size));
+    offset += size + 1;
+  }
+  return result;
 }
 
 /** The scannable text of one operation, with the lines the ChangeSet adds. */
-async function operationScanTargets(
+function operationScanTargets(
   op: Operation,
-  baseCommit: string,
-  repoPath: string,
-): Promise<Array<{ path: string; text: string; addedLines: Set<number> }>> {
+  baseFiles: Map<string, string>,
+): Array<{ path: string; text: string; addedLines: Set<number> }> {
   if (op.type === "delete") return [];
   if (op.type === "rename") {
     if (op.content === undefined) return [];
@@ -212,7 +261,7 @@ async function operationScanTargets(
     }
     if (op.content === undefined) return [];
     const text = decodeContent(op.content, op.encoding);
-    const base = await readBaseFile(repoPath, baseCommit, op.path);
+    const base = baseFiles.get(op.path) ?? "";
     return [{ path: op.path, text, addedLines: addedLinesForContent(base, text) }];
   }
   // create
@@ -221,16 +270,45 @@ async function operationScanTargets(
   return [{ path: op.path, text, addedLines: allLines(text) }];
 }
 
-/** Scan every operation; split findings by confidence, each tagged with its path. */
+/**
+ * Scan every operation; split findings by confidence, each tagged with its
+ * path. Base file contents are read in a single `git cat-file --batch` (not one
+ * `git show` per file). The event loop is yielded to between files, and the
+ * total bytes scanned is bounded by MAX_SCAN_TOTAL_BYTES: once the budget is
+ * spent, remaining files are reported as `scan_skipped` rather than scanned,
+ * so a large ChangeSet cannot block the node for seconds of synchronous regex.
+ */
 async function scanChangeSet(
   operations: Operation[],
   baseCommit: string,
   repoPath: string,
 ): Promise<{ high: PathFinding[]; low: PathFinding[] }> {
+  // Read every base file the ChangeSet needs in one batched git call.
+  const basePaths = operations
+    .filter((op) => op.type === "modify" && op.patch === undefined && op.content !== undefined)
+    .map((op) => (op as { path: string }).path);
+  const baseFiles = await readBaseFiles(repoPath, baseCommit, basePaths);
   const high: PathFinding[] = [];
   const low: PathFinding[] = [];
+  let totalBytes = 0;
   for (const op of operations) {
-    for (const { path, text, addedLines } of await operationScanTargets(op, baseCommit, repoPath)) {
+    // Yield to the event loop between files so a large ChangeSet does not
+    // block the node while the (synchronous) scanner runs.
+    await new Promise((resolve) => setImmediate(resolve));
+    for (const { path, text, addedLines } of operationScanTargets(op, baseFiles)) {
+      const bytes = Buffer.byteLength(text, "utf8");
+      if (totalBytes + bytes > MAX_SCAN_TOTAL_BYTES) {
+        low.push({
+          rule: "scan_skipped",
+          confidence: "low",
+          path,
+          line: 1,
+          col: 1,
+          fingerprint: fingerprint(`skipped:${text.length}`),
+        });
+        continue;
+      }
+      totalBytes += bytes;
       for (const finding of scanSecrets(text, { path, addedLines })) {
         (finding.confidence === "high" ? high : low).push({ ...finding, path });
       }

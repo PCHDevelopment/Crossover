@@ -1253,4 +1253,26 @@ describe("workspace.apply_changeset — secret scanning (T901)", () => {
     expect(rows.length).toBe(1);
     expect(rows[0].summary).toContain("too large to scan");
   });
+
+  it("bounds the total bytes scanned at 8 MiB across a ChangeSet", async () => {
+    const f = await fixture();
+    // Five files just under the 2 MiB per-file bound; together they exceed the
+    // 8 MiB total budget, so the fifth is scan_skipped rather than scanned.
+    const size = 2 * 1024 * 1024 - 1;
+    const ops = Array.from({ length: 5 }, (_, i) => ({
+      type: "create" as const,
+      path: `f${i}.txt`,
+      content: "x".repeat(size),
+    }));
+    const start = Date.now();
+    await f.applyDirect(ops, 0, {});
+    const ms = Date.now() - start;
+    expect(ms).toBeLessThan(5000);
+    const { rows } = await db.pool.query(
+      "SELECT summary FROM inbox_items WHERE room_id = $1 AND kind = 'SECRET_SCAN'",
+      [f.room],
+    );
+    expect(rows.length).toBe(1);
+    expect(rows[0].summary).toContain("too large to scan");
+  });
 });

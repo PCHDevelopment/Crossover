@@ -86,7 +86,7 @@ const ASSIGNMENT =
 // ending in EXAMPLE.
 const ALLOWLIST = /example$/i;
 
-const fingerprint = (value: string): string =>
+export const fingerprint = (value: string): string =>
   createHash("sha256").update(value).digest("hex").slice(0, 16);
 
 /** Offsets of the first character of each line, for O(log n) position lookups. */

@@ -170,6 +170,26 @@ describe("security.scanSecrets", () => {
     expect(findings).toEqual([]);
   });
 
+  it("scans a file just under the 2 MiB bound within a time bound", () => {
+    // The per-file bound is MAX_SCAN_BYTES (2 MiB). A file just under it is
+    // scanned (not skipped) and must be fast — this is the bound O1 asked to
+    // test at, not 40k.
+    const text = `key = ${AWS_KEY}\n` + "x".repeat(MAX_SCAN_BYTES - 40);
+    const start = Date.now();
+    const findings = scanSecrets(text);
+    const ms = Date.now() - start;
+    expect(ms).toBeLessThan(1000);
+    expect(findings.some((f) => f.rule === "aws_access_key_id")).toBe(true);
+    expect(findings.some((f) => f.rule === "scan_skipped")).toBe(false);
+  });
+
+  it("skips a file just over the 2 MiB bound as scan_skipped", () => {
+    const text = "x".repeat(MAX_SCAN_BYTES + 1);
+    const findings = scanSecrets(text);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]!.rule).toBe("scan_skipped");
+  });
+
   it("is total: it never throws", () => {
     for (const text of [
       "",
