@@ -1,6 +1,11 @@
 export { isPrivateAddress, resolvePublicAddresses } from "./network.js";
 export type { HostResolver } from "./network.js";
 export {
+  matchesHostPattern,
+  normalizeEgressHost,
+  normalizeRoomEgressAllowlist,
+} from "./egress-allowlist.js";
+export {
   createSandboxReadToken,
   SANDBOX_READ_TOKEN_MAX_TTL_MS,
   verifySandboxReadToken,

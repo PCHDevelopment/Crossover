@@ -777,7 +777,7 @@ Tests run in a sandbox only validate that sandbox's view. Canonical truth comes 
 ## 14.7 Isolation (D11)
 
 - Docker with the **gVisor (`runsc`)** runtime on dedicated sandbox hosts.
-- **Network egress default-deny** through per-sandbox internal Docker networks. The separate non-root TypeScript proxy accepts HTTPS `CONNECT` on port 443 only, checks a sandbox-scoped credential and the room allowlist, resolves and pins public DNS answers, and emits structured per-sandbox byte logs. Egress to GitHub and registries is allowed; the platform supplies no credentials, so pushes and publishes need credentials the agent itself provides, which §21.4 discourages. The proxy logs uncaught exceptions and exits, and Docker runs it with `--restart unless-stopped`; room settings may add exact hosts or `*.suffix` patterns.
+- **Network egress default-deny** through per-sandbox internal Docker networks. The separate non-root TypeScript proxy accepts HTTPS `CONNECT` on port 443 only, checks a sandbox-scoped credential and the room allowlist, resolves and pins public DNS answers, and emits structured per-sandbox byte logs. Egress to GitHub and registries is allowed; the platform supplies no credentials, so pushes and publishes need credentials the agent itself provides, which §21.4 discourages. The proxy logs uncaught exceptions and exits, and Docker runs it with `--restart unless-stopped`; an owner or admin uses `room.set_egress_allowlist { hosts }` to set up to 100 exact hosts or `*.suffix` patterns for the room. The setting applies to sandboxes; plugin tools use only the signed host list their invocation receives.
 - Cloud metadata endpoints (IMDS) blocked.
 - No platform or plugin credentials in sandboxes, ever (§21.4).
 - One sandbox per participant; sandboxes cannot reach each other.
@@ -868,6 +868,7 @@ ROOM
   room.digest              since=sequence (§17.3)
   room.events.subscribe    filters (§17.1), after=sequence
   room.events.list         after, limit, types?
+  room.set_egress_allowlist hosts (owner/admin; exact hosts or *.suffix, max 100; §14.7)
   events.redact            sequence, reason (owner only; §19.6)
   room.set_lead            owner/admin
   room.transfer_lead / room.accept_lead
@@ -1175,6 +1176,7 @@ If the node crashes between steps 2 and 3, the new owner reconciles on startup b
 
 ```text
 room.created / room.paused / room.resumed / room.archived
+room.egress_allowlist_changed
 lead.changed / lead.transfer_offered
 
 participant.invited / participant.joined / participant.left

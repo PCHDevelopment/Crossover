@@ -64,6 +64,7 @@ METHODS: dict[str, bool] = {
     "room.get_state": False,
     "room.invite": True,
     "room.resume": True,
+    "room.set_egress_allowlist": True,
     "room.set_lead": True,
     "room.transfer_lead": True,
     "sandbox.exec": True,
