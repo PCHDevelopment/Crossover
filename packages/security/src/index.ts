@@ -14,3 +14,5 @@ export {
 } from "./proxy-credentials.js";
 export { postWebhook } from "./webhook.js";
 export type { PostWebhookOptions, WebhookRequest } from "./webhook.js";
+export { ENTROPY_THRESHOLD, fingerprint, scanSecrets } from "./secret-scanner.js";
+export type { ScanOptions, SecretConfidence, SecretFinding, SecretRule } from "./secret-scanner.js";

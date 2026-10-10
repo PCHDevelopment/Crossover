@@ -3,14 +3,21 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { withTransaction } from "@crossover/db";
 import { createTestDatabase, type TestDatabase } from "@crossover/db/testing";
-import { allowAll, Dispatcher, type Authorizer } from "@crossover/kernel";
+import { allowAll, Dispatcher, type Authorizer, type CommandContext } from "@crossover/kernel";
 import { CrossoverError, newId } from "@crossover/protocol";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { git } from "./git.js";
 import { materialize } from "./materialize.js";
 import { merge } from "./merge.js";
 import { parseConflicts } from "./parse-check.js";
-import { registerWorkspaceCommands, type WorkspaceCommandDeps } from "./apply.js";
+import {
+  apply as applyChangeset,
+  registerWorkspaceCommands,
+  type ApplyExtras,
+  type WorkspaceCommandDeps,
+} from "./apply.js";
+import { changesetParamsSchema } from "./changeset.js";
+import { UPSTREAM_ACTOR } from "./upstream-import.js";
 import { ConflictEscalationSweeper } from "./conflict-escalation-sweeper.js";
 import { HealthCheckQueue } from "./health-queue.js";
 import { provisionWorkspace } from "./provision.js";
@@ -101,6 +108,44 @@ async function fixture(authorize: Authorizer = allowAll, deps: WorkspaceCommandD
       [room, id, kind],
     );
   const apply = (operations: Operation[], base = 0) => dispatch(request(operations, base));
+  // Call `apply` directly with `extras` (e.g. an upstream actor), outside the
+  // dispatcher, so the test can exercise caller-specific pipeline behavior.
+  const applyDirect = async (operations: Operation[], base: number, extras: ApplyExtras) => {
+    const client = await db.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const ctx: CommandContext = {
+        client,
+        room_id: room,
+        command_id: newId("cmd"),
+        idempotency_key: newId("cmd"),
+        principal: {
+          room_id: room,
+          participant_id: actor,
+          kind: "HUMAN",
+          authority: "MEMBER",
+          role: "DEVELOPER",
+        },
+        authorize: async () => {},
+        authorizeAs: async () => {},
+        afterCommit: () => {},
+      };
+      const params = changesetParamsSchema.parse({
+        source: "API",
+        message: "Edit",
+        base_workspace_revision: base,
+        operations,
+      });
+      const out = await applyChangeset(ctx, params, deps, extras);
+      await client.query("COMMIT");
+      return out;
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  };
   const rowsFor = async (
     table: "changesets" | "workspace_revisions" | "file_revisions" | "events" | "conflicts",
   ) => (await db.pool.query(`SELECT * FROM ${table} WHERE room_id = $1`, [room])).rows;
@@ -116,6 +161,7 @@ async function fixture(authorize: Authorizer = allowAll, deps: WorkspaceCommandD
     dispatchAs,
     addParticipant,
     apply,
+    applyDirect,
     rowsFor,
     dispatcher,
   };
@@ -953,5 +999,353 @@ describe("workspace.apply_changeset", () => {
     } finally {
       await db.pool.query("ALTER TABLE events DROP CONSTRAINT reject_apply");
     }
+  });
+});
+
+describe("workspace.apply_changeset — secret scanning (T901)", () => {
+  // A realistic AWS key that is NOT a documented example (the docs key
+  // AKIAIOSFODNN7EXAMPLE is allowlisted and must not match).
+  const AWS_KEY = "AKIA1234567890ABCDEF";
+  const HIGH_ENTROPY = "aB3dE5fG7hI9jK1lM3nO5pQ7rS9tU1vW";
+  const GITHUB_TOKEN = `ghp_${"x".repeat(36)}`;
+
+  it("blocks a high-confidence secret with VALIDATION naming file and line", async () => {
+    const f = await fixture();
+    await expect(
+      f.apply([{ type: "create", path: "config.env", content: `AWS_KEY=${AWS_KEY}\n` }]),
+    ).rejects.toMatchObject({
+      code: "VALIDATION",
+      details: {
+        reason: "secret_detected",
+        findings: [
+          expect.objectContaining({
+            rule: "aws_access_key_id",
+            path: "config.env",
+            line: 1,
+          }),
+        ],
+      },
+    });
+    // Nothing persisted: no ChangeSet, no new revision, no file.
+    expect(await f.rowsFor("changesets")).toEqual([]);
+    expect(await f.rowsFor("workspace_revisions")).toHaveLength(1);
+    expect(await f.rowsFor("file_revisions")).toEqual([]);
+  });
+
+  it("applies a low-confidence secret and flags the author and owner via inbox", async () => {
+    const f = await fixture();
+    const owner = newId("part");
+    await f.addParticipant(owner);
+    await db.pool.query("UPDATE participants SET authority = 'OWNER' WHERE id = $1", [owner]);
+    await db.pool.query("UPDATE rooms SET owner_id = $2 WHERE id = $1", [f.room, owner]);
+
+    const response = await f.apply([
+      { type: "create", path: "config.ts", content: `api_key = "${HIGH_ENTROPY}"\n` },
+    ]);
+    expect(response.response).toMatchObject({ status: "APPLIED" });
+
+    const { rows: inbox } = await db.pool.query(
+      "SELECT participant_id, kind, ref, summary, author_id FROM inbox_items WHERE room_id = $1",
+      [f.room],
+    );
+    // Flagged to both the author and the owner.
+    expect(inbox.map((r) => r.participant_id).sort()).toEqual([f.actor, owner].sort());
+    for (const item of inbox) {
+      expect(item.kind).toBe("SECRET_SCAN");
+      expect(item.ref).toEqual({ kind: "changeset", id: expect.any(String) });
+      expect(item.author_id).toBe("system");
+      // The summary names the file and line, never the value.
+      expect(item.summary).toContain("config.ts:1");
+      expect(item.summary).not.toContain(HIGH_ENTROPY);
+    }
+  });
+
+  it("sends a single inbox item when the author is the room owner", async () => {
+    const f = await fixture(); // in the fixture the room owner IS the actor
+    await f.apply([{ type: "create", path: "config.ts", content: `token: ${HIGH_ENTROPY}\n` }]);
+    const { rows: inbox } = await db.pool.query(
+      "SELECT participant_id, kind FROM inbox_items WHERE room_id = $1",
+      [f.room],
+    );
+    expect(inbox).toEqual([{ participant_id: f.actor, kind: "SECRET_SCAN" }]);
+  });
+
+  it("does not flag a clean ChangeSet", async () => {
+    const f = await fixture();
+    await f.apply([{ type: "create", path: "readme.md", content: "# Hello\n" }]);
+    const { rows: inbox } = await db.pool.query("SELECT * FROM inbox_items WHERE room_id = $1", [
+      f.room,
+    ]);
+    expect(inbox).toEqual([]);
+  });
+
+  it("scans base64 content and a real unified-diff patch", async () => {
+    const f = await fixture();
+    // base64-encoded content containing an AWS key
+    const b64 = Buffer.from(`AWS_KEY=${AWS_KEY}\n`).toString("base64");
+    await expect(
+      f.apply([{ type: "create", path: "bin.dat", content: b64, encoding: "base64" }]),
+    ).rejects.toMatchObject({ code: "VALIDATION" });
+
+    // a real unified diff that adds a GitHub token on new-file line 2
+    await f.apply([{ type: "create", path: "a.txt", content: "start\n" }]);
+    const patch = [
+      `--- a/a.txt`,
+      `+++ b/a.txt`,
+      `@@ -1 +1,2 @@`,
+      ` start`,
+      `+${GITHUB_TOKEN}`,
+      "",
+    ].join("\n");
+    await expect(f.apply([{ type: "modify", path: "a.txt", patch }], 1)).rejects.toMatchObject({
+      code: "VALIDATION",
+      details: { findings: [expect.objectContaining({ rule: "github_token", line: 2 })] },
+    });
+  });
+
+  it("does not block a patch that removes a secret", async () => {
+    const f = await fixture();
+    // Set up a file that already contains a secret via an upstream pull (which
+    // the scanner flags but never blocks).
+    await f.applyDirect(
+      [{ type: "create", path: "leak.txt", content: `aws = ${AWS_KEY}\nother = line\n` }],
+      0,
+      { actorId: UPSTREAM_ACTOR },
+    );
+    // A patch that deletes the secret line: no `+` lines, so nothing is flagged.
+    const patch = [
+      "--- a/leak.txt",
+      "+++ b/leak.txt",
+      "@@ -1,2 +1,1 @@",
+      `-aws = ${AWS_KEY}`,
+      " other = line",
+      "",
+    ].join("\n");
+    const response = await f.apply([{ type: "modify", path: "leak.txt", patch }], 1);
+    expect(response.response).toMatchObject({ status: "APPLIED" });
+  });
+
+  it("does not block an edit that leaves a pre-existing secret untouched", async () => {
+    const f = await fixture();
+    // Set up a file with a pre-existing secret (line 1) via an upstream pull.
+    await f.applyDirect(
+      [{ type: "create", path: "legacy.txt", content: `old = ${AWS_KEY}\nline2 = x\nline3 = y\n` }],
+      0,
+      { actorId: UPSTREAM_ACTOR },
+    );
+    // A full-content modify that changes only line 3; the secret (line 1) is
+    // unchanged, so it is not in the added lines and does not wedge the edit.
+    const response = await f.apply(
+      [
+        {
+          type: "modify",
+          path: "legacy.txt",
+          content: `old = ${AWS_KEY}\nline2 = x\nline3 = changed\n`,
+        },
+      ],
+      1,
+    );
+    expect(response.response).toMatchObject({ status: "APPLIED" });
+  });
+
+  it("does not block an edit to a non-ASCII (café.ts) file that leaves a pre-existing secret untouched", async () => {
+    // Sabotage for the ls-tree regression: an intermediate `git ls-tree` C-quotes
+    // non-ASCII paths ("src/caf\303\251.ts"), so the base lookup misses, every
+    // line counts as added, and a pre-existing secret gets rejected as
+    // secret_detected. Feeding `<commit>:<path>` straight to `cat-file --batch`
+    // avoids the C-quoting, so the base is read and the edit applies.
+    const f = await fixture();
+    await f.applyDirect(
+      [
+        {
+          type: "create",
+          path: "src/café.ts",
+          content: `old = ${AWS_KEY}\nline2 = x\nline3 = y\n`,
+        },
+      ],
+      0,
+      { actorId: UPSTREAM_ACTOR },
+    );
+    const response = await f.apply(
+      [
+        {
+          type: "modify",
+          path: "src/café.ts",
+          content: `old = ${AWS_KEY}\nline2 = x\nline3 = changed\n`,
+        },
+      ],
+      1,
+    );
+    expect(response.response).toMatchObject({ status: "APPLIED" });
+  });
+
+  it("rejects a ChangeSet whose newline path desyncs the base batch (scanner bypass)", async () => {
+    // A path may contain a newline (normalizePath rejects only NUL). cat-file
+    // --batch reads one ref per line, so a newline path splits into two refs
+    // and shifts every later file's base. Repro: target.txt is diffed against
+    // vendor.txt's content, so an added AWS key counts as unchanged and the
+    // ChangeSet is (wrongly) APPLIED. The fix leaves newline paths out of the
+    // batch (base "", scanned whole), so target.txt keeps its real base and the
+    // key is an added line → REJECTED.
+    const f = await fixture();
+    // 1. Upstream brings in vendor.txt (with the key) and target.txt (without).
+    await f.applyDirect(
+      [
+        { type: "create", path: "vendor.txt", content: `k = ${AWS_KEY}\n` },
+        { type: "create", path: "target.txt", content: "a\n" },
+      ],
+      0,
+      { actorId: UPSTREAM_ACTOR },
+    );
+    // The rev-1 SHA is visible to any reader through workspace.history.
+    const revs = await f.rowsFor("workspace_revisions");
+    const rev1 = revs.find((r) => Number(r.revision) === 1)!.commit_sha as string;
+    // 2. Upstream brings in a file whose name contains a newline; the second
+    //    half is "<rev-1 sha>:vendor.txt", a valid ref to vendor.txt's content.
+    const newlinePath = `x\n${rev1}:vendor.txt`;
+    await f.applyDirect([{ type: "create", path: newlinePath, content: "n\n" }], 1, {
+      actorId: UPSTREAM_ACTOR,
+    });
+    // 3. One ChangeSet modifies the newline file and adds the key to target.txt.
+    await expect(
+      f.apply(
+        [
+          { type: "modify", path: newlinePath, content: "n2\n" },
+          { type: "modify", path: "target.txt", content: `k = ${AWS_KEY}\n` },
+        ],
+        2,
+      ),
+    ).rejects.toMatchObject({
+      code: "VALIDATION",
+      details: { reason: "secret_detected" },
+    });
+  });
+
+  it("flags an upstream pull's secrets without blocking or crashing", async () => {
+    const f = await fixture();
+    const owner = newId("part");
+    await f.addParticipant(owner);
+    await db.pool.query("UPDATE participants SET authority = 'OWNER' WHERE id = $1", [owner]);
+    await db.pool.query("UPDATE rooms SET owner_id = $2 WHERE id = $1", [f.room, owner]);
+
+    // A high-confidence secret in an upstream pull: never blocked (the room
+    // doesn't control upstream content), and flagged to the owner and the caller
+    // — never to system:upstream, which is not a participant (the old code's FK crash).
+    const response = await f.applyDirect(
+      [{ type: "create", path: "upstream.txt", content: `key = ${AWS_KEY}\n` }],
+      0,
+      { actorId: UPSTREAM_ACTOR },
+    );
+    expect(response.response).toMatchObject({ status: "APPLIED" });
+
+    const { rows: inbox } = await db.pool.query(
+      "SELECT participant_id, kind, summary FROM inbox_items WHERE room_id = $1",
+      [f.room],
+    );
+    expect(inbox.map((r) => r.participant_id).sort()).toEqual([f.actor, owner].sort());
+    for (const item of inbox) {
+      expect(item.kind).toBe("SECRET_SCAN");
+      expect(item.summary).toContain("upstream.txt:1");
+      expect(item.summary).not.toContain(AWS_KEY);
+    }
+  });
+
+  it("never leaks the matched value in a VALIDATION error", async () => {
+    const f = await fixture();
+    const secret = AWS_KEY;
+    try {
+      await f.apply([{ type: "create", path: "c.env", content: `K=${secret}\n` }]);
+      throw new Error("expected VALIDATION");
+    } catch (e) {
+      expect(e).toBeInstanceOf(CrossoverError);
+      expect((e as CrossoverError).code).toBe("VALIDATION");
+      expect(JSON.stringify((e as CrossoverError).details ?? {})).not.toContain(secret);
+    }
+  });
+
+  it("never leaks the matched value in emitted events", async () => {
+    const f = await fixture();
+    const owner = newId("part");
+    await f.addParticipant(owner);
+    await db.pool.query("UPDATE participants SET authority = 'OWNER' WHERE id = $1", [owner]);
+    await db.pool.query("UPDATE rooms SET owner_id = $2 WHERE id = $1", [f.room, owner]);
+    const secret = HIGH_ENTROPY;
+    await f.apply([{ type: "create", path: "c.ts", content: `api_key = "${secret}"\n` }]);
+    const { rows: events } = await db.pool.query(
+      "SELECT actor_id, type, payload FROM events WHERE room_id = $1",
+      [f.room],
+    );
+    expect(events.length).toBeGreaterThan(0);
+    for (const event of events) {
+      expect(
+        JSON.stringify({ actor_id: event.actor_id, type: event.type, payload: event.payload }),
+      ).not.toContain(secret);
+    }
+  });
+
+  it("scans an added line that starts with ++ (not mistaken for a file header)", async () => {
+    const f = await fixture();
+    // Set up a file via an upstream pull so the initial content isn't blocked.
+    await f.applyDirect([{ type: "create", path: "inc.txt", content: "line1\n" }], 0, {
+      actorId: UPSTREAM_ACTOR,
+    });
+    const { rows: revRows } = await db.pool.query(
+      "SELECT MAX(revision)::int AS rev FROM workspace_revisions WHERE room_id = $1",
+      [f.room],
+    );
+    const rev = revRows[0].rev;
+    // A patch whose added line's content itself starts with `++`. Before the
+    // hunk-state fix, `+++…` was skipped as a file header and the secret
+    // escaped the scan.
+    const patch = [
+      "--- a/inc.txt",
+      "+++ b/inc.txt",
+      "@@ -1 +1,2 @@",
+      " line1",
+      `+++${AWS_KEY}`,
+      "",
+    ].join("\n");
+    await expect(
+      f.applyDirect([{ type: "modify", path: "inc.txt", patch }], rev, {}),
+    ).rejects.toMatchObject({
+      code: "VALIDATION",
+      details: {
+        findings: [expect.objectContaining({ path: "inc.txt" })],
+      },
+    });
+  });
+
+  it("surfaces scan_skipped in the inbox for a file too large to scan", async () => {
+    const f = await fixture();
+    const big = "x".repeat(5 * 1024 * 1024 + 1);
+    await f.applyDirect([{ type: "create", path: "big.txt", content: big }], 0, {});
+    const { rows } = await db.pool.query(
+      "SELECT summary FROM inbox_items WHERE room_id = $1 AND kind = 'SECRET_SCAN'",
+      [f.room],
+    );
+    expect(rows.length).toBe(1);
+    expect(rows[0].summary).toContain("too large to scan");
+  });
+
+  it("bounds the total bytes scanned at 8 MiB across a ChangeSet", async () => {
+    const f = await fixture();
+    // Five files just under the 2 MiB per-file bound; together they exceed the
+    // 8 MiB total budget, so the fifth is scan_skipped rather than scanned.
+    const size = 2 * 1024 * 1024 - 1;
+    const ops = Array.from({ length: 5 }, (_, i) => ({
+      type: "create" as const,
+      path: `f${i}.txt`,
+      content: "x".repeat(size),
+    }));
+    const start = Date.now();
+    await f.applyDirect(ops, 0, {});
+    const ms = Date.now() - start;
+    expect(ms).toBeLessThan(5000);
+    const { rows } = await db.pool.query(
+      "SELECT summary FROM inbox_items WHERE room_id = $1 AND kind = 'SECRET_SCAN'",
+      [f.room],
+    );
+    expect(rows.length).toBe(1);
+    expect(rows[0].summary).toContain("too large to scan");
   });
 });
