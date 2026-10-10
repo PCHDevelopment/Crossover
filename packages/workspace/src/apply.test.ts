@@ -1156,7 +1156,13 @@ describe("workspace.apply_changeset — secret scanning (T901)", () => {
     // avoids the C-quoting, so the base is read and the edit applies.
     const f = await fixture();
     await f.applyDirect(
-      [{ type: "create", path: "src/café.ts", content: `old = ${AWS_KEY}\nline2 = x\nline3 = y\n` }],
+      [
+        {
+          type: "create",
+          path: "src/café.ts",
+          content: `old = ${AWS_KEY}\nline2 = x\nline3 = y\n`,
+        },
+      ],
       0,
       { actorId: UPSTREAM_ACTOR },
     );
