@@ -40,7 +40,6 @@ export interface ToolExecutionSpec {
   command: readonly string[];
   /** Exact hosts or `*.suffix` patterns this plugin invocation may reach through the proxy. */
   egressHosts: readonly string[];
-  /** Credentials the broker may mint for this tool, with only its declared GitHub permissions. */
   integrations?: readonly ToolIntegrationRequirement[];
 }
 
@@ -137,6 +136,8 @@ export class ToolRegistry {
         if (providers.has(integration.provider))
           throw bad("an execution integration provider is declared more than once");
         providers.add(integration.provider);
+        if (integration.provider === "github" && !Object.keys(integration.permissions ?? {}).length)
+          throw bad("a GitHub execution integration requires explicit permissions");
         if (
           integration.permissions &&
           (integration.provider !== "github" ||

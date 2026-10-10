@@ -12,7 +12,7 @@ import {
   type ToolRunner,
 } from "@crossover/kernel";
 import { newId } from "@crossover/protocol";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { ConfigKeyRoomDataKeyProvider, EnvelopeSecretStore } from "./secret-store.js";
 import { IntegrationCredentialBroker, type AssumeRoleInput } from "./integration-broker.js";
@@ -38,6 +38,56 @@ const app = {
     }),
   ),
 };
+
+const restoreLogCaptures: Array<() => void> = [];
+afterEach(() => {
+  for (const restore of restoreLogCaptures.splice(0)) restore();
+});
+
+function captureRuntimeLogs(): string[] {
+  const entries: string[] = [];
+  const consoleDescriptors = new Map<string, PropertyDescriptor>();
+  for (const name of Object.getOwnPropertyNames(console)) {
+    const descriptor = Object.getOwnPropertyDescriptor(console, name);
+    if (
+      !descriptor ||
+      typeof descriptor.value !== "function" ||
+      name.startsWith("_") ||
+      name === "Console"
+    )
+      continue;
+    consoleDescriptors.set(name, descriptor);
+    Object.defineProperty(console, name, {
+      ...descriptor,
+      value: (...args: unknown[]) => entries.push(args.map(stringifyLogValue).join(" ")),
+    });
+  }
+
+  const emitWarningDescriptor = Object.getOwnPropertyDescriptor(process, "emitWarning");
+  if (!emitWarningDescriptor || typeof emitWarningDescriptor.value !== "function")
+    throw new Error("process.emitWarning is not available");
+  Object.defineProperty(process, "emitWarning", {
+    ...emitWarningDescriptor,
+    value: (...args: unknown[]) => entries.push(args.map(stringifyLogValue).join(" ")),
+  });
+
+  restoreLogCaptures.push(() => {
+    for (const [name, descriptor] of consoleDescriptors)
+      Object.defineProperty(console, name, descriptor);
+    Object.defineProperty(process, "emitWarning", emitWarningDescriptor);
+  });
+  return entries;
+}
+
+function stringifyLogValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value instanceof Error) return `${value.name}: ${value.message}\n${value.stack ?? ""}`;
+  try {
+    return JSON.stringify(value) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
 
 let db: TestDatabase;
 beforeAll(async () => {
@@ -127,17 +177,18 @@ describe("IntegrationCredentialBroker", () => {
       },
       fetcher,
     });
+    const declaredPermissions = { contents: "read", pull_requests: "write" } as const;
     const execution: ToolExecutionSpec = {
       image: "fixture",
       command: ["run"],
       egressHosts: [],
-      integrations: [{ provider: "github", permissions: { contents: "read" } }],
+      integrations: [{ provider: "github", permissions: declaredPermissions }],
     };
     const lease = await service.credentialsFor(invocation, execution);
 
     expect(lease.environment).toEqual({ GITHUB_TOKEN: "github-install-token" });
     const body = JSON.parse(String(requests[0]?.init?.body)) as Record<string, unknown>;
-    expect(body).toEqual({ repository_ids: [9823], permissions: { contents: "read" } });
+    expect(body).toEqual({ repository_ids: [9823], permissions: declaredPermissions });
     await lease.revoke?.();
     expect(requests.filter(({ url }) => url.endsWith("/installation/token"))).toHaveLength(1);
   });
@@ -174,7 +225,8 @@ describe("IntegrationCredentialBroker", () => {
     });
   });
 
-  it("keeps connection and minted secrets out of responses, room events and tool records", async () => {
+  it("keeps connection and minted secrets out of responses, events, logs and tool records", async () => {
+    const runtimeLogs = captureRuntimeLogs();
     const roomId = newId("room");
     const ownerId = newId("part");
     const agentId = newId("part");
@@ -207,6 +259,7 @@ describe("IntegrationCredentialBroker", () => {
     const userToken = "github-user-access-token-secret";
     const githubToken = "github-installation-token-secret";
     const oauthToken = "oauth-slack-access-token-secret";
+    let revokeCount = 0;
     const fetcher: typeof fetch = async (input) => {
       const url = String(input);
       if (url === "https://github.com/login/oauth/access_token")
@@ -222,7 +275,11 @@ describe("IntegrationCredentialBroker", () => {
           token: githubToken,
           expires_at: new Date(Date.now() + 30 * 60_000).toISOString(),
         });
-      if (url.endsWith("/installation/token")) return new Response(null, { status: 204 });
+      if (url.endsWith("/installation/token")) {
+        revokeCount += 1;
+        if (revokeCount === 2) throw new Error(`revocation failed for ${githubToken}`);
+        return new Response(null, { status: 204 });
+      }
       throw new Error("Unexpected GitHub request");
     };
     const service = new IntegrationCredentialBroker({
@@ -306,6 +363,18 @@ describe("IntegrationCredentialBroker", () => {
         args: { repo: "acme/widgets", title: "Safe" },
       }),
     );
+    const failedToolResponse = await dispatcher
+      .dispatch(
+        agent,
+        envelope("tools.invoke", {
+          tool: "github.create_pull_request",
+          args: { repo: "acme/widgets", title: "Exercise failed revocation" },
+        }),
+      )
+      .catch((error: unknown) => {
+        if (!(error instanceof Error)) throw error;
+        return { name: error.name, message: error.message };
+      });
     const events = (
       await db.pool.query("SELECT type, payload FROM events WHERE room_id = $1 ORDER BY sequence", [
         roomId,
@@ -326,20 +395,29 @@ describe("IntegrationCredentialBroker", () => {
       await db.pool.query("SELECT encrypted_secret FROM integrations WHERE room_id = $1", [roomId])
     ).rows;
     const persisted = JSON.stringify({
-      responses: [githubConnect, oauthConnect, toolResponse],
+      responses: [githubConnect, oauthConnect, toolResponse, failedToolResponse],
       events,
       toolRows,
       commandRows,
       approvalRows,
       encryptedRows,
     });
+    const logs = runtimeLogs.join("\n");
 
-    expect(environments).toEqual([{ GITHUB_TOKEN: githubToken, OAUTH_SLACK_TOKEN: oauthToken }]);
+    expect(environments).toEqual([
+      { GITHUB_TOKEN: githubToken, OAUTH_SLACK_TOKEN: oauthToken },
+      { GITHUB_TOKEN: githubToken, OAUTH_SLACK_TOKEN: oauthToken },
+    ]);
     expect(JSON.stringify(toolResponse)).not.toContain(githubToken);
     expect(JSON.stringify(toolResponse)).not.toContain(oauthToken);
+    expect(failedToolResponse).toMatchObject({ message: "github.create_pull_request failed" });
+    expect(JSON.stringify(failedToolResponse)).not.toContain(githubToken);
     for (const secret of [code, userToken, githubToken, oauthToken])
       expect(persisted).not.toContain(secret);
-    expect(events.filter((event) => event.type === "tool.invoked")).toHaveLength(1);
+    for (const secret of [code, userToken, githubToken, oauthToken])
+      expect(logs).not.toContain(secret);
+    expect(revokeCount).toBe(2);
+    expect(events.filter((event) => event.type === "tool.invoked")).toHaveLength(2);
     expect(events.filter((event) => event.type === "integration.connected")).toHaveLength(2);
   });
 });

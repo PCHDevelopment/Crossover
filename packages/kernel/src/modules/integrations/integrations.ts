@@ -81,11 +81,9 @@ export interface IntegrationCommandsOptions {
   secretStore?: SecretStore;
   /** Implemented by the broker layer; failed role assumptions stay pending. */
   verifyAwsRole?: AwsRoleVerifier;
-  /** Exchange and verify the one-time OAuth code before storing selected repositories. */
   verifyGitHubConnection?: GitHubConnectionVerifier;
 }
 
-/** Decrypt provider config after an atomic status gate; tools use the connected default. */
 export async function readConnectedIntegrationSecretConfig(
   pool: Pool,
   secretStore: SecretStore,

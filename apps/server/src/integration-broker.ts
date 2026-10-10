@@ -202,6 +202,8 @@ export class IntegrationCredentialBroker {
     const repoId = Number(ids[index]);
     if (!Number.isSafeInteger(repoId) || repoId <= 0)
       throw new Error("GitHub integration configuration is invalid");
+    if (!Object.keys(requirement.permissions ?? {}).length)
+      throw new Error("GitHub tool permissions are unavailable");
 
     const response = await this.request(
       `${API}/app/installations/${encodeURIComponent(config.installation_id)}/access_tokens`,
@@ -210,7 +212,7 @@ export class IntegrationCredentialBroker {
         headers: this.appHeaders(app),
         body: JSON.stringify({
           repository_ids: [repoId],
-          permissions: requirement.permissions ?? {},
+          permissions: requirement.permissions,
         }),
       },
     );

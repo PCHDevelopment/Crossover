@@ -129,7 +129,6 @@ export interface ServerConfig {
   integrationSecretKey?: Uint8Array;
   /** KMS key id or ARN for production room-scoped integration secret encryption. */
   integrationKmsKeyId?: string;
-  /** Operator credentials for the room-scoped GitHub App broker. */
   githubApp?: { appId: string; clientId: string; clientSecret: string; privateKey: string };
   /** Bind address and private, unpublished port of the internal Git-only listener. */
   gitInternalHost?: string;

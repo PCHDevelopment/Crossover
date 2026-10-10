@@ -64,13 +64,31 @@ describe("ToolRegistry", () => {
     const registry = new ToolRegistry();
     expect(() =>
       registry.register(tool({ execution: { ...base, integrations: [{ provider: "github" }] } })),
+    ).toThrow(/requires explicit permissions/);
+    expect(() =>
+      registry.register(
+        tool({ execution: { ...base, integrations: [{ provider: "github", permissions: {} }] } }),
+      ),
+    ).toThrow(/requires explicit permissions/);
+    expect(() =>
+      registry.register(
+        tool({
+          execution: {
+            ...base,
+            integrations: [{ provider: "github", permissions: { contents: "read" } }],
+          },
+        }),
+      ),
     ).not.toThrow();
     const { scope: _scope, ...unscoped } = tool();
     void _scope;
     expect(() =>
       new ToolRegistry().register({
         ...unscoped,
-        execution: { ...base, integrations: [{ provider: "github" }] },
+        execution: {
+          ...base,
+          integrations: [{ provider: "github", permissions: { contents: "read" } }],
+        },
       }),
     ).toThrow(/repository-scoped/);
     expect(() =>

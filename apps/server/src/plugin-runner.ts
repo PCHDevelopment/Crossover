@@ -50,7 +50,6 @@ const ENV_RESERVED = new Set([
 
 export interface PluginCredentialLease {
   environment: Readonly<Record<string, string>>;
-  /** Revoke a minted credential after the container has stopped. */
   revoke?: () => Promise<void>;
 }
 
