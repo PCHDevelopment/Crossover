@@ -1,17 +1,21 @@
 import { execFile, spawn } from "node:child_process";
 import { isAbsolute } from "node:path";
+import type { Readable } from "node:stream";
 import {
   createSandboxProxyCredential,
   createSandboxReadToken,
   SANDBOX_READ_TOKEN_MAX_TTL_MS,
 } from "@crossover/security";
-import { CrossoverError } from "@crossover/protocol";
+import { CrossoverError, isId } from "@crossover/protocol";
 import { normalizePath } from "./path.js";
 import { ignoredPrunedDirectories } from "./ignore.js";
 import type {
   ExecutionDriver,
   SandboxLimits,
   SandboxResources,
+  SandboxExecOutcome,
+  SandboxExecProcess,
+  SandboxExecTermination,
   SandboxSnapshotEntry,
   SandboxSnapshotFile,
 } from "./execution.js";
@@ -320,6 +324,157 @@ export class DockerExecutionDriver implements ExecutionDriver {
     } catch (error) {
       if (!(await this.inspectContainer(input.resources.container_ref))?.running) throw error;
     }
+  }
+
+  /** Run a shell command in a fresh process group and capture stdout and stderr separately. */
+  async exec(input: {
+    sandbox_id: string;
+    resources: SandboxResources;
+    exec_id: string;
+    command: string;
+    cwd: string;
+    timeoutMs: number;
+    onOutput: (stream: "stdout" | "stderr", chunk: Buffer) => Promise<void>;
+  }): Promise<SandboxExecProcess> {
+    this.assertResources(input.sandbox_id, input.resources);
+    if (!isId(input.exec_id, "exec")) throw new Error("Invalid sandbox execution id");
+    if (input.command.includes("\0") || input.command.length === 0)
+      throw new CrossoverError("VALIDATION", "Command must be nonempty text without NUL");
+    if (
+      !Number.isSafeInteger(input.timeoutMs) ||
+      input.timeoutMs < 1 ||
+      input.timeoutMs > 3_600_000
+    )
+      throw new CrossoverError(
+        "VALIDATION",
+        "Sandbox command timeout must be from 1 to 3600000 ms",
+      );
+    if (!isAbsolute(input.cwd) || input.cwd.includes("\0"))
+      throw new CrossoverError("VALIDATION", "Sandbox working directory must be absolute");
+
+    const pidFile = `/tmp/crossover-${input.exec_id}.pid`;
+    const wrapper =
+      `printf '%s\\n' "$$" > "${pidFile}"; ` +
+      `trap 'rm -f "${pidFile}"' EXIT; ` +
+      `sh -lc "$CROSSOVER_EXEC_COMMAND"`;
+    const child = spawn(
+      this.dockerBinary,
+      [
+        "exec",
+        "--workdir",
+        input.cwd,
+        "--env",
+        `CROSSOVER_EXEC_COMMAND=${input.command}`,
+        input.resources.container_ref,
+        "setsid",
+        "sh",
+        "-lc",
+        wrapper,
+      ],
+      { stdio: ["ignore", "pipe", "pipe"] },
+    );
+
+    const start = Date.now();
+    let reason: SandboxExecTermination | undefined;
+    let closed = false;
+    let settled = false;
+    let childCode: number | null = null;
+    let outputError: unknown;
+    let outputTail = Promise.resolve();
+    let cancelPromise: Promise<void> | undefined;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let resolveFinished!: (outcome: SandboxExecOutcome) => void;
+    const finished = new Promise<SandboxExecOutcome>((resolve) => (resolveFinished = resolve));
+
+    const queueOutput = (stream: "stdout" | "stderr", source: Readable) => {
+      source.on("data", (value: Buffer) => {
+        source.pause();
+        outputTail = outputTail
+          .then(() => input.onOutput(stream, value))
+          .catch((error: unknown) => {
+            outputError = error;
+          })
+          .finally(() => source.resume());
+      });
+    };
+    if (child.stdout) queueOutput("stdout", child.stdout);
+    if (child.stderr) queueOutput("stderr", child.stderr);
+
+    const readPid = async (): Promise<number | undefined> => {
+      const result = await this.invoke(
+        ["exec", input.resources.container_ref, "sh", "-lc", `cat ${pidFile}`],
+        { timeoutMs: 5_000, maxBuffer: 1024 },
+      );
+      if (result.code !== 0) return undefined;
+      const pid = Number(result.stdout.trim());
+      return Number.isSafeInteger(pid) && pid > 1 ? pid : undefined;
+    };
+    const signalGroup = async (signal: "TERM" | "KILL"): Promise<void> => {
+      let pid: number | undefined;
+      const deadline = Date.now() + 5_000;
+      while (!closed && pid === undefined && Date.now() < deadline) {
+        pid = await readPid().catch(() => undefined);
+        if (pid === undefined) await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      if (pid === undefined) return;
+      await this.invoke(
+        [
+          "exec",
+          input.resources.container_ref,
+          "sh",
+          "-lc",
+          `kill -${signal} -${pid} 2>/dev/null || true`,
+        ],
+        { timeoutMs: 5_000, maxBuffer: 1024 },
+      );
+    };
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      if (timeout) clearTimeout(timeout);
+      void outputTail.finally(() => {
+        const finalReason: SandboxExecOutcome["reason"] = outputError
+          ? "start_failed"
+          : (reason ?? "exit");
+        resolveFinished({
+          exit_code: finalReason === "exit" ? childCode : null,
+          duration_ms: Date.now() - start,
+          reason: finalReason,
+        });
+      });
+    };
+
+    const cancel = (why: SandboxExecTermination): Promise<void> => {
+      if (cancelPromise) return cancelPromise;
+      if (closed) return Promise.resolve();
+      reason ??= why;
+      cancelPromise = (async () => {
+        await signalGroup("TERM");
+        const stopped = await Promise.race([
+          finished.then(() => true),
+          new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 5_000)),
+        ]);
+        if (!stopped && !closed) await signalGroup("KILL");
+      })();
+      return cancelPromise;
+    };
+    const process: SandboxExecProcess = { finished, cancel };
+
+    child.once("error", (error) => {
+      outputError = error;
+      closed = true;
+      finish();
+    });
+    child.once("close", (code) => {
+      closed = true;
+      childCode = code;
+      finish();
+    });
+    child.once("spawn", () => {
+      timeout = setTimeout(() => void cancel("timed_out"), input.timeoutMs);
+      timeout.unref();
+    });
+    return process;
   }
 
   /** Fetch one scoped shallow checkout through a short-lived, isolated Git fetcher. */

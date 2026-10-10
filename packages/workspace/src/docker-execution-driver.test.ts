@@ -973,4 +973,65 @@ describe("DockerExecutionDriver", () => {
     },
     120_000,
   );
+
+  it.skipIf(skipDockerIntegration)(
+    "streams output and cancels a shell process group with its child",
+    async () => {
+      const driver = new DockerExecutionDriver();
+      const sandboxId = newId("sandbox");
+      const resources = await driver.create({
+        sandbox_id: sandboxId,
+        room_id: newId("room"),
+        participant_id: newId("part"),
+        limits: { disk_enforcement: "soft" },
+      });
+      let running: Awaited<ReturnType<typeof driver.exec>> | undefined;
+      try {
+        await driver.start({ sandbox_id: sandboxId, resources });
+        const output: Buffer[] = [];
+        running = await driver.exec({
+          sandbox_id: sandboxId,
+          resources,
+          exec_id: newId("exec"),
+          command: 'sleep 300 & child=$!; printf "CHILD=%s\\n" "$child"; wait',
+          cwd: "/workspace",
+          timeoutMs: 60_000,
+          onOutput: async (_stream, chunk) => void output.push(Buffer.from(chunk)),
+        });
+        const deadline = Date.now() + 5_000;
+        while (!Buffer.concat(output).toString("utf8").includes("CHILD=") && Date.now() < deadline)
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        const match = /CHILD=(\d+)/.exec(Buffer.concat(output).toString("utf8"));
+        expect(match, "the child PID should be reported before cancellation").not.toBeNull();
+        const childPid = match![1]!;
+
+        await running.cancel("cancelled");
+        await expect(running.finished).resolves.toMatchObject({
+          reason: "cancelled",
+          exit_code: null,
+        });
+        let childState = "";
+        for (let attempt = 0; attempt < 30; attempt++) {
+          childState = execFileSync(
+            "docker",
+            [
+              "exec",
+              resources.container_ref,
+              "node",
+              "-e",
+              `try{const s=require("node:fs").readFileSync("/proc/${childPid}/stat","utf8");const i=s.lastIndexOf(") ");process.stdout.write(i<0?"?":s.slice(i+2,i+3))}catch{process.stdout.write("gone")}`,
+            ],
+            { encoding: "utf8", timeout: 5_000 },
+          );
+          if (childState === "gone" || childState === "Z") break;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        expect(["gone", "Z"]).toContain(childState);
+      } finally {
+        await running?.cancel("sandbox_stopped").catch(() => undefined);
+        await driver.destroy({ sandbox_id: sandboxId, resources });
+      }
+    },
+    30_000,
+  );
 });

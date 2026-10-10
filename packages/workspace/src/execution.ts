@@ -18,6 +18,19 @@ export interface SandboxLimits {
   disk_enforcement: DiskEnforcementMode;
 }
 
+export type SandboxExecTermination = "cancelled" | "timed_out" | "revoked" | "sandbox_stopped";
+
+export interface SandboxExecOutcome {
+  exit_code: number | null;
+  duration_ms: number;
+  reason: "exit" | SandboxExecTermination | "start_failed";
+}
+
+export interface SandboxExecProcess {
+  finished: Promise<SandboxExecOutcome>;
+  cancel(reason: SandboxExecTermination): Promise<void>;
+}
+
 export interface SandboxRecord {
   id: string;
   room_id: string;
@@ -104,6 +117,16 @@ export interface ExecutionDriver {
     files: readonly Pick<SandboxSnapshotFile, "path" | "mode" | "content">[];
     delete_paths: readonly string[];
   }): Promise<void>;
+  /** Start a tracked shell process inside the running sandbox. */
+  exec?(input: {
+    sandbox_id: string;
+    resources: SandboxResources;
+    exec_id: string;
+    command: string;
+    cwd: string;
+    timeoutMs: number;
+    onOutput: (stream: "stdout" | "stderr", chunk: Buffer) => Promise<void>;
+  }): Promise<SandboxExecProcess>;
   start(input: { sandbox_id: string; resources: SandboxResources }): Promise<void>;
   stop(input: { sandbox_id: string; resources: SandboxResources }): Promise<void>;
   destroy(input: { sandbox_id: string; resources?: SandboxResources }): Promise<void>;
@@ -128,6 +151,10 @@ export class ExecutionService {
   private readonly diskEnforcement: DiskEnforcementMode;
   private sweepTimer: NodeJS.Timeout | undefined;
   private readonly ensureLocks = new Map<string, Promise<void>>();
+  private readonly activeExecs = new Map<
+    string,
+    { room_id: string; participant_id: string; sandbox_id: string; process: SandboxExecProcess }
+  >();
 
   constructor(
     private readonly pool: Pool,
@@ -168,6 +195,112 @@ export class ExecutionService {
     return Boolean(
       this.driver.snapshotInventory && this.driver.readSnapshotFiles && this.driver.updateSnapshot,
     );
+  }
+
+  supportsSandboxExec(): boolean {
+    return Boolean(this.driver.exec);
+  }
+
+  /** Preflight the concurrency limit before committing the command's start event. */
+  async assertExecCapacity(roomId: string, participantId: string): Promise<void> {
+    await this.withSandboxLock(roomId, participantId, async (sandbox) => {
+      if (!this.driver.exec)
+        throw new CrossoverError(
+          "UNAVAILABLE",
+          "Sandbox execution is not supported by this driver",
+        );
+      if (this.activeCount(sandbox.id) >= 8)
+        throw new CrossoverError("VALIDATION", "A sandbox may run at most 8 commands at once", {
+          details: { reason: "too_many_execs", maximum: 8 },
+        });
+    });
+  }
+
+  /** Start one command while serialized with submit's post-commit working-copy advance. */
+  async startExec(input: {
+    room_id: string;
+    participant_id: string;
+    exec_id: string;
+    command: string;
+    cwd: string;
+    timeoutMs: number;
+    onOutput: (stream: "stdout" | "stderr", chunk: Buffer) => Promise<void>;
+  }): Promise<SandboxExecProcess> {
+    return this.withSandboxLock(input.room_id, input.participant_id, async (sandbox) => {
+      const run = this.driver.exec;
+      if (!run || !sandbox.volume_ref || !sandbox.container_ref)
+        throw new CrossoverError(
+          "UNAVAILABLE",
+          "Sandbox execution is not supported by this driver",
+        );
+      if (this.activeCount(sandbox.id) >= 8)
+        throw new CrossoverError("VALIDATION", "A sandbox may run at most 8 commands at once", {
+          details: { reason: "too_many_execs", maximum: 8 },
+        });
+      const process = await run.call(this.driver, {
+        sandbox_id: sandbox.id,
+        resources: this.resources(sandbox),
+        exec_id: input.exec_id,
+        command: input.command,
+        cwd: input.cwd,
+        timeoutMs: input.timeoutMs,
+        onOutput: input.onOutput,
+      });
+      this.activeExecs.set(input.exec_id, {
+        room_id: input.room_id,
+        participant_id: input.participant_id,
+        sandbox_id: sandbox.id,
+        process,
+      });
+      void process.finished
+        .catch(() => undefined)
+        .then(() =>
+          this.withEnsureLock(input.room_id, input.participant_id, async () => {
+            const active = this.activeExecs.get(input.exec_id);
+            if (active?.process === process) this.activeExecs.delete(input.exec_id);
+          }),
+        )
+        .catch((error: unknown) => console.error("Failed to clear completed sandbox exec", error));
+      return process;
+    });
+  }
+
+  async cancelExec(
+    roomId: string,
+    participantId: string,
+    execId: string,
+    reason: SandboxExecTermination = "cancelled",
+  ): Promise<boolean> {
+    const active = this.activeExecs.get(execId);
+    if (!active || active.room_id !== roomId || active.participant_id !== participantId)
+      return false;
+    await active.process.cancel(reason);
+    await active.process.finished.catch(() => undefined);
+    return true;
+  }
+
+  async cancelParticipantExecs(
+    roomId: string,
+    participantId: string,
+    reason: SandboxExecTermination,
+  ): Promise<void> {
+    const active = [...this.activeExecs.values()].filter(
+      (run) => run.room_id === roomId && run.participant_id === participantId,
+    );
+    await Promise.all(active.map((run) => run.process.cancel(reason).catch(() => undefined)));
+    await Promise.all(active.map((run) => run.process.finished.catch(() => undefined)));
+  }
+
+  async cancelAllExecs(reason: SandboxExecTermination): Promise<void> {
+    const active = [...this.activeExecs.values()];
+    await Promise.all(active.map((run) => run.process.cancel(reason).catch(() => undefined)));
+    await Promise.all(active.map((run) => run.process.finished.catch(() => undefined)));
+  }
+
+  private activeCount(sandboxId: string): number {
+    let count = 0;
+    for (const run of this.activeExecs.values()) if (run.sandbox_id === sandboxId) count++;
+    return count;
   }
 
   async snapshotInventory(
@@ -218,8 +351,8 @@ export class ExecutionService {
     nextBaseRevision: number,
     files: readonly Pick<SandboxSnapshotFile, "path" | "mode" | "content">[],
     deletePaths: readonly string[],
-  ): Promise<void> {
-    await this.withSandboxLock(roomId, participantId, async (sandbox) => {
+  ): Promise<"advanced" | "process_running"> {
+    return this.withSandboxLock(roomId, participantId, async (sandbox) => {
       if (sandbox.base_revision !== expectedBaseRevision)
         throw new CrossoverError(
           "CONFLICT_VERSION",
@@ -227,6 +360,7 @@ export class ExecutionService {
         );
       if (!sandbox.volume_ref || !sandbox.container_ref || !this.driver.updateSnapshot)
         throw new CrossoverError("UNAVAILABLE", "Sandbox working copy cannot be advanced");
+      if (this.activeCount(sandbox.id) > 0) return "process_running";
       await this.driver.updateSnapshot({
         sandbox_id: sandbox.id,
         resources: { volume_ref: sandbox.volume_ref, container_ref: sandbox.container_ref },
@@ -245,6 +379,7 @@ export class ExecutionService {
           "CONFLICT_VERSION",
           "Sandbox base changed while it was being advanced",
         );
+      return "advanced";
     });
   }
 
@@ -481,6 +616,7 @@ export class ExecutionService {
   async close(): Promise<void> {
     if (this.sweepTimer) clearInterval(this.sweepTimer);
     this.sweepTimer = undefined;
+    await this.cancelAllExecs("sandbox_stopped");
   }
 
   private async getOrCreate(roomId: string, participantId: string): Promise<SandboxRow> {
@@ -618,56 +754,59 @@ export class ExecutionService {
     participantId: string,
     idleAtOrBefore?: Date,
   ): Promise<boolean> {
-    const sandbox = await withTransaction(this.pool, async (client) => {
-      const { rows } = await client.query<SandboxRow>(
-        `SELECT id, room_id, participant_id, status, limits, base_revision, volume_ref, container_ref,
+    return this.withEnsureLock(roomId, participantId, async () => {
+      const sandbox = await withTransaction(this.pool, async (client) => {
+        const { rows } = await client.query<SandboxRow>(
+          `SELECT id, room_id, participant_id, status, limits, base_revision, volume_ref, container_ref,
                 last_active_at, updated_at
          FROM sandboxes WHERE room_id = $1 AND participant_id = $2 FOR UPDATE`,
-        [roomId, participantId],
-      );
-      const current = rows[0];
-      if (!current || current.status !== "RUNNING") return null;
-      if (idleAtOrBefore && current.last_active_at > idleAtOrBefore) return null;
-      const { rows: claimed } = await client.query<SandboxRow>(
-        `UPDATE sandboxes SET status = 'HIBERNATING', updated_at = clock_timestamp()
+          [roomId, participantId],
+        );
+        const current = rows[0];
+        if (!current || current.status !== "RUNNING") return null;
+        if (idleAtOrBefore && current.last_active_at > idleAtOrBefore) return null;
+        const { rows: claimed } = await client.query<SandboxRow>(
+          `UPDATE sandboxes SET status = 'HIBERNATING', updated_at = clock_timestamp()
          WHERE id = $1 AND room_id = $2 AND status = 'RUNNING'
          RETURNING id, room_id, participant_id, status, limits, base_revision, volume_ref, container_ref,
                    last_active_at, updated_at`,
-        [current.id, roomId],
-      );
-      return claimed[0] ?? null;
-    });
-    if (!sandbox) return false;
-
-    const resources = this.resources(sandbox);
-    try {
-      await this.driver.stop({ sandbox_id: sandbox.id, resources });
-      const rowCount = await withTransaction(this.pool, async (client) => {
-        const result = await client.query(
-          `UPDATE sandboxes SET status = 'HIBERNATED', updated_at = clock_timestamp()
-           WHERE id = $1 AND room_id = $2 AND status = 'HIBERNATING'`,
-          [sandbox.id, roomId],
+          [current.id, roomId],
         );
-        return result.rowCount;
+        return claimed[0] ?? null;
       });
-      return rowCount === 1;
-    } catch (error) {
-      // Keep future ensures able to heal a container that stopped before this write failed.
-      await withTransaction(this.pool, async (client) =>
-        client.query(
-          `UPDATE sandboxes SET status = 'RUNNING', updated_at = clock_timestamp()
+      if (!sandbox) return false;
+
+      const resources = this.resources(sandbox);
+      try {
+        await this.cancelSandboxExecs(sandbox.id, "sandbox_stopped");
+        await this.driver.stop({ sandbox_id: sandbox.id, resources });
+        const rowCount = await withTransaction(this.pool, async (client) => {
+          const result = await client.query(
+            `UPDATE sandboxes SET status = 'HIBERNATED', updated_at = clock_timestamp()
            WHERE id = $1 AND room_id = $2 AND status = 'HIBERNATING'`,
-          [sandbox.id, roomId],
-        ),
-      ).catch((recoveryError: unknown) =>
-        console.error("[execution] failed to recover interrupted hibernation", recoveryError),
-      );
-      throw error;
-    }
+            [sandbox.id, roomId],
+          );
+          return result.rowCount;
+        });
+        return rowCount === 1;
+      } catch (error) {
+        // Keep future ensures able to heal a container that stopped before this write failed.
+        await withTransaction(this.pool, async (client) =>
+          client.query(
+            `UPDATE sandboxes SET status = 'RUNNING', updated_at = clock_timestamp()
+           WHERE id = $1 AND room_id = $2 AND status = 'HIBERNATING'`,
+            [sandbox.id, roomId],
+          ),
+        ).catch((recoveryError: unknown) =>
+          console.error("[execution] failed to recover interrupted hibernation", recoveryError),
+        );
+        throw error;
+      }
+    });
   }
 
   private async destroyOne(roomId: string, participantId: string): Promise<boolean> {
-    const sandbox = await withTransaction(this.pool, async (client) => {
+    const claim = await withTransaction(this.pool, async (client) => {
       const { rows } = await client.query<SandboxRow>(
         `SELECT id, room_id, participant_id, status, limits, base_revision, volume_ref, container_ref,
                 last_active_at, updated_at
@@ -683,25 +822,48 @@ export class ExecutionService {
                    last_active_at, updated_at`,
         [current.id, roomId],
       );
-      return claimed[0] ?? null;
+      return claimed[0]
+        ? { sandbox: normalizeSandbox(claimed[0]), previousStatus: current.status }
+        : null;
     });
-    if (!sandbox) return false;
+    if (!claim) return false;
 
-    await this.driver.destroy({
-      sandbox_id: sandbox.id,
-      ...(sandbox.volume_ref && sandbox.container_ref
-        ? { resources: this.resources(sandbox) }
-        : {}),
-    });
-    await withTransaction(this.pool, async (client) =>
-      client.query(
-        `UPDATE sandboxes SET status = 'DESTROYED', volume_ref = NULL, container_ref = NULL,
+    const destroy = async (): Promise<boolean> => {
+      const sandbox = claim.sandbox;
+      await this.cancelSandboxExecs(sandbox.id, "sandbox_stopped");
+      await this.driver.destroy({
+        sandbox_id: sandbox.id,
+        ...(sandbox.volume_ref && sandbox.container_ref
+          ? { resources: this.resources(sandbox) }
+          : {}),
+      });
+      await withTransaction(this.pool, async (client) =>
+        client.query(
+          `UPDATE sandboxes SET status = 'DESTROYED', volume_ref = NULL, container_ref = NULL,
                               updated_at = clock_timestamp()
          WHERE id = $1 AND room_id = $2 AND status = 'DESTROYING'`,
-        [sandbox.id, roomId],
-      ),
-    );
-    return true;
+          [sandbox.id, roomId],
+        ),
+      );
+      return true;
+    };
+
+    // A create/start transition has not returned a usable sandbox to an exec caller yet. Let
+    // cleanup win immediately; the in-flight ensure observes DESTROYING and adopts this cleanup.
+    // For a RUNNING sandbox, take the lock after fencing it so an exec or advance that already
+    // holds the lock finishes before its process group and volume are destroyed.
+    if (claim.previousStatus === "CREATING" || claim.previousStatus === "STARTING")
+      return destroy();
+    return this.withEnsureLock(roomId, participantId, destroy);
+  }
+
+  private async cancelSandboxExecs(
+    sandboxId: string,
+    reason: SandboxExecTermination,
+  ): Promise<void> {
+    const active = [...this.activeExecs.values()].filter((run) => run.sandbox_id === sandboxId);
+    await Promise.all(active.map((run) => run.process.cancel(reason).catch(() => undefined)));
+    await Promise.all(active.map((run) => run.process.finished.catch(() => undefined)));
   }
 
   private resources(sandbox: SandboxRow): SandboxResources {
