@@ -570,6 +570,7 @@ export class DockerExecutionDriver implements ExecutionDriver {
         mismatches = await verifiedPrunedDirectories(payload.pruned_directories);
         if (mismatches.length) throw new Error(`pruning_mismatch:${mismatches[0]}`);
       } catch (cause) {
+        if (cause instanceof CrossoverError && cause.retryable) throw cause;
         throw snapshotPruningRetryFailed(path, cause);
       }
     }
