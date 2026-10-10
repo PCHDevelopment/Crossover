@@ -339,6 +339,57 @@ describe("egress visibility conformance (§34.5)", () => {
     expect((await list(f.owner))[0]!.paths).toEqual([SECRET]);
   });
 
+  it("sandbox event paths and intents are redacted for a scoped bystander", async () => {
+    const f = await fixture();
+    await server.dispatcher.runSystem(f.roomId, "egress.sandbox_visibility", async () => ({
+      result: undefined,
+      events: [
+        {
+          type: "sandbox.behind" as const,
+          actor_id: "system",
+          payload: {
+            participant_id: f.a.id,
+            changed_paths: [SECRET],
+            intents: [
+              {
+                participant_id: f.a.id,
+                paths: [SECRET],
+                ranges: [{ path: SECRET, start_line: 1, end_line: 1 }],
+              },
+            ],
+          },
+        },
+        {
+          type: "sandbox.synced" as const,
+          actor_id: "system",
+          payload: { participant_id: f.a.id, conflicted_paths: [SECRET] },
+        },
+      ],
+    }));
+
+    const list = async (token: string) =>
+      (
+        await ok(
+          await f.command(token, "room.events.list", {
+            types: ["sandbox.behind", "sandbox.synced"],
+          }),
+        )
+      ).response.events as {
+        type: string;
+        payload: Record<string, unknown>;
+      }[];
+    const asB = await list(f.b.token);
+    expect(JSON.stringify(asB)).not.toContain(SECRET);
+    expect(asB).toHaveLength(2);
+    expect(asB[0]?.payload).toMatchObject({ participant_id: f.a.id, paths_redacted: true });
+    expect(asB[0]?.payload).not.toHaveProperty("intents");
+    expect(asB[0]?.payload).not.toHaveProperty("changed_paths");
+    expect(asB[1]?.payload).not.toHaveProperty("conflicted_paths");
+
+    const asOwner = await list(f.owner);
+    expect(JSON.stringify(asOwner)).toContain(SECRET);
+  });
+
   it("every MCP read tool: B never receives it, and each tool is a registered read command", async () => {
     const f = await fixture();
     const byMethod = new Map(server.dispatcher.commandInfo().map((c) => [c.method, c]));
