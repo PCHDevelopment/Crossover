@@ -1,0 +1,9 @@
+{
+  "name": "crossover-aws-plugin",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@aws-sdk/client-cloudwatch-logs": "3.1149.0",
+    "@aws-sdk/client-lambda": "3.1149.0"
+  }
+}

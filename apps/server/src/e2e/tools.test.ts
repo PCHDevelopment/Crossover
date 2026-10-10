@@ -289,17 +289,29 @@ describe("tools over HTTP", () => {
     expect(content.response.provenance).toMatchObject({ trust: "external" });
   });
 
-  it("tier 3 needs the owner's time-limited grant, and nothing in a role bundle gives it", async () => {
+  it("staging deploys are Tier 2; production requires an owner grant and records the denial", async () => {
     const r = await newRoom();
     const denied = await r.invoke("aws.deploy_lambda", { function: "staging-api" });
     expect(denied.statusCode).toBe(403);
-    const noExpiry = await r.grant("aws.deploy_lambda:staging-*");
-    expect(noExpiry.statusCode).toBe(400);
-    await ok(await r.grant("aws.deploy_lambda:staging-*", { expires_at: tomorrow() }));
+    const stagingGrant = await r.grant("aws.deploy_lambda:staging-*");
+    const stagingGrantResult = await ok(stagingGrant);
+    expect(stagingGrantResult.response.tier).toBe(2);
     await ok(await r.invoke("aws.deploy_lambda", { function: "staging-api" }));
+    expect((await r.events("tool.invoked")).at(-1)!.payload).toMatchObject({
+      capability: "aws.deploy_lambda:staging-api",
+      tier: 2,
+    });
     const prod = await r.invoke("aws.deploy_lambda", { function: "prod-api" });
     expect(prod.statusCode).toBe(403);
-    expect((await r.events("tool.invoked")).at(-1)!.payload).toMatchObject({ tier: 3 });
+    expect((await r.events("capability.denied")).at(-1)!.payload).toMatchObject({
+      missing_capability: "aws.deploy_lambda:prod-api",
+    });
+    await ok(await r.grant("aws.deploy_lambda:prod-*", { expires_at: tomorrow() }));
+    await ok(await r.invoke("aws.deploy_lambda", { function: "prod-api" }));
+    expect((await r.events("tool.invoked")).at(-1)!.payload).toMatchObject({
+      capability: "aws.deploy_lambda:prod-api",
+      tier: 3,
+    });
   });
 
   it("a provider outage is a retryable PROVIDER_UNAVAILABLE, the platform doesn't retry, and nothing a runner throws by accident leaks", async () => {
