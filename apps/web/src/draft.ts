@@ -112,14 +112,17 @@ export function applyIncoming(
   }
   const merged = merge3(draft.base, draft.text, content);
   if (!merged.clean) return { draft: { ...draft, conflicted: true }, outcome: "conflict" };
+  const next: Draft = {
+    ...draft,
+    base: content,
+    baseRevision: revision,
+    text: merged.text,
+    conflicted: false,
+  };
+  // Nothing of ours left (the change was our own flush, back before its response): a clean
+  // draft, and its edit times go with it.
   return {
-    draft: {
-      ...draft,
-      base: content,
-      baseRevision: revision,
-      text: merged.text,
-      conflicted: false,
-    },
+    draft: isDirty(next) ? next : { ...openDraft(next.path, revision, content), conflicted: false },
     outcome: "rebased",
   };
 }

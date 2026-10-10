@@ -84,6 +84,16 @@ describe("incoming changes to an open file (§13.3)", () => {
     expect(isDirty(r.draft)).toBe(true); // our line is still ours to flush
   });
 
+  it("our own flush coming back before its response leaves a clean draft, with no stale edit times", () => {
+    const d = edit(openDraft("a.ts", 1, "a\n"), "a\nb\n", 1_000);
+    const r = applyIncoming(d, "a\nb\n", 2);
+    expect(r.outcome).toBe("rebased");
+    expect(isDirty(r.draft)).toBe(false);
+    expect(r.draft.firstEditAt).toBeUndefined();
+    // The next keystroke starts a fresh 10 s window, not one from the earlier edits.
+    expect(flushDue(edit(r.draft, "a\nb\nc\n", 20_000), 20_000)).toBe(false);
+  });
+
   it("a dirty buffer that overlaps is kept as is and marked conflicted", () => {
     const d = edit(openDraft("a.ts", 1, "a\nb\nc\n"), "a\nmine\nc\n", 0);
     const r = applyIncoming(d, "a\ntheirs\nc\n", 2);
