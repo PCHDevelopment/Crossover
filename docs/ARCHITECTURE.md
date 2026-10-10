@@ -696,7 +696,7 @@ When `workspace.changeset.applied` touches a file open in the editor:
 
 ## 13.4 Live presence
 
-- Human cursors, selections and open files are broadcast through the presence channel (Redis, ephemeral, never in the ledger).
+- Human cursors, selections and open files are broadcast through the presence channel (Redis, ephemeral, never in the ledger). `presence.update { status?: active | idle, open_files?: path[] (at most 20), cursor?: { path, line, column, selection? } | null }` replaces the caller's record, which lives 45 s; clients re-send it every 15 s. The cursor's path is one of `open_files`; positions are 1-based; more than 20 updates a second from one participant is `RATE_LIMITED`. Each update is also published on the room's presence channel, apart from its event channel. `presence.list` returns every record as the reader may see it: open files they can't read are left out, and so is a cursor on one; the status always shows (§34.5). Over the WebSocket the same records are a snapshot and live updates (T1105b-2).
 - Agent edit intents (§11.4) render as highlighted regions in the editor. Each participant has at most one room-scoped intent: `{ paths, ranges?, task_id? }`; ranges are `{ path, start_line, end_line }` with 1-based inclusive line numbers. Set replaces the intent and refreshes its 45-second Redis TTL; clear deletes it. `presence.list_intents` returns active intents with participant ID and expiry. Intents are never written to the event ledger.
 
 ---
@@ -881,6 +881,7 @@ PARTICIPANTS & PRESENCE
   presence.set_intent      paths, ranges?, task_id?
   presence.clear_intent
   presence.list_intents
+  presence.list            everyone's status, open files and cursor, as the reader may see them
 
 CAPABILITIES
   capabilities.list        participant_id
