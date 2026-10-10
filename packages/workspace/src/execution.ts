@@ -1,7 +1,10 @@
 import type { Pool } from "@crossover/db";
 import { withTransaction } from "@crossover/db";
 import { CrossoverError, newId } from "@crossover/protocol";
-import type { SandboxFileChanges } from "./sandbox-status.js";
+import { ignoredWorkspacePaths } from "./ignore.js";
+import { git } from "./git.js";
+import { normalizePath } from "./path.js";
+import { createSandboxFileChangesAccumulator, type SandboxFileChanges } from "./sandbox-status.js";
 
 const SANDBOX_IDLE_MS = 30 * 60 * 1000;
 const SWEEP_INTERVAL_MS = 60 * 1000;
@@ -150,6 +153,12 @@ export interface ExecutionServiceOptions {
   diskEnforcement?: DiskEnforcementMode;
   /** Test seam for a failure after Docker resources exist but before their refs are persisted. */
   afterDriverCreate?: (sandbox: SandboxRecord) => Promise<void>;
+  /** Canonical paths readable by the participant whose own status is being reported. */
+  readablePaths?: (
+    roomId: string,
+    participantId: string,
+    paths: readonly string[],
+  ) => Promise<string[]>;
 }
 
 let softEnforcementWarningLogged = false;
@@ -638,12 +647,10 @@ export class ExecutionService {
     let workspace: SandboxWorkspaceHead;
     let changes: SandboxFileChanges;
     try {
+      const base = await this.workspaceRevision(roomId, sandbox.base_revision);
       [workspace, changes] = await Promise.all([
         this.workspaceHead(roomId),
-        this.driver.status({
-          sandbox_id: sandbox.id,
-          resources: { volume_ref: sandbox.volume_ref, container_ref: sandbox.container_ref },
-        }),
+        this.snapshotChanges(sandbox, base.repo_path, base.commit_sha),
       ]);
     } catch (cause) {
       if (cause instanceof CrossoverError) throw cause;
@@ -661,6 +668,71 @@ export class ExecutionService {
       behind_by: Math.max(0, workspace.revision - sandbox.base_revision),
       ...changes,
     };
+  }
+
+  private async workspaceRevision(
+    roomId: string,
+    revision: number,
+  ): Promise<{ repo_path: string; commit_sha: string }> {
+    const { rows } = await this.pool.query<{ repo_path: string; commit_sha: string }>(
+      `SELECT w.repo_path, wr.commit_sha
+       FROM workspaces w
+       JOIN workspace_revisions wr ON wr.workspace_id = w.id AND wr.room_id = w.room_id
+       WHERE w.room_id = $1 AND wr.revision = $2`,
+      [roomId, revision],
+    );
+    if (!rows[0])
+      throw new CrossoverError("CONFLICT_VERSION", "Sandbox base revision is unavailable");
+    return rows[0];
+  }
+
+  private async snapshotChanges(
+    sandbox: SandboxRecord,
+    repoPath: string,
+    baseCommit: string,
+  ): Promise<SandboxFileChanges> {
+    if (!this.driver.snapshotInventory)
+      throw new CrossoverError("UNAVAILABLE", "Sandbox snapshot is not supported by this driver");
+    const fullBase = await readWorkspaceTree(repoPath, baseCommit);
+    const visiblePaths = this.options.readablePaths
+      ? await this.options.readablePaths(sandbox.room_id, sandbox.participant_id, [
+          ...fullBase.keys(),
+        ])
+      : [...fullBase.keys()];
+    const visible = new Set(visiblePaths);
+    const base = new Map([...fullBase].filter(([path]) => visible.has(path)));
+    const ignoreRules = await readWorkspaceIgnoreRules(repoPath, fullBase);
+    const objectFormat = (
+      await git(["rev-parse", "--show-object-format"], { gitDir: repoPath, timeoutMs: 10_000 })
+    ).stdout.trim();
+    if (objectFormat !== "sha1" && objectFormat !== "sha256")
+      throw new CrossoverError("UNAVAILABLE", "Workspace Git object format is unsupported");
+    const inventory = await this.snapshotInventory(
+      sandbox,
+      [...base.keys()],
+      objectFormat,
+      ignoreRules,
+    );
+    const addedPaths = inventory.filter((entry) => !base.has(entry.path)).map(({ path }) => path);
+    const ignored = await ignoredWorkspacePaths(repoPath, base, addedPaths);
+    const current = new Map(inventory.map((entry) => [entry.path, entry]));
+    const changes = createSandboxFileChangesAccumulator();
+    let stopped = false;
+    for (const [path, previous] of base) {
+      if (previous.mode === "160000") continue;
+      const entry = current.get(path);
+      if (!entry) stopped = !changes.add("deleted", path);
+      else if (entry.sha !== previous.sha || entry.mode !== previous.mode)
+        stopped = !changes.add("modified", path);
+      if (stopped) break;
+    }
+    if (!stopped) {
+      for (const { path } of inventory) {
+        if (base.has(path) || ignored.has(path)) continue;
+        if (!changes.add("added", path)) break;
+      }
+    }
+    return changes.finish();
   }
 
   /** Hibernate idle sandboxes; the container stops while its Docker volume is retained. */
@@ -1012,6 +1084,54 @@ function normalizeSandbox(sandbox: SandboxRow): SandboxRecord {
     ...sandbox,
     base_revision: sandbox.base_revision === null ? null : Number(sandbox.base_revision),
   };
+}
+
+type WorkspaceTreeEntry = { mode: string; sha: string };
+
+async function readWorkspaceTree(
+  repoPath: string,
+  commit: string,
+): Promise<Map<string, WorkspaceTreeEntry>> {
+  const { stdout } = await git(["ls-tree", "-r", "-z", "--full-tree", commit], {
+    gitDir: repoPath,
+    timeoutMs: 60_000,
+    maxBuffer: 128 * 1024 * 1024,
+  });
+  const entries = new Map<string, WorkspaceTreeEntry>();
+  for (const record of stdout.split("\0")) {
+    if (!record) continue;
+    const tab = record.indexOf("\t");
+    const [mode, type, sha] = record.slice(0, tab).split(" ");
+    const rawPath = record.slice(tab + 1);
+    if (!mode || (type !== "blob" && type !== "commit") || !sha || !rawPath)
+      throw new CrossoverError("UNAVAILABLE", "Workspace tree is malformed");
+    const path = normalizePath(rawPath);
+    if (path !== rawPath)
+      throw new CrossoverError("VALIDATION", "Workspace contains a non-canonical path");
+    entries.set(path, { mode, sha });
+  }
+  return entries;
+}
+
+async function readWorkspaceIgnoreRules(
+  repoPath: string,
+  entries: ReadonlyMap<string, WorkspaceTreeEntry>,
+): Promise<{ path: string; patterns: string[] }[]> {
+  const rules: { path: string; patterns: string[] }[] = [];
+  for (const [path, entry] of entries) {
+    if (
+      (entry.mode !== "100644" && entry.mode !== "100755") ||
+      (path !== ".roomignore" && path !== ".gitignore" && !path.endsWith("/.gitignore"))
+    )
+      continue;
+    const { stdout } = await git(["cat-file", "blob", entry.sha], {
+      gitDir: repoPath,
+      timeoutMs: 10_000,
+      encoding: "buffer",
+    });
+    rules.push({ path, patterns: stdout.toString("utf8").split(/\r?\n/) });
+  }
+  return rules;
 }
 
 function delay(ms: number): Promise<void> {

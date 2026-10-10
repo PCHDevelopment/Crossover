@@ -19,14 +19,17 @@ import type {
   SandboxSnapshotEntry,
   SandboxSnapshotFile,
 } from "./execution.js";
-import { createPorcelainStatusAccumulator, type SandboxFileChanges } from "./sandbox-status.js";
+import {
+  createPorcelainStatusAccumulator,
+  MAX_STATUS_OUTPUT_BYTES,
+  type SandboxFileChanges,
+} from "./sandbox-status.js";
 import { SANDBOX_SNAPSHOT_HELPER } from "./sandbox-snapshot-helper.js";
 
 const DEFAULT_IMAGE = "node:22-bookworm-slim";
 const DEFAULT_GIT_FETCHER_IMAGE = "crossover-git-fetcher:latest";
 const GIT_NETWORK = "crossover-git";
 const FETCH_TIMEOUT_MS = 4 * 60 * 1000;
-const MAX_STATUS_OUTPUT_BYTES = 16 * 1024 * 1024;
 const MAX_SNAPSHOT_OUTPUT_BYTES = 96 * 1024 * 1024;
 
 export interface DockerInvocationOptions {
