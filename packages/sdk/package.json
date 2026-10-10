@@ -10,7 +10,8 @@
     }
   },
   "scripts": {
-    "build": "tsc -b"
+    "build": "tsc -b",
+    "gen:python": "tsc -b && node dist/python-catalog-cli.js"
   },
   "dependencies": {
     "@crossover/protocol": "workspace:*"

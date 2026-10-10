@@ -281,6 +281,7 @@ export function registerTaskCommands(dispatcher: Dispatcher): void {
               task_id: task.id,
               from_version: task.version,
               version: updated.version,
+              owner_id: updated.owner_id,
               changes,
             },
           },

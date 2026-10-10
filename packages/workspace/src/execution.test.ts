@@ -32,6 +32,7 @@ class FakeExecutionDriver implements ExecutionDriver {
   readonly running = new Set<string>();
   readonly statusCalls: string[] = [];
   readonly execCancellations: SandboxExecTermination[] = [];
+  readonly execStarted: string[] = [];
   changes = {
     modified: [] as string[],
     added: [] as string[],
@@ -96,7 +97,8 @@ class FakeExecutionDriver implements ExecutionDriver {
     return this.changes;
   }
 
-  async exec(): Promise<SandboxExecProcess> {
+  async exec(input: { exec_id: string }): Promise<SandboxExecProcess> {
+    this.execStarted.push(input.exec_id);
     let finish!: (outcome: SandboxExecOutcome) => void;
     const finished = new Promise<SandboxExecOutcome>((resolve) => (finish = resolve));
     return {
@@ -193,6 +195,36 @@ async function makeParticipants(count = 1, kind: "HUMAN" | "AGENT" = "AGENT") {
 }
 
 describe("ExecutionService", () => {
+  it("cancels a pending reservation without launching its driver process", async () => {
+    const { roomId, participantIds } = await makeParticipants(1, "AGENT");
+    const participantId = participantIds[0]!;
+    const driver = new FakeExecutionDriver();
+    const execution = new ExecutionService(db.pool, driver);
+    const execId = newId("exec");
+    const cancelledBy = newId("part");
+    await execution.reserveExec(roomId, participantId, execId);
+
+    expect(
+      await execution.cancelExec(roomId, participantId, execId, "cancelled", cancelledBy),
+    ).toBe(true);
+    const process = await execution.startExec({
+      room_id: roomId,
+      participant_id: participantId,
+      exec_id: execId,
+      command: "sleep 5",
+      cwd: "/workspace",
+      timeoutMs: 60_000,
+      onOutput: async () => {},
+    });
+
+    expect(driver.execStarted).toEqual([]);
+    expect(process.cancelled_by).toBe(cancelledBy);
+    await expect(process.finished).resolves.toMatchObject({
+      exit_code: null,
+      reason: "cancelled",
+    });
+  });
+
   it("materializes the canonical revision before starting and records the numeric base", async () => {
     const { roomId, participantIds } = await makeParticipants();
     const workspaceId = newId("ws");
@@ -395,10 +427,12 @@ describe("ExecutionService", () => {
     await execution.ensure(roomId, participantId);
     await execution.cancelParticipantExecs(roomId, participantId, "revoked");
     expect(driver.stopped).toHaveLength(1);
+    const execId = newId("exec");
+    await execution.reserveExec(roomId, participantId, execId);
     await execution.startExec({
       room_id: roomId,
       participant_id: participantId,
-      exec_id: newId("exec"),
+      exec_id: execId,
       command: "long-running agent task",
       cwd: "/workspace",
       timeoutMs: 60_000,

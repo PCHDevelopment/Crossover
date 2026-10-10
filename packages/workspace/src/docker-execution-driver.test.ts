@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -40,6 +40,46 @@ function expectMissing(container: string, path: string) {
 }
 
 describe("DockerExecutionDriver", () => {
+  it("passes command text on stdin, keeps it out of Docker argv, and reports output failures distinctly", async () => {
+    const root = await mkdtemp(join(tmpdir(), "crossover-docker-exec-stdin-"));
+    try {
+      const argsPath = join(root, "args");
+      const inputPath = join(root, "input");
+      const execId = newId("exec");
+      const command = "printf 'private argv text'";
+      const docker = join(root, "docker");
+      await writeFile(
+        docker,
+        `#!/bin/sh\nprintf '%s\\n' "$@" > '${argsPath}'\ncat > '${inputPath}'\nprintf 'CROSSOVER_EXEC_PGID:${execId}:123\\n' >&2\nprintf 'output'\n`,
+      );
+      await chmod(docker, 0o700);
+      const driver = new DockerExecutionDriver({ dockerBinary: docker });
+      const sandboxId = newId("sandbox");
+      const name = `crossover-sbx-${sandboxId.toLowerCase()}`;
+      const run = await driver.exec({
+        sandbox_id: sandboxId,
+        resources: { volume_ref: name, container_ref: name },
+        exec_id: execId,
+        command,
+        cwd: "/workspace",
+        timeoutMs: 10_000,
+        onOutput: async () => {
+          throw new Error("injected output callback failure");
+        },
+      });
+
+      await expect(run.finished).resolves.toMatchObject({
+        reason: "output_failed",
+        exit_code: null,
+      });
+      const args = await readFile(argsPath, "utf8");
+      expect(args).not.toContain(command);
+      expect(await readFile(inputPath, "utf8")).toBe(Buffer.from(command).toString("base64"));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("runs the fetcher on crossover-git with a short-lived token and hardening", async () => {
     const calls: Array<{ args: string[]; timeoutMs?: number; env?: NodeJS.ProcessEnv }> = [];
     const secret = "a sufficiently long internal Git signing secret";

@@ -1,5 +1,6 @@
-import { isMutatingMethod, newId, type MethodName } from "@crossover/protocol";
+import { CrossoverError, isMutatingMethod, newId, type MethodName } from "@crossover/protocol";
 import { makeApi, type Api, type CallOptions, type CommandResult } from "./api.js";
+import { TokenStore, type RoomTokens, type TokenOptions } from "./tokens.js";
 import { errorFromBody, postJson, type FetchLike, type RetryOptions } from "./http.js";
 import {
   RoomSocket,
@@ -27,12 +28,6 @@ export interface UserSession {
   user: { id: string; display_name: string };
   session_token: string;
   expires_at: string;
-}
-
-/** A participant's access to one room. */
-export interface RoomTokens {
-  access_token: string;
-  [key: string]: unknown;
 }
 
 /** What a room session says about the participant it is for, with its tokens. */
@@ -66,6 +61,8 @@ export interface UserRoomInfo {
 export class CrossoverClient {
   readonly options: Required<Pick<ClientOptions, "clientName" | "clientVersion">> & ClientOptions;
   private readonly fetchImpl: FetchLike;
+  /** Token stores by the refresh token they started from: one per login. */
+  private readonly stores = new Map<string, TokenStore>();
 
   constructor(options: ClientOptions) {
     this.options = {
@@ -153,9 +150,31 @@ export class CrossoverClient {
     return json as Record<string, unknown> & { tokens: RoomTokens };
   }
 
-  /** Work in a room with its access token. */
-  room(roomId: string, accessToken: string): RoomClient {
-    return new RoomClient(this, roomId, accessToken, this.fetchImpl);
+  /**
+   * Work in a room with its access token, or with the `tokens` that `join` / `roomSession`
+   * returned: then an expired access token is renewed with the refresh token (once, however many
+   * calls and subscriptions notice) and the request retried, and `onTokens` receives each new pair
+   * to persist (refresh tokens are single-use). `onTokens` runs after the new pair is held in
+   * memory: if it throws, the call that triggered the refresh fails with that error but the client
+   * keeps working with the new pair (so persist best-effort, and expect a restart to need a new
+   * login if you lost it). Rooms entered with the same refresh token share one token store, so two
+   * `room()` calls never refresh the same login twice (so the `onTokens` of the first call wins; later ones are ignored, and the store lives as long
+   * as the client).
+   */
+  room(roomId: string, tokens: string | RoomTokens, options: TokenOptions = {}): RoomClient {
+    const login = typeof tokens === "string" ? undefined : tokens.refresh_token;
+    let store = login ? this.stores.get(login) : undefined;
+    if (!store) {
+      store = new TokenStore(
+        tokens,
+        `${this.options.baseUrl}/v1/auth/refresh`,
+        this.fetchImpl,
+        this.options.retry,
+        options,
+      );
+      if (login) this.stores.set(login, store);
+    }
+    return new RoomClient(this, roomId, store, this.fetchImpl);
   }
 }
 
@@ -177,7 +196,7 @@ export class RoomClient {
   constructor(
     private readonly client: CrossoverClient,
     readonly roomId: string,
-    private readonly token: string,
+    private readonly tokens: TokenStore,
     private readonly fetchImpl: FetchLike,
   ) {
     this.api = makeApi((method, params, options) => this.call(method, params, options));
@@ -189,15 +208,26 @@ export class RoomClient {
     params: Record<string, unknown> = {},
     options: CallOptions = {},
   ): Promise<CommandResult<R>> {
-    const { json } = await postJson(
-      this.fetchImpl,
-      `${this.client.options.baseUrl}/v1/rooms/${encodeURIComponent(this.roomId)}/commands`,
-      this.token,
-      envelope(method, params, options),
-      this.client.options.retry,
-      options.signal,
-    );
-    return json as CommandResult<R>;
+    // One envelope, so a retry after renewing the token carries the same idempotency key.
+    const body = envelope(method, params, options);
+    const url = `${this.client.options.baseUrl}/v1/rooms/${encodeURIComponent(this.roomId)}/commands`;
+    for (let renewed = false; ; renewed = true) {
+      const token = this.tokens.access;
+      try {
+        const { json } = await postJson(
+          this.fetchImpl,
+          url,
+          token,
+          body,
+          this.client.options.retry,
+          options.signal,
+        );
+        return json as CommandResult<R>;
+      } catch (error) {
+        const expired = error instanceof CrossoverError && error.code === "UNAUTHENTICATED";
+        if (!expired || renewed || !(await this.tokens.refreshAfter(token))) throw error;
+      }
+    }
   }
 
   private wsConfig(): WsConfig {
@@ -207,7 +237,9 @@ export class RoomClient {
       throw new Error("No WebSocket available: pass `WebSocket` in the client options");
     return {
       url: `${o.baseUrl.replace(/^http/, "ws")}/v1/rooms/${encodeURIComponent(this.roomId)}/ws`,
-      token: this.token,
+      token: this.tokens.access,
+      getToken: () => this.tokens.access,
+      refresh: (failed) => this.tokens.refreshAfter(failed),
       WebSocket,
       client: o.clientName,
       clientVersion: o.clientVersion,
