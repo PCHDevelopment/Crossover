@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Pool } from "@crossover/db";
@@ -36,6 +37,11 @@ class FakeExecutionDriver implements ExecutionDriver {
   readonly running = new Set<string>();
   readonly statusCalls: string[] = [];
   snapshotEntries: { path: string; mode: string; sha: string | null; size: number }[] = [];
+  readonly snapshotUpdates: Array<{
+    files: readonly { path: string; mode: string; content: Buffer }[];
+    delete_paths: readonly string[];
+  }> = [];
+  private snapshotObjectFormat: "sha1" | "sha256" = "sha1";
   readonly execCancellations: SandboxExecTermination[] = [];
   readonly execStarted: string[] = [];
   changes = {
@@ -102,8 +108,31 @@ class FakeExecutionDriver implements ExecutionDriver {
     return this.changes;
   }
 
-  async snapshotInventory() {
+  async snapshotInventory(input: Parameters<NonNullable<ExecutionDriver["snapshotInventory"]>>[0]) {
+    this.snapshotObjectFormat = input.object_format;
     return this.snapshotEntries;
+  }
+
+  async updateSnapshot(input: Parameters<NonNullable<ExecutionDriver["updateSnapshot"]>>[0]) {
+    this.snapshotUpdates.push(input);
+    const removed = new Set(input.delete_paths);
+    const entries = this.snapshotEntries.filter(({ path }) => !removed.has(path));
+    for (const file of input.files) {
+      const sha = createHash(this.snapshotObjectFormat)
+        .update(`blob ${file.content.length}\0`)
+        .update(file.content)
+        .digest("hex");
+      const entry = {
+        path: file.path,
+        mode: file.mode,
+        sha,
+        size: file.content.length,
+      };
+      const index = entries.findIndex(({ path }) => path === file.path);
+      if (index === -1) entries.push(entry);
+      else entries[index] = entry;
+    }
+    this.snapshotEntries = entries;
   }
 
   async exec(input: { exec_id: string }): Promise<SandboxExecProcess> {
@@ -389,6 +418,125 @@ describe("ExecutionService", () => {
     }
   });
 
+  it("coalesces canonical advances and never reports or installs unreadable paths", async () => {
+    const { roomId, participantIds } = await makeParticipants();
+    const root = await mkdtemp(join(tmpdir(), "crossover-execution-advance-"));
+    try {
+      const checkoutPath = join(root, "checkout");
+      await mkdir(checkoutPath);
+      await git(["init", "--quiet", checkoutPath], { timeoutMs: 10_000 });
+      const repoPath = join(checkoutPath, ".git");
+      await writeFile(join(checkoutPath, "public.txt"), "base public\n");
+      await writeFile(join(checkoutPath, "secret.txt"), "base secret\n");
+      const commit = async (message: string) => {
+        await git(["add", "-A"], { cwd: checkoutPath, timeoutMs: 10_000 });
+        await git(
+          [
+            "-c",
+            "user.name=Sandbox Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            message,
+          ],
+          { cwd: checkoutPath, timeoutMs: 10_000 },
+        );
+        return (
+          await git(["rev-parse", "HEAD"], { gitDir: repoPath, timeoutMs: 10_000 })
+        ).stdout.trim();
+      };
+      const baseCommit = await commit("base");
+      const workspaceId = newId("ws");
+      await db.pool.query("INSERT INTO workspaces (id, room_id, repo_path) VALUES ($1, $2, $3)", [
+        workspaceId,
+        roomId,
+        repoPath,
+      ]);
+      await db.pool.query(
+        `INSERT INTO workspace_revisions (workspace_id, room_id, revision, commit_sha)
+         VALUES ($1, $2, 0, $3)`,
+        [workspaceId, roomId, baseCommit],
+      );
+      const driver = new MaterializingExecutionDriver();
+      const visible = async (_room: string, _participant: string, paths: readonly string[]) =>
+        paths.filter((path) => path !== "secret.txt");
+      const execution = new ExecutionService(db.pool, driver, { readablePaths: visible });
+      const sandbox = await execution.ensure(roomId, participantIds[0]!);
+      const basePublic = (
+        await git(["rev-parse", `${baseCommit}:public.txt`], {
+          gitDir: repoPath,
+          timeoutMs: 10_000,
+        })
+      ).stdout.trim();
+      driver.snapshotEntries = [
+        { path: "public.txt", mode: "100644", sha: basePublic, size: 12 },
+        { path: "secret.txt", mode: "100644", sha: "f".repeat(40), size: 17 },
+      ];
+      const execId = newId("exec");
+      await execution.reserveExec(roomId, participantIds[0]!, execId);
+      await execution.startExec({
+        room_id: roomId,
+        participant_id: participantIds[0]!,
+        exec_id: execId,
+        command: "long-running command",
+        cwd: "/workspace",
+        timeoutMs: 60_000,
+        onOutput: async () => {},
+      });
+
+      await writeFile(join(checkoutPath, "secret.txt"), "hidden canonical change\n");
+      const hiddenCommit = await commit("hidden change");
+      await writeFile(join(checkoutPath, "public.txt"), "visible canonical change\n");
+      const headCommit = await commit("visible change");
+      await db.pool.query(
+        `INSERT INTO workspace_revisions (workspace_id, room_id, revision, commit_sha)
+         VALUES ($1, $2, 1, $3), ($1, $2, 2, $4)`,
+        [workspaceId, roomId, hiddenCommit, headCommit],
+      );
+      const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+      execution.setSandboxEventSink(async (_roomId, emitted) => {
+        events.push(...emitted.map(({ type, payload }) => ({ type, payload })));
+      });
+      // A submit-specific skip for revision 1 must not suppress the coalesced revision 2.
+      execution.scheduleCanonicalAdvance(roomId, 1, participantIds[0]!);
+      execution.scheduleCanonicalAdvance(roomId, 2);
+
+      await vi.waitFor(() => {
+        expect(
+          events.some(
+            ({ type, payload }) =>
+              type === "sandbox.behind" && payload.reason === "process_running",
+          ),
+        ).toBe(true);
+      });
+      expect(driver.snapshotUpdates).toHaveLength(0);
+      expect(await execution.get(roomId, participantIds[0]!)).toMatchObject({ base_revision: 0 });
+
+      await execution.cancelExec(roomId, participantIds[0]!, execId);
+      await vi.waitFor(async () => {
+        expect((await execution.get(roomId, participantIds[0]!))?.base_revision).toBe(2);
+      });
+      await vi.waitFor(() => {
+        expect(events.some(({ type }) => type === "sandbox.synced")).toBe(true);
+      });
+      expect(driver.snapshotUpdates).toHaveLength(1);
+      expect(driver.snapshotUpdates[0]!.files.map(({ path }) => path)).toEqual(["public.txt"]);
+      expect(events.find(({ type }) => type === "sandbox.behind")?.payload).toMatchObject({
+        changed_paths: ["public.txt"],
+        overlaps_local_changes: false,
+      });
+      expect(JSON.stringify(events)).not.toContain("secret.txt");
+      expect(await execution.get(roomId, participantIds[0]!)).toMatchObject({
+        id: sandbox.id,
+        base_revision: 2,
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("bounds raw snapshot status at the shared entry limit", async () => {
     const { roomId, participantIds } = await makeParticipants();
     const root = await mkdtemp(join(tmpdir(), "crossover-execution-status-cap-"));
@@ -416,7 +564,10 @@ describe("ExecutionService", () => {
         await git(["rev-parse", "HEAD"], { gitDir: repoPath, timeoutMs: 10_000 })
       ).stdout.trim();
       const baseBlob = (
-        await git(["rev-parse", `${baseCommit}:base.txt`], { gitDir: repoPath, timeoutMs: 10_000 })
+        await git(["rev-parse", `${baseCommit}:base.txt`], {
+          gitDir: repoPath,
+          timeoutMs: 10_000,
+        })
       ).stdout.trim();
       const workspaceId = newId("ws");
       await db.pool.query("INSERT INTO workspaces (id, room_id, repo_path) VALUES ($1, $2, $3)", [

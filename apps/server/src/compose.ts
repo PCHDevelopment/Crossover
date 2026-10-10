@@ -265,6 +265,7 @@ export async function composeServer(
     executionService = new ExecutionService(pool, executionDriver, {
       diskEnforcement: config.sandboxDiskEnforcement ?? "soft",
       readablePaths: readableSandboxPaths,
+      listIntents: (roomId) => intentStore.list(roomId),
     });
     executionService.startSweeper();
 
@@ -276,6 +277,12 @@ export async function composeServer(
       budgets,
       onLeaseAcquire: (roomId) => reconcileRef(pool, roomId),
       ...(overrides.leaseTtlMs !== undefined ? { leaseTtlMs: overrides.leaseTtlMs } : {}),
+    });
+    executionService.setSandboxEventSink(async (roomId, events) => {
+      await dispatcher.runSystem(roomId, "sandbox.canonical_advance", async () => ({
+        result: undefined,
+        events: [...events],
+      }));
     });
     const healthRunner = new DockerHealthRunner({
       allowedImages: config.healthImages,
@@ -567,6 +574,8 @@ function registerCommands(
   // apply_changeset plus reads; schedule health for every committed revision.
   const workspaceDeps: WorkspaceCommandDeps = {
     scheduleHealthCheck: (roomId, revision) => healthQueue.enqueue(roomId, revision),
+    scheduleSandboxAdvance: (roomId, revision) =>
+      execution.scheduleCanonicalAdvance(roomId, revision),
     ...(upstream ? { upstream } : {}),
   };
   registerWorkspaceCommands(dispatcher, workspaceDeps);
