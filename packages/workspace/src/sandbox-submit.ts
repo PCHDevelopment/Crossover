@@ -105,7 +105,13 @@ export function registerSandboxSubmitCommand(
         void dispatcher
           .runSystem(ctx.room_id, "changes.submit.advance", async () => ({
             result: undefined,
-            events: [{ type, actor_id: "system", payload }],
+            events: [
+              {
+                type,
+                actor_id: "system",
+                payload: { participant_id: ctx.principal.participant_id, ...payload },
+              },
+            ],
           }))
           .catch((error: unknown) =>
             console.error("Failed to report sandbox submit advance", error),
@@ -134,6 +140,7 @@ export function registerSandboxSubmitCommand(
             return {
               type: "sandbox.behind",
               payload: {
+                participant_id: ctx.principal.participant_id,
                 behind_by: Math.max(0, applied.revision - prepared.base_revision),
                 changed_paths: visible,
                 overlaps_local_changes: true,

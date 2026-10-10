@@ -26,6 +26,19 @@ const base = (value: unknown): unknown =>
  * an authorization check (which would itself record a denial).
  */
 export function redactEventFor(viewer: EventViewer, event: RoomEvent): RoomEvent {
+  if (event.type.startsWith("sandbox.")) {
+    const payload = event.payload as Record<string, unknown>;
+    if (
+      !Object.hasOwn(payload, "changed_paths") ||
+      payload.participant_id === viewer.participant_id ||
+      seesDenials(viewer)
+    ) {
+      return event;
+    }
+    const { changed_paths: _changedPaths, ...rest } = payload;
+    void _changedPaths;
+    return { ...event, payload: { ...rest, paths_redacted: true } };
+  }
   if (event.type !== "capability.denied") return event;
   const payload = event.payload as Record<string, unknown>;
   if (
