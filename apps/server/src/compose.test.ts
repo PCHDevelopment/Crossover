@@ -5,7 +5,13 @@ import { createHash } from "node:crypto";
 import { createTestDatabase, type TestDatabase } from "@crossover/db/testing";
 import type { Authorizer, EventPublisher } from "@crossover/kernel";
 import { CrossoverError, newId, type RoomEvent } from "@crossover/protocol";
-import { git, type ExecutionDriver, type SandboxLimits } from "@crossover/workspace";
+import {
+  git,
+  type ExecutionDriver,
+  type SandboxExecOutcome,
+  type SandboxExecProcess,
+  type SandboxLimits,
+} from "@crossover/workspace";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { composeServer, type ComposeOverrides, type CrossoverServer } from "./compose.js";
 import { loadConfig, type ServerConfig } from "./config.js";
@@ -39,6 +45,7 @@ class RecordingExecutionDriver implements ExecutionDriver {
   readonly working = new Map<string, Map<string, { mode: string; content: Buffer }>>();
   readonly snapshotRules = new Map<string, { path: string; patterns: string[] }[]>();
   failSnapshotUpdate = false;
+  finishExec: ((outcome: SandboxExecOutcome) => void) | undefined;
 
   async create({ sandbox_id }: { sandbox_id: string; limits: SandboxLimits }) {
     this.working.set(sandbox_id, this.working.get(sandbox_id) ?? new Map());
@@ -95,6 +102,15 @@ class RecordingExecutionDriver implements ExecutionDriver {
     for (const file of input.files)
       files.set(file.path, { mode: file.mode, content: Buffer.from(file.content) });
     this.working.set(input.sandbox_id, files);
+  }
+  async exec(): Promise<SandboxExecProcess> {
+    let finish!: (outcome: SandboxExecOutcome) => void;
+    const finished = new Promise<SandboxExecOutcome>((resolve) => (finish = resolve));
+    this.finishExec = finish;
+    return {
+      finished,
+      cancel: async (reason) => finish({ exit_code: null, duration_ms: 1, reason }),
+    };
   }
   async start(_input: { sandbox_id: string }): Promise<void> {}
   async stop(input: { sandbox_id: string }): Promise<void> {
@@ -400,6 +416,45 @@ describe("composeServer", () => {
     });
     const status = await ok(await cmd(envelope("sandbox.status"), owner.tokens.access_token));
     expect(status.response).toMatchObject({ base_revision: 0, head_revision: 1, behind_by: 1 });
+  });
+
+  it("reports process_running instead of claiming a blocked submit advance synced", async () => {
+    const driver = new RecordingExecutionDriver();
+    const { server, publisher } = await start({}, new RecordingPublisher(), {
+      executionDriver: driver,
+    });
+    const { roomId, owner, cmd } = await walkthrough(server.app, false);
+    const participantId = await ownerParticipantId(roomId);
+    const sandbox = await server.execution.ensure(roomId, participantId);
+    await ok(
+      await cmd(
+        envelope("sandbox.exec", { command: "long running command" }),
+        owner.tokens.access_token,
+      ),
+    );
+    await server.dispatcher.actors.get(roomId).idle();
+    expect(driver.finishExec).toBeDefined();
+
+    driver.working.get(sandbox.id)!.set("submitted.txt", {
+      mode: "100644",
+      content: Buffer.from("submit while running"),
+    });
+    await ok(
+      await cmd(
+        envelope("changes.submit", { message: "Submit during a process" }),
+        owner.tokens.access_token,
+      ),
+    );
+    await server.dispatcher.actors.get(roomId).idle();
+    expect(publisher.events.filter((event) => event.type === "sandbox.synced")).toHaveLength(0);
+    expect(publisher.events.find((event) => event.type === "sandbox.behind")).toMatchObject({
+      actor_id: "system",
+      payload: { participant_id: participantId, reason: "process_running" },
+    });
+    expect(await server.execution.get(roomId, participantId)).toMatchObject({ base_revision: 0 });
+
+    driver.finishExec!({ exit_code: 0, duration_ms: 1, reason: "exit" });
+    await server.dispatcher.actors.get(roomId).idle();
   });
 
   it("rejects unmatched filters and selects exact files or directory prefixes only", async () => {

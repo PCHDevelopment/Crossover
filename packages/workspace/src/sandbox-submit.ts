@@ -122,7 +122,7 @@ export function registerSandboxSubmitCommand(
             (operation) => !prepared.submitted_paths.has(operation.path),
           );
           const rebasedTree = await planRebase(prepared, applied.applied_commit, localOperations);
-          const behindEvent = async (): Promise<EmittedEvent> => {
+          const behindEvent = async (reason?: string): Promise<EmittedEvent> => {
             const changedPaths = await changedTreePaths(
               prepared.object_repo,
               prepared.base_commit,
@@ -145,6 +145,7 @@ export function registerSandboxSubmitCommand(
                 changed_paths: visible,
                 overlaps_local_changes: true,
                 intents: [],
+                ...(reason ? { reason } : {}),
               },
             };
           };
@@ -169,7 +170,14 @@ export function registerSandboxSubmitCommand(
                   delta.delete_paths,
                 )
                 .then(
-                  () => reportAdvanceEvent("sandbox.synced", { base_revision: applied.revision }),
+                  async (result) => {
+                    if (result === "advanced") {
+                      reportAdvanceEvent("sandbox.synced", { base_revision: applied.revision });
+                      return;
+                    }
+                    const behind = await behindEvent("process_running");
+                    reportAdvanceEvent("sandbox.behind", behind.payload ?? {});
+                  },
                   (error: unknown) => {
                     console.error("Sandbox submit applied, but working copy advance failed", error);
                     reportAdvanceEvent("sandbox.behind", {

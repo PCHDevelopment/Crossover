@@ -1,7 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Pool } from "@crossover/db";
 import { createTestDatabase, type TestDatabase } from "@crossover/db/testing";
 import { newId } from "@crossover/protocol";
+import { git } from "./git.js";
 import {
   ExecutionService,
   type ExecutionDriver,
@@ -31,6 +35,7 @@ class FakeExecutionDriver implements ExecutionDriver {
   readonly provisioned = new Map<string, SandboxResources>();
   readonly running = new Set<string>();
   readonly statusCalls: string[] = [];
+  snapshotEntries: { path: string; mode: string; sha: string | null; size: number }[] = [];
   readonly execCancellations: SandboxExecTermination[] = [];
   readonly execStarted: string[] = [];
   changes = {
@@ -95,6 +100,10 @@ class FakeExecutionDriver implements ExecutionDriver {
   async status(input: { sandbox_id: string; resources: SandboxResources }) {
     this.statusCalls.push(input.sandbox_id);
     return this.changes;
+  }
+
+  async snapshotInventory() {
+    return this.snapshotEntries;
   }
 
   async exec(input: { exec_id: string }): Promise<SandboxExecProcess> {
@@ -264,42 +273,116 @@ describe("ExecutionService", () => {
 
   it("reports the canonical base and head with local working-copy changes", async () => {
     const { roomId, participantIds } = await makeParticipants();
-    const workspaceId = newId("ws");
-    await db.pool.query("INSERT INTO workspaces (id, room_id, repo_path) VALUES ($1, $2, $3)", [
-      workspaceId,
-      roomId,
-      `/workspace/${roomId}.git`,
-    ]);
-    await db.pool.query(
-      `INSERT INTO workspace_revisions (workspace_id, room_id, revision, commit_sha)
+    const root = await mkdtemp(join(tmpdir(), "crossover-execution-status-"));
+    try {
+      const checkoutPath = join(root, "checkout");
+      await mkdir(checkoutPath);
+      await git(["init", "--quiet", checkoutPath], { timeoutMs: 10_000 });
+      const repoPath = join(checkoutPath, ".git");
+      await mkdir(join(checkoutPath, "src"));
+      await writeFile(join(checkoutPath, "src/changed.ts"), "base\n");
+      await writeFile(join(checkoutPath, "old.txt"), "old\n");
+      const commit = async (message: string) => {
+        await git(["add", "-A"], { cwd: checkoutPath, timeoutMs: 10_000 });
+        await git(
+          [
+            "-c",
+            "user.name=Sandbox Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            message,
+          ],
+          { cwd: checkoutPath, timeoutMs: 10_000 },
+        );
+        return (
+          await git(["rev-parse", "HEAD"], { gitDir: repoPath, timeoutMs: 10_000 })
+        ).stdout.trim();
+      };
+      const baseCommit = await commit("base");
+      const baseBlob = (
+        await git(["rev-parse", `${baseCommit}:src/changed.ts`], {
+          gitDir: repoPath,
+          timeoutMs: 10_000,
+        })
+      ).stdout.trim();
+      const localBlob = (
+        await git(["hash-object", "--stdin"], {
+          cwd: checkoutPath,
+          timeoutMs: 10_000,
+          input: "local\n",
+        })
+      ).stdout.trim();
+      expect(localBlob).not.toBe(baseBlob);
+      await writeFile(join(checkoutPath, "src/changed.ts"), "canonical\n");
+      await rm(join(checkoutPath, "old.txt"));
+      await writeFile(join(checkoutPath, "new.txt"), "new\n");
+      const headCommit = await commit("head");
+      const canonicalBlob = (
+        await git(["rev-parse", `${headCommit}:src/changed.ts`], {
+          gitDir: repoPath,
+          timeoutMs: 10_000,
+        })
+      ).stdout.trim();
+      const newBlob = (
+        await git(["rev-parse", `${headCommit}:new.txt`], { gitDir: repoPath, timeoutMs: 10_000 })
+      ).stdout.trim();
+      const workspaceId = newId("ws");
+      await db.pool.query("INSERT INTO workspaces (id, room_id, repo_path) VALUES ($1, $2, $3)", [
+        workspaceId,
+        roomId,
+        repoPath,
+      ]);
+      await db.pool.query(
+        `INSERT INTO workspace_revisions (workspace_id, room_id, revision, commit_sha)
        VALUES ($1, $2, 7, $3)`,
-      [workspaceId, roomId, "a".repeat(40)],
-    );
-    const driver = new MaterializingExecutionDriver();
-    driver.changes = {
-      modified: ["src/changed.ts"],
-      added: ["notes/new.md"],
-      deleted: ["old.txt"],
-      truncated: false,
-    };
-    const execution = new ExecutionService(db.pool, driver);
-    const sandbox = await execution.ensure(roomId, participantIds[0]!);
-    await db.pool.query(
-      `INSERT INTO workspace_revisions (workspace_id, room_id, revision, commit_sha)
+        [workspaceId, roomId, baseCommit],
+      );
+      const driver = new MaterializingExecutionDriver();
+      driver.snapshotEntries = [
+        { path: "src/changed.ts", mode: "100644", sha: localBlob, size: 6 },
+        { path: "notes/new.md", mode: "100644", sha: null, size: 3 },
+      ];
+      const execution = new ExecutionService(db.pool, driver);
+      const sandbox = await execution.ensure(roomId, participantIds[0]!);
+      await db.pool.query(
+        `INSERT INTO workspace_revisions (workspace_id, room_id, revision, commit_sha)
        VALUES ($1, $2, 10, $3)`,
-      [workspaceId, roomId, "b".repeat(40)],
-    );
+        [workspaceId, roomId, headCommit],
+      );
 
-    await expect(execution.status(roomId, participantIds[0]!)).resolves.toEqual({
-      base_revision: 7,
-      head_revision: 10,
-      behind_by: 3,
-      modified: ["src/changed.ts"],
-      added: ["notes/new.md"],
-      deleted: ["old.txt"],
-      truncated: false,
-    });
-    expect(driver.statusCalls).toEqual([sandbox.id]);
+      await expect(execution.status(roomId, participantIds[0]!)).resolves.toEqual({
+        base_revision: 7,
+        head_revision: 10,
+        behind_by: 3,
+        modified: ["src/changed.ts"],
+        added: ["notes/new.md"],
+        deleted: ["old.txt"],
+        truncated: false,
+      });
+
+      // Once submit or sync advances the base, files now canonical are clean by that database
+      // revision even if the sandbox's own Git index still describes its original materialization.
+      await db.pool.query("UPDATE sandboxes SET base_revision = 10 WHERE id = $1", [sandbox.id]);
+      driver.snapshotEntries = [
+        { path: "src/changed.ts", mode: "100644", sha: canonicalBlob, size: 10 },
+        { path: "new.txt", mode: "100644", sha: newBlob, size: 4 },
+      ];
+      await expect(execution.status(roomId, participantIds[0]!)).resolves.toMatchObject({
+        base_revision: 10,
+        head_revision: 10,
+        behind_by: 0,
+        modified: [],
+        added: [],
+        deleted: [],
+        truncated: false,
+      });
+      expect(driver.statusCalls).toEqual([]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("creates one sandbox per room participant and records the selected disk policy", async () => {
