@@ -3,11 +3,14 @@ import type { Pool } from "@crossover/db";
 import {
   resolvePublicAddresses,
   verifyHealthInstallProxyCredential,
+  verifyPluginProxyCredential,
   verifySandboxProxyCredential,
+  type PluginProxyClaims,
   type HostResolver,
 } from "@crossover/security";
 import {
   isAllowedEgressHost,
+  isAllowedPluginEgressHost,
   normalizeEgressHost,
   normalizeRoomEgressAllowlist,
 } from "./allowlist.js";
@@ -33,6 +36,16 @@ const ACTIVE_HEALTH_INSTALL_SQL = `
     AND room.status = 'ACTIVE'
 `;
 
+const ACTIVE_PLUGIN_SQL = `
+  SELECT room.id AS room_id, room.settings
+  FROM participants participant
+  JOIN rooms room ON room.id = participant.room_id
+  WHERE participant.id = $1
+    AND participant.room_id = $2
+    AND participant.status = 'ACTIVE'
+    AND room.status = 'ACTIVE'
+`;
+
 export interface EgressPolicyOptions {
   pool: Pool;
   secret: string;
@@ -43,9 +56,10 @@ export type ConnectPolicy =
   | {
       allowed: true;
       identityId: string;
-      identityType: "sandbox" | "health_install";
+      identityType: "sandbox" | "health_install" | "plugin";
       sandboxId?: string;
       healthInstallId?: string;
+      pluginInvocationId?: string;
       roomId: string;
       host: string;
       addresses: string[];
@@ -55,9 +69,10 @@ export type ConnectPolicy =
       allowed: false;
       status: number;
       identityId?: string;
-      identityType?: "sandbox" | "health_install";
+      identityType?: "sandbox" | "health_install" | "plugin";
       sandboxId?: string;
       healthInstallId?: string;
+      pluginInvocationId?: string;
       roomId?: string;
       host: string;
       reason: string;
@@ -75,7 +90,7 @@ interface ConnectTarget {
 
 interface ProxyIdentity {
   id: string;
-  type: "sandbox" | "health_install";
+  type: "sandbox" | "health_install" | "plugin";
   credential: string;
 }
 
@@ -98,11 +113,17 @@ export async function authorizeConnect(
   }
 
   const identity = parseProxyIdentity(authorization);
+  const pluginClaims =
+    identity?.type === "plugin"
+      ? verifyPluginProxyCredential(identity.credential, options.secret)
+      : null;
   if (
     !identity ||
-    !(identity.type === "sandbox"
-      ? verifySandboxProxyCredential(identity.id, identity.credential, options.secret)
-      : verifyHealthInstallProxyCredential(identity.id, identity.credential, options.secret))
+    (identity.type === "sandbox" &&
+      !verifySandboxProxyCredential(identity.id, identity.credential, options.secret)) ||
+    (identity.type === "health_install" &&
+      !verifyHealthInstallProxyCredential(identity.id, identity.credential, options.secret)) ||
+    (identity.type === "plugin" && !pluginClaims)
   ) {
     return {
       allowed: false,
@@ -115,8 +136,14 @@ export async function authorizeConnect(
   let active: ActiveSandbox | undefined;
   try {
     const { rows } = await options.pool.query<ActiveSandbox>(
-      identity.type === "sandbox" ? ACTIVE_SANDBOX_SQL : ACTIVE_HEALTH_INSTALL_SQL,
-      [identity.id],
+      identity.type === "sandbox"
+        ? ACTIVE_SANDBOX_SQL
+        : identity.type === "health_install"
+          ? ACTIVE_HEALTH_INSTALL_SQL
+          : ACTIVE_PLUGIN_SQL,
+      identity.type === "plugin"
+        ? [pluginClaims!.participantId, pluginClaims!.roomId]
+        : [identity.id],
     );
     active = rows[0];
   } catch {
@@ -134,8 +161,40 @@ export async function authorizeConnect(
       status: 403,
       ...identityFields(identity),
       host: target.host,
-      reason: identity.type === "sandbox" ? "sandbox_inactive" : "health_install_inactive",
+      reason:
+        identity.type === "sandbox"
+          ? "sandbox_inactive"
+          : identity.type === "health_install"
+            ? "health_install_inactive"
+            : "plugin_inactive",
     };
+  }
+
+  if (identity.type === "plugin") {
+    let pluginHosts: string[];
+    try {
+      pluginHosts = normalizeRoomEgressAllowlist(pluginClaims!.hosts);
+    } catch {
+      return {
+        allowed: false,
+        status: 403,
+        ...identityFields(identity, pluginClaims),
+        roomId: active.room_id,
+        host: target.host,
+        reason: "invalid_plugin_allowlist",
+      };
+    }
+    if (!isAllowedPluginEgressHost(target.host, pluginHosts)) {
+      return {
+        allowed: false,
+        status: 403,
+        ...identityFields(identity, pluginClaims),
+        roomId: active.room_id,
+        host: target.host,
+        reason: "plugin_host_not_declared",
+      };
+    }
+    return authorizePublicHost(target, identity, pluginClaims!, active.room_id, options);
   }
 
   let roomAllowlist: string[];
@@ -190,6 +249,36 @@ export async function authorizeConnect(
   };
 }
 
+async function authorizePublicHost(
+  target: ConnectTarget,
+  identity: ProxyIdentity,
+  claims: PluginProxyClaims,
+  roomId: string,
+  options: EgressPolicyOptions,
+): Promise<ConnectPolicy> {
+  let addresses: string[];
+  try {
+    addresses = await resolvePublicAddresses(target.host, options.resolveHost);
+  } catch {
+    return {
+      allowed: false,
+      status: 403,
+      ...identityFields(identity, claims),
+      roomId,
+      host: target.host,
+      reason: "unsafe_or_unresolved_address",
+    };
+  }
+  return {
+    allowed: true,
+    ...identityFields(identity, claims),
+    roomId,
+    host: target.host,
+    addresses,
+    port: target.port,
+  };
+}
+
 function parseConnectTarget(authority: string): ConnectTarget {
   if (!authority || authority.length > 260 || /[\s/@?#\\]/.test(authority))
     throw new Error("invalid CONNECT authority");
@@ -224,24 +313,37 @@ function parseProxyIdentity(value: string | string[] | undefined): ProxyIdentity
   if (/^sandbox_[A-Za-z0-9_-]{8,128}$/.test(id)) return { id, type: "sandbox", credential };
   if (/^hinstall_[0-7][0-9A-HJKMNP-TV-Z]{25}$/.test(id))
     return { id, type: "health_install", credential };
+  if (id === "plugin") return { id, type: "plugin", credential };
   return null;
 }
 
-function identityFields(identity: ProxyIdentity): {
+function identityFields(
+  identity: ProxyIdentity,
+  claims?: PluginProxyClaims | null,
+): {
   identityId: string;
-  identityType: "sandbox" | "health_install";
+  identityType: "sandbox" | "health_install" | "plugin";
   sandboxId?: string;
   healthInstallId?: string;
+  pluginInvocationId?: string;
 } {
-  return identity.type === "sandbox"
-    ? {
-        identityId: identity.id,
-        identityType: identity.type,
-        sandboxId: identity.id,
-      }
-    : {
-        identityId: identity.id,
-        identityType: identity.type,
-        healthInstallId: identity.id,
-      };
+  if (identity.type === "sandbox") {
+    return {
+      identityId: identity.id,
+      identityType: identity.type,
+      sandboxId: identity.id,
+    };
+  }
+  if (identity.type === "health_install") {
+    return {
+      identityId: identity.id,
+      identityType: identity.type,
+      healthInstallId: identity.id,
+    };
+  }
+  return {
+    identityId: claims?.invocationId ?? "plugin",
+    identityType: identity.type,
+    ...(claims ? { pluginInvocationId: claims.invocationId } : {}),
+  };
 }

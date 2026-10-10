@@ -20,3 +20,4 @@ export * from "./modules/provenance.js";
 export * from "./modules/approvals/approvals.js";
 export * from "./budgets.js";
 export * from "./modules/tools/index.js";
+export * from "./modules/integrations/index.js";

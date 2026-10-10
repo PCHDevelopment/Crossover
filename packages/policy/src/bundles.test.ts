@@ -28,6 +28,7 @@ const READS: Capability[] = [
   "memory.read",
   "decisions.read",
   "tools.read",
+  "integrations.read",
   "checkpoints.read",
 ];
 const DEVELOPER_WORK: Capability[] = [
@@ -157,7 +158,13 @@ describe("role bundles (§6.1)", () => {
         expect(powers.has(c) && !allowed, `${role} ${c}`).toBe(false);
       }
     }
-    for (const c of ["room.freeze", "room.archive", "capabilities.grant_tier3", "events.redact"]) {
+    for (const c of [
+      "room.freeze",
+      "room.archive",
+      "capabilities.grant_tier3",
+      "events.redact",
+      "integrations.manage",
+    ]) {
       for (const role of ROLES)
         expect(ROLE_BUNDLES[role].has(c as Capability), `${role} ${c}`).toBe(false);
     }
@@ -187,6 +194,7 @@ describe("authority powers (§6.2)", () => {
     "conflicts.abandon",
     "capabilities.grant_tier3",
     "events.redact",
+    "integrations.manage",
   ];
 
   it("members have none", () => {

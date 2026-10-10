@@ -3,6 +3,7 @@ import { createTestDatabase, type TestDatabase } from "@crossover/db/testing";
 import { authorize } from "@crossover/policy";
 import { CrossoverError, newId } from "@crossover/protocol";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { z } from "zod";
 import { Dispatcher } from "../../dispatcher.js";
 import type { Principal } from "../../principal.js";
 import { registerInviteCommands } from "../invites/invite.js";
@@ -40,6 +41,14 @@ async function setup() {
   registerApprovalCommands(d);
   registerInboxCommands(d);
   registerInviteCommands(d);
+  d.registerCommand({
+    method: "memory.put",
+    action: "messages.send",
+    mutating: true,
+    params: z.strictObject({ secret: z.string() }),
+    notApprovable: true,
+    execute: async () => ({ response: { saved: true } }),
+  });
   const room = newId("room");
   await pool.query(
     `INSERT INTO rooms (id, slug, name, objective, owner_id) VALUES ($1, $1, 'n', 'o', 'x')`,
@@ -273,6 +282,20 @@ describe("approval gates (§22.2, T905)", () => {
     );
     const waiting = await pool.query("SELECT 1 FROM approvals WHERE room_id = $1", [s.room]);
     expect(waiting.rowCount).toBe(0);
+  });
+
+  it("a command with secret params cannot queue those params for approval", async () => {
+    const s = await setup();
+    await s.gate(s.lead);
+    const secret = "never-store-this-token";
+    await failsWith(
+      s.d.dispatch(s.lead, envelope("memory.put", { secret })),
+      "VALIDATION",
+      "not_approvable",
+    );
+    const waiting = await pool.query("SELECT params FROM approvals WHERE room_id = $1", [s.room]);
+    expect(waiting.rows).toEqual([]);
+    expect(JSON.stringify(waiting.rows)).not.toContain(secret);
   });
 
   it("a paused requester or a frozen room stops an approved command, which stays pending; the refusal names the requester", async () => {

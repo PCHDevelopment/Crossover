@@ -2,6 +2,7 @@ import type { PoolClient } from "@crossover/db";
 import { CrossoverError, newId } from "@crossover/protocol";
 import { z } from "zod";
 import type { Dispatcher, RoomlessContext } from "../../dispatcher.js";
+import { registerRoomEgressAllowlistCommand } from "./egress.js";
 import { registerRoomStateCommand, type StateSectionRegistry } from "./state.js";
 
 /** Slugs are lowercase letters, digits and hyphens, 3–48 characters. */
@@ -54,6 +55,7 @@ export interface RoomCommandDeps {
 /** Register the room commands (`room.create`, `room.get_state`) on a dispatcher. */
 export function registerRoomCommands(dispatcher: Dispatcher, deps: RoomCommandDeps = {}): void {
   registerRoomStateCommand(dispatcher, deps.stateSections);
+  registerRoomEgressAllowlistCommand(dispatcher);
   dispatcher.registerRoomlessCommand({
     method: "room.create",
     params: roomCreateParams,

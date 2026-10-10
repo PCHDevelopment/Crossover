@@ -32,7 +32,7 @@ const grantSchema = z.string().superRefine((value, ctx) => {
       message: `${base} is an authority power and can't be granted by an invite`,
     });
   }
-  if (tierOf(base) === 3) {
+  if (tierOf(value) === 3) {
     ctx.addIssue({
       code: "custom",
       message: `${value} is a Tier 3 capability and can't be granted by an invite`,

@@ -139,8 +139,8 @@ async function fixture(): Promise<Fixture> {
   const a = await joinRoom(roomId, owner, "Agent-A");
   const b = await joinRoom(roomId, owner, "Agent-B");
 
-  // B puts a file in the workspace. The secret path itself never exists there: the only trace of
-  // it is the denial event, so seeing it anywhere is a leak of that event.
+  // B puts a public file in the workspace. A's denied attempt below creates a ledger event, and
+  // the owner later adds an actual canonical file at that path to probe sandbox.status.
   await ok(
     await mutate(b.token, "workspace.apply_changeset", {
       source: "API",
@@ -172,6 +172,16 @@ async function fixture(): Promise<Fixture> {
     }),
   );
   await ok(await command(a.token, "presence.set_intent", { paths: [SECRET] }));
+  // Make the denied path canonical after B's read grant is revoked. B's materialized sandbox
+  // omits it, so sandbox.status must filter the canonical base instead of reporting a deletion.
+  await ok(
+    await mutate(owner, "workspace.apply_changeset", {
+      source: "API",
+      message: "Add an owner-only canonical file",
+      base_workspace_revision: 1,
+      operations: [{ type: "create", path: SECRET, content: "owner only\n" }],
+    }),
+  );
   return { roomId, owner, a, b, command };
 }
 
@@ -274,7 +284,7 @@ describe("egress visibility conformance (§34.5)", () => {
       envelope("workspace.apply_changeset", {
         source: "API",
         message: "Again",
-        base_workspace_revision: 1,
+        base_workspace_revision: 2,
         operations: [{ type: "create", path: SECRET, content: "again\n" }],
       }),
       f.a.token,
@@ -359,6 +369,57 @@ describe("egress visibility conformance (§34.5)", () => {
       open_files: [SECRET, "docs/readme.md"],
       cursor: { path: SECRET },
     });
+  });
+
+  it("sandbox event paths and intents are redacted for a scoped bystander", async () => {
+    const f = await fixture();
+    await server.dispatcher.runSystem(f.roomId, "egress.sandbox_visibility", async () => ({
+      result: undefined,
+      events: [
+        {
+          type: "sandbox.behind" as const,
+          actor_id: "system",
+          payload: {
+            participant_id: f.a.id,
+            changed_paths: [SECRET],
+            intents: [
+              {
+                participant_id: f.a.id,
+                paths: [SECRET],
+                ranges: [{ path: SECRET, start_line: 1, end_line: 1 }],
+              },
+            ],
+          },
+        },
+        {
+          type: "sandbox.synced" as const,
+          actor_id: "system",
+          payload: { participant_id: f.a.id, conflicted_paths: [SECRET] },
+        },
+      ],
+    }));
+
+    const list = async (token: string) =>
+      (
+        await ok(
+          await f.command(token, "room.events.list", {
+            types: ["sandbox.behind", "sandbox.synced"],
+          }),
+        )
+      ).response.events as {
+        type: string;
+        payload: Record<string, unknown>;
+      }[];
+    const asB = await list(f.b.token);
+    expect(JSON.stringify(asB)).not.toContain(SECRET);
+    expect(asB).toHaveLength(2);
+    expect(asB[0]?.payload).toMatchObject({ participant_id: f.a.id, paths_redacted: true });
+    expect(asB[0]?.payload).not.toHaveProperty("intents");
+    expect(asB[0]?.payload).not.toHaveProperty("changed_paths");
+    expect(asB[1]?.payload).not.toHaveProperty("conflicted_paths");
+
+    const asOwner = await list(f.owner);
+    expect(JSON.stringify(asOwner)).toContain(SECRET);
   });
 
   it("every MCP read tool: B never receives it, and each tool is a registered read command", async () => {

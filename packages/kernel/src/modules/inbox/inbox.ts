@@ -18,6 +18,7 @@ export const INBOX_KINDS = [
   "VETO",
   "LOOP_DETECTED",
   "MANIFEST_CHANGED",
+  "SECRET_SCAN",
 ] as const;
 export type InboxKind = (typeof INBOX_KINDS)[number];
 

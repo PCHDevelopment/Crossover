@@ -328,7 +328,7 @@ describe("room.invite", () => {
       const s = await setup();
       for (const bad of [
         "aws.deploy_lambda",
-        "aws.deploy_lambda:function/staging-*",
+        "aws.deploy_lambda:prod-*",
         "acme.launch_rocket",
         "capabilities.grant_tier3",
       ]) {
@@ -338,6 +338,17 @@ describe("room.invite", () => {
         ).rejects.toMatchObject({ code: "VALIDATION" });
       }
       expect(await count("invites", `room_id = '${s.room}'`)).toBe(0);
+    });
+
+    it("allows a Tier 2 staging Lambda grant on an invite", async () => {
+      const s = await setup();
+      const out = await invite(s, s.owner, {
+        role: "DEVELOPER",
+        capability_grants: ["aws.deploy_lambda:staging-*"],
+      });
+      expect(out.response).toMatchObject({
+        capability_grants: ["aws.deploy_lambda:staging-*"],
+      });
     });
 
     it("limits the list to 50", async () => {

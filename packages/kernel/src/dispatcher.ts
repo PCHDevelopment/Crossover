@@ -180,6 +180,11 @@ export interface CommandDefinition<S extends z.ZodType, R> {
    */
   returnsOneTime?: boolean;
   /**
+   * The request contains secret data that must not be copied into the approvals table. Commands
+   * with this flag can't be queued for approval; `returnsOneTime` implies the same restriction.
+   */
+  notApprovable?: boolean;
+  /**
    * How a **read** command keeps one participant from seeing what another may not (§34.5,
    * T1301). Required for every non-mutating command; checked at registration.
    * - `participant`: what it returns can differ by reader (events, paths, denials) and goes
@@ -947,7 +952,7 @@ export class Dispatcher {
   ): Promise<
     { error: CrossoverError; replay?: undefined } | { replay: DispatchResult; error?: undefined }
   > {
-    if (def.returnsOneTime) {
+    if (def.returnsOneTime || def.notApprovable) {
       return {
         error: new CrossoverError("VALIDATION", `${envelope.method} can't wait for approval`, {
           details: { reason: "not_approvable", method: envelope.method },

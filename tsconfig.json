@@ -17,6 +17,9 @@
       "path": "packages/gateway"
     },
     {
+      "path": "packages/github-api"
+    },
+    {
       "path": "packages/kernel"
     },
     {
@@ -39,6 +42,12 @@
     },
     {
       "path": "apps/web"
+    },
+    {
+      "path": "plugins/browser"
+    },
+    {
+      "path": "plugins/aws"
     }
   ]
 }

@@ -5,8 +5,14 @@ import { createHash } from "node:crypto";
 import { createTestDatabase, type TestDatabase } from "@crossover/db/testing";
 import type { Authorizer, EventPublisher } from "@crossover/kernel";
 import { CrossoverError, newId, type RoomEvent } from "@crossover/protocol";
-import { git, type ExecutionDriver, type SandboxLimits } from "@crossover/workspace";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import {
+  git,
+  type ExecutionDriver,
+  type SandboxExecOutcome,
+  type SandboxExecProcess,
+  type SandboxLimits,
+} from "@crossover/workspace";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { composeServer, type ComposeOverrides, type CrossoverServer } from "./compose.js";
 import { loadConfig, type ServerConfig } from "./config.js";
 
@@ -39,6 +45,8 @@ class RecordingExecutionDriver implements ExecutionDriver {
   readonly working = new Map<string, Map<string, { mode: string; content: Buffer }>>();
   readonly snapshotRules = new Map<string, { path: string; patterns: string[] }[]>();
   failSnapshotUpdate = false;
+  finishExec: ((outcome: SandboxExecOutcome) => void) | undefined;
+  snapshotInventoryPause: { started: () => void; wait: Promise<void> } | undefined;
 
   async create({ sandbox_id }: { sandbox_id: string; limits: SandboxLimits }) {
     this.working.set(sandbox_id, this.working.get(sandbox_id) ?? new Map());
@@ -51,6 +59,12 @@ class RecordingExecutionDriver implements ExecutionDriver {
     _input: Parameters<NonNullable<ExecutionDriver["materialize"]>>[0],
   ): Promise<void> {}
   async snapshotInventory(input: Parameters<NonNullable<ExecutionDriver["snapshotInventory"]>>[0]) {
+    const pause = this.snapshotInventoryPause;
+    if (pause) {
+      this.snapshotInventoryPause = undefined;
+      pause.started();
+      await pause.wait;
+    }
     this.snapshotRules.set(input.sandbox_id, input.ignore_rules ?? []);
     const files = this.working.get(input.sandbox_id) ?? new Map();
     const tracked = new Set(input.tracked_paths);
@@ -95,6 +109,15 @@ class RecordingExecutionDriver implements ExecutionDriver {
     for (const file of input.files)
       files.set(file.path, { mode: file.mode, content: Buffer.from(file.content) });
     this.working.set(input.sandbox_id, files);
+  }
+  async exec(): Promise<SandboxExecProcess> {
+    let finish!: (outcome: SandboxExecOutcome) => void;
+    const finished = new Promise<SandboxExecOutcome>((resolve) => (finish = resolve));
+    this.finishExec = finish;
+    return {
+      finished,
+      cancel: async (reason) => finish({ exit_code: null, duration_ms: 1, reason }),
+    };
   }
   async start(_input: { sandbox_id: string }): Promise<void> {}
   async stop(input: { sandbox_id: string }): Promise<void> {
@@ -367,7 +390,7 @@ describe("composeServer", () => {
     expect(Number(count.rows[0]!.count)).toBe(1);
   });
 
-  it("reports a failed sandbox advance and keeps the old base revision", async () => {
+  it("reports a failed queued advance while submit still moves its own base", async () => {
     const driver = new RecordingExecutionDriver();
     const { server, publisher } = await start({}, new RecordingPublisher(), {
       executionDriver: driver,
@@ -393,13 +416,61 @@ describe("composeServer", () => {
       base_revision: 0,
       sandbox_advance: "scheduled",
     });
-    await server.dispatcher.actors.get(roomId).idle();
+    await vi.waitFor(() => {
+      expect(
+        publisher.events.some(
+          (event) =>
+            event.room_id === roomId &&
+            event.type === "sandbox.behind" &&
+            event.payload.reason === "advance_failed",
+        ),
+      ).toBe(true);
+    });
     expect(publisher.events.find((event) => event.type === "sandbox.behind")).toMatchObject({
       actor_id: "system",
       payload: { participant_id: participantId, behind_by: 1, reason: "advance_failed" },
     });
     const status = await ok(await cmd(envelope("sandbox.status"), owner.tokens.access_token));
-    expect(status.response).toMatchObject({ base_revision: 0, head_revision: 1, behind_by: 1 });
+    expect(status.response).toMatchObject({ base_revision: 1, head_revision: 1, behind_by: 0 });
+  });
+
+  it("reports process_running instead of claiming a blocked submit advance synced", async () => {
+    const driver = new RecordingExecutionDriver();
+    const { server, publisher } = await start({}, new RecordingPublisher(), {
+      executionDriver: driver,
+    });
+    const { roomId, owner, cmd } = await walkthrough(server.app, false);
+    const participantId = await ownerParticipantId(roomId);
+    const sandbox = await server.execution.ensure(roomId, participantId);
+    await ok(
+      await cmd(
+        envelope("sandbox.exec", { command: "long running command" }),
+        owner.tokens.access_token,
+      ),
+    );
+    await server.dispatcher.actors.get(roomId).idle();
+    expect(driver.finishExec).toBeDefined();
+
+    driver.working.get(sandbox.id)!.set("submitted.txt", {
+      mode: "100644",
+      content: Buffer.from("submit while running"),
+    });
+    await ok(
+      await cmd(
+        envelope("changes.submit", { message: "Submit during a process" }),
+        owner.tokens.access_token,
+      ),
+    );
+    await server.dispatcher.actors.get(roomId).idle();
+    expect(publisher.events.filter((event) => event.type === "sandbox.synced")).toHaveLength(0);
+    expect(publisher.events.find((event) => event.type === "sandbox.behind")).toMatchObject({
+      actor_id: "system",
+      payload: { participant_id: participantId, reason: "process_running" },
+    });
+    expect(await server.execution.get(roomId, participantId)).toMatchObject({ base_revision: 0 });
+
+    driver.finishExec!({ exit_code: 0, duration_ms: 1, reason: "exit" });
+    await server.dispatcher.actors.get(roomId).idle();
   });
 
   it("rejects unmatched filters and selects exact files or directory prefixes only", async () => {
@@ -565,7 +636,7 @@ describe("composeServer", () => {
     const scopedEvent = (scopedEvents.response.events as RoomEvent[])[0]!;
     expect(ownerEvent.payload).toMatchObject({
       participant_id: ownerId,
-      changed_paths: expect.arrayContaining(["private/owner-only.txt", "submitted.txt"]),
+      changed_paths: expect.arrayContaining(["private/owner-only.txt"]),
     });
     expect(scopedEvent.payload).toMatchObject({
       participant_id: ownerId,
@@ -834,11 +905,9 @@ describe("composeServer", () => {
     ).resolves.toBeDefined();
   });
 
-  it("keeps the old base and emits sandbox.behind when local rebasing conflicts", async () => {
+  it("leaves human conflict markers at the new base and refuses to submit them", async () => {
     const driver = new RecordingExecutionDriver();
-    const { server, publisher } = await start({}, new RecordingPublisher(), {
-      executionDriver: driver,
-    });
+    const { server } = await start({}, new RecordingPublisher(), { executionDriver: driver });
     const { roomId, owner, cmd } = await walkthrough(server.app, false);
     const participantId = await ownerParticipantId(roomId);
     const sandbox = await server.execution.ensure(roomId, participantId);
@@ -862,34 +931,293 @@ describe("composeServer", () => {
       ),
     );
 
-    const submitted = await ok(
+    await vi.waitFor(async () => {
+      expect((await server.execution.get(roomId, participantId))?.base_revision).toBe(1);
+      expect(driver.working.get(sandbox.id)!.get("local.txt")?.content.toString()).toContain(
+        "<<<<<<<",
+      );
+    });
+    const rejected = await cmd(
+      envelope("changes.submit", { paths: ["local.txt"], message: "Submit unresolved conflict" }),
+      owner.tokens.access_token,
+    );
+    expect(rejected.statusCode).toBe(400);
+    expect(rejected.json().error).toMatchObject({
+      code: "VALIDATION",
+      details: { reason: "conflict_markers", paths: ["local.txt"] },
+    });
+    expect(await server.execution.get(roomId, participantId)).toMatchObject({ base_revision: 1 });
+  });
+
+  it("leaves an agent sandbox behind when local changes overlap the canonical advance", async () => {
+    const driver = new RecordingExecutionDriver();
+    const { server, publisher } = await start({}, new RecordingPublisher(), {
+      executionDriver: driver,
+    });
+    const { roomId, owner, agent, cmd } = await walkthrough(server.app, false);
+    const participantId = agent.participant_id as string;
+    const sandbox = await server.execution.ensure(roomId, participantId);
+    driver.working.get(sandbox.id)!.set("local.txt", {
+      mode: "100644",
+      content: Buffer.from("sandbox version"),
+    });
+
+    await ok(
       await cmd(
-        envelope("changes.submit", {
-          paths: ["submitted.txt"],
-          message: "Submit disjoint file",
+        envelope("workspace.apply_changeset", {
+          source: "API",
+          message: "Concurrent canonical edit",
+          base_workspace_revision: 0,
+          operations: [{ type: "create", path: "local.txt", content: "canonical version" }],
         }),
         owner.tokens.access_token,
       ),
     );
-    expect(submitted.response).toMatchObject({
-      status: "APPLIED",
-      applied_revision: 2,
-      base_revision: 0,
-      sandbox_advance: "behind",
+    await vi.waitFor(() => {
+      expect(
+        publisher.events.some(
+          (event) =>
+            event.room_id === roomId &&
+            event.type === "sandbox.behind" &&
+            event.payload.participant_id === participantId &&
+            event.payload.reason === "local_changes",
+        ),
+      ).toBe(true);
     });
+
     expect(await server.execution.get(roomId, participantId)).toMatchObject({ base_revision: 0 });
     expect(driver.working.get(sandbox.id)!.get("local.txt")?.content.toString()).toBe(
       "sandbox version",
     );
-    const behind = publisher.events.find(
-      (event) => event.room_id === roomId && event.type === "sandbox.behind",
+  });
+
+  it("sandbox.sync rebases non-overlapping edits onto the latest head", async () => {
+    const driver = new RecordingExecutionDriver();
+    const { server, publisher } = await start({}, new RecordingPublisher(), {
+      executionDriver: driver,
+    });
+    const { roomId, owner, agent, cmd } = await walkthrough(server.app, false);
+    await ok(
+      await cmd(
+        envelope("workspace.apply_changeset", {
+          source: "API",
+          message: "Create a shared file",
+          base_workspace_revision: 0,
+          operations: [{ type: "create", path: "local.txt", content: "one\ntwo\nthree\n" }],
+        }),
+        owner.tokens.access_token,
+      ),
     );
-    expect(behind?.payload).toMatchObject({
-      participant_id: participantId,
-      behind_by: 2,
-      changed_paths: ["local.txt", "submitted.txt"],
-      overlaps_local_changes: true,
-      intents: [],
+    const participantId = agent.participant_id as string;
+    const sandbox = await server.execution.ensure(roomId, participantId);
+    driver.working.get(sandbox.id)!.set("local.txt", {
+      mode: "100644",
+      content: Buffer.from("ONE\ntwo\nthree\n"),
+    });
+    await ok(
+      await cmd(
+        envelope("workspace.apply_changeset", {
+          source: "API",
+          message: "Edit a separate line",
+          base_workspace_revision: 1,
+          operations: [{ type: "modify", path: "local.txt", content: "one\ntwo\nTHREE\n" }],
+        }),
+        owner.tokens.access_token,
+      ),
+    );
+
+    const synced = await ok(await cmd(envelope("sandbox.sync"), agent.tokens.access_token));
+    expect(synced.response).toEqual({ synced_to: 2 });
+    expect(await server.execution.get(roomId, participantId)).toMatchObject({ base_revision: 2 });
+    expect(driver.working.get(sandbox.id)!.get("local.txt")?.content.toString()).toBe(
+      "ONE\ntwo\nTHREE\n",
+    );
+    await vi.waitFor(() => {
+      expect(
+        publisher.events.find(
+          (event) =>
+            event.room_id === roomId &&
+            event.type === "sandbox.synced" &&
+            event.payload.participant_id === participantId,
+        ),
+      ).toMatchObject({ payload: { base_revision: 2 } });
+    });
+  });
+
+  it("lets another room command complete while sandbox.sync is preparing its snapshot", async () => {
+    const driver = new RecordingExecutionDriver();
+    const { server, publisher } = await start({}, new RecordingPublisher(), {
+      executionDriver: driver,
+    });
+    const { roomId, owner, agent, cmd } = await walkthrough(server.app, false);
+    await ok(
+      await cmd(
+        envelope("workspace.apply_changeset", {
+          source: "API",
+          message: "Create a shared file",
+          base_workspace_revision: 0,
+          operations: [{ type: "create", path: "local.txt", content: "one\ntwo\nthree\n" }],
+        }),
+        owner.tokens.access_token,
+      ),
+    );
+    const participantId = agent.participant_id as string;
+    const sandbox = await server.execution.ensure(roomId, participantId);
+    driver.working.get(sandbox.id)!.set("local.txt", {
+      mode: "100644",
+      content: Buffer.from("ONE\ntwo\nthree\n"),
+    });
+    await ok(
+      await cmd(
+        envelope("workspace.apply_changeset", {
+          source: "API",
+          message: "Edit a separate line",
+          base_workspace_revision: 1,
+          operations: [{ type: "modify", path: "local.txt", content: "one\ntwo\nTHREE\n" }],
+        }),
+        owner.tokens.access_token,
+      ),
+    );
+    await vi.waitFor(() => {
+      expect(
+        publisher.events.some(
+          (event) =>
+            event.room_id === roomId &&
+            event.type === "sandbox.behind" &&
+            event.payload.participant_id === participantId &&
+            event.payload.reason === "local_changes",
+        ),
+      ).toBe(true);
+    });
+    await server.dispatcher.actors.get(roomId).idle();
+
+    let markSnapshotStarted!: () => void;
+    const snapshotStarted = new Promise<void>((resolve) => {
+      markSnapshotStarted = resolve;
+    });
+    let releaseSnapshot!: () => void;
+    const snapshotWait = new Promise<void>((resolve) => {
+      releaseSnapshot = resolve;
+    });
+    driver.snapshotInventoryPause = { started: markSnapshotStarted, wait: snapshotWait };
+
+    const syncing = cmd(envelope("sandbox.sync"), agent.tokens.access_token);
+    try {
+      await snapshotStarted;
+      const messageSent = await Promise.race([
+        cmd(
+          envelope("messages.send", { body: "While the sandbox sync is preparing" }),
+          agent.tokens.access_token,
+        ).then((response) => {
+          expect(response.statusCode, response.body).toBe(200);
+          return "sent" as const;
+        }),
+        new Promise<"blocked">((resolve) => setTimeout(() => resolve("blocked"), 2_000)),
+      ]);
+      expect(messageSent).toBe("sent");
+    } finally {
+      releaseSnapshot();
+    }
+
+    const synced = await ok(await syncing);
+    expect(synced.response).toEqual({ synced_to: 2 });
+    expect(await server.execution.get(roomId, participantId)).toMatchObject({ base_revision: 2 });
+  });
+
+  it("sandbox.sync advances to head and leaves merge markers on conflicts", async () => {
+    const driver = new RecordingExecutionDriver();
+    const { server } = await start({}, new RecordingPublisher(), { executionDriver: driver });
+    const { roomId, owner, agent, cmd } = await walkthrough(server.app, false);
+    await ok(
+      await cmd(
+        envelope("workspace.apply_changeset", {
+          source: "API",
+          message: "Create a shared file",
+          base_workspace_revision: 0,
+          operations: [{ type: "create", path: "local.txt", content: "base\nsecond\n" }],
+        }),
+        owner.tokens.access_token,
+      ),
+    );
+    const participantId = agent.participant_id as string;
+    const sandbox = await server.execution.ensure(roomId, participantId);
+    driver.working.get(sandbox.id)!.set("local.txt", {
+      mode: "100644",
+      content: Buffer.from("local\nsecond\n"),
+    });
+    await ok(
+      await cmd(
+        envelope("workspace.apply_changeset", {
+          source: "API",
+          message: "Conflicting canonical edit",
+          base_workspace_revision: 1,
+          operations: [{ type: "modify", path: "local.txt", content: "head\nsecond\n" }],
+        }),
+        owner.tokens.access_token,
+      ),
+    );
+
+    const synced = await ok(await cmd(envelope("sandbox.sync"), agent.tokens.access_token));
+    expect(synced.response).toEqual({ synced_to: 2, conflicted_paths: ["local.txt"] });
+    expect(await server.execution.get(roomId, participantId)).toMatchObject({ base_revision: 2 });
+    expect(driver.working.get(sandbox.id)!.get("local.txt")?.content.toString()).toContain(
+      "<<<<<<<",
+    );
+  });
+
+  it("sandbox.sync leaves the working copy alone while an exec is running", async () => {
+    const driver = new RecordingExecutionDriver();
+    const { server } = await start({}, new RecordingPublisher(), { executionDriver: driver });
+    const { roomId, owner, agent, cmd } = await walkthrough(server.app, false);
+    await ok(
+      await cmd(
+        envelope("workspace.apply_changeset", {
+          source: "API",
+          message: "Create a shared file",
+          base_workspace_revision: 0,
+          operations: [{ type: "create", path: "local.txt", content: "base\n" }],
+        }),
+        owner.tokens.access_token,
+      ),
+    );
+    const participantId = agent.participant_id as string;
+    const sandbox = await server.execution.ensure(roomId, participantId);
+    driver.working.get(sandbox.id)!.set("local.txt", {
+      mode: "100644",
+      content: Buffer.from("base\n"),
+    });
+    await ok(
+      await cmd(
+        envelope("sandbox.exec", { command: "long-running command" }),
+        agent.tokens.access_token,
+      ),
+    );
+    await server.dispatcher.actors.get(roomId).idle();
+    expect(driver.finishExec).toBeDefined();
+    await ok(
+      await cmd(
+        envelope("workspace.apply_changeset", {
+          source: "API",
+          message: "Advance canonical while exec is active",
+          base_workspace_revision: 1,
+          operations: [{ type: "modify", path: "local.txt", content: "next\n" }],
+        }),
+        owner.tokens.access_token,
+      ),
+    );
+
+    const blocked = await ok(await cmd(envelope("sandbox.sync"), agent.tokens.access_token));
+    expect(blocked.response).toMatchObject({
+      base_revision: 1,
+      head_revision: 2,
+      reason: "process_running",
+    });
+    expect(await server.execution.get(roomId, participantId)).toMatchObject({ base_revision: 1 });
+    expect(driver.working.get(sandbox.id)!.get("local.txt")?.content.toString()).toBe("base\n");
+
+    driver.finishExec?.({ exit_code: 0, duration_ms: 1, reason: "exit" });
+    await vi.waitFor(async () => {
+      expect((await server.execution.get(roomId, participantId))?.base_revision).toBe(2);
     });
   });
 

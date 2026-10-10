@@ -2,6 +2,7 @@ import { Redis, type RedisOptions } from "ioredis";
 import { CrossoverError } from "@crossover/protocol";
 import { z } from "zod";
 import type { Dispatcher, CommandContext } from "../../dispatcher.js";
+import { filterReadablePaths } from "./readable-paths.js";
 
 export const EDIT_INTENT_TTL_MS = 45_000;
 
@@ -203,24 +204,24 @@ export function registerPresenceIntentCommands(
       // An intent names the paths someone is about to edit, so a reader sees only the paths
       // they may read: others are left out, and an intent with none left is left out whole
       // (its task link with it), so a denied path is neither named nor hinted at (§34.5).
-      const readable = new Map<string, boolean>();
-      const mayRead = async (path: string): Promise<boolean> => {
-        const known = readable.get(path);
-        if (known !== undefined) return known;
-        let allowed = true;
-        try {
-          await ctx.authorize("workspace.read", { path });
-        } catch (error) {
-          if (!(error instanceof CrossoverError) || error.code !== "FORBIDDEN") throw error;
-          allowed = false;
-        }
-        readable.set(path, allowed);
-        return allowed;
-      };
+      const stored = await store.list(ctx.room_id);
+      const visible = new Set(
+        await filterReadablePaths(
+          stored.flatMap(({ paths }) => paths),
+          async (path) => {
+            try {
+              await ctx.authorize("workspace.read", { path });
+              return true;
+            } catch (error) {
+              if (error instanceof CrossoverError && error.code === "FORBIDDEN") return false;
+              throw error;
+            }
+          },
+        ),
+      );
       const intents = [];
-      for (const intent of await store.list(ctx.room_id)) {
-        const paths: string[] = [];
-        for (const path of intent.paths) if (await mayRead(path)) paths.push(path);
+      for (const intent of stored) {
+        const paths = intent.paths.filter((path) => visible.has(path));
         if (paths.length === 0) continue;
         const keep = new Set(paths);
         intents.push({
