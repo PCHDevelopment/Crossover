@@ -38,6 +38,7 @@ class RecordingExecutionDriver implements ExecutionDriver {
   readonly destroyed: string[] = [];
   readonly working = new Map<string, Map<string, { mode: string; content: Buffer }>>();
   readonly snapshotRules = new Map<string, { path: string; patterns: string[] }[]>();
+  failSnapshotUpdate = false;
 
   async create({ sandbox_id }: { sandbox_id: string; limits: SandboxLimits }) {
     this.working.set(sandbox_id, this.working.get(sandbox_id) ?? new Map());
@@ -85,6 +86,10 @@ class RecordingExecutionDriver implements ExecutionDriver {
   async updateSnapshot(
     input: Parameters<NonNullable<ExecutionDriver["updateSnapshot"]>>[0],
   ): Promise<void> {
+    if (this.failSnapshotUpdate) {
+      this.failSnapshotUpdate = false;
+      throw new Error("injected snapshot update failure");
+    }
     const files = this.working.get(input.sandbox_id) ?? new Map();
     for (const path of input.delete_paths) files.delete(path);
     for (const file of input.files)
@@ -151,6 +156,14 @@ const post = (app: App, url: string, body: unknown, token?: string) =>
 async function ok(res: Awaited<ReturnType<typeof post>>, status = 200) {
   expect(res.statusCode, res.body).toBe(status);
   return res.json();
+}
+
+async function ownerParticipantId(roomId: string): Promise<string> {
+  const { rows } = await db.pool.query<{ id: string }>(
+    "SELECT id FROM participants WHERE room_id = $1 AND authority = 'OWNER'",
+    [roomId],
+  );
+  return rows[0]!.id;
 }
 
 /** The skeleton flow over HTTP, as a person and an agent would drive it. */
@@ -296,11 +309,8 @@ describe("composeServer", () => {
       executionDriver: driver,
     });
     const { roomId, owner, cmd } = await walkthrough(server.app, false);
-    const ownerRow = await db.pool.query<{ id: string }>(
-      "SELECT id FROM participants WHERE room_id = $1 AND authority = 'OWNER'",
-      [roomId],
-    );
-    const sandbox = await server.execution.ensure(roomId, ownerRow.rows[0]!.id);
+    const participantId = await ownerParticipantId(roomId);
+    const sandbox = await server.execution.ensure(roomId, participantId);
     driver.working.get(sandbox.id)!.set("submitted.bin", {
       mode: "100644",
       content: Buffer.from([0, 1, 0xff, 10]),
@@ -311,12 +321,17 @@ describe("composeServer", () => {
     expect(first.response).toMatchObject({
       status: "APPLIED",
       applied_revision: 1,
-      base_revision: 1,
+      base_revision: 0,
+      sandbox_advance: "scheduled",
     });
+    await server.dispatcher.actors.get(roomId).idle();
+    expect(publisher.events.filter((event) => event.type === "sandbox.synced")).toMatchObject([
+      { actor_id: "system", payload: { base_revision: 1 } },
+    ]);
     expect(driver.working.get(sandbox.id)!.get("submitted.bin")?.content).toEqual(
       Buffer.from([0, 1, 0xff, 10]),
     );
-    expect(await server.execution.get(roomId, ownerRow.rows[0]!.id)).toMatchObject({
+    expect(await server.execution.get(roomId, participantId)).toMatchObject({
       base_revision: 1,
     });
 
@@ -324,8 +339,10 @@ describe("composeServer", () => {
     expect(replay.response).toMatchObject({
       status: "APPLIED",
       applied_revision: 1,
-      base_revision: 1,
+      base_revision: 0,
+      sandbox_advance: "scheduled",
     });
+    expect(publisher.events.filter((event) => event.type === "sandbox.synced")).toHaveLength(1);
     const priorEventCount = publisher.events.filter((event) => event.room_id === roomId).length;
     const noChanges = await cmd(
       envelope("changes.submit", { message: "Nothing to submit" }),
@@ -347,23 +364,55 @@ describe("composeServer", () => {
     expect(Number(count.rows[0]!.count)).toBe(1);
   });
 
+  it("reports a failed sandbox advance and keeps the old base revision", async () => {
+    const driver = new RecordingExecutionDriver();
+    const { server, publisher } = await start({}, new RecordingPublisher(), {
+      executionDriver: driver,
+    });
+    const { roomId, owner, cmd } = await walkthrough(server.app, false);
+    const participantId = await ownerParticipantId(roomId);
+    const sandbox = await server.execution.ensure(roomId, participantId);
+    driver.working.get(sandbox.id)!.set("submitted.txt", {
+      mode: "100644",
+      content: Buffer.from("submitted"),
+    });
+    driver.failSnapshotUpdate = true;
+
+    const applied = await ok(
+      await cmd(
+        envelope("changes.submit", { message: "Submit before failed advance" }),
+        owner.tokens.access_token,
+      ),
+    );
+    expect(applied.response).toMatchObject({
+      status: "APPLIED",
+      applied_revision: 1,
+      base_revision: 0,
+      sandbox_advance: "scheduled",
+    });
+    await server.dispatcher.actors.get(roomId).idle();
+    expect(publisher.events.find((event) => event.type === "sandbox.behind")).toMatchObject({
+      actor_id: "system",
+      payload: { behind_by: 1, reason: "advance_failed" },
+    });
+    const status = await ok(await cmd(envelope("sandbox.status"), owner.tokens.access_token));
+    expect(status.response).toMatchObject({ base_revision: 0, head_revision: 1, behind_by: 1 });
+  });
+
   it("rejects unmatched filters and selects exact files or directory prefixes only", async () => {
     const driver = new RecordingExecutionDriver();
     const { server } = await start({}, new RecordingPublisher(), { executionDriver: driver });
     const { roomId, owner, cmd } = await walkthrough(server.app, false);
-    const ownerRow = await db.pool.query<{ id: string }>(
-      "SELECT id FROM participants WHERE room_id = $1 AND authority = 'OWNER'",
-      [roomId],
-    );
-    const sandbox = await server.execution.ensure(roomId, ownerRow.rows[0]!.id);
+    const participantId = await ownerParticipantId(roomId);
+    const sandbox = await server.execution.ensure(roomId, participantId);
     const working = driver.working.get(sandbox.id)!;
-    working.set("src/main.ts", { mode: "100644", content: Buffer.from("export {};") });
-    working.set("src/main.tsx", { mode: "100644", content: Buffer.from("export {};\n") });
+    working.set("app/[slug]/page.tsx", { mode: "100644", content: Buffer.from("export {};") });
+    working.set("app/[slug]/page.tsx.map", { mode: "100644", content: Buffer.from("map") });
     working.set("root.txt", { mode: "100644", content: Buffer.from("local only") });
 
     const typo = await cmd(
       envelope("changes.submit", {
-        paths: ["src/mian.ts"],
+        paths: ["app/[slug]/mian.tsx"],
         message: "Catch a path filter typo",
       }),
       owner.tokens.access_token,
@@ -371,12 +420,15 @@ describe("composeServer", () => {
     expect(typo.statusCode).toBe(400);
     expect(typo.json().error).toMatchObject({
       code: "VALIDATION",
-      details: { reason: "path_not_changed", path: "src/mian.ts" },
+      details: { reason: "path_not_changed", path: "app/[slug]/mian.tsx" },
     });
 
     const exact = await ok(
       await cmd(
-        envelope("changes.submit", { paths: ["src/main.ts"], message: "Submit one exact path" }),
+        envelope("changes.submit", {
+          paths: ["app/[slug]/page.tsx"],
+          message: "Submit one exact path",
+        }),
         owner.tokens.access_token,
       ),
     );
@@ -388,7 +440,7 @@ describe("composeServer", () => {
       [roomId],
     );
     await expect(
-      git(["cat-file", "-e", `${workspace.rows[0]!.commit_sha}:src/main.ts`], {
+      git(["cat-file", "-e", `${workspace.rows[0]!.commit_sha}:app/[slug]/page.tsx`], {
         gitDir: workspace.rows[0]!.repo_path,
         timeoutMs: 10_000,
       }),
@@ -400,7 +452,7 @@ describe("composeServer", () => {
       }),
     ).rejects.toThrow();
     await expect(
-      git(["cat-file", "-e", `${workspace.rows[0]!.commit_sha}:src/main.tsx`], {
+      git(["cat-file", "-e", `${workspace.rows[0]!.commit_sha}:app/[slug]/page.tsx.map`], {
         gitDir: workspace.rows[0]!.repo_path,
         timeoutMs: 10_000,
       }),
@@ -408,11 +460,16 @@ describe("composeServer", () => {
 
     const directory = await ok(
       await cmd(
-        envelope("changes.submit", { paths: ["src/"], message: "Submit the remaining src file" }),
+        envelope("changes.submit", { paths: ["app/"], message: "Submit the remaining app file" }),
         owner.tokens.access_token,
       ),
     );
-    expect(directory.response).toMatchObject({ status: "APPLIED", applied_revision: 2 });
+    expect(directory.response).toMatchObject({
+      status: "APPLIED",
+      applied_revision: 2,
+      base_revision: 1,
+      sandbox_advance: "scheduled",
+    });
     const secondRevision = await db.pool.query<{ repo_path: string; commit_sha: string }>(
       `SELECT w.repo_path, wr.commit_sha FROM workspaces w
        JOIN workspace_revisions wr ON wr.workspace_id = w.id AND wr.room_id = w.room_id
@@ -420,7 +477,7 @@ describe("composeServer", () => {
       [roomId],
     );
     await expect(
-      git(["cat-file", "-e", `${secondRevision.rows[0]!.commit_sha}:src/main.tsx`], {
+      git(["cat-file", "-e", `${secondRevision.rows[0]!.commit_sha}:app/[slug]/page.tsx.map`], {
         gitDir: secondRevision.rows[0]!.repo_path,
         timeoutMs: 10_000,
       }),
@@ -438,11 +495,8 @@ describe("composeServer", () => {
       authorize: denyBlockedPath,
     });
     const { roomId, owner, cmd } = await walkthrough(server.app, false);
-    const ownerRow = await db.pool.query<{ id: string }>(
-      "SELECT id FROM participants WHERE room_id = $1 AND authority = 'OWNER'",
-      [roomId],
-    );
-    const sandbox = await server.execution.ensure(roomId, ownerRow.rows[0]!.id);
+    const participantId = await ownerParticipantId(roomId);
+    const sandbox = await server.execution.ensure(roomId, participantId);
     driver.working.get(sandbox.id)!.set("blocked.txt", {
       mode: "100644",
       content: Buffer.from("do not apply"),
@@ -454,7 +508,7 @@ describe("composeServer", () => {
     );
     expect(denied.statusCode).toBe(403);
     expect(denied.json().error.code).toBe("FORBIDDEN");
-    expect(await server.execution.get(roomId, ownerRow.rows[0]!.id)).toMatchObject({
+    expect(await server.execution.get(roomId, participantId)).toMatchObject({
       base_revision: 0,
     });
     const count = await db.pool.query<{ count: string }>(
@@ -520,11 +574,8 @@ describe("composeServer", () => {
     const driver = new RecordingExecutionDriver();
     const { server } = await start({}, new RecordingPublisher(), { executionDriver: driver });
     const { roomId, owner, cmd } = await walkthrough(server.app, false);
-    const ownerRow = await db.pool.query<{ id: string }>(
-      "SELECT id FROM participants WHERE room_id = $1 AND authority = 'OWNER'",
-      [roomId],
-    );
-    const sandbox = await server.execution.ensure(roomId, ownerRow.rows[0]!.id);
+    const participantId = await ownerParticipantId(roomId);
+    const sandbox = await server.execution.ensure(roomId, participantId);
     const working = driver.working.get(sandbox.id)!;
 
     working.set("etc-passwd-link", { mode: "120000", content: Buffer.from("/etc/passwd") });
@@ -590,7 +641,7 @@ describe("composeServer", () => {
       [roomId],
     );
     expect(Number(count.rows[0]!.count)).toBe(1);
-    expect(await server.execution.get(roomId, ownerRow.rows[0]!.id)).toMatchObject({
+    expect(await server.execution.get(roomId, participantId)).toMatchObject({
       base_revision: 1,
     });
   });
@@ -599,11 +650,8 @@ describe("composeServer", () => {
     const driver = new RecordingExecutionDriver();
     const { server } = await start({}, new RecordingPublisher(), { executionDriver: driver });
     const { roomId, owner, cmd } = await walkthrough(server.app);
-    const ownerRow = await db.pool.query<{ id: string }>(
-      "SELECT id FROM participants WHERE room_id = $1 AND authority = 'OWNER'",
-      [roomId],
-    );
-    const sandbox = await server.execution.ensure(roomId, ownerRow.rows[0]!.id);
+    const participantId = await ownerParticipantId(roomId);
+    const sandbox = await server.execution.ensure(roomId, participantId);
     const working = driver.working.get(sandbox.id)!;
     working.set("README.md", { mode: "100755", content: Buffer.from("# Alpha\n") });
 
@@ -621,7 +669,12 @@ describe("composeServer", () => {
         owner.tokens.access_token,
       ),
     );
-    expect(edited.response).toMatchObject({ status: "APPLIED", applied_revision: 2 });
+    expect(edited.response).toMatchObject({
+      status: "APPLIED",
+      applied_revision: 2,
+      base_revision: 1,
+      sandbox_advance: "scheduled",
+    });
 
     const workspace = await db.pool.query<{ repo_path: string; commit_sha: string }>(
       `SELECT w.repo_path, wr.commit_sha FROM workspaces w
@@ -640,11 +693,7 @@ describe("composeServer", () => {
     const driver = new RecordingExecutionDriver();
     const { server } = await start({}, new RecordingPublisher(), { executionDriver: driver });
     const { roomId, owner, cmd } = await walkthrough(server.app, false);
-    const ownerRow = await db.pool.query<{ id: string }>(
-      "SELECT id FROM participants WHERE room_id = $1 AND authority = 'OWNER'",
-      [roomId],
-    );
-    const participantId = ownerRow.rows[0]!.id;
+    const participantId = await ownerParticipantId(roomId);
     const sandbox = await server.execution.ensure(roomId, participantId);
     driver.working.get(sandbox.id)!.set("submitted.txt", {
       mode: "100644",
@@ -667,7 +716,8 @@ describe("composeServer", () => {
     expect(applied.response).toMatchObject({
       status: "APPLIED",
       applied_revision: 1,
-      base_revision: 1,
+      base_revision: 0,
+      sandbox_advance: "scheduled",
     });
     expect(driver.working.get(sandbox.id)!.get("local.txt")?.content.toString()).toBe(
       "keep editing",
@@ -699,11 +749,7 @@ describe("composeServer", () => {
       executionDriver: driver,
     });
     const { roomId, owner, cmd } = await walkthrough(server.app, false);
-    const ownerRow = await db.pool.query<{ id: string }>(
-      "SELECT id FROM participants WHERE room_id = $1 AND authority = 'OWNER'",
-      [roomId],
-    );
-    const participantId = ownerRow.rows[0]!.id;
+    const participantId = await ownerParticipantId(roomId);
     const sandbox = await server.execution.ensure(roomId, participantId);
     driver.working.get(sandbox.id)!.set("local.txt", {
       mode: "100644",
@@ -738,6 +784,7 @@ describe("composeServer", () => {
       status: "APPLIED",
       applied_revision: 2,
       base_revision: 0,
+      sandbox_advance: "behind",
     });
     expect(await server.execution.get(roomId, participantId)).toMatchObject({ base_revision: 0 });
     expect(driver.working.get(sandbox.id)!.get("local.txt")?.content.toString()).toBe(
