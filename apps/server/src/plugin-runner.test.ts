@@ -17,8 +17,10 @@ function registry(
     idempotent?: boolean;
     integrations?: ToolExecutionSpec["integrations"];
     maxOutputBytes?: number;
+    pidsLimit?: number;
     name?: string;
     capability?: string;
+    roomEgressAllowlist?: boolean;
   } = {},
 ) {
   const tools = new ToolRegistry();
@@ -34,6 +36,8 @@ function registry(
       image: `busybox:1.36.1-musl@sha256:${"a".repeat(64)}`,
       command: ["node", "dist/worker.js"],
       egressHosts: options.hosts ?? ["API.GITHUB.COM."],
+      ...(options.roomEgressAllowlist ? { roomEgressAllowlist: true } : {}),
+      ...(options.pidsLimit === undefined ? {} : { pidsLimit: options.pidsLimit }),
       ...(options.integrations ? { integrations: options.integrations } : {}),
       ...(options.maxOutputBytes === undefined ? {} : { maxOutputBytes: options.maxOutputBytes }),
     },
@@ -136,6 +140,51 @@ describe("DockerToolRunner", () => {
       true,
     );
     expect(calls.some((call) => call.args[0] === "network" && call.args[1] === "rm")).toBe(true);
+  });
+
+  it("uses the current room host list and still forces the proxy when that list is empty", async () => {
+    const calls: { args: readonly string[]; options: Parameters<PluginDockerInvoker>[2] }[] = [];
+    let environmentContents = "";
+    const invoke: PluginDockerInvoker = async (_binary, args, options) => {
+      calls.push({ args, options });
+      if (args[0] === "run") {
+        const envFileIndex = args.indexOf("--env-file");
+        environmentContents = await readFile(args[envFileIndex + 1]!, "utf8");
+      }
+      return args[0] === "run"
+        ? { code: 0, stdout: '{"result":{"ok":true}}', stderr: "" }
+        : { code: 0, stdout: "", stderr: "" };
+    };
+    const roomEgressHosts = vi.fn(async () => [] as string[]);
+    const runner = new DockerToolRunner({
+      registry: registry({ hosts: [], roomEgressAllowlist: true, pidsLimit: 256 }),
+      egressProxyContainer: "crossover-egress-proxy",
+      egressProxySecret: SECRET,
+      roomEgressHosts,
+      invoke,
+    });
+
+    await expect(runner.run(invocation, new AbortController().signal)).resolves.toEqual({
+      result: { ok: true },
+    });
+    expect(roomEgressHosts).toHaveBeenCalledTimes(1);
+    expect(roomEgressHosts).toHaveBeenCalledWith(invocation);
+    expect(calls.some((call) => call.args[0] === "network" && call.args[1] === "create")).toBe(
+      true,
+    );
+    expect(calls.find((call) => call.args[0] === "run")?.args).toContain("--pids-limit=256");
+    const env = Object.fromEntries(
+      environmentContents
+        .trimEnd()
+        .split("\n")
+        .map((entry) => {
+          const separator = entry.indexOf("=");
+          return [entry.slice(0, separator), entry.slice(separator + 1)];
+        }),
+    );
+    expect(
+      verifyPluginProxyCredential(decodeURIComponent(new URL(env.HTTPS_PROXY!).password), SECRET),
+    ).toMatchObject({ hosts: [] });
   });
 
   it("maps a sanitized worker rate-limit response to a retryable stable provider error", async () => {

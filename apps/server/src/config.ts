@@ -91,6 +91,11 @@ const envSchema = z.object({
     .string()
     .regex(/^[A-Za-z0-9][A-Za-z0-9._/:+-]{0,254}@sha256:[a-f0-9]{64}$/)
     .optional(),
+  /** Operator-provisioned immutable browser plugin worker image. */
+  BROWSER_PLUGIN_IMAGE: z
+    .string()
+    .regex(/^[A-Za-z0-9][A-Za-z0-9._/:+-]{0,254}@sha256:[a-f0-9]{64}$/)
+    .optional(),
   GIT_INTERNAL_HOST: z.string().trim().min(1).optional(),
   GIT_INTERNAL_PORT: z.coerce.number().int().min(1).max(65_535).default(8081),
   GIT_INTERNAL_CONTAINER: z
@@ -137,6 +142,8 @@ export interface ServerConfig {
   githubApp?: { appId: string; clientId: string; clientSecret: string; privateKey: string };
   /** Digest-pinned isolated GitHub worker image; GitHub tools are unavailable when unset. */
   githubPluginImage?: string;
+  /** Digest-pinned isolated browser worker image; browser tools are unavailable when unset. */
+  browserPluginImage?: string;
   /** Bind address and private, unpublished port of the internal Git-only listener. */
   gitInternalHost?: string;
   gitInternalPort?: number;
@@ -260,6 +267,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
         }
       : {}),
     ...(e.GITHUB_PLUGIN_IMAGE ? { githubPluginImage: e.GITHUB_PLUGIN_IMAGE } : {}),
+    ...(e.BROWSER_PLUGIN_IMAGE ? { browserPluginImage: e.BROWSER_PLUGIN_IMAGE } : {}),
     ...(e.GIT_INTERNAL_HOST ? { gitInternalHost: e.GIT_INTERNAL_HOST } : {}),
     gitInternalPort: e.GIT_INTERNAL_PORT,
     ...(e.GIT_INTERNAL_CONTAINER ? { gitInternalContainer: e.GIT_INTERNAL_CONTAINER } : {}),

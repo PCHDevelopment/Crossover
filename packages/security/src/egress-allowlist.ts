@@ -1,14 +1,24 @@
 import { isIP } from "node:net";
 
+export const ROOM_EGRESS_ALLOWLIST_MAX_BYTES = 4 * 1024;
+
 /** Validate room-provided `settings.egress_allowlist` entries. Invalid entries deny the request. */
 export function normalizeRoomEgressAllowlist(value: unknown): string[] {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value) || value.length > 100)
     throw new Error("room egress_allowlist must be an array of at most 100 host patterns");
-  return value.map((entry) => {
-    if (typeof entry !== "string") throw new Error("room egress_allowlist entries must be strings");
-    return normalizeHostPattern(entry);
-  });
+  const hosts = [
+    ...new Set(
+      value.map((entry) => {
+        if (typeof entry !== "string")
+          throw new Error("room egress_allowlist entries must be strings");
+        return normalizeHostPattern(entry);
+      }),
+    ),
+  ].sort();
+  if (Buffer.byteLength(JSON.stringify(hosts), "utf8") > ROOM_EGRESS_ALLOWLIST_MAX_BYTES)
+    throw new Error("egress allowlist too large");
+  return hosts;
 }
 
 /** Normalize a CONNECT destination hostname before matching or logging it. */

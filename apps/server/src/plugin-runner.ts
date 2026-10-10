@@ -1,5 +1,4 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { isIP } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
@@ -11,7 +10,7 @@ import {
   type ToolRegistry,
   type ToolRunner,
 } from "@crossover/kernel";
-import { createPluginProxyCredential } from "@crossover/security";
+import { createPluginProxyCredential, normalizeRoomEgressAllowlist } from "@crossover/security";
 import {
   invokeDocker,
   isMissingDockerResource,
@@ -59,6 +58,8 @@ export type PluginCredentialProvider = (
   execution: ToolExecutionSpec,
 ) => Promise<Readonly<Record<string, string>> | PluginCredentialLease>;
 
+export type PluginRoomEgressProvider = (invocation: ToolInvocation) => Promise<readonly string[]>;
+
 export interface DockerToolRunnerOptions {
   registry: ToolRegistry;
   dockerBinary?: string;
@@ -69,6 +70,8 @@ export interface DockerToolRunnerOptions {
   timeoutMs?: number;
   maxOutputBytes?: number;
   credentials?: PluginCredentialProvider;
+  /** Reads the current room allowlist for tools explicitly marked to use it. */
+  roomEgressHosts?: PluginRoomEgressProvider;
   invoke?: PluginDockerInvoker;
   sweepResources?: boolean;
 }
@@ -150,10 +153,15 @@ export class DockerToolRunner implements ToolRunner {
       this.maxOutputBytes,
     );
 
-    const hosts = normalizeHosts(execution.egressHosts);
+    const roomHosts = execution.roomEgressAllowlist
+      ? await this.readRoomEgressHosts(invocation)
+      : [];
+    const hosts = normalizeHosts([...execution.egressHosts, ...roomHosts]);
+    const proxyRequired =
+      execution.roomEgressAllowlist === true || execution.egressHosts.length > 0;
     const runId = randomBytes(12).toString("hex");
     const containerName = `crossover-plugin-${runId}`;
-    const networkName = hosts.length > 0 ? `crossover-plugin-net-${runId}` : undefined;
+    const networkName = proxyRequired ? `crossover-plugin-net-${runId}` : undefined;
     let networkCreated = false;
     let proxyConnected = false;
     let environmentDirectory: string | undefined;
@@ -239,7 +247,7 @@ export class DockerToolRunner implements ToolRunner {
         "--user=1000:1000",
         "--cap-drop=ALL",
         "--security-opt=no-new-privileges",
-        "--pids-limit=64",
+        `--pids-limit=${execution.pidsLimit ?? 64}`,
         "--cpus=1",
         "--memory=256m",
         "--memory-swap=256m",
@@ -311,6 +319,12 @@ export class DockerToolRunner implements ToolRunner {
     return output!;
   }
 
+  private async readRoomEgressHosts(invocation: ToolInvocation): Promise<readonly string[]> {
+    if (!this.options.roomEgressHosts)
+      throw new Error("Room egress is not configured for this plugin runner");
+    return this.options.roomEgressHosts(invocation);
+  }
+
   private async mustSucceed(args: readonly string[]): Promise<void> {
     const result = await this.invoke(this.dockerBinary, args, {
       timeoutMs: 20_000,
@@ -355,32 +369,7 @@ export class DockerToolRunner implements ToolRunner {
 }
 
 function normalizeHosts(input: readonly string[]): string[] {
-  if (input.length > 100) throw new Error("Plugin host declaration exceeds the limit");
-  return [...new Set(input.map(normalizeHostPattern))].sort();
-}
-
-function normalizeHostPattern(input: string): string {
-  const wildcard = input.startsWith("*.");
-  const source = (wildcard ? input.slice(2) : input).replace(/\.$/, "");
-  if (!source || source.length > 253 || /[/:?#@\s\\]/.test(source) || isIP(source))
-    throw new Error("Plugin host declaration is invalid");
-  let host: string;
-  try {
-    const url = new URL(`https://${source}`);
-    if (url.port || url.username || url.password || url.pathname !== "/")
-      throw new Error("invalid host");
-    host = url.hostname.toLowerCase().replace(/\.$/, "");
-  } catch {
-    throw new Error("Plugin host declaration is invalid");
-  }
-  const labels = host.split(".");
-  if (
-    labels.length < 2 ||
-    labels.some((label) => !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label))
-  ) {
-    throw new Error("Plugin host declaration is invalid");
-  }
-  return `${wildcard ? "*." : ""}${host}`;
+  return [...new Set(normalizeRoomEgressAllowlist(input))].sort();
 }
 
 function isCredentialLease(

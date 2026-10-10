@@ -40,6 +40,10 @@ export interface ToolExecutionSpec {
   command: readonly string[];
   /** Exact hosts or `*.suffix` patterns this plugin invocation may reach through the proxy. */
   egressHosts: readonly string[];
+  /** Use the room's current `settings.egress_allowlist` as this tool's only host scope. */
+  roomEgressAllowlist?: boolean;
+  /** Container process/thread limit; defaults to 64 and cannot exceed 256. */
+  pidsLimit?: number;
   /** Broker credentials required by the tool; GitHub declarations need explicit permissions. */
   integrations?: readonly ToolIntegrationRequirement[];
   /** Optional per-tool output bound in bytes; it cannot exceed the platform's 256 KiB cap. */
@@ -111,8 +115,20 @@ export class ToolRegistry {
     if (this.tools.has(tool.name)) throw bad("already registered");
     if (!NAME.test(tool.capability)) throw bad("the capability must be <resource>.<action>");
     if (tool.execution) {
-      const { image, command, egressHosts, integrations = [], maxOutputBytes } = tool.execution;
-      if (!/^[A-Za-z0-9][A-Za-z0-9._/:+-]{0,254}@sha256:[a-f0-9]{64}$/.test(image))
+      const {
+        image,
+        command,
+        egressHosts,
+        roomEgressAllowlist,
+        pidsLimit,
+        integrations = [],
+        maxOutputBytes,
+      } = tool.execution;
+      if (
+        !/^(?:sha256:[a-f0-9]{64}|[A-Za-z0-9][A-Za-z0-9._/:+-]{0,254}@sha256:[a-f0-9]{64})$/.test(
+          image,
+        )
+      )
         throw bad("the execution image must be pinned by a sha256 digest");
       if (
         !Array.isArray(command) ||
@@ -135,6 +151,16 @@ export class ToolRegistry {
         )
       ) {
         throw bad("the execution host allowlist is invalid");
+      }
+      if (roomEgressAllowlist !== undefined && typeof roomEgressAllowlist !== "boolean")
+        throw bad("the room egress allowlist setting must be boolean");
+      if (roomEgressAllowlist && egressHosts.length !== 0)
+        throw bad("room egress tools cannot declare fixed hosts");
+      if (
+        pidsLimit !== undefined &&
+        (!Number.isSafeInteger(pidsLimit) || pidsLimit < 1 || pidsLimit > 256)
+      ) {
+        throw bad("the execution process limit must be from 1 to 256");
       }
       if (
         maxOutputBytes !== undefined &&

@@ -128,6 +128,36 @@ describe("ToolRegistry", () => {
       ).toThrow(/execution output limit/);
     }
   });
+
+  it("accepts immutable local image IDs for Docker-built integration fixtures", () => {
+    expect(() =>
+      new ToolRegistry().register(
+        tool({
+          execution: {
+            image: `sha256:${"b".repeat(64)}`,
+            command: ["/bin/busybox", "true"],
+            egressHosts: [],
+          },
+        }),
+      ),
+    ).not.toThrow();
+  });
+
+  it("caps per-tool container process limits", () => {
+    const base = {
+      image: `busybox:1.36.1-musl@sha256:${"a".repeat(64)}`,
+      command: ["/bin/busybox", "true"],
+      egressHosts: [],
+    };
+    expect(() =>
+      new ToolRegistry().register(tool({ execution: { ...base, pidsLimit: 256 } })),
+    ).not.toThrow();
+    for (const pidsLimit of [0, 257, Number.NaN]) {
+      expect(() =>
+        new ToolRegistry().register(tool({ execution: { ...base, pidsLimit } })),
+      ).toThrow(/process limit/);
+    }
+  });
 });
 
 describe("capabilityFor", () => {

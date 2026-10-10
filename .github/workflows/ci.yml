@@ -73,6 +73,7 @@ jobs:
       - run: docker pull node:22-bookworm-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392
       - run: docker pull busybox:1.36.1-musl@sha256:3c6ae8008e2c2eedd141725c30b20d9c36b026eb796688f88205845ef17aa213
       - run: docker build -f apps/egress-proxy/Dockerfile -t crossover-egress-proxy:test .
+      - run: docker build --target test -f plugins/browser/Dockerfile -t crossover-browser-plugin:test .
       - run: docker build -f apps/git-fetcher/Dockerfile -t crossover-git-fetcher:test .
       - run: docker build -f plugins/github/Dockerfile -t crossover-github-plugin:test .
       - name: Smoke test GitHub plugin stdin/stdout with network disabled

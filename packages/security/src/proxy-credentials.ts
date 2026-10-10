@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { normalizeRoomEgressAllowlist } from "./egress-allowlist.js";
 
 const DOMAIN = "crossover-egress-proxy-v1";
 const HEALTH_INSTALL_DOMAIN = "crossover-health-install-egress-proxy-v1";
@@ -112,16 +113,25 @@ function validPluginClaims(
     return false;
   }
   const claims = value as Partial<PluginProxyClaims>;
+  if (!Array.isArray(claims.hosts)) return false;
+  let canonicalHosts: string[];
+  try {
+    canonicalHosts = normalizeRoomEgressAllowlist(claims.hosts);
+  } catch {
+    return false;
+  }
+  if (
+    canonicalHosts.length !== claims.hosts.length ||
+    canonicalHosts.some((host, index) => host !== claims.hosts![index])
+  ) {
+    return false;
+  }
   const safeId = (id: unknown) =>
     typeof id === "string" && id.length > 0 && id.length <= 200 && /^[A-Za-z0-9_-]+$/.test(id);
   if (
     !safeId(claims.invocationId) ||
     !safeId(claims.roomId) ||
     !safeId(claims.participantId) ||
-    !Array.isArray(claims.hosts) ||
-    claims.hosts.length < 1 ||
-    claims.hosts.length > 100 ||
-    claims.hosts.some((host) => typeof host !== "string" || host.length < 1 || host.length > 253) ||
     !Number.isSafeInteger(claims.expiresAt)
   ) {
     return false;

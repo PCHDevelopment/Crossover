@@ -77,14 +77,14 @@ describe("room.set_egress_allowlist", () => {
     const room = await setup();
     const out = await run(room, room.owner, [" API.Example.com. ", "*.Packages.example"]);
     expect(out.response).toEqual({
-      hosts: ["api.example.com", "*.packages.example"],
+      hosts: ["*.packages.example", "api.example.com"],
       changed: true,
     });
     expect(out.events).toHaveLength(1);
     expect(out.events[0]).toMatchObject({
       type: "room.egress_allowlist_changed",
       actor_id: room.owner.participant_id,
-      payload: { hosts: ["api.example.com", "*.packages.example"] },
+      payload: { hosts: ["*.packages.example", "api.example.com"] },
     });
 
     const settings = (
@@ -95,7 +95,7 @@ describe("room.set_egress_allowlist", () => {
     ).rows[0]!.settings;
     expect(settings).toEqual({
       keep: true,
-      egress_allowlist: ["api.example.com", "*.packages.example"],
+      egress_allowlist: ["*.packages.example", "api.example.com"],
     });
 
     // Egress settings are already room-wide in room.get_state; the corresponding event uses
@@ -106,7 +106,7 @@ describe("room.set_egress_allowlist", () => {
   it("allows admins and treats an identical canonical list as a no-op", async () => {
     const room = await setup();
     await run(room, room.owner, ["api.example.com"]);
-    const out = await run(room, room.admin, ["API.EXAMPLE.COM."]);
+    const out = await run(room, room.admin, ["API.EXAMPLE.COM.", "api.example.com"]);
     expect(out.response).toEqual({ hosts: ["api.example.com"], changed: false });
     expect(out.events).toEqual([]);
   });
@@ -136,6 +136,21 @@ describe("room.set_egress_allowlist", () => {
     );
     expect(tooMany).toBeInstanceOf(CrossoverError);
     expect((tooMany as CrossoverError).code).toBe("VALIDATION");
+
+    const tooLarge = await run(
+      room,
+      room.owner,
+      Array.from({ length: 16 }, (_, index) => {
+        const first = `h${index}`.padEnd(63, "a");
+        return `${first}.${"b".repeat(63)}.${"c".repeat(61)}.${"d".repeat(63)}`;
+      }),
+    ).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(tooLarge).toBeInstanceOf(CrossoverError);
+    expect((tooLarge as CrossoverError).code).toBe("VALIDATION");
+    expect((tooLarge as Error).message).toBe("egress allowlist too large");
     const settings = (
       await pool.query<{ settings: Record<string, unknown> }>(
         "SELECT settings FROM rooms WHERE id = $1",
