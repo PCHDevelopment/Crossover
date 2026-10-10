@@ -1,6 +1,7 @@
 import type { Dispatcher } from "@crossover/kernel";
+import { CrossoverError } from "@crossover/protocol";
 import { z } from "zod";
-import type { ExecutionService } from "./execution.js";
+import type { ExecutionService, SandboxSyncResult } from "./execution.js";
 
 export const sandboxSyncParamsSchema = z.strictObject({});
 
@@ -14,11 +15,11 @@ export function registerSandboxSyncCommand(
     action: "sandbox.exec",
     mutating: true,
     params: sandboxSyncParamsSchema,
+    prepare: async (ctx) => execution.syncWorkingCopy(ctx.room_id, ctx.principal.participant_id),
     execute: async (ctx) => {
-      const { response, event } = await execution.syncWorkingCopy(
-        ctx.room_id,
-        ctx.principal.participant_id,
-      );
+      const prepared = ctx.prepared as SandboxSyncResult | undefined;
+      if (!prepared) throw new CrossoverError("UNAVAILABLE", "Sandbox sync was not prepared");
+      const { response, event } = prepared;
       if (event)
         ctx.afterCommit(() => {
           void dispatcher
