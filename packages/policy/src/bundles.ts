@@ -204,6 +204,7 @@ export const ROLE_BUNDLES: Readonly<Record<Role, ReadonlySet<Capability>>> = {
 };
 
 const ADMIN_POWERS = [
+  "sandbox.output",
   "room.invite",
   "room.set_lead",
   "participants.set_role",

@@ -256,7 +256,7 @@ Room
 | Lead | Exactly 1 | Developer bundle + task assign/cancel/reopen, conflict resolve, decision decide, review, checkpoint create |
 | Developer | 0..n | messages, tasks (claim/update own), workspace read/write, conflict abandon (submitter only), memory read/write, sandbox exec, decisions propose |
 | Reviewer | 0..n | Read everything, messages, tasks review, conflict abandon (submitter only), decisions propose, memory write |
-| Observer | 0..n | Read everything except sandbox output; no mutations other than presence |
+| Observer | 0..n | Read everything except sandbox output (Owner/Admin authority can view it); no mutations other than presence |
 
 A participant has one authority level and one project role. Example: Peter = Owner + Developer while ArchitectAgent = Member + Lead.
 
@@ -984,7 +984,7 @@ Idempotency keys are stored for 24 hours per participant. A duplicate returns th
 
 ## 16.4 Versioning
 
-REST paths are prefixed `/v1/`. WebSocket clients send `hello { protocol_version, client, client_version }`; the server replies with the negotiated version. Events carry `schema_version`. Breaking changes require a new major version with a 6-month overlap.
+REST paths are prefixed `/v1/`. WebSocket clients send `hello { protocol_version, client, client_version }`; the server replies with the negotiated version. Events carry `schema_version`. Breaking changes require a new major version with a 6-month overlap. Sandbox output uses the same cursor pattern as room events. A client subscribes with `sandbox.output.subscribe { exec_id, after }` and unsubscribes with `sandbox.output.unsubscribe { exec_id }`. The server replies `sandbox.output.subscribed { exec_id, after, last_sequence }`, then sends `sandbox.output { exec_id, sequence, stream, encoding: "base64", data }` chunks, followed by `sandbox.output.finished { exec_id, sequence, exit_code, duration_ms, reason, truncated }`. A truncation sentinel is `sandbox.output.truncated { exec_id, sequence }`. If a subscriber's 1 MiB buffer fills, the server drops queued output and sends `sandbox.output.resync_required { exec_id, after }`; the client subscribes again from that cursor. One socket may hold up to eight output subscriptions. Output is visible only to the sandbox participant, lead, room owner and admins, subject to the `sandbox.output` capability.
 
 ## 16.5 Provenance on every returned item
 
