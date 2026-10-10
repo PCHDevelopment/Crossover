@@ -1179,6 +1179,48 @@ describe("workspace.apply_changeset — secret scanning (T901)", () => {
     expect(response.response).toMatchObject({ status: "APPLIED" });
   });
 
+  it("rejects a ChangeSet whose newline path desyncs the base batch (scanner bypass)", async () => {
+    // A path may contain a newline (normalizePath rejects only NUL). cat-file
+    // --batch reads one ref per line, so a newline path splits into two refs
+    // and shifts every later file's base. Repro: target.txt is diffed against
+    // vendor.txt's content, so an added AWS key counts as unchanged and the
+    // ChangeSet is (wrongly) APPLIED. The fix leaves newline paths out of the
+    // batch (base "", scanned whole), so target.txt keeps its real base and the
+    // key is an added line → REJECTED.
+    const f = await fixture();
+    // 1. Upstream brings in vendor.txt (with the key) and target.txt (without).
+    await f.applyDirect(
+      [
+        { type: "create", path: "vendor.txt", content: `k = ${AWS_KEY}\n` },
+        { type: "create", path: "target.txt", content: "a\n" },
+      ],
+      0,
+      { actorId: UPSTREAM_ACTOR },
+    );
+    // The rev-1 SHA is visible to any reader through workspace.history.
+    const revs = await f.rowsFor("workspace_revisions");
+    const rev1 = revs.find((r) => Number(r.revision) === 1)!.commit_sha as string;
+    // 2. Upstream brings in a file whose name contains a newline; the second
+    //    half is "<rev-1 sha>:vendor.txt", a valid ref to vendor.txt's content.
+    const newlinePath = `x\n${rev1}:vendor.txt`;
+    await f.applyDirect([{ type: "create", path: newlinePath, content: "n\n" }], 1, {
+      actorId: UPSTREAM_ACTOR,
+    });
+    // 3. One ChangeSet modifies the newline file and adds the key to target.txt.
+    await expect(
+      f.apply(
+        [
+          { type: "modify", path: newlinePath, content: "n2\n" },
+          { type: "modify", path: "target.txt", content: `k = ${AWS_KEY}\n` },
+        ],
+        2,
+      ),
+    ).rejects.toMatchObject({
+      code: "VALIDATION",
+      details: { reason: "secret_detected" },
+    });
+  });
+
   it("flags an upstream pull's secrets without blocking or crashing", async () => {
     const f = await fixture();
     const owner = newId("part");

@@ -191,10 +191,18 @@ function addedLinesForContent(base: string, next: string): Set<number> {
  * Read the base versions of multiple files in a single `git cat-file --batch`
  * call. The `<commit>:<path>` refs are fed on stdin (not argv), so non-ASCII
  * paths are not C-quoted by an intermediate `ls-tree` and big ChangeSets do not
- * overflow argv. A missing object yields a `missing` line and maps to "";
- * a cat-file error propagates rather than silently treating every line as
- * added (which would flag pre-existing secrets in files whose base could not
- * be read).
+ * overflow argv.
+ *
+ * A path containing a newline is left out of the batch and given base "" (so
+ * it is scanned whole): `cat-file --batch` reads one ref per line, so a newline
+ * in the path would split it into two refs and shift every later file's base.
+ * That is the fail-safe direction — a false positive only for a path with such
+ * a strange name.
+ *
+ * Exactly one header is expected per ref written; any other count is an error
+ * (a desync would silently assign the wrong base to later files). A missing
+ * object yields a `missing` line and maps to ""; a cat-file error propagates
+ * (the apply fails UNAVAILABLE) rather than treating every line as added.
  */
 async function readBaseFiles(
   repoPath: string,
@@ -204,7 +212,10 @@ async function readBaseFiles(
   const result = new Map<string, string>();
   for (const p of paths) result.set(p, "");
   if (paths.length === 0) return result;
-  const refs = paths.map((p) => `${commit}:${p}`);
+  // Only paths without a newline can be sent as one ref per line.
+  const batchPaths = paths.filter((p) => !p.includes("\n"));
+  if (batchPaths.length === 0) return result;
+  const refs = batchPaths.map((p) => `${commit}:${p}`);
   // cat-file --batch prints, in input order, either
   //   "<oid> SP <type> SP <size> LF <content> LF"   (object present)
   // or
@@ -218,10 +229,17 @@ async function readBaseFiles(
   });
   const buf = stdout as Buffer;
   let offset = 0;
-  for (let i = 0; i < paths.length; i++) {
-    const path = paths[i]!;
+  for (let i = 0; i < batchPaths.length; i++) {
+    const path = batchPaths[i]!;
     const nl = buf.indexOf(0x0a, offset);
-    if (nl < 0) break;
+    if (nl < 0) {
+      // Fewer headers than refs: the batch desynced. Fail rather than assign
+      // the wrong base to the remaining files.
+      throw new CrossoverError(
+        "PROVIDER_UNAVAILABLE",
+        "git cat-file --batch returned fewer headers than refs",
+      );
+    }
     const header = buf.toString("utf8", offset, nl);
     offset = nl + 1;
     if (header.endsWith(" missing")) {
@@ -229,6 +247,12 @@ async function readBaseFiles(
       continue;
     }
     const size = Number(header.split(" ")[2]);
+    if (!Number.isInteger(size) || size < 0) {
+      throw new CrossoverError(
+        "PROVIDER_UNAVAILABLE",
+        "git cat-file --batch returned a malformed header",
+      );
+    }
     result.set(path, buf.toString("utf8", offset, offset + size));
     offset += size + 1; // content + trailing LF
   }
