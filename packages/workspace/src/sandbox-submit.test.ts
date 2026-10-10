@@ -5,10 +5,10 @@ describe("changes.submit contract", () => {
   it("accepts exact paths and trailing-slash directory prefixes, but not globs", () => {
     expect(
       changesSubmitParamsSchema.parse({
-        paths: ["src/file.ts", "packages/workspace/"],
+        paths: ["src/file.ts", "packages/workspace/", "app/[slug]/page.tsx"],
         message: "Submit working copy",
       }).paths,
-    ).toEqual(["src/file.ts", "packages/workspace/"]);
+    ).toEqual(["src/file.ts", "packages/workspace/", "app/[slug]/page.tsx"]);
     expect(changesSubmitParamsSchema.safeParse({ paths: ["src/*.ts"], message: "x" }).success).toBe(
       false,
     );

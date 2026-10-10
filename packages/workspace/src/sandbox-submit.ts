@@ -17,13 +17,9 @@ const MAX_OPERATIONS = 500;
 const MAX_CHANGESET_BYTES = 25 * 1024 * 1024;
 const MAX_REBASE_BYTES = 64 * 1024 * 1024;
 const MAX_REBASE_PATHS = 10_000;
-
 const pathFilter = z
   .string()
-  .refine(
-    (value) => !/[?*]/.test(value) && !value.includes("[") && !value.includes("]"),
-    "Glob path filters are not supported",
-  )
+  .refine((value) => !/[?*]/.test(value), "Glob path filters are not supported")
   .transform((value) => {
     const directory = value.endsWith("/");
     const path = normalizePath(directory ? value.slice(0, -1) : value);
@@ -35,7 +31,6 @@ export const changesSubmitParamsSchema = z.strictObject({
   message: z.string().refine((value) => !value.includes("\0"), "Text contains NUL"),
   task_id: z.string().min(1).optional(),
 });
-
 type ChangesSubmitParams = z.infer<typeof changesSubmitParamsSchema>;
 type TreeEntry = { mode: string; sha: string };
 type TreeMap = Map<string, TreeEntry>;
@@ -52,8 +47,10 @@ interface PreparedSandboxSubmit {
   submitted_paths: ReadonlySet<string>;
   protected_paths: ReadonlySet<string>;
 }
-
-export type SandboxSubmitResponse = ApplyResponse & { base_revision: number };
+export type SandboxSubmitResponse = ApplyResponse & {
+  base_revision: number;
+  sandbox_advance: "scheduled" | "behind";
+};
 
 /** Register `changes.submit` with a raw, bounded sandbox snapshot before the apply transaction. */
 export function registerSandboxSubmitCommand(
@@ -92,8 +89,7 @@ export function registerSandboxSubmitCommand(
           "CONFLICT_VERSION",
           "Sandbox base changed; sync before submitting",
         );
-
-      let responseBaseRevision = prepared.base_revision;
+      let sandboxAdvance: SandboxSubmitResponse["sandbox_advance"] = "behind";
       const changeParams = changesetParamsSchema.parse({
         source: "SANDBOX",
         message: params.message,
@@ -102,6 +98,18 @@ export function registerSandboxSubmitCommand(
         operations: prepared.operations,
         ...(params.task_id !== undefined ? { task_id: params.task_id } : {}),
       });
+      const reportAdvanceEvent = (
+        type: "sandbox.synced" | "sandbox.behind",
+        payload: Record<string, unknown>,
+      ) =>
+        void dispatcher
+          .runSystem(ctx.room_id, "changes.submit.advance", async () => ({
+            result: undefined,
+            events: [{ type, actor_id: "system", payload }],
+          }))
+          .catch((error: unknown) =>
+            console.error("Failed to report sandbox submit advance", error),
+          );
       const result = await apply(ctx, changeParams, deps, {
         onApplied: async (applyContext, applied) => {
           const localOperations = prepared.all_operations.filter(
@@ -134,7 +142,6 @@ export function registerSandboxSubmitCommand(
             };
           };
           if (!rebasedTree.clean) return { events: [await behindEvent()] };
-
           const delta = await snapshotDelta(
             prepared.object_repo,
             prepared.snapshot_commit,
@@ -142,22 +149,41 @@ export function registerSandboxSubmitCommand(
           );
           if (overwritesOmittedPaths(delta, prepared.protected_paths))
             return { events: [await behindEvent()] };
-          responseBaseRevision = applied.revision;
+          sandboxAdvance = "scheduled";
           return {
             afterCommit: () =>
-              execution.advanceWorkingCopy(
-                ctx.room_id,
-                ctx.principal.participant_id,
-                prepared.base_revision,
-                applied.revision,
-                delta.files,
-                delta.delete_paths,
-              ),
+              execution
+                .advanceWorkingCopy(
+                  ctx.room_id,
+                  ctx.principal.participant_id,
+                  prepared.base_revision,
+                  applied.revision,
+                  delta.files,
+                  delta.delete_paths,
+                )
+                .then(
+                  () => reportAdvanceEvent("sandbox.synced", { base_revision: applied.revision }),
+                  (error: unknown) => {
+                    sandboxAdvance = "behind";
+                    console.error("Sandbox submit applied, but working copy advance failed", error);
+                    reportAdvanceEvent("sandbox.behind", {
+                      behind_by: Math.max(0, applied.revision - prepared.base_revision),
+                      changed_paths: [],
+                      overlaps_local_changes: true,
+                      intents: [],
+                      reason: "advance_failed",
+                    });
+                  },
+                ),
           };
         },
       });
       return {
-        response: { ...result.response, base_revision: responseBaseRevision },
+        response: {
+          ...result.response,
+          base_revision: prepared.base_revision,
+          sandbox_advance: sandboxAdvance,
+        },
         ...(result.events ? { events: result.events } : {}),
       };
     },
@@ -195,7 +221,6 @@ async function prepareSandboxSubmit(
     ).stdout.trim();
     if (objectFormat !== "sha1" && objectFormat !== "sha256")
       throw new CrossoverError("UNAVAILABLE", "Workspace Git object format is unsupported");
-
     const baseEntries = await readTree(workspace.repo_path, workspace.commit_sha);
     const ignoreRules = await Promise.all(
       [...baseEntries]
@@ -234,7 +259,6 @@ async function prepareSandboxSubmit(
     const ignored = await ignoredWorkspacePaths(workspace.repo_path, baseEntries, newPaths);
     const changes = diffSnapshot(baseEntries, inventory, ignored);
     if (!changes.length) throw noChanges();
-
     validateFilters(
       params.paths ?? [],
       changes.map(({ path }) => path),
@@ -262,12 +286,10 @@ async function prepareSandboxSubmit(
     const rebaseBytes = changes.reduce((sum, entry) => sum + (entry.size ?? 0), 0);
     if (rebaseBytes > MAX_REBASE_BYTES)
       throw tooLarge("sandbox_snapshot_too_large", MAX_REBASE_BYTES);
-
     for (const change of changes) {
       if (change.size !== undefined && change.size > 25 * 1024 * 1024)
         throw tooLarge("sandbox_file_too_large", 25 * 1024 * 1024, change.path);
     }
-
     const selectedPaths = new Set(selected.map(({ path }) => path));
     const excludedSymlinkPaths = new Set(
       changes
@@ -405,34 +427,27 @@ function encodeContent(
 }
 
 function validateFilters(filters: readonly string[], changedPaths: readonly string[]): void {
-  for (const filter of filters) {
-    if (!changedPaths.some((path) => matchesFilter(path, filter)))
-      throw new CrossoverError(
-        "VALIDATION",
-        `Path filter did not match a changed path: ${filter}`,
-        {
-          details: { reason: "path_not_changed", path: filter },
-        },
-      );
-  }
+  const unmatched = filters.find(
+    (filter) => !changedPaths.some((path) => matchesFilter(path, filter)),
+  );
+  if (unmatched)
+    throw new CrossoverError(
+      "VALIDATION",
+      `Path filter did not match a changed path: ${unmatched}`,
+      {
+        details: { reason: "path_not_changed", path: unmatched },
+      },
+    );
 }
-
 function matchesAnyFilter(path: string, filters: readonly string[]): boolean {
   return !filters.length || filters.some((filter) => matchesFilter(path, filter));
 }
-
 function matchesFilter(path: string, filter: string): boolean {
   return filter.endsWith("/") ? path.startsWith(filter) : path === filter;
 }
 
-function depth(path: string): number {
-  return path.split("/").length;
-}
-
-function comparePath(left: string, right: string): number {
-  return left < right ? -1 : left > right ? 1 : 0;
-}
-
+const depth = (path: string) => path.split("/").length;
+const comparePath = (left: string, right: string) => (left < right ? -1 : left > right ? 1 : 0);
 async function readTree(repo: string, commit: string): Promise<TreeMap> {
   const { stdout } = await git(["ls-tree", "-r", "-z", "--full-tree", commit], {
     gitDir: repo,
@@ -486,7 +501,6 @@ async function createObjectRepo(repo: string, objectFormat: "sha1" | "sha256"): 
     throw error;
   }
 }
-
 async function planRebase(
   prepared: PreparedSandboxSubmit,
   appliedCommit: string,
@@ -497,16 +511,8 @@ async function planRebase(
     prepared.base_commit,
     localOperations,
   );
-  const result = await merge(
-    prepared.object_repo,
-    prepared.base_commit,
-    appliedCommit,
-    localCommit,
-  );
-  if (!result.clean) return { clean: false, tree: result.tree };
-  return { clean: true, tree: result.tree };
+  return merge(prepared.object_repo, prepared.base_commit, appliedCommit, localCommit);
 }
-
 async function snapshotDelta(
   repo: string,
   oldCommit: string,
@@ -568,7 +574,6 @@ function noChanges(): CrossoverError {
     details: { reason: "no_changes" },
   });
 }
-
 function tooLarge(reason: string, limit: number, path?: string): CrossoverError {
   return new CrossoverError("VALIDATION", "Sandbox working copy exceeds submission limits", {
     details: { reason, limit, ...(path ? { path } : {}) },
