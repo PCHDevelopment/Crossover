@@ -42,6 +42,7 @@ export interface LogStore {
   create(metadata: SandboxExecLogMetadata): Promise<void>;
   append(execId: string, chunk: SandboxOutputChunk): Promise<void>;
   get(execId: string): Promise<SandboxExecLogMetadata | undefined>;
+  lastCursor(execId: string): Promise<number>;
   read(execId: string, afterCursor: number, limit: number): Promise<SandboxOutputChunk[]>;
   /** The exec runner is the only metadata writer, so implementations need not serialize updates. */
   update(execId: string, patch: Partial<SandboxExecLogMetadata>): Promise<void>;
@@ -136,6 +137,24 @@ export class FileLogStore implements LogStore {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
       throw error;
     }
+  }
+
+  async lastCursor(execId: string): Promise<number> {
+    const directory = join(this.directory(execId), "chunks");
+    let names: string[];
+    try {
+      names = await readdir(directory);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0;
+      throw error;
+    }
+    let last = 0;
+    for (const name of names) {
+      if (!/^\d{10}\.json$/.test(name)) continue;
+      const cursor = Number(name.slice(0, 10));
+      if (Number.isSafeInteger(cursor)) last = Math.max(last, cursor);
+    }
+    return last;
   }
 
   async read(execId: string, afterCursor: number, limit: number): Promise<SandboxOutputChunk[]> {
@@ -241,6 +260,9 @@ export class MemoryLogStore implements LogStore {
   async get(execId: string): Promise<SandboxExecLogMetadata | undefined> {
     const metadata = this.metadata.get(execId);
     return metadata ? structuredClone(metadata) : undefined;
+  }
+  async lastCursor(execId: string): Promise<number> {
+    return this.chunks.get(execId)?.reduce((last, chunk) => Math.max(last, chunk.cursor), 0) ?? 0;
   }
   async read(execId: string, afterCursor: number, limit: number): Promise<SandboxOutputChunk[]> {
     return (this.chunks.get(execId) ?? [])
