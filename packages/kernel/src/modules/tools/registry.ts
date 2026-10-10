@@ -40,6 +40,11 @@ export interface ToolExecutionSpec {
   command: readonly string[];
   /** Exact hosts or `*.suffix` patterns this plugin invocation may reach through the proxy. */
   egressHosts: readonly string[];
+  /** Resolve only these AWS service endpoints for one validated region. */
+  awsRegionalEgress?: {
+    services: readonly ("lambda" | "logs")[];
+    regionFrom: "args.region" | "scope.logsArn";
+  };
   /** Use the room's current `settings.egress_allowlist` as this tool's only host scope. */
   roomEgressAllowlist?: boolean;
   /** Container process/thread limit; defaults to 64 and cannot exceed 256. */
@@ -119,6 +124,7 @@ export class ToolRegistry {
         image,
         command,
         egressHosts,
+        awsRegionalEgress,
         roomEgressAllowlist,
         pidsLimit,
         integrations = [],
@@ -156,6 +162,23 @@ export class ToolRegistry {
         throw bad("the room egress allowlist setting must be boolean");
       if (roomEgressAllowlist && egressHosts.length !== 0)
         throw bad("room egress tools cannot declare fixed hosts");
+      if (awsRegionalEgress !== undefined) {
+        const { services, regionFrom } = awsRegionalEgress;
+        if (
+          !Array.isArray(services) ||
+          services.length === 0 ||
+          services.length > 2 ||
+          new Set(services).size !== services.length ||
+          services.some((service) => service !== "lambda" && service !== "logs") ||
+          !["args.region", "scope.logsArn"].includes(regionFrom)
+        ) {
+          throw bad("AWS regional egress is invalid");
+        }
+        if (!integrations.some((integration) => integration.provider === "aws"))
+          throw bad("AWS regional egress requires the AWS integration");
+        if (regionFrom === "scope.logsArn" && services.some((service) => service !== "logs"))
+          throw bad("log-group scope egress can only target CloudWatch Logs");
+      }
       if (
         pidsLimit !== undefined &&
         (!Number.isSafeInteger(pidsLimit) || pidsLimit < 1 || pidsLimit > 256)

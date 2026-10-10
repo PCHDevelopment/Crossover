@@ -5,7 +5,11 @@ import { describe, expect, it, vi } from "vitest";
 import { ToolRegistry, type ToolExecutionSpec, type ToolInvocation } from "@crossover/kernel";
 import { verifyPluginProxyCredential } from "@crossover/security";
 import { z } from "zod";
-import { DockerToolRunner, type PluginDockerInvoker } from "./plugin-runner.js";
+import {
+  DockerToolRunner,
+  resolveAwsRegionalHosts,
+  type PluginDockerInvoker,
+} from "./plugin-runner.js";
 import { PLUGIN_SWEEP_INTERVAL_MS, PluginResourceSweeper } from "./plugin-runner-docker.js";
 
 const SECRET = "plugin-proxy-secret-with-at-least-32-bytes";
@@ -21,6 +25,7 @@ function registry(
     name?: string;
     capability?: string;
     roomEgressAllowlist?: boolean;
+    awsRegionalEgress?: ToolExecutionSpec["awsRegionalEgress"];
   } = {},
 ) {
   const tools = new ToolRegistry();
@@ -37,6 +42,7 @@ function registry(
       command: ["node", "dist/worker.js"],
       egressHosts: options.hosts ?? ["API.GITHUB.COM."],
       ...(options.roomEgressAllowlist ? { roomEgressAllowlist: true } : {}),
+      ...(options.awsRegionalEgress ? { awsRegionalEgress: options.awsRegionalEgress } : {}),
       ...(options.pidsLimit === undefined ? {} : { pidsLimit: options.pidsLimit }),
       ...(options.integrations ? { integrations: options.integrations } : {}),
       ...(options.maxOutputBytes === undefined ? {} : { maxOutputBytes: options.maxOutputBytes }),
@@ -56,6 +62,71 @@ const invocation: ToolInvocation = {
 };
 
 describe("DockerToolRunner", () => {
+  it("derives only the invocation region's AWS service endpoints", () => {
+    expect(
+      resolveAwsRegionalHosts(
+        { ...invocation, args: { region: "us-east-1" } },
+        { regionFrom: "args.region", services: ["lambda"] },
+      ),
+    ).toEqual(["lambda.us-east-1.amazonaws.com"]);
+    expect(
+      resolveAwsRegionalHosts(
+        { ...invocation, scope: "arn:aws-cn:logs:cn-north-1:123456789012:log-group:app" },
+        { regionFrom: "scope.logsArn", services: ["logs"] },
+      ),
+    ).toEqual(["logs.cn-north-1.amazonaws.com.cn"]);
+    expect(() =>
+      resolveAwsRegionalHosts(
+        { ...invocation, args: { region: "evil.example.com" } },
+        { regionFrom: "args.region", services: ["lambda"] },
+      ),
+    ).toThrow(/scope is invalid/);
+  });
+
+  it("places only the ARN's CloudWatch regional endpoint in the proxy claim", async () => {
+    let proxyToken = "";
+    const invoke: PluginDockerInvoker = async (_binary, args) => {
+      if (args[0] === "run") {
+        const envFile = args[args.indexOf("--env-file") + 1]!;
+        const environment = Object.fromEntries(
+          (await readFile(envFile, "utf8"))
+            .trimEnd()
+            .split("\n")
+            .map((entry) => {
+              const separator = entry.indexOf("=");
+              return [entry.slice(0, separator), entry.slice(separator + 1)];
+            }),
+        );
+        proxyToken = decodeURIComponent(new URL(environment.HTTPS_PROXY!).password);
+        return { code: 0, stdout: '{"result":{}}', stderr: "" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    const awsInvocation: ToolInvocation = {
+      ...invocation,
+      tool: "aws.read_logs",
+      capability: "aws.read_logs:arn:aws:logs:us-east-1:123456789012:log-group:app",
+      scope: "arn:aws:logs:us-east-1:123456789012:log-group:app",
+      args: { log_group_arn: "arn:aws:logs:us-east-1:123456789012:log-group:app" },
+    };
+    const runner = new DockerToolRunner({
+      registry: registry({
+        name: "aws.read_logs",
+        capability: "aws.read_logs",
+        hosts: [],
+        awsRegionalEgress: { regionFrom: "scope.logsArn", services: ["logs"] },
+        integrations: [{ provider: "aws" }],
+      }),
+      egressProxyContainer: "crossover-egress-proxy",
+      egressProxySecret: SECRET,
+      invoke,
+    });
+    await runner.run(awsInvocation, new AbortController().signal);
+    expect(verifyPluginProxyCredential(proxyToken, SECRET)?.hosts).toEqual([
+      "logs.us-east-1.amazonaws.com",
+    ]);
+  });
+
   it("runs each invocation in a bounded container with scoped egress and only selected credentials", async () => {
     const calls: { args: readonly string[]; options: Parameters<PluginDockerInvoker>[2] }[] = [];
     let environmentContents = "";

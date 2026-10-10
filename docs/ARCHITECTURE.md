@@ -1262,7 +1262,7 @@ workspace.read
 workspace.write:src/api/**          path-scoped
 github.create_pull_request:org/repo
 aws.read_logs:arn:aws:logs:…
-aws.deploy_lambda:function/staging-*
+aws.deploy_lambda:staging-*
 browser.navigate
 sandbox.exec
 integrations.read
@@ -1277,7 +1277,7 @@ A participant's effective capabilities = role bundle (§6.1) + explicit grants �
 |---|---|---|---|
 | 0 | Read | `workspace.read`, `github.read_repository`, `aws.read_logs` | In role bundles |
 | 1 | Room-internal writes | `workspace.write`, `tasks.*`, `memory.write`, `sandbox.exec` | In role bundles |
-| 2 | External, reversible side effects | `github.create_pull_request`, `slack.post_message`, `browser.navigate` | Granted by owner/admin, no expiry |
+| 2 | External, reversible side effects | `github.create_pull_request`, `slack.post_message`, `browser.navigate`, `aws.deploy_lambda:staging-*` | Granted by owner/admin, no expiry |
 | 3 | External, irreversible or production | `aws.deploy_lambda:prod-*`, push to protected branch, delete external resources | Owner only, expires ≤ 24 h, never in bundles |
 
 Full autonomy applies to every tier the agent has been granted. Approval gates (§22.2) are an option the owner can turn on per capability, not the default.

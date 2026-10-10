@@ -156,7 +156,10 @@ export class DockerToolRunner implements ToolRunner {
     const roomHosts = execution.roomEgressAllowlist
       ? await this.readRoomEgressHosts(invocation)
       : [];
-    const hosts = normalizeHosts([...execution.egressHosts, ...roomHosts]);
+    const regionalHosts = execution.awsRegionalEgress
+      ? resolveAwsRegionalHosts(invocation, execution.awsRegionalEgress)
+      : [];
+    const hosts = normalizeHosts([...execution.egressHosts, ...regionalHosts, ...roomHosts]);
     if (execution.roomEgressAllowlist === true && hosts.length === 0) {
       throw new ToolProviderError("egress not configured", {
         retryable: false,
@@ -164,7 +167,9 @@ export class DockerToolRunner implements ToolRunner {
       });
     }
     const proxyRequired =
-      execution.roomEgressAllowlist === true || execution.egressHosts.length > 0;
+      execution.roomEgressAllowlist === true ||
+      execution.egressHosts.length > 0 ||
+      execution.awsRegionalEgress !== undefined;
     const runId = randomBytes(12).toString("hex");
     const containerName = `crossover-plugin-${runId}`;
     const networkName = proxyRequired ? `crossover-plugin-net-${runId}` : undefined;
@@ -376,6 +381,47 @@ export class DockerToolRunner implements ToolRunner {
 
 function normalizeHosts(input: readonly string[]): string[] {
   return [...new Set(normalizeRoomEgressAllowlist(input))].sort();
+}
+
+/** Derive a narrow regional AWS endpoint allowlist from the invocation's validated scope/args. */
+export function resolveAwsRegionalHosts(
+  invocation: ToolInvocation,
+  policy: NonNullable<ToolExecutionSpec["awsRegionalEgress"]>,
+): string[] {
+  let region: string | undefined;
+  let partition: string | undefined;
+  if (policy.regionFrom === "scope.logsArn") {
+    const match =
+      typeof invocation.scope === "string"
+        ? /^arn:(aws|aws-us-gov|aws-cn):logs:([a-z0-9-]+):\d{12}:log-group:[^*?]+(?::\*)?$/.exec(
+            invocation.scope,
+          )
+        : null;
+    partition = match?.[1];
+    region = match?.[2];
+  } else {
+    const args = invocation.args;
+    if (typeof args === "object" && args !== null && !Array.isArray(args)) {
+      const value = (args as Record<string, unknown>)["region"];
+      if (typeof value === "string") region = value;
+    }
+    if (region?.startsWith("cn-")) partition = "aws-cn";
+    else if (region?.startsWith("us-gov-")) partition = "aws-us-gov";
+    else partition = "aws";
+  }
+  if (
+    !region ||
+    !partition ||
+    !/^[a-z]{2}(-gov)?-[a-z]+-\d+$/.test(region) ||
+    !["aws", "aws-us-gov", "aws-cn"].includes(partition)
+  ) {
+    throw new ToolProviderError("AWS regional egress scope is invalid", {
+      retryable: false,
+      code: "VALIDATION",
+    });
+  }
+  const domain = partition === "aws-cn" ? "amazonaws.com.cn" : "amazonaws.com";
+  return policy.services.map((service) => `${service}.${region}.${domain}`);
 }
 
 function isCredentialLease(

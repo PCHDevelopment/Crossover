@@ -10,6 +10,7 @@ import { IntegrationCredentialBroker } from "./integration-broker.js";
 import { GitHubPullRequestProvider } from "./github-pull-request.js";
 import { registerBrowserTools } from "./browser-plugin.js";
 import { registerGitHubTools } from "./github-plugin.js";
+import { registerAwsTools } from "./aws-plugin.js";
 import {
   Dispatcher,
   RedisBudgetLimiter,
@@ -286,6 +287,8 @@ export async function composeServer(
       registerGitHubTools(toolRegistry, config.githubPluginImage);
     if (!overrides.tools?.registry && config.browserPluginImage)
       registerBrowserTools(toolRegistry, config.browserPluginImage);
+    if (!overrides.tools?.registry && config.awsPluginImage)
+      registerAwsTools(toolRegistry, config.awsPluginImage);
     kmsOperations = config.integrationKmsKeyId ? new AwsKmsDataKeyOperations() : undefined;
     const integrationSecretStore =
       overrides.integrations?.secretStore ??
