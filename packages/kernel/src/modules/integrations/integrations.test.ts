@@ -9,6 +9,7 @@ import {
   readConnectedIntegrationSecretConfig,
   registerIntegrationCommands,
 } from "./integrations.js";
+import { ensureRoomDataKey } from "./room-key.js";
 import type { EncryptedSecret, SecretStore } from "./secret-store.js";
 
 let db: TestDatabase;
@@ -234,6 +235,121 @@ describe("room integration commands", () => {
         ])
       ).rows[0].count,
     ).toBe(0);
+  });
+
+  it("does not place a secret-bearing connect request into the approvals table", async () => {
+    const f = await setup();
+    const token = "approval-queue-secret-token";
+    await pool.query(
+      `INSERT INTO capability_grants
+         (id, room_id, participant_id, effect, capability, requires_approval, created_by)
+       VALUES ($1, $2, $3, 'GRANT', 'integrations.manage', true, $4)`,
+      [newId("grant"), f.roomId, f.owner.participant_id, f.owner.participant_id],
+    );
+
+    const error = await dispatch(f, f.owner, "integrations.connect", {
+      provider: "oauth:slack",
+      access_token: token,
+    }).then(
+      () => undefined,
+      (reason: unknown) => reason,
+    );
+    expect(error).toMatchObject({
+      code: "VALIDATION",
+      details: { reason: "not_approvable", method: "integrations.connect" },
+    });
+    const approvals = await pool.query("SELECT params FROM approvals WHERE room_id = $1", [
+      f.roomId,
+    ]);
+    expect(approvals.rows).toEqual([]);
+    expect(JSON.stringify(approvals.rows)).not.toContain(token);
+  });
+
+  it("races two first room-key writes without surfacing a unique-constraint error", async () => {
+    const f = await setup();
+    const encrypted = (wrappedDataKey: string): EncryptedSecret => ({
+      version: 1,
+      iv: Buffer.alloc(12, 1).toString("base64url"),
+      ciphertext: "AA",
+      tag: Buffer.alloc(16, 2).toString("base64url"),
+      wrapped_data_key: wrappedDataKey,
+    });
+    const ensure = async (wrappedDataKey: string) => {
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        await ensureRoomDataKey(client, f.roomId, encrypted(wrappedDataKey));
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      } finally {
+        client.release();
+      }
+    };
+
+    const outcomes = await Promise.allSettled([
+      ensure("kms-wrapped-first"),
+      ensure("kms-wrapped-second"),
+    ]);
+    expect(outcomes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
+    const conflict = outcomes.find((outcome) => outcome.status === "rejected");
+    expect(conflict?.status).toBe("rejected");
+    if (conflict?.status === "rejected") {
+      expect(conflict.reason).toMatchObject({ code: "CONFLICT_VERSION", retryable: true });
+    }
+  });
+
+  it("handles concurrent first connects with a retryable key mismatch", async () => {
+    let resolveSeals!: () => void;
+    const bothSealed = new Promise<void>((resolve) => {
+      resolveSeals = resolve;
+    });
+    let seals = 0;
+    const racingSecretStore: SecretStore = {
+      async seal(roomId, provider, plaintext, wrappedDataKey) {
+        const ordinal = ++seals;
+        const id = `race-secret-${roomId}-${provider}-${serial++}`;
+        secretValues.set(id, plaintext);
+        if (ordinal === 2) resolveSeals();
+        await bothSealed;
+        return {
+          version: 1,
+          iv: Buffer.alloc(12, 3).toString("base64url"),
+          ciphertext: Buffer.from(id).toString("base64url"),
+          tag: Buffer.alloc(16, 4).toString("base64url"),
+          wrapped_data_key: wrappedDataKey ?? `kms-wrapped-${ordinal}`,
+        };
+      },
+      open: testSecretStore.open,
+    };
+    const f = await setup(racingSecretStore);
+    const outcomes = await Promise.allSettled([
+      dispatch(f, f.owner, "integrations.connect", {
+        provider: "aws",
+        role_arn: "arn:aws:iam::123456789012:role/CrossoverDeploy",
+      }),
+      dispatch(f, f.owner, "integrations.connect", {
+        provider: "oauth:slack",
+        access_token: "concurrent-token-value",
+      }),
+    ]);
+
+    expect(seals).toBe(2);
+    expect(outcomes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
+    const conflict = outcomes.find((outcome) => outcome.status === "rejected");
+    expect(conflict?.status).toBe("rejected");
+    if (conflict?.status === "rejected") {
+      expect(conflict.reason).toMatchObject({
+        code: "CONFLICT_VERSION",
+        retryable: true,
+        details: { reason: "integration_key_changed" },
+      });
+    }
+    const stored = await pool.query("SELECT provider FROM integrations WHERE room_id = $1", [
+      f.roomId,
+    ]);
+    expect(stored.rowCount).toBe(1);
   });
 
   it("releases secrets only for CONNECTED, unexpired integrations", async () => {

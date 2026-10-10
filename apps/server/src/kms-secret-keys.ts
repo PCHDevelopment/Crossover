@@ -57,6 +57,7 @@ export class KmsRoomDataKeyProvider implements RoomDataKeyProvider {
       const ciphertext = decode(wrappedDataKey);
       const result = await this.operations.decryptDataKey({
         CiphertextBlob: ciphertext,
+        KeyId: this.keyId,
         EncryptionContext,
       });
       try {

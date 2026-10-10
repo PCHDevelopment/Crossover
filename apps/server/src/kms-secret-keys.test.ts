@@ -38,6 +38,7 @@ describe("KMS-backed room data keys", () => {
         operation: "decrypt",
         input: {
           CiphertextBlob: ciphertext,
+          KeyId: "alias/test",
           EncryptionContext: { room_id: "room_alpha" },
         },
       },

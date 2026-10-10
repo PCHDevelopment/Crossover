@@ -4,6 +4,7 @@ import { CrossoverError } from "@crossover/protocol";
 import { z } from "zod";
 import type { Dispatcher, PrepareContext } from "../../dispatcher.js";
 import type { EncryptedSecret, SecretStore } from "./secret-store.js";
+import { ensureRoomDataKey } from "./room-key.js";
 
 const PROVIDER_PATTERN = /^(?:github|aws|oauth:[a-z][a-z0-9_]{1,31})$/;
 const ROLE_ARN_PATTERN =
@@ -136,6 +137,7 @@ export function registerIntegrationCommands(
     action: "integrations.manage",
     mutating: true,
     returnsOneTime: true,
+    notApprovable: true,
     params: integrationsConnectParams,
     prepare: async (ctx, params) => prepareConnection(ctx, params, options),
     execute: async (ctx, params) => {
@@ -332,40 +334,6 @@ async function prepareConnection(
     connected_at: connectedAt,
     ...(externalId ? { external_id: externalId } : {}),
   };
-}
-
-async function ensureRoomDataKey(
-  client: PoolClient,
-  roomId: string,
-  encrypted: EncryptedSecret,
-): Promise<void> {
-  const keyStrategy = encrypted.wrapped_data_key === null ? "CONFIG" : "KMS";
-  const { rows } = await client.query<IntegrationKeyRow>(
-    "SELECT key_strategy, wrapped_data_key FROM integration_room_keys WHERE room_id = $1 FOR UPDATE",
-    [roomId],
-  );
-  const current = rows[0];
-  if (current) {
-    if (
-      current.key_strategy !== keyStrategy ||
-      current.wrapped_data_key !== encrypted.wrapped_data_key
-    ) {
-      throw new CrossoverError(
-        "CONFLICT_VERSION",
-        "The room integration key changed; retry connect",
-        {
-          retryable: true,
-          details: { reason: "integration_key_changed" },
-        },
-      );
-    }
-    return;
-  }
-  await client.query(
-    `INSERT INTO integration_room_keys (room_id, key_strategy, wrapped_data_key)
-     VALUES ($1, $2, $3)`,
-    [roomId, keyStrategy, encrypted.wrapped_data_key],
-  );
 }
 
 async function requireOwner(
