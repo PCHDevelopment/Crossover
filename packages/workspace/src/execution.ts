@@ -23,7 +23,7 @@ export type SandboxExecTermination = "cancelled" | "timed_out" | "revoked" | "sa
 export interface SandboxExecOutcome {
   exit_code: number | null;
   duration_ms: number;
-  reason: "exit" | SandboxExecTermination | "start_failed";
+  reason: "exit" | SandboxExecTermination | "start_failed" | "output_failed";
 }
 
 export interface SandboxExecProcess {
@@ -202,18 +202,25 @@ export class ExecutionService {
   }
 
   /** Preflight the concurrency limit before committing the command's start event. */
-  async assertExecCapacity(roomId: string, participantId: string): Promise<void> {
-    await this.withSandboxLock(roomId, participantId, async (sandbox) => {
+  async assertExecCapacity(roomId: string, participantId: string): Promise<string> {
+    return this.withSandboxLock(roomId, participantId, async (sandbox) => {
       if (!this.driver.exec)
         throw new CrossoverError(
           "UNAVAILABLE",
           "Sandbox execution is not supported by this driver",
         );
-      if (this.activeCount(sandbox.id) >= 8)
-        throw new CrossoverError("VALIDATION", "A sandbox may run at most 8 commands at once", {
-          details: { reason: "too_many_execs", maximum: 8 },
-        });
+      this.assertExecCapacityFor(sandbox.id);
+      return sandbox.id;
     });
+  }
+
+  assertExecCapacityFor(sandboxId: string): void {
+    if (!this.driver.exec)
+      throw new CrossoverError("UNAVAILABLE", "Sandbox execution is not supported by this driver");
+    if (this.activeCount(sandboxId) >= 8)
+      throw new CrossoverError("VALIDATION", "A sandbox may run at most 8 commands at once", {
+        details: { reason: "too_many_execs", maximum: 8 },
+      });
   }
 
   /** Start one command while serialized with submit's post-commit working-copy advance. */

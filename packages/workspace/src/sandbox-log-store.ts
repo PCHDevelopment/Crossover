@@ -3,7 +3,13 @@ import { join } from "node:path";
 import { isId } from "@crossover/protocol";
 
 export type SandboxExecReason =
-  "exit" | "cancelled" | "timed_out" | "revoked" | "sandbox_stopped" | "start_failed";
+  | "exit"
+  | "cancelled"
+  | "timed_out"
+  | "revoked"
+  | "sandbox_stopped"
+  | "start_failed"
+  | "output_failed";
 
 export interface SandboxExecLogMetadata {
   exec_id: string;
@@ -18,6 +24,7 @@ export interface SandboxExecLogMetadata {
   exit_code?: number | null;
   duration_ms?: number;
   reason?: SandboxExecReason;
+  cancelled_by?: string;
   output_bytes: number;
   truncated: boolean;
 }
