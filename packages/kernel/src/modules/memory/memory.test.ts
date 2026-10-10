@@ -262,3 +262,68 @@ describe("memory.put", () => {
     await rejects(put(s, s.dev, { content_type: "text/plain" }), "VALIDATION");
   });
 });
+
+describe("secret scanning on memory (T902)", () => {
+  const PRIVATE_KEY = [
+    "-----BEGIN PRIVATE KEY-----",
+    "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7",
+    "-----END PRIVATE KEY-----",
+  ].join("\n");
+  const LOW_ENTROPY = "api_key = aB3dE5gH7jK9mN1pQ3rS5tU7vW9xY2zA";
+
+  it("memory.put rejects a private-key block with secret_detected; the value is in no error, event, inbox or row", async () => {
+    const s = await setup();
+    const err = await rejects(
+      put(s, s.dev, { key: "secrets/deploy", value: PRIVATE_KEY }),
+      "VALIDATION",
+    );
+    expect(err.details).toMatchObject({ reason: "secret_detected" });
+    const findings = (err.details as { findings: Array<Record<string, unknown>> }).findings;
+    expect(findings[0]).toMatchObject({
+      rule: "private_key_block",
+      confidence: "high",
+      location: { kind: "memory", key: "secrets/deploy" },
+    });
+    // The matched value appears nowhere: not in the error, not in any inbox
+    // summary, and no memory revision was written.
+    expect(JSON.stringify({ err, findings })).not.toContain(
+      "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7",
+    );
+    const { rows: revs } = await pool.query(
+      "SELECT value FROM memory_revisions WHERE room_id = $1 AND key = $2",
+      [s.room, "secrets/deploy"],
+    );
+    expect(revs).toHaveLength(0);
+    const { rows: inbox } = await pool.query("SELECT summary FROM inbox_items WHERE room_id = $1", [
+      s.room,
+    ]);
+    for (const r of inbox)
+      expect(r.summary).not.toContain("MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7");
+  });
+
+  it("memory.put flags a low-confidence match: SECRET_SCAN to author and owner, location only in the summary", async () => {
+    const s = await setup();
+    // The room owner must be a real participant for the inbox FK; use s.dev2
+    // (not the author s.dev) so the author and owner are two distinct recipients.
+    await pool.query("UPDATE rooms SET owner_id = $2 WHERE id = $1", [
+      s.room,
+      s.dev2.participant_id,
+    ]);
+    const out = await put(s, s.dev, { key: "creds/api", value: LOW_ENTROPY });
+    expect((out.response as MemoryEntryView).value).toBe(LOW_ENTROPY); // flagged, not rejected
+    const { rows } = await pool.query(
+      `SELECT participant_id, summary FROM inbox_items
+       WHERE room_id = $1 AND kind = 'SECRET_SCAN' ORDER BY participant_id`,
+      [s.room],
+    );
+    expect(rows.map((r) => r.participant_id).sort()).toEqual(
+      [s.dev.participant_id, s.dev2.participant_id].sort(),
+    );
+    for (const r of rows) {
+      expect(r.summary).toContain("memory key creds/api");
+      expect(r.summary).toContain("line 1");
+      expect(r.summary).toContain("high_entropy_assignment");
+      expect(r.summary).not.toContain("aB3dE5gH7jK9mN1pQ3rS5tU7vW9xY2zA");
+    }
+  });
+});

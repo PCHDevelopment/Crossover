@@ -1,5 +1,6 @@
 import { CrossoverError } from "@crossover/protocol";
 import type { PoolClient } from "@crossover/db";
+import { scanTextForSecrets } from "../secret-scan.js";
 import {
   loadAuthorKinds,
   provenanceOf,
@@ -200,6 +201,12 @@ export function registerMemoryCommands(dispatcher: Dispatcher): void {
           });
         }
       }
+      // T902: scan the whole new value; a high-confidence secret rejects, a
+      // low-confidence match is flagged to the author and the room owner.
+      await scanTextForSecrets(ctx.client, ctx.room_id, ctx.principal.participant_id, p.value, {
+        kind: "memory",
+        key: p.key,
+      });
       const entry = await putMemory(ctx.client, ctx.room_id, ctx.principal.participant_id, p);
       return {
         response: labelMemory(entry, principalKinds(ctx.principal)),

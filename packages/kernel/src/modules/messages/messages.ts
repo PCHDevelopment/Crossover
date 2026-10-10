@@ -1,6 +1,7 @@
 import { CrossoverError, newId } from "@crossover/protocol";
 import { z } from "zod";
 import { deliverInbox } from "../inbox/inbox.js";
+import { scanTextForSecrets } from "../secret-scan.js";
 import {
   loadAuthorKinds,
   principalKinds,
@@ -147,12 +148,20 @@ export function registerMessageCommands(dispatcher: Dispatcher): void {
           });
         }
       }
+      const messageId = newId("msg");
+      // T902: a high-confidence secret in the body rejects; a low-confidence
+      // match is flagged to the author and the room owner.
+      await scanTextForSecrets(ctx.client, ctx.room_id, ctx.principal.participant_id, p.body, {
+        kind: "message",
+        field: "body",
+        id: messageId,
+      });
       const { rows } = await ctx.client.query<MessageRow>(
         `INSERT INTO messages (id, room_id, author_id, body, mentions, refs, reply_to)
          VALUES ($1, $2, $3, $4, $5::text[], $6::jsonb, $7)
          RETURNING ${COLUMNS}`,
         [
-          newId("msg"),
+          messageId,
           ctx.room_id,
           ctx.principal.participant_id,
           p.body,
@@ -215,6 +224,13 @@ export function registerMessageCommands(dispatcher: Dispatcher): void {
           details: { reason: "not_author" },
         });
       }
+      // T902: scan the whole new body; a high-confidence secret can't already
+      // be in the old one (it would have been blocked on send/edit).
+      await scanTextForSecrets(ctx.client, ctx.room_id, ctx.principal.participant_id, p.body, {
+        kind: "message",
+        field: "body",
+        id: p.message_id,
+      });
       const { rows } = await ctx.client.query<MessageRow>(
         `UPDATE messages SET body = $3, edited_at = clock_timestamp()
          WHERE id = $1 AND room_id = $2 RETURNING ${COLUMNS}`,
