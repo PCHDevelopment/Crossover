@@ -38,6 +38,19 @@ describe("typed API", () => {
   });
 });
 
+describe("typed API: a command that is also a namespace", () => {
+  it("sandbox.exec runs, and sandbox.exec.cancel is reachable under it", async () => {
+    const calls: string[] = [];
+    const api = makeApi(async (method) => {
+      calls.push(method);
+      return { response: null, events: [], replayed: false };
+    });
+    await api.sandbox.exec({ command: "ls" });
+    await api.sandbox.exec.cancel({ exec_id: "x" });
+    expect(calls).toEqual(["sandbox.exec", "sandbox.exec.cancel"]);
+  });
+});
+
 describe("REST transport", () => {
   it("puts the bearer token and a fresh idempotency key on a mutating command, none on a read", async () => {
     const seen: { url: string; auth: string | null; body: Record<string, unknown> }[] = [];
