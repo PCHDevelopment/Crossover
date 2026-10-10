@@ -164,7 +164,6 @@ export function registerSandboxSubmitCommand(
                 .then(
                   () => reportAdvanceEvent("sandbox.synced", { base_revision: applied.revision }),
                   (error: unknown) => {
-                    sandboxAdvance = "behind";
                     console.error("Sandbox submit applied, but working copy advance failed", error);
                     reportAdvanceEvent("sandbox.behind", {
                       behind_by: Math.max(0, applied.revision - prepared.base_revision),
