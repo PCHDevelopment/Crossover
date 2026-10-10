@@ -1148,6 +1148,31 @@ describe("workspace.apply_changeset — secret scanning (T901)", () => {
     expect(response.response).toMatchObject({ status: "APPLIED" });
   });
 
+  it("does not block an edit to a non-ASCII (café.ts) file that leaves a pre-existing secret untouched", async () => {
+    // Sabotage for the ls-tree regression: an intermediate `git ls-tree` C-quotes
+    // non-ASCII paths ("src/caf\303\251.ts"), so the base lookup misses, every
+    // line counts as added, and a pre-existing secret gets rejected as
+    // secret_detected. Feeding `<commit>:<path>` straight to `cat-file --batch`
+    // avoids the C-quoting, so the base is read and the edit applies.
+    const f = await fixture();
+    await f.applyDirect(
+      [{ type: "create", path: "src/café.ts", content: `old = ${AWS_KEY}\nline2 = x\nline3 = y\n` }],
+      0,
+      { actorId: UPSTREAM_ACTOR },
+    );
+    const response = await f.apply(
+      [
+        {
+          type: "modify",
+          path: "src/café.ts",
+          content: `old = ${AWS_KEY}\nline2 = x\nline3 = changed\n`,
+        },
+      ],
+      1,
+    );
+    expect(response.response).toMatchObject({ status: "APPLIED" });
+  });
+
   it("flags an upstream pull's secrets without blocking or crashing", async () => {
     const f = await fixture();
     const owner = newId("part");

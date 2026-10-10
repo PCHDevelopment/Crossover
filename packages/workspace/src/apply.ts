@@ -188,10 +188,13 @@ function addedLinesForContent(base: string, next: string): Set<number> {
 }
 
 /**
- * Read the base versions of multiple files with two git calls total — one
- * `ls-tree` to resolve the paths to object ids, one `cat-file --batch` to read
- * the objects — instead of one `git show` per file. Returns a map of
- * path → content; paths absent from the base commit map to "".
+ * Read the base versions of multiple files in a single `git cat-file --batch`
+ * call. The `<commit>:<path>` refs are fed on stdin (not argv), so non-ASCII
+ * paths are not C-quoted by an intermediate `ls-tree` and big ChangeSets do not
+ * overflow argv. A missing object yields a `missing` line and maps to "";
+ * a cat-file error propagates rather than silently treating every line as
+ * added (which would flag pre-existing secrets in files whose base could not
+ * be read).
  */
 async function readBaseFiles(
   repoPath: string,
@@ -201,44 +204,33 @@ async function readBaseFiles(
   const result = new Map<string, string>();
   for (const p of paths) result.set(p, "");
   if (paths.length === 0) return result;
-  // Resolve the paths to object ids in one call. ls-tree prints
-  // "<mode> SP <type> SP <oid> TAB <path>" for each path present in the commit.
-  const idByPath = new Map<string, string>();
-  try {
-    const { stdout } = await git(["ls-tree", commit, "--", ...paths], {
-      cwd: repoPath,
-      timeoutMs: 5000,
-      encoding: "utf8",
-    });
-    for (const line of stdout.split("\n")) {
-      const tab = line.indexOf("\t");
-      if (tab < 0) continue;
-      const oid = line.slice(0, tab).split(" ")[2];
-      if (oid) idByPath.set(line.slice(tab + 1), oid);
-    }
-  } catch {
-    // No base versions at all (e.g. the base commit is empty).
-  }
-  const entries = [...idByPath.entries()];
-  if (entries.length === 0) return result;
-  // Read every object in one call. cat-file --batch prints
-  // "<oid> SP <type> SP <size> LF <content> LF" per object, in input order;
-  // the content is exactly <size> bytes. A buffer keeps byte offsets exact.
+  const refs = paths.map((p) => `${commit}:${p}`);
+  // cat-file --batch prints, in input order, either
+  //   "<oid> SP <type> SP <size> LF <content> LF"   (object present)
+  // or
+  //   "<ref> SP missing LF"                          (object absent)
+  // The content is exactly <size> bytes. A buffer keeps byte offsets exact.
   const { stdout } = await git(["cat-file", "--batch"], {
     cwd: repoPath,
     timeoutMs: 10_000,
     encoding: "buffer",
-    input: entries.map(([, oid]) => oid).join("\n") + "\n",
+    input: refs.join("\n") + "\n",
   });
   const buf = stdout as Buffer;
   let offset = 0;
-  for (const [path] of entries) {
+  for (let i = 0; i < paths.length; i++) {
+    const path = paths[i]!;
     const nl = buf.indexOf(0x0a, offset);
     if (nl < 0) break;
-    const size = Number(buf.toString("utf8", offset, nl).split(" ")[2]);
+    const header = buf.toString("utf8", offset, nl);
     offset = nl + 1;
+    if (header.endsWith(" missing")) {
+      result.set(path, "");
+      continue;
+    }
+    const size = Number(header.split(" ")[2]);
     result.set(path, buf.toString("utf8", offset, offset + size));
-    offset += size + 1;
+    offset += size + 1; // content + trailing LF
   }
   return result;
 }
