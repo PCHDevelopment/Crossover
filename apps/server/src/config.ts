@@ -72,6 +72,13 @@ const envSchema = z.object({
     .optional(),
   SANDBOX_EGRESS_PROXY_PORT: z.coerce.number().int().min(1).max(65_535).optional(),
   SANDBOX_EGRESS_PROXY_SECRET: z.string().min(32).optional(),
+  /** 32-byte hex key for development integration-secret encryption. */
+  INTEGRATION_SECRET_KEY: z
+    .string()
+    .regex(/^[a-fA-F0-9]{64}$/)
+    .optional(),
+  /** AWS KMS key id or ARN used for production integration-secret envelope encryption. */
+  INTEGRATION_KMS_KEY_ID: z.string().trim().min(1).optional(),
   GIT_INTERNAL_HOST: z.string().trim().min(1).optional(),
   GIT_INTERNAL_PORT: z.coerce.number().int().min(1).max(65_535).default(8081),
   GIT_INTERNAL_CONTAINER: z
@@ -111,6 +118,10 @@ export interface ServerConfig {
   sandboxEgressProxyPort?: number;
   /** Shared HMAC secret for sandbox, health-install and short-lived plugin proxy credentials. */
   sandboxEgressProxySecret?: string;
+  /** Development-only master key for room-scoped integration secret encryption. */
+  integrationSecretKey?: Uint8Array;
+  /** KMS key id or ARN for production room-scoped integration secret encryption. */
+  integrationKmsKeyId?: string;
   /** Bind address and private, unpublished port of the internal Git-only listener. */
   gitInternalHost?: string;
   gitInternalPort?: number;
@@ -173,6 +184,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
       "Invalid server configuration:\n  SANDBOX_DISK_ENFORCEMENT=hard requires SANDBOX_VOLUME_DRIVER and SANDBOX_VOLUME_OPTS (a nonempty JSON object)",
     );
   }
+  if (env.NODE_ENV === "production" && !e.INTEGRATION_KMS_KEY_ID) {
+    throw new Error(
+      "Invalid server configuration:\n  INTEGRATION_KMS_KEY_ID is required in production for integration secrets",
+    );
+  }
+  if (env.NODE_ENV === "production" && e.INTEGRATION_SECRET_KEY) {
+    throw new Error(
+      "Invalid server configuration:\n  INTEGRATION_SECRET_KEY is development-only; production must use KMS",
+    );
+  }
   return {
     databaseUrl: e.DATABASE_URL,
     redisUrl: e.REDIS_URL,
@@ -198,6 +219,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     ...(e.SANDBOX_EGRESS_PROXY_SECRET
       ? { sandboxEgressProxySecret: e.SANDBOX_EGRESS_PROXY_SECRET }
       : {}),
+    ...(e.INTEGRATION_SECRET_KEY
+      ? { integrationSecretKey: Buffer.from(e.INTEGRATION_SECRET_KEY, "hex") }
+      : {}),
+    ...(e.INTEGRATION_KMS_KEY_ID ? { integrationKmsKeyId: e.INTEGRATION_KMS_KEY_ID } : {}),
     ...(e.GIT_INTERNAL_HOST ? { gitInternalHost: e.GIT_INTERNAL_HOST } : {}),
     gitInternalPort: e.GIT_INTERNAL_PORT,
     ...(e.GIT_INTERNAL_CONTAINER ? { gitInternalContainer: e.GIT_INTERNAL_CONTAINER } : {}),

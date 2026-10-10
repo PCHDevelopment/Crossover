@@ -74,6 +74,9 @@ export const EVENT_TYPES = [
   "tool.completed",
   "tool.failed",
 
+  "integration.connected",
+  "integration.disconnected",
+
   "budget.exceeded",
   "circuit_breaker.tripped",
   "loop.detected",
