@@ -14,6 +14,7 @@ import {
   LeaseSweeper,
   RedisEventPublisher,
   RedisEventSubscriber,
+  RedisPresenceSubscriber,
   registerRoomEventsSubscribeCommand,
   registerCapabilityCommands,
   registerDecisionCommands,
@@ -161,6 +162,7 @@ export async function composeServer(
 
   const intentStore = new RedisEditIntentStore(config.redisUrl);
   const presenceStore = new RedisPresenceStore(config.redisUrl);
+  const presenceSubscriber = new RedisPresenceSubscriber(config.redisUrl);
   const ownBudgets = overrides.budgets ? undefined : new RedisBudgetLimiter(config.redisUrl);
   const budgets = overrides.budgets ?? ownBudgets!;
   const sandboxLogStore = new FileLogStore(join(config.workspaceRoot, ".sandbox-exec-logs"));
@@ -325,7 +327,7 @@ export async function composeServer(
         perMinute: config.refreshPerMinute ?? 30,
       },
       ...(config.webRoot ? { staticRoot: config.webRoot } : {}),
-      ws: { subscriber, sandboxOutput },
+      ws: { subscriber, sandboxOutput, presence: presenceSubscriber },
     });
     gitApp = buildInternalGitServer({
       pool,
@@ -352,6 +354,7 @@ export async function composeServer(
         await redisSubscriber?.close();
         await intentStore.close();
         await presenceStore.close();
+        await presenceSubscriber.close();
         await ownBudgets?.close();
         if (!overrides.pool) await pool.end();
       })());
@@ -369,6 +372,7 @@ export async function composeServer(
     await redisSubscriber?.close();
     await intentStore.close();
     await presenceStore.close();
+    await presenceSubscriber.close();
     await ownBudgets?.close();
     if (!overrides.pool) await pool.end();
     throw err;

@@ -98,31 +98,37 @@ export interface EventSubscriber {
 }
 
 /**
- * One Redis connection in subscriber mode for the whole node, fanning each room channel out
- * to its local listeners. Messages that don't parse are dropped.
+ * One Redis connection in subscriber mode for the whole node, fanning each room's channel out
+ * to its local listeners. Messages that `parse` rejects (returns `undefined`) are dropped.
  */
-export class RedisEventSubscriber implements EventSubscriber {
+export class RedisRoomFanout<T> {
   private readonly redis: Redis;
-  private readonly handlers = new Map<string, Set<(event: RoomEvent) => void>>();
+  private readonly handlers = new Map<string, Set<(message: T) => void>>();
 
-  constructor(url: string, options: RedisOptions = {}) {
+  constructor(
+    url: string,
+    private readonly channelOf: (roomId: string) => string,
+    parse: (raw: string) => T | undefined,
+    options: RedisOptions = {},
+  ) {
     this.redis = new Redis(url, {
       retryStrategy: (n: number) => Math.min(n * 200, 2_000),
       ...options,
     } as never);
     this.redis.on("error", () => {});
-    this.redis.on("message", (channel: string, message: string) => {
+    this.redis.on("message", (channel: string, raw: string) => {
       const set = this.handlers.get(channel);
       if (!set) return;
-      let event: RoomEvent;
+      let message: T | undefined;
       try {
-        event = JSON.parse(message) as RoomEvent;
+        message = parse(raw);
       } catch {
         return;
       }
+      if (message === undefined) return;
       for (const handler of [...set]) {
         try {
-          handler(event);
+          handler(message);
         } catch {
           // One listener's failure must not stop the others.
         }
@@ -130,8 +136,8 @@ export class RedisEventSubscriber implements EventSubscriber {
     });
   }
 
-  async subscribe(roomId: string, handler: (event: RoomEvent) => void) {
-    const channel = roomChannel(roomId);
+  async subscribe(roomId: string, handler: (message: T) => void) {
+    const channel = this.channelOf(roomId);
     let set = this.handlers.get(channel);
     if (!set) {
       set = new Set();
@@ -152,5 +158,12 @@ export class RedisEventSubscriber implements EventSubscriber {
 
   async close(): Promise<void> {
     this.redis.disconnect();
+  }
+}
+
+/** Room events from Redis, one subscriber connection per node. */
+export class RedisEventSubscriber extends RedisRoomFanout<RoomEvent> implements EventSubscriber {
+  constructor(url: string, options: RedisOptions = {}) {
+    super(url, roomChannel, (raw) => JSON.parse(raw) as RoomEvent, options);
   }
 }

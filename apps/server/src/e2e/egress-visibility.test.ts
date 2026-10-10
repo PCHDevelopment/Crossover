@@ -175,6 +175,37 @@ async function fixture(): Promise<Fixture> {
   return { roomId, owner, a, b, command };
 }
 
+/** The server's WebSocket address; it starts listening the first time it's asked for. */
+let listening: Promise<string> | undefined;
+
+/** A greeted WebSocket for `token`, recording every frame it receives. */
+async function openSocket(roomId: string, token: string) {
+  listening ??= server.app.listen({ port: 0, host: "127.0.0.1" });
+  const address = await listening;
+  const sock = new WebSocket(`${address.replace("http", "ws")}/v1/rooms/${roomId}/ws`);
+  const frames: string[] = [];
+  sock.onmessage = (m) => frames.push(String(m.data));
+  await new Promise((resolve, reject) => {
+    sock.onopen = resolve;
+    sock.onerror = reject;
+  });
+  sock.send(
+    JSON.stringify({
+      type: "hello",
+      protocol_version: 1,
+      client: "e2e",
+      client_version: "1",
+      token,
+    }),
+  );
+  const until = async (done: () => boolean, label: string) => {
+    for (let i = 0; i < 100 && !done(); i++) await new Promise((r) => setTimeout(r, 50));
+    expect(done(), `${label}: ${frames.join("\n").slice(0, 400)}`).toBe(true);
+  };
+  await until(() => frames.some((fr) => fr.includes('"hello_ok"')), "hello");
+  return { sock, frames, until };
+}
+
 /** Arguments for reads that need some; new reads declare `view_probe` instead of adding here. */
 const KNOWN_PROBES: Record<string, Record<string, unknown>> = {
   "workspace.read": { path: "docs/readme.md" },
@@ -235,32 +266,14 @@ describe("egress visibility conformance (§34.5)", () => {
 
   it("the WebSocket stream, backfill and live: B never receives it, the owner does (control)", async () => {
     const f = await fixture();
-    const address = await server.app.listen({ port: 0, host: "127.0.0.1" });
     const open = async (token: string) => {
-      const sock = new WebSocket(`${address.replace("http", "ws")}/v1/rooms/${f.roomId}/ws`);
-      const frames: string[] = [];
-      sock.onmessage = (m) => frames.push(String(m.data));
-      await new Promise((resolve, reject) => {
-        sock.onopen = resolve;
-        sock.onerror = reject;
-      });
-      sock.send(
-        JSON.stringify({
-          type: "hello",
-          protocol_version: 1,
-          client: "e2e",
-          client_version: "1",
-          token,
-        }),
+      const socket = await openSocket(f.roomId, token);
+      socket.sock.send(JSON.stringify({ type: "subscribe", after: 0, profile: "all" }));
+      await socket.until(
+        () => socket.frames.some((fr) => fr.includes('"subscribed"')),
+        "subscribed",
       );
-      const until = async (done: () => boolean, label: string) => {
-        for (let i = 0; i < 100 && !done(); i++) await new Promise((r) => setTimeout(r, 50));
-        expect(done(), `${label}: ${frames.join("\n").slice(0, 400)}`).toBe(true);
-      };
-      await until(() => frames.some((fr) => fr.includes('"hello_ok"')), "hello");
-      sock.send(JSON.stringify({ type: "subscribe", after: 0, profile: "all" }));
-      await until(() => frames.some((fr) => fr.includes('"subscribed"')), "subscribed");
-      return { sock, frames, until };
+      return socket;
     };
     const asB = await open(f.b.token);
     const asOwner = await open(f.owner);
@@ -359,6 +372,65 @@ describe("egress visibility conformance (§34.5)", () => {
       open_files: [SECRET, "docs/readme.md"],
       cursor: { path: SECRET },
     });
+  });
+
+  it("presence over the WebSocket, snapshot and live: B never sees the path, the owner does (control)", async () => {
+    const f = await fixture();
+    const update = (params: Record<string, unknown>) =>
+      post(`/v1/rooms/${f.roomId}/commands`, envelope("presence.update", params, false), f.a.token);
+    await ok(await update({ open_files: [SECRET], cursor: { path: SECRET, line: 1, column: 1 } }));
+    const subscribe = async (token: string) => {
+      const socket = await openSocket(f.roomId, token);
+      socket.sock.send(JSON.stringify({ type: "presence.subscribe" }));
+      await socket.until(
+        () => socket.frames.some((fr) => fr.includes('"presence.snapshot"')),
+        "snapshot",
+      );
+      return socket;
+    };
+    const asB = await subscribe(f.b.token);
+    const asOwner = await subscribe(f.owner);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- frames are loosely typed JSON
+    const parsed = (frames: string[]) => frames.map((fr) => JSON.parse(fr) as Record<string, any>);
+    const snapshotOf = (frames: string[]) =>
+      parsed(frames).find((fr) => fr["type"] === "presence.snapshot")!["presence"];
+    expect(snapshotOf(asB.frames)).toEqual([
+      expect.objectContaining({ participant_id: f.a.id, open_files: [], cursor: null }),
+    ]);
+    expect(snapshotOf(asOwner.frames)[0]).toMatchObject({ open_files: [SECRET] });
+
+    // Live: A moves the cursor to a file B may read, keeping the secret open.
+    await ok(
+      await update({
+        open_files: [SECRET, "docs/readme.md"],
+        cursor: { path: "docs/readme.md", line: 2, column: 1 },
+      }),
+    );
+    const live = (frames: string[]) =>
+      parsed(frames)
+        .filter((fr) => fr["type"] === "presence")
+        .map((fr) => fr["record"]);
+    await asB.until(() => live(asB.frames).length >= 1, "B's live update");
+    await asOwner.until(() => live(asOwner.frames).length >= 1, "the owner's live update");
+    expect(live(asB.frames)[0]).toMatchObject({
+      participant_id: f.a.id,
+      open_files: ["docs/readme.md"],
+      cursor: { path: "docs/readme.md", line: 2 },
+    });
+    expect(live(asOwner.frames)[0]).toMatchObject({ open_files: [SECRET, "docs/readme.md"] });
+    expect(asB.frames.join("\n").includes(SECRET), "presence stream leaked the path to B").toBe(
+      false,
+    );
+
+    // Unsubscribed, B gets no more updates; the owner still does.
+    asB.sock.send(JSON.stringify({ type: "presence.unsubscribe" }));
+    await new Promise((r) => setTimeout(r, 100));
+    await ok(await update({ status: "idle" }));
+    await asOwner.until(() => live(asOwner.frames).length >= 2, "the owner's second update");
+    await new Promise((r) => setTimeout(r, 100));
+    expect(live(asB.frames)).toHaveLength(1);
+    asB.sock.close();
+    asOwner.sock.close();
   });
 
   it("every MCP read tool: B never receives it, and each tool is a registered read command", async () => {

@@ -4,6 +4,9 @@ import {
   createEventMatcher,
   type Dispatcher,
   type EventSubscriber,
+  type Presence,
+  presenceFor,
+  type PresenceSubscriber,
   redactEventFor,
   type Principal,
   type SubscriptionFilter,
@@ -72,6 +75,8 @@ export interface WebSocketOptions {
   sandboxOutput?: SandboxOutputSource;
   /** Maximum queued output per subscriber before it must replay from its cursor. Default 1 MiB. */
   maxSandboxOutputBufferedBytes?: number;
+  /** Live presence (§13.4, Redis), for `presence.subscribe`. */
+  presence?: PresenceSubscriber;
 }
 
 /** Close codes (4000-range, application defined). */
@@ -108,6 +113,19 @@ interface SandboxStream {
   unsubscribe: () => void;
 }
 
+interface PresenceStream {
+  /** Sends in order, one at a time. */
+  out: Promise<void>;
+  /** The latest update per participant that arrived before the snapshot was sent. */
+  pending: Map<string, Presence> | undefined;
+  /** `workspace.read` answers per path; forgotten when the token is re-checked. */
+  readable: Map<string, boolean>;
+  unsubscribe: () => Promise<void>;
+}
+
+/** Paths remembered per presence subscriber before the cache starts over. */
+const MAX_READABLE_CACHE = 1_000;
+
 function sandboxUpdateBytes(update: SandboxOutputUpdate): number {
   if (update.kind === "chunk" && update.chunk.kind === "data")
     return Math.ceil(update.chunk.data.byteLength / 3) * 4 + 256;
@@ -131,6 +149,12 @@ function sandboxUpdateBytes(update: SandboxOutputUpdate): number {
  *   `event { event }`, in sequence order and each exactly once: history from PostgreSQL, then
  *   live from Redis, and whenever a live event shows a gap (or nothing arrives for a while) the
  *   missing range is fetched from PostgreSQL.
+ * - `presence.subscribe`: authorized as `presence.list` (§13.4); the server sends
+ *   `presence.snapshot { presence }` and then each update as `presence { record }`, every record
+ *   as this participant may see it (open files they can't read and a cursor on one are left out).
+ *   Nothing is sent when a record expires: clients drop a record once its `expires_at` passes.
+ *   A refusal is an `error` frame with `subscription: "presence"`, which leaves the event stream
+ *   alone. `presence.unsubscribe` stops it.
  *
  * A connection that can't keep up (more than 1,000 queued events or 5 MiB) is closed with
  * `resync_required`; the client reconnects with `after = last sequence it saw`.
@@ -170,6 +194,7 @@ class Connection {
   private helloDone = false;
   private stream: Stream | undefined;
   private readonly sandboxStreams = new Map<string, SandboxStream>();
+  private presenceStream: PresenceStream | undefined;
   private closed = false;
   /** Commands run one at a time, in the order they arrived. */
   private queue: Promise<void> = Promise.resolve();
@@ -258,6 +283,10 @@ class Connection {
         return this.subscribeSandboxOutput(frame);
       case "sandbox.output.unsubscribe":
         return this.unsubscribeSandboxOutput(frame);
+      case "presence.subscribe":
+        return this.subscribePresence();
+      case "presence.unsubscribe":
+        return this.stopPresence();
       case "hello":
         return this.send({
           type: "error",
@@ -313,6 +342,7 @@ class Connection {
       authenticate(this.o.pool, this.token!).then(
         async (principal) => {
           this.principal = principal; // a changed role changes what the stream shows
+          this.presenceStream?.readable.clear();
           await this.revalidateSandboxOutput();
         },
         (error: unknown) => this.fail(CLOSE.UNAUTHENTICATED, error),
@@ -395,6 +425,96 @@ class Connection {
     await this.backfill(stream);
     stream.syncing = false;
     this.drain(stream);
+  }
+
+  private async subscribePresence(): Promise<void> {
+    await this.stopPresence();
+    if (!this.o.presence) {
+      this.send({
+        type: "error",
+        subscription: "presence",
+        error: new CrossoverError("NOT_FOUND", "Presence isn't available").toErrorBody().error,
+      });
+      return;
+    }
+    const stream: PresenceStream = {
+      out: Promise.resolve(),
+      pending: new Map(),
+      readable: new Map(),
+      unsubscribe: async () => undefined,
+    };
+    this.presenceStream = stream;
+    // Live updates first, so nothing slips between the snapshot and the stream.
+    stream.unsubscribe = await this.o.presence.subscribe(this.roomId, (record) =>
+      this.onPresence(stream, record),
+    );
+    let snapshot: Presence[];
+    try {
+      const listed = await this.o.dispatcher.dispatch(this.principal!, {
+        id: newId("cmd"),
+        method: "presence.list",
+        params: {},
+      });
+      snapshot = (listed.response as { presence: Presence[] }).presence;
+    } catch (error) {
+      if (this.presenceStream === stream) await this.stopPresence();
+      this.send({ type: "error", subscription: "presence", error: toHttpError(error).body.error });
+      return;
+    }
+    if (this.presenceStream !== stream || this.closed) return;
+    this.send({ type: "presence.snapshot", presence: snapshot });
+    const listed = new Map(snapshot.map((record) => [record.participant_id, record.expires_at]));
+    const pending = stream.pending!;
+    stream.pending = undefined;
+    for (const record of pending.values()) {
+      const known = listed.get(record.participant_id);
+      // An update the snapshot already includes (or that it superseded) isn't sent again.
+      if (known === undefined || known < record.expires_at) this.sendPresence(stream, record);
+    }
+  }
+
+  private onPresence(stream: PresenceStream, record: Presence): void {
+    if (this.presenceStream !== stream || this.closed) return;
+    if (stream.pending) stream.pending.set(record.participant_id, record);
+    else this.sendPresence(stream, record);
+  }
+
+  /** Send `record` as this participant may see it, after everything queued before it. */
+  private sendPresence(stream: PresenceStream, record: Presence): void {
+    stream.out = stream.out
+      .then(async () => {
+        const seen = await presenceFor(record, (path) => this.mayReadPath(stream, path));
+        if (this.presenceStream !== stream || this.closed) return;
+        this.send({ type: "presence", record: seen });
+      })
+      .catch((error: unknown) => this.o.onInternalError?.(error));
+  }
+
+  /** `workspace.read` on `path` for this participant; any refusal reads as no. */
+  private async mayReadPath(stream: PresenceStream, path: string): Promise<boolean> {
+    const known = stream.readable.get(path);
+    if (known !== undefined) return known;
+    let allowed = true;
+    try {
+      await authorize(
+        this.principal!,
+        "workspace.read",
+        { room_id: this.roomId, path },
+        { method: "presence.subscribe", params: {}, client: this.o.pool },
+      );
+    } catch (error) {
+      if (!(error instanceof CrossoverError)) throw error;
+      allowed = false;
+    }
+    if (stream.readable.size >= MAX_READABLE_CACHE) stream.readable.clear();
+    stream.readable.set(path, allowed);
+    return allowed;
+  }
+
+  private async stopPresence(): Promise<void> {
+    const stream = this.presenceStream;
+    this.presenceStream = undefined;
+    await stream?.unsubscribe().catch(() => undefined);
   }
 
   private async subscribeSandboxOutput(frame: Record<string, unknown>): Promise<void> {
@@ -812,5 +932,6 @@ class Connection {
     if (this.revalidate) clearInterval(this.revalidate);
     await this.stopStream();
     this.stopSandboxOutput();
+    await this.stopPresence();
   }
 }
