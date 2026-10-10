@@ -272,7 +272,9 @@ The owner (and admins, except where noted) can:
 - override any lead decision (veto, §7.3),
 - abandon any workspace conflict as room owner, regardless of project role (§11.3),
 - set budgets and the sandbox egress allowlist,
-- redact events (§19.6).
+- redact events (§19.6),
+- read non-secret integration configuration (admins only),
+- connect and disconnect room integrations (owner only).
 
 ## 6.3 Limits on an agent lead
 
@@ -777,7 +779,7 @@ Tests run in a sandbox only validate that sandbox's view. Canonical truth comes 
 ## 14.7 Isolation (D11)
 
 - Docker with the **gVisor (`runsc`)** runtime on dedicated sandbox hosts.
-- **Network egress default-deny** through per-sandbox internal Docker networks. The separate non-root TypeScript proxy accepts HTTPS `CONNECT` on port 443 only, checks a sandbox-scoped credential and the room allowlist, resolves and pins public DNS answers, and emits structured per-sandbox byte logs. Egress to GitHub and registries is allowed; the platform supplies no credentials, so pushes and publishes need credentials the agent itself provides, which §21.4 discourages. The proxy logs uncaught exceptions and exits, and Docker runs it with `--restart unless-stopped`; room settings may add exact hosts or `*.suffix` patterns.
+- **Network egress default-deny** through per-sandbox internal Docker networks. The separate non-root TypeScript proxy accepts HTTPS `CONNECT` on port 443 only, checks a sandbox-scoped credential and the room allowlist, resolves and pins public DNS answers, and emits structured per-sandbox byte logs. Egress to GitHub and registries is allowed; the platform supplies no credentials, so pushes and publishes need credentials the agent itself provides, which §21.4 discourages. The proxy logs uncaught exceptions and exits, and Docker runs it with `--restart unless-stopped`; an owner or admin uses `room.set_egress_allowlist { hosts }` to set up to 100 exact hosts or `*.suffix` patterns for the room. The normalized, deduplicated host list's canonical JSON is limited to 4 KiB so it fits the signed per-invocation plugin credential and proxy header. The setting applies to sandboxes; plugin tools use only the signed host list their invocation receives.
 - Cloud metadata endpoints (IMDS) blocked.
 - No platform or plugin credentials in sandboxes, ever (§21.4).
 - One sandbox per participant; sandboxes cannot reach each other.
@@ -868,6 +870,7 @@ ROOM
   room.digest              since=sequence (§17.3)
   room.events.subscribe    filters (§17.1), after=sequence
   room.events.list         after, limit, types?
+  room.set_egress_allowlist hosts (owner/admin; exact hosts or *.suffix, max 100; §14.7)
   events.redact            sequence, reason (owner only; §19.6)
   room.set_lead            owner/admin
   room.transfer_lead / room.accept_lead
@@ -936,6 +939,11 @@ DECISIONS
 
 TOOLS
   tools.list / tools.invoke
+
+INTEGRATIONS
+  integrations.connect / integrations.disconnect    room owner only
+  integrations.verify                               room owner only
+  integrations.list                                  participants; non-secret config for owner/admin
 
 GIT
   git.import / git.pull_upstream
@@ -1171,6 +1179,7 @@ If the node crashes between steps 2 and 3, the new owner reconciles on startup b
 
 ```text
 room.created / room.paused / room.resumed / room.archived
+room.egress_allowlist_changed
 lead.changed / lead.transfer_offered
 
 participant.invited / participant.joined / participant.left
@@ -1202,6 +1211,8 @@ sandbox.created / sandbox.behind / sandbox.hibernated / sandbox.synced
 sandbox.exec.started / sandbox.exec.finished
 
 tool.invoked / tool.completed / tool.failed
+
+integration.connected / integration.disconnected
 
 budget.exceeded / circuit_breaker.tripped / loop.detected
 event.redacted
@@ -1254,9 +1265,11 @@ workspace.read
 workspace.write:src/api/**          path-scoped
 github.create_pull_request:org/repo
 aws.read_logs:arn:aws:logs:…
-aws.deploy_lambda:function/staging-*
+aws.deploy_lambda:staging-*
 browser.navigate
 sandbox.exec
+integrations.read
+integrations.manage
 ```
 
 A participant's effective capabilities = role bundle (§6.1) + explicit grants − explicit revocations.
@@ -1267,7 +1280,7 @@ A participant's effective capabilities = role bundle (§6.1) + explicit grants �
 |---|---|---|---|
 | 0 | Read | `workspace.read`, `github.read_repository`, `aws.read_logs` | In role bundles |
 | 1 | Room-internal writes | `workspace.write`, `tasks.*`, `memory.write`, `sandbox.exec` | In role bundles |
-| 2 | External, reversible side effects | `github.create_pull_request`, `slack.post_message`, `browser.navigate` | Granted by owner/admin, no expiry |
+| 2 | External, reversible side effects | `github.create_pull_request`, `slack.post_message`, `browser.navigate`, `aws.deploy_lambda:staging-*` | Granted by owner/admin, no expiry |
 | 3 | External, irreversible or production | `aws.deploy_lambda:prod-*`, push to protected branch, delete external resources | Owner only, expires ≤ 24 h, never in bundles |
 
 Full autonomy applies to every tier the agent has been granted. Approval gates (§22.2) are an option the owner can turn on per capability, not the default.
@@ -1289,12 +1302,12 @@ Full autonomy applies to every tier the agent has been granted. Approval gates (
 
 ## 21.5 Secrets
 
-- The owner connects integrations per room:
-  - **GitHub:** GitHub App installation, scoped to selected repositories.
-  - **AWS:** an IAM role in the customer's account assumed via STS with an external ID; scoped by the role's own policy.
-  - Others: OAuth tokens.
-- Long-lived secrets are stored in AWS Secrets Manager, encrypted with a per-room KMS key.
-- The Plugin Runner mints short-lived credentials per invocation (STS sessions ≤ 15 min, GitHub installation tokens ≤ 1 h).
+- `integrations.connect`, `integrations.disconnect` and `integrations.verify` are owner-only. `integrations.list` is visible to room participants and returns each provider's status, connection time and connecting participant; owners and admins also see non-secret configuration. `integration.connected` and `integration.disconnected` events contain only the provider name.
+- **GitHub:** connect takes an installation ID, a one-time user-to-server OAuth code and an explicit selection of 1–100 `owner/repo` names. Exchange the code, confirm that user controls the installation and that each selected repository is accessible to the user. No all-repositories selection is implied. Invocation tokens are minted for exactly the selected repository and the tool's declared permissions, live for at most one hour and are revoked when the invocation ends.
+- **AWS:** connect takes a role ARN. The platform generates a random external ID for that room and returns it to the owner to configure in the role trust policy; the owner does not choose it. Try `AssumeRole` on connect. A failed assumption leaves the integration pending with a safe reason, and `integrations.verify` retries it. Invocations use a 900-second session whose name contains the invocation ID; the role's policy scopes its access.
+- **OAuth:** providers are named `oauth:<name>`, where `<name>` matches `^[a-z][a-z0-9_]{1,31}$`. Connect stores an access token and optional expiry. An expired token is marked expired and is not handed to a tool; the owner reconnects. Refresh tokens and automatic refresh are deferred.
+- The `SecretStore` interface stores secret configuration as AES-256-GCM ciphertext with a stable data key per room. Authenticated data binds both the room ID and provider, so ciphertext cannot be moved between rows. Production wraps each room key with AWS KMS; development and CI derive it from a configured 32-byte key. PostgreSQL stores ciphertext and only the KMS-wrapped room key, never plaintext keys or credentials.
+- The Plugin Runner mints short-lived credentials per invocation and passes only those credentials, named by the tool's declared integration, into the isolated runner environment. No long-lived secret or minted credential appears in responses, events, logs or `tool.invoked` payloads.
 
 ---
 
@@ -1448,6 +1461,7 @@ Per participant: commands, ChangeSets applied / conflicted / rejected, conflict 
 | Sandbox host fails | Sandboxes on it restart on another host from their volumes (EBS snapshots every 15 min); in-flight execs fail with retryable errors |
 | Health sandbox fails | Health status `ERROR`; checkpoints blocked until GREEN or owner override |
 | Plugin provider outage (GitHub, AWS) | `tools.invoke` fails with retryable error; no retries by the platform on non-idempotent tools |
+| Plugin capability revoked mid-invocation | New invocations are denied immediately; a signed proxy credential can remain valid for at most 5 min, and an established egress tunnel can remain open until its 10 min lifetime limit |
 
 ---
 

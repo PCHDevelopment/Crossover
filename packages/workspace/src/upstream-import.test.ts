@@ -111,7 +111,10 @@ async function room(opts: { fetcher: UpstreamFetcher; credentials?: GitCredentia
     await db.pool.query("SELECT repo_path FROM workspaces WHERE room_id = $1", [roomId])
   ).rows[0].repo_path as string;
   const d = new Dispatcher({ pool: db.pool, authorize: allowAll, nodeId: roomId });
+  const scheduledAdvances: Array<{ room_id: string; revision: number }> = [];
   registerWorkspaceCommands(d, {
+    scheduleSandboxAdvance: (scheduledRoom, revision) =>
+      scheduledAdvances.push({ room_id: scheduledRoom, revision }),
     upstream: {
       fetcher: opts.fetcher,
       resolve: PUBLIC,
@@ -130,7 +133,7 @@ async function room(opts: { fetcher: UpstreamFetcher; credentials?: GitCredentia
     key = newId("cmd"),
   ) =>
     d.dispatch(principal, { id: newId("cmd"), method: "git.import", params, idempotency_key: key });
-  return { d, roomId, lead, repo, principal, importIt };
+  return { d, roomId, lead, repo, principal, importIt, scheduledAdvances };
 }
 
 const rejects = async (p: Promise<unknown>, reason?: string) => {
@@ -150,6 +153,7 @@ describe("git.import (§24.1, T801)", () => {
     const fetcher = new FixtureFetcher(up.dir);
     const r = await room({ fetcher });
     const out = await r.importIt();
+    expect(r.scheduledAdvances).toEqual([{ room_id: r.roomId, revision: 1 }]);
     expect(out.response).toMatchObject({
       applied_revision: 1,
       file_count: 6,
@@ -390,8 +394,14 @@ describe("git.import (§24.1, T801)", () => {
 
 describe("credentials never leak (§24.1)", () => {
   const SECRET = "ghs_s3cr3tTokenValue";
+  let revocations = 0;
   const provider: GitCredentialProvider = {
-    credentialFor: async () => ({ type: "bearer", token: SECRET }),
+    credentialFor: async () => ({
+      credential: { type: "bearer", token: SECRET },
+      revoke: async () => {
+        revocations += 1;
+      },
+    }),
   };
 
   it("the provider's credential reaches the fetcher, and nothing the room can read", async () => {
@@ -400,6 +410,7 @@ describe("credentials never leak (§24.1)", () => {
     const r = await room({ fetcher, credentials: provider });
     const out = await r.importIt();
     expect(fetcher.requests[0]!.credential).toEqual({ type: "bearer", token: SECRET });
+    expect(revocations).toBe(1);
     const everything = JSON.stringify({
       response: out.response,
       events: (await db.pool.query("SELECT payload FROM events WHERE room_id = $1", [r.roomId]))

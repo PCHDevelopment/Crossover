@@ -160,33 +160,33 @@ describe("capabilities.grant", () => {
     it("without expires_at → VALIDATION, whoever asks", async () => {
       const r = await setup();
       for (const who of [r.owner, r.admin]) {
-        await rejects(grant(r, who, r.dev, "aws.deploy_lambda:function/prod-*"), "VALIDATION");
+        await rejects(grant(r, who, r.dev, "aws.deploy_lambda:prod-*"), "VALIDATION");
       }
     });
 
     it("by an admin, with a valid expiry → FORBIDDEN", async () => {
       const r = await setup();
       const err = await rejects(
-        grant(r, r.admin, r.dev, "aws.deploy_lambda:function/prod-*", { expires_at: inHours(1) }),
+        grant(r, r.admin, r.dev, "aws.deploy_lambda:prod-*", { expires_at: inHours(1) }),
         "FORBIDDEN",
       );
       expect(err.details).toMatchObject({ missing_capability: "capabilities.grant_tier3" });
-      expect(await can(r, r.dev, "aws.deploy_lambda:function/prod-x")).toBe(false);
+      expect(await can(r, r.dev, "aws.deploy_lambda:prod-x")).toBe(false);
     });
 
     it("by the owner, with an expiry within 24 h → allowed, and it lapses", async () => {
       const r = await setup();
-      const out = await grant(r, r.owner, r.dev, "aws.deploy_lambda:function/prod-*", {
+      const out = await grant(r, r.owner, r.dev, "aws.deploy_lambda:prod-*", {
         expires_at: inHours(23),
       });
       expect(out.response).toMatchObject({ tier: 3 });
-      expect(await can(r, r.dev, "aws.deploy_lambda:function/prod-x")).toBe(true);
-      expect(await can(r, r.dev, "aws.deploy_lambda:function/staging-x")).toBe(false);
+      expect(await can(r, r.dev, "aws.deploy_lambda:prod-x")).toBe(true);
+      expect(await can(r, r.dev, "aws.deploy_lambda:staging-x")).toBe(false);
       await pool.query(
         "UPDATE capability_grants SET created_at = created_at - interval '2 days', expires_at = clock_timestamp() - interval '1 second' WHERE participant_id = $1",
         [r.dev.participant_id],
       );
-      expect(await can(r, r.dev, "aws.deploy_lambda:function/prod-x")).toBe(false);
+      expect(await can(r, r.dev, "aws.deploy_lambda:prod-x")).toBe(false);
     });
 
     it("beyond 24 h, or in the past → VALIDATION", async () => {
@@ -209,6 +209,16 @@ describe("capabilities.grant", () => {
         "FORBIDDEN",
       );
       await grant(r, r.owner, r.dev, "nuclear.launch", { expires_at: inHours(1) });
+    });
+  });
+
+  describe("scope-aware staging deploys", () => {
+    it("lets an admin grant staging without an expiry, at Tier 2", async () => {
+      const r = await setup();
+      const out = await grant(r, r.admin, r.dev, "aws.deploy_lambda:staging-*");
+      expect(out.response).toMatchObject({ tier: 2, expires_at: null });
+      expect(await can(r, r.dev, "aws.deploy_lambda:staging-api")).toBe(true);
+      expect(await can(r, r.dev, "aws.deploy_lambda:prod-api")).toBe(false);
     });
   });
 
@@ -419,9 +429,9 @@ describe("capabilities.revoke", () => {
 
   it("an admin can revoke a Tier 3 grant the owner made", async () => {
     const r = await setup();
-    await grant(r, r.owner, r.dev, "aws.deploy_lambda:function/prod-*", { expires_at: inHours(1) });
-    await revoke(r, r.admin, r.dev, "aws.deploy_lambda:function/prod-*");
-    expect(await can(r, r.dev, "aws.deploy_lambda:function/prod-x")).toBe(false);
+    await grant(r, r.owner, r.dev, "aws.deploy_lambda:prod-*", { expires_at: inHours(1) });
+    await revoke(r, r.admin, r.dev, "aws.deploy_lambda:prod-*");
+    expect(await can(r, r.dev, "aws.deploy_lambda:prod-x")).toBe(false);
   });
 
   it("refuses to revoke an authority power, and answers NOT_FOUND when there is nothing to revoke", async () => {

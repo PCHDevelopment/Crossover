@@ -2,6 +2,7 @@ import type { PoolClient } from "@crossover/db";
 import { CrossoverError, newId } from "@crossover/protocol";
 import { git } from "./git.js";
 import { initRoomRepo } from "./repo.js";
+import { recordWorkspaceRevision } from "./revision.js";
 
 /** Provision §9.1 history in the caller's room-creation transaction; safe to retry. */
 export async function provisionWorkspace(
@@ -26,10 +27,10 @@ export async function provisionWorkspace(
     [newId("ws"), roomId, repo],
   );
   const id = rows[0]!.id;
-  await client.query(
-    `INSERT INTO workspace_revisions (workspace_id, room_id, revision, commit_sha)
-     VALUES ($1, $2, 0, $3) ON CONFLICT (workspace_id, revision) DO NOTHING`,
-    [id, roomId, commit],
+  await recordWorkspaceRevision(
+    client,
+    { workspace_id: id, room_id: roomId, revision: 0, commit_sha: commit },
+    { onConflict: "ignore" },
   );
   return id;
 }

@@ -133,6 +133,41 @@ describe("redactEventFor", () => {
     },
   );
 
+  it("removes every path-bearing sandbox field from events shown to another participant", () => {
+    const behind = {
+      ...sandboxBehind("part_a"),
+      payload: {
+        participant_id: "part_a",
+        changed_paths: ["secrets/key.pem"],
+        intents: [
+          {
+            participant_id: "part_a",
+            paths: ["secrets/key.pem"],
+            ranges: [{ path: "secrets/key.pem", start_line: 1, end_line: 1 }],
+          },
+        ],
+      },
+    } as RoomEvent;
+    const synced = {
+      room_id: "room_x",
+      sequence: 3,
+      actor_id: "system",
+      type: "sandbox.synced",
+      payload: { participant_id: "part_a", conflicted_paths: ["secrets/key.pem"] },
+    } as unknown as RoomEvent;
+
+    for (const event of [behind, synced]) {
+      const out = redactEventFor(viewer("part_b"), event);
+      expect(out.payload).toMatchObject({ participant_id: "part_a", paths_redacted: true });
+      expect(out.payload).not.toHaveProperty("changed_paths");
+      expect(out.payload).not.toHaveProperty("conflicted_paths");
+      expect(out.payload).not.toHaveProperty("intents");
+      expect(JSON.stringify(out)).not.toContain("secrets/key.pem");
+      expect(redactEventFor(viewer("part_a"), event)).toBe(event);
+      expect(redactEventFor(viewer("part_l", "LEAD"), event)).toBe(event);
+    }
+  });
+
   it("who sees denials: lead, owner, admin", () => {
     expect(seesDenials(viewer("a", "LEAD"))).toBe(true);
     expect(seesDenials(viewer("a", "DEVELOPER", "OWNER"))).toBe(true);

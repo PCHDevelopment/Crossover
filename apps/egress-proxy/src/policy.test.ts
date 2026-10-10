@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
+  createPluginProxyCredential,
   createHealthInstallProxyCredential,
   createSandboxProxyCredential,
 } from "@crossover/security";
@@ -111,6 +112,57 @@ describe("egress policy", () => {
     });
   });
 
+  it("limits a plugin invocation to its signed hosts and active participant", async () => {
+    const now = Date.now();
+    const credential = createPluginProxyCredential(
+      {
+        invocationId: "cmd_01J8D9M8T2B7K4V5W6X3Y2Z1AB",
+        roomId: fixture.roomId,
+        participantId: fixture.participantId,
+        hosts: ["api.github.com"],
+        expiresAt: now + 60_000,
+      },
+      SECRET,
+    );
+    const authorization = `Basic ${Buffer.from(`plugin:${credential}`).toString("base64")}`;
+    const options = {
+      pool: fixture.db.pool,
+      secret: SECRET,
+      resolveHost: async () => ["93.184.216.34"],
+    };
+
+    await expect(
+      authorizeConnect("api.github.com:443", authorization, options),
+    ).resolves.toMatchObject({
+      allowed: true,
+      identityId: "cmd_01J8D9M8T2B7K4V5W6X3Y2Z1AB",
+      identityType: "plugin",
+      pluginInvocationId: "cmd_01J8D9M8T2B7K4V5W6X3Y2Z1AB",
+      roomId: fixture.roomId,
+      host: "api.github.com",
+    });
+    await expect(
+      authorizeConnect("registry.npmjs.org:443", authorization, options),
+    ).resolves.toMatchObject({
+      allowed: false,
+      status: 403,
+      reason: "plugin_host_not_declared",
+    });
+
+    await fixture.db.pool.query("UPDATE participants SET status = 'PAUSED' WHERE id = $1", [
+      fixture.participantId,
+    ]);
+    try {
+      await expect(
+        authorizeConnect("api.github.com:443", authorization, options),
+      ).resolves.toMatchObject({ allowed: false, status: 403, reason: "plugin_inactive" });
+    } finally {
+      await fixture.db.pool.query("UPDATE participants SET status = 'ACTIVE' WHERE id = $1", [
+        fixture.participantId,
+      ]);
+    }
+  });
+
   it("rejects expired health install credentials", async () => {
     const installId = "hinstall_01J8D9M8T2B7K4V5W6X3Y2Z1AD";
     await fixture.db.pool.query(
@@ -190,6 +242,37 @@ describe("egress policy", () => {
         resolveHost: async () => [],
       }),
     ).resolves.toMatchObject({ allowed: false, reason: "unsafe_or_unresolved_address" });
+  });
+
+  it("refuses a Lambda request to a region other than the one in its signed egress", async () => {
+    const credential = createPluginProxyCredential(
+      {
+        invocationId: "cmd_01J8D9M8T2B7K4V5W6X3Y2Z1AB",
+        roomId: fixture.roomId,
+        participantId: fixture.participantId,
+        hosts: ["lambda.us-east-1.amazonaws.com"],
+        expiresAt: Date.now() + 60_000,
+      },
+      SECRET,
+    );
+    const authorization = `Basic ${Buffer.from(`plugin:${credential}`).toString("base64")}`;
+    const options = {
+      pool: fixture.db.pool,
+      secret: SECRET,
+      resolveHost: async () => ["93.184.216.34"],
+    };
+
+    await expect(
+      authorizeConnect("lambda.us-east-1.amazonaws.com:443", authorization, options),
+    ).resolves.toMatchObject({ allowed: true, host: "lambda.us-east-1.amazonaws.com" });
+    await expect(
+      authorizeConnect("lambda.us-west-2.amazonaws.com:443", authorization, options),
+    ).resolves.toMatchObject({
+      allowed: false,
+      status: 403,
+      host: "lambda.us-west-2.amazonaws.com",
+      reason: "plugin_host_not_declared",
+    });
   });
 });
 

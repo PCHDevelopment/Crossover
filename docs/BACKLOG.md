@@ -1237,9 +1237,12 @@ Deps: T1202 · Migration: —
 
 Deps: T1202, T1203 · Migration: —
 
-`aws.read_logs:<arn>` (tier 0) and `aws.deploy_lambda:<function>` (tier 2 for `staging-*`, tier 3 for anything else, owner-granted with ≤ 24 h expiry, §21.2), via STS assume-role with the external ID.
+`aws.read_logs:<log-group-arn>` (tier 0) and `aws.deploy_lambda:<function>` (tier 2 when the scope starts with `staging-`, tier 3 otherwise), via STS assume-role with the external ID. Tier 2 staging grants are owner/admin-granted without expiry; Tier 3 grants are owner-only and expire within 24 h (§21.2).
+
+`aws.read_logs` takes a canonical log group ARN, an ISO time range of at most 24 hours, and optional filter, stream names, requested page limit (1–1,000) and next token. Each response returns at most 20 events to stay within the 256 KiB output cap; an optional next token continues the query. Each message is capped at 8 KiB. `aws.deploy_lambda` takes the function name, AWS region, S3 bucket/key and required object version, with optional `publish`; it returns only function ARN, optional version, code SHA-256 and last-modified time. Uploading artifacts is out of scope. Egress is restricted to the selected region's CloudWatch Logs or Lambda endpoint.
 
 - The demo step 14 path: `aws.deploy_lambda:prod-api` without a tier 3 grant → `FORBIDDEN` and `capability.denied` visible in Activity.
+- Tests cover scope-specific tiers and grants, region-specific endpoint allowlists, full scoped log reads with bounds, immutable deployment inputs, and the denial event for ungranted production deploys.
 
 ---
 

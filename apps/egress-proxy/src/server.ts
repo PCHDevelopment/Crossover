@@ -8,13 +8,14 @@ const MAX_HEADER_SIZE = 8 * 1024;
 const CONNECT_TIMEOUT_MS = 5_000;
 const IDLE_TIMEOUT_MS = 60_000;
 const MAX_TUNNEL_LIFETIME_MS = 10 * 60_000;
-const MAX_TUNNELS_PER_SANDBOX = 32;
+const MAX_TUNNELS_PER_IDENTITY = 32;
 
 export interface EgressLog {
   timestamp: string;
   event: "egress";
   sandbox_id?: string;
   health_install_id?: string;
+  plugin_invocation_id?: string;
   room_id?: string;
   host: string;
   allowed: boolean;
@@ -78,6 +79,7 @@ async function handleConnect(
     log(options.logger, {
       ...(decision.sandboxId ? { sandbox_id: decision.sandboxId } : {}),
       ...(decision.healthInstallId ? { health_install_id: decision.healthInstallId } : {}),
+      ...(decision.pluginInvocationId ? { plugin_invocation_id: decision.pluginInvocationId } : {}),
       ...(decision.roomId ? { room_id: decision.roomId } : {}),
       host: decision.host,
       allowed: false,
@@ -93,19 +95,22 @@ async function handleConnect(
   }
 
   if (client.destroyed) return;
-  const maxTunnels = options.maxTunnelsPerSandbox ?? MAX_TUNNELS_PER_SANDBOX;
+  const maxTunnels = options.maxTunnelsPerSandbox ?? MAX_TUNNELS_PER_IDENTITY;
   const identityTunnels = activeTunnels.get(decision.identityId) ?? new Set<object>();
   if (identityTunnels.size >= maxTunnels) {
     log(options.logger, {
       ...(decision.sandboxId ? { sandbox_id: decision.sandboxId } : {}),
       ...(decision.healthInstallId ? { health_install_id: decision.healthInstallId } : {}),
+      ...(decision.pluginInvocationId ? { plugin_invocation_id: decision.pluginInvocationId } : {}),
       room_id: decision.roomId,
       host: decision.host,
       allowed: false,
       reason:
         decision.identityType === "sandbox"
           ? "sandbox_tunnel_limit"
-          : "health_install_tunnel_limit",
+          : decision.identityType === "health_install"
+            ? "health_install_tunnel_limit"
+            : "plugin_tunnel_limit",
     });
     writeProxyError(client, 503, "Service Unavailable");
     return;
@@ -129,6 +134,7 @@ async function handleConnect(
     log(options.logger, {
       ...(decision.sandboxId ? { sandbox_id: decision.sandboxId } : {}),
       ...(decision.healthInstallId ? { health_install_id: decision.healthInstallId } : {}),
+      ...(decision.pluginInvocationId ? { plugin_invocation_id: decision.pluginInvocationId } : {}),
       room_id: decision.roomId,
       host: decision.host,
       allowed: true,
@@ -157,6 +163,7 @@ async function handleConnect(
     log(options.logger, {
       ...(decision.sandboxId ? { sandbox_id: decision.sandboxId } : {}),
       ...(decision.healthInstallId ? { health_install_id: decision.healthInstallId } : {}),
+      ...(decision.pluginInvocationId ? { plugin_invocation_id: decision.pluginInvocationId } : {}),
       room_id: decision.roomId,
       host: decision.host,
       allowed: true,

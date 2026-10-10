@@ -1,6 +1,6 @@
 import type { Pool, PoolClient } from "@crossover/db";
 import { IDEMPOTENCY_TTL_HOURS } from "@crossover/ledger";
-import { loadLiveGrants } from "@crossover/policy";
+import { loadLiveGrants, tierOf } from "@crossover/policy";
 import { CrossoverError, type ErrorCode } from "@crossover/protocol";
 import { z } from "zod";
 import type { Dispatcher, EmittedEvent } from "../../dispatcher.js";
@@ -336,7 +336,8 @@ export function registerToolCommands(dispatcher: Dispatcher, options: ToolComman
         }),
       ]);
       const result = output.result ?? null;
-      if (Buffer.byteLength(JSON.stringify(result)) > MAX_TOOL_RESULT_BYTES) {
+      const resultLimit = def.execution?.maxOutputBytes ?? MAX_TOOL_RESULT_BYTES;
+      if (Buffer.byteLength(JSON.stringify(result)) > resultLimit) {
         return failed({
           code: "PROVIDER_UNAVAILABLE",
           message: `${def.name} returned more than the limit allows`,
@@ -357,10 +358,10 @@ export function registerToolCommands(dispatcher: Dispatcher, options: ToolComman
       }
       if (error instanceof ToolProviderError) {
         return failed({
-          code: "PROVIDER_UNAVAILABLE",
+          code: error.options.code ?? "PROVIDER_UNAVAILABLE",
           message: error.message,
           retryable: error.options.retryable,
-          details: { tool: def.name },
+          details: { tool: def.name, ...(error.options.details ?? {}) },
         });
       }
       // What a runner throws by accident may carry anything: say only that it failed.
@@ -409,6 +410,7 @@ export function registerToolCommands(dispatcher: Dispatcher, options: ToolComman
         capability: string,
         extra: Record<string, unknown> = {},
       ): Promise<boolean> => {
+        const tier = tierOf(capability);
         const out = await dispatcher.runSystem(
           ctx.room_id,
           type,
@@ -422,7 +424,7 @@ export function registerToolCommands(dispatcher: Dispatcher, options: ToolComman
                   tool: def.name,
                   invocation_id: ctx.command_id,
                   capability,
-                  tier: def.tier,
+                  tier: tierOf(capability),
                   ...extra,
                 },
               } satisfies EmittedEvent & { actor_id: string },
@@ -430,7 +432,7 @@ export function registerToolCommands(dispatcher: Dispatcher, options: ToolComman
           }),
           // A frozen room takes no event. For `tool.invoked` of a tier 3 tool that means the tool
           // doesn't run (it throws); anything else is kept in the outcome and logged on a retry.
-          def.tier >= 3 && type === "tool.invoked" ? {} : { whenFrozen: () => false },
+          tier >= 3 && type === "tool.invoked" ? {} : { whenFrozen: () => false },
         );
         return out.result;
       };
@@ -439,7 +441,7 @@ export function registerToolCommands(dispatcher: Dispatcher, options: ToolComman
         capability: string,
         released = false,
       ): Promise<void> => {
-        if (def.tier < 2) return;
+        if (tierOf(capability) < 2) return;
         // Claim the right to log first, atomically: concurrent retries of the same key must append
         // the event once. If the append doesn't happen (a frozen room, a failure), give the claim back.
         const { rowCount } = await ctx.pool.query(
@@ -498,6 +500,7 @@ export function registerToolCommands(dispatcher: Dispatcher, options: ToolComman
       const args = parseArgs(def, p.args);
       const scope = scopeOf(def, args);
       const capability = capabilityFor(def, args);
+      const invocationTier = tierOf(capability);
       if (!(await ctx.isAllowed(capability))) return { denied: true }; // `execute` refuses, and records it
       if (!runner) {
         throw new CrossoverError("PROVIDER_UNAVAILABLE", "No tool runner is configured", {
@@ -510,11 +513,11 @@ export function registerToolCommands(dispatcher: Dispatcher, options: ToolComman
         return { outcome: claim.resolved, capability, scope };
       }
 
-      if (def.tier >= 2) {
+      if (invocationTier >= 2) {
         try {
           await note("tool.invoked", capability);
         } catch (error) {
-          if (def.tier >= 3) {
+          if (invocationTier >= 3) {
             // Fail closed: no record that it started, no run.
             await releaseClaim(ctx.pool, who).catch(() => undefined);
             throw error instanceof CrossoverError

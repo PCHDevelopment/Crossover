@@ -100,7 +100,8 @@ export function capabilityMatches(granted: string, requested: string): boolean {
 
 /** The risk tier (§21.2) of a capability string; throws `VALIDATION` if it is malformed. */
 export function tierOf(capability: string): Tier {
-  return capabilityTier(parseCapability(capability).base);
+  const parsed = parseCapability(capability);
+  return capabilityTier(parsed.base, parsed.scope);
 }
 
 /**
