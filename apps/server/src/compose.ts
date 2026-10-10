@@ -6,6 +6,7 @@ import {
 } from "@crossover/gateway";
 import { registerMcp } from "@crossover/mcp";
 import { buildInternalGitServer } from "./internal-git.js";
+import { IntegrationCredentialBroker } from "./integration-broker.js";
 import {
   Dispatcher,
   RedisBudgetLimiter,
@@ -276,6 +277,23 @@ export async function composeServer(
       },
     });
     const toolRegistry = overrides.tools?.registry ?? new ToolRegistry({ tierOf });
+    kmsOperations = config.integrationKmsKeyId ? new AwsKmsDataKeyOperations() : undefined;
+    const integrationSecretStore =
+      overrides.integrations?.secretStore ??
+      (kmsOperations && config.integrationKmsKeyId
+        ? new EnvelopeSecretStore(
+            new KmsRoomDataKeyProvider(kmsOperations, config.integrationKmsKeyId),
+          )
+        : config.integrationSecretKey
+          ? new EnvelopeSecretStore(new ConfigKeyRoomDataKeyProvider(config.integrationSecretKey))
+          : undefined);
+    const credentialBroker = integrationSecretStore
+      ? new IntegrationCredentialBroker({
+          pool,
+          secretStore: integrationSecretStore,
+          ...(config.githubApp ? { github: config.githubApp } : {}),
+        })
+      : undefined;
     const toolRunner =
       overrides.tools?.runner ??
       (pluginRunner = new DockerToolRunner({
@@ -290,21 +308,23 @@ export async function composeServer(
         ...(config.sandboxEgressProxySecret
           ? { egressProxySecret: config.sandboxEgressProxySecret }
           : {}),
+        ...(credentialBroker
+          ? {
+              credentials: (invocation, execution) =>
+                credentialBroker.credentialsFor(invocation, execution),
+            }
+          : {}),
         timeoutMs: Math.min(overrides.tools?.timeoutMs ?? 60_000, 55_000),
       }));
-    kmsOperations = config.integrationKmsKeyId ? new AwsKmsDataKeyOperations() : undefined;
-    const integrationSecretStore =
-      overrides.integrations?.secretStore ??
-      (kmsOperations && config.integrationKmsKeyId
-        ? new EnvelopeSecretStore(
-            new KmsRoomDataKeyProvider(kmsOperations, config.integrationKmsKeyId),
-          )
-        : config.integrationSecretKey
-          ? new EnvelopeSecretStore(new ConfigKeyRoomDataKeyProvider(config.integrationSecretKey))
-          : undefined);
     const integrationOptions: IntegrationCommandsOptions = {
       ...overrides.integrations,
       ...(integrationSecretStore ? { secretStore: integrationSecretStore } : {}),
+      ...(overrides.integrations?.verifyAwsRole || !credentialBroker
+        ? {}
+        : { verifyAwsRole: credentialBroker.verifyAwsRole }),
+      ...(overrides.integrations?.verifyGitHubConnection || !credentialBroker || !config.githubApp
+        ? {}
+        : { verifyGitHubConnection: credentialBroker.verifyGitHubConnection }),
     };
     registerCommands(
       dispatcher,

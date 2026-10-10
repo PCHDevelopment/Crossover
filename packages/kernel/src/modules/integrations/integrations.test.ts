@@ -8,6 +8,7 @@ import type { Principal } from "../../principal.js";
 import {
   readConnectedIntegrationSecretConfig,
   registerIntegrationCommands,
+  type IntegrationCommandsOptions,
 } from "./integrations.js";
 import { ensureRoomDataKey } from "./room-key.js";
 import type { EncryptedSecret, SecretStore } from "./secret-store.js";
@@ -70,7 +71,10 @@ async function participant(
   return { participant_id: participantId, room_id: roomId, authority, kind, role };
 }
 
-async function setup(secretStore: SecretStore = testSecretStore) {
+async function setup(
+  secretStore: SecretStore = testSecretStore,
+  options: Partial<IntegrationCommandsOptions> = {},
+) {
   const roomId = newId("room");
   const ownerId = newId("part");
   await pool.query(
@@ -94,7 +98,7 @@ async function setup(secretStore: SecretStore = testSecretStore) {
   const member = await participant(roomId, "MEMBER", "AGENT", "DEVELOPER");
   const lead = await participant(roomId, "MEMBER", "AGENT", "LEAD");
   const dispatcher = new Dispatcher({ pool, authorize, nodeId: `integrations-${++serial}` });
-  registerIntegrationCommands(dispatcher, { secretStore });
+  registerIntegrationCommands(dispatcher, { ...options, secretStore });
   return { roomId, owner, admin, member, lead, dispatcher };
 }
 
@@ -149,29 +153,19 @@ describe("room integration commands", () => {
     expect(JSON.stringify(stored)).not.toContain(accessToken);
   });
 
-  it("rejects GitHub connections until the verified OAuth flow is available", async () => {
+  it("does not persist a GitHub OAuth code when the verifier is unavailable", async () => {
     const f = await setup();
     const authorizationCode = "github-authorization-code-secret";
-    const disabled = await dispatch(f, f.owner, "integrations.connect", {
-      provider: "github",
-    }).then(
-      () => null,
-      (error: unknown) => error,
-    );
-    expect(disabled).toMatchObject({
-      code: "VALIDATION",
-      message: "GitHub integration is not available yet",
-    });
     const withCode = await dispatch(f, f.owner, "integrations.connect", {
       provider: "github",
-      installation_id: "123456",
+      installation_id: 123456,
       code: authorizationCode,
       repositories: ["Example/Service"],
     }).then(
       () => null,
       (error: unknown) => error,
     );
-    expect(withCode).toMatchObject({ code: "VALIDATION" });
+    expect(withCode).toMatchObject({ code: "PROVIDER_UNAVAILABLE" });
     expect(JSON.stringify(withCode)).not.toContain(authorizationCode);
     const stored = await pool.query("SELECT 1 FROM integrations WHERE room_id = $1", [f.roomId]);
     expect(stored.rowCount).toBe(0);
@@ -179,6 +173,78 @@ describe("room integration commands", () => {
       f.roomId,
     ]);
     expect(key.rowCount).toBe(0);
+  });
+
+  it("stores only the verified explicit GitHub repository selection", async () => {
+    const code = "one-time-github-oauth-code";
+    const verifier = vi.fn(
+      async (input: { installation_id: number; repositories: readonly string[] }) => ({
+        installation_id: String(input.installation_id),
+        repositories: [...input.repositories],
+        repository_ids: ["8910"],
+      }),
+    );
+    const f = await setup(testSecretStore, { verifyGitHubConnection: verifier });
+    const result = await dispatch(f, f.owner, "integrations.connect", {
+      provider: "github",
+      installation_id: 123456,
+      code,
+      repositories: ["Example/Service"],
+    });
+
+    expect(verifier).toHaveBeenCalledWith({
+      installation_id: 123456,
+      code,
+      repositories: ["example/service"],
+    });
+    expect(JSON.stringify(result)).not.toContain(code);
+    expect(result.response).toMatchObject({
+      provider: "github",
+      status: "CONNECTED",
+      config: { installation_id: "123456", repositories: ["example/service"] },
+    });
+    const encrypted = (
+      await pool.query("SELECT encrypted_secret FROM integrations WHERE room_id = $1", [f.roomId])
+    ).rows[0].encrypted_secret;
+    expect(JSON.stringify(encrypted)).not.toContain(code);
+    expect(
+      secretValues.get(Buffer.from(encrypted.ciphertext, "base64url").toString("utf8")),
+    ).toEqual(
+      JSON.stringify({
+        installation_id: "123456",
+        repositories_json: '["example/service"]',
+        repository_ids_json: '["8910"]',
+      }),
+    );
+  });
+
+  it("retries a pending AWS role verification without returning its external ID", async () => {
+    let connected = false;
+    const verifier = vi.fn(async () => ({ connected }));
+    const f = await setup(testSecretStore, { verifyAwsRole: verifier });
+    const initial = await dispatch(f, f.owner, "integrations.connect", {
+      provider: "aws",
+      role_arn: "arn:aws:iam::123456789012:role/CrossoverDeploy",
+    });
+    expect(initial.response).toMatchObject({
+      status: "PENDING",
+      status_reason: "assume_role_failed",
+    });
+    connected = true;
+    const verified = await dispatch(f, f.owner, "integrations.verify", { provider: "aws" });
+    expect(verified.response).toEqual({
+      provider: "aws",
+      status: "CONNECTED",
+      status_reason: null,
+    });
+    expect(JSON.stringify(verified)).not.toContain(
+      (initial.one_time as { external_id: string }).external_id,
+    );
+    await expect(
+      readConnectedIntegrationSecretConfig(pool, testSecretStore, f.roomId, "aws"),
+    ).resolves.toMatchObject({
+      configuration: { role_arn: "arn:aws:iam::123456789012:role/CrossoverDeploy" },
+    });
   });
 
   it("returns AWS external IDs once, keeps them encrypted, and lets only the owner connect or disconnect", async () => {
@@ -375,9 +441,11 @@ describe("room integration commands", () => {
     });
     await expect(
       readConnectedIntegrationSecretConfig(pool, secretStore, f.roomId, "oauth:slack"),
-    ).resolves.toEqual({
-      access_token: "connected-token-value",
-      expires_at: "2999-01-01T00:00:00Z",
+    ).resolves.toMatchObject({
+      configuration: {
+        access_token: "connected-token-value",
+        expires_at: "2999-01-01T00:00:00Z",
+      },
     });
 
     await dispatch(f, f.owner, "integrations.connect", {
@@ -388,6 +456,14 @@ describe("room integration commands", () => {
     await expect(
       readConnectedIntegrationSecretConfig(pool, secretStore, f.roomId, "oauth:slack"),
     ).rejects.toMatchObject({ code: "PROVIDER_UNAVAILABLE" });
+    await expect(
+      pool.query(
+        "SELECT status, status_reason FROM integrations WHERE room_id = $1 AND provider = 'oauth:slack'",
+        [f.roomId],
+      ),
+    ).resolves.toMatchObject({
+      rows: [expect.objectContaining({ status: "EXPIRED", status_reason: "token_expired" })],
+    });
   });
 
   it("marks expired OAuth tokens", async () => {

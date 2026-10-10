@@ -40,6 +40,13 @@ export interface ToolExecutionSpec {
   command: readonly string[];
   /** Exact hosts or `*.suffix` patterns this plugin invocation may reach through the proxy. */
   egressHosts: readonly string[];
+  /** Credentials the broker may mint for this tool, with only its declared GitHub permissions. */
+  integrations?: readonly ToolIntegrationRequirement[];
+}
+
+export interface ToolIntegrationRequirement {
+  provider: string;
+  permissions?: Readonly<Record<string, "read" | "write">>;
 }
 
 /** What the runner (T1202) gets for one invocation. */
@@ -98,7 +105,7 @@ export class ToolRegistry {
     if (this.tools.has(tool.name)) throw bad("already registered");
     if (!NAME.test(tool.capability)) throw bad("the capability must be <resource>.<action>");
     if (tool.execution) {
-      const { image, command, egressHosts } = tool.execution;
+      const { image, command, egressHosts, integrations = [] } = tool.execution;
       if (!/^[A-Za-z0-9][A-Za-z0-9._/:+-]{0,254}@sha256:[a-f0-9]{64}$/.test(image))
         throw bad("the execution image must be pinned by a sha256 digest");
       if (
@@ -122,6 +129,27 @@ export class ToolRegistry {
         )
       ) {
         throw bad("the execution host allowlist is invalid");
+      }
+      const providers = new Set<string>();
+      for (const integration of integrations) {
+        if (!/^(?:github|aws|oauth:[a-z][a-z0-9_]{1,31})$/.test(integration.provider))
+          throw bad("an execution integration provider is invalid");
+        if (providers.has(integration.provider))
+          throw bad("an execution integration provider is declared more than once");
+        providers.add(integration.provider);
+        if (
+          integration.permissions &&
+          (integration.provider !== "github" ||
+            Object.entries(integration.permissions).some(
+              ([name, level]) =>
+                !/^[a-z][a-z_]{0,39}$/.test(name) || !["read", "write"].includes(level),
+            ))
+        ) {
+          throw bad("execution integration permissions are invalid");
+        }
+      }
+      if (integrations.some((integration) => integration.provider === "github") && !tool.scope) {
+        throw bad("a GitHub integration requires a repository-scoped tool");
       }
     }
     const expected = this.options.tierOf?.(tool.capability);

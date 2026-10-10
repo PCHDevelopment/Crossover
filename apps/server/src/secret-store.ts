@@ -90,8 +90,8 @@ export class EnvelopeSecretStore implements SecretStore {
   }
 
   /**
-   * Internal cryptographic primitive; production consumers must read through
-   * `readConnectedIntegrationSecretConfig` so status and expiry checks run before decryption.
+   * Internal cryptographic primitive; production consumers must go through the connected gate
+   * `readConnectedIntegrationSecretConfig` or the pending-only AWS verification path.
    */
   async open(roomId: string, provider: string, encrypted: EncryptedSecret): Promise<string> {
     validateRoomId(roomId);

@@ -2,7 +2,7 @@ import { chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { ToolRegistry, type ToolInvocation } from "@crossover/kernel";
+import { ToolRegistry, type ToolExecutionSpec, type ToolInvocation } from "@crossover/kernel";
 import { verifyPluginProxyCredential } from "@crossover/security";
 import { z } from "zod";
 import { DockerToolRunner, type PluginDockerInvoker } from "./plugin-runner.js";
@@ -11,7 +11,13 @@ import { PLUGIN_SWEEP_INTERVAL_MS, PluginResourceSweeper } from "./plugin-runner
 const SECRET = "plugin-proxy-secret-with-at-least-32-bytes";
 const TOKEN = "short-lived-provider-token";
 
-function registry(options: { hosts?: readonly string[]; idempotent?: boolean } = {}) {
+function registry(
+  options: {
+    hosts?: readonly string[];
+    idempotent?: boolean;
+    integrations?: ToolExecutionSpec["integrations"];
+  } = {},
+) {
   const tools = new ToolRegistry();
   tools.register({
     name: "github.read_repository",
@@ -25,6 +31,7 @@ function registry(options: { hosts?: readonly string[]; idempotent?: boolean } =
       image: `busybox:1.36.1-musl@sha256:${"a".repeat(64)}`,
       command: ["node", "dist/worker.js"],
       egressHosts: options.hosts ?? ["API.GITHUB.COM."],
+      ...(options.integrations ? { integrations: options.integrations } : {}),
     },
   });
   return tools;
@@ -248,6 +255,33 @@ describe("DockerToolRunner", () => {
     await expect(runner.run(invocation, new AbortController().signal)).rejects.toThrow(
       /contained a credential/,
     );
+  });
+
+  it("passes declared integrations to the broker and revokes its lease after failure", async () => {
+    const revoke = vi.fn(async () => undefined);
+    const credentials = vi.fn(async () => ({ environment: { GITHUB_TOKEN: TOKEN }, revoke }));
+    const runner = new DockerToolRunner({
+      registry: registry({
+        hosts: [],
+        integrations: [{ provider: "github", permissions: { contents: "read" } }],
+      }),
+      credentials,
+      invoke: async (_binary, args) =>
+        args[0] === "run"
+          ? { code: 1, stdout: "", stderr: "" }
+          : { code: 0, stdout: "", stderr: "" },
+    });
+
+    await expect(runner.run(invocation, new AbortController().signal)).rejects.toThrow(
+      /Plugin execution failed/,
+    );
+    expect(credentials).toHaveBeenCalledWith(
+      invocation,
+      expect.objectContaining({
+        integrations: [{ provider: "github", permissions: { contents: "read" } }],
+      }),
+    );
+    expect(revoke).toHaveBeenCalledOnce();
   });
 
   it("rejects oversized output and still removes the invocation container", async () => {
