@@ -4,7 +4,7 @@ import { CrossoverError, newId } from "@crossover/protocol";
 import { ignoredWorkspacePaths } from "./ignore.js";
 import { git } from "./git.js";
 import { normalizePath } from "./path.js";
-import type { SandboxFileChanges } from "./sandbox-status.js";
+import { createSandboxFileChangesAccumulator, type SandboxFileChanges } from "./sandbox-status.js";
 
 const SANDBOX_IDLE_MS = 30 * 60 * 1000;
 const SWEEP_INTERVAL_MS = 60 * 1000;
@@ -716,20 +716,23 @@ export class ExecutionService {
     const addedPaths = inventory.filter((entry) => !base.has(entry.path)).map(({ path }) => path);
     const ignored = await ignoredWorkspacePaths(repoPath, base, addedPaths);
     const current = new Map(inventory.map((entry) => [entry.path, entry]));
-    const changes: SandboxFileChanges = { modified: [], added: [], deleted: [], truncated: false };
+    const changes = createSandboxFileChangesAccumulator();
+    let stopped = false;
     for (const [path, previous] of base) {
       if (previous.mode === "160000") continue;
       const entry = current.get(path);
-      if (!entry) changes.deleted.push(path);
+      if (!entry) stopped = !changes.add("deleted", path);
       else if (entry.sha !== previous.sha || entry.mode !== previous.mode)
-        changes.modified.push(path);
+        stopped = !changes.add("modified", path);
+      if (stopped) break;
     }
-    for (const { path } of inventory)
-      if (!base.has(path) && !ignored.has(path)) changes.added.push(path);
-    changes.modified.sort();
-    changes.added.sort();
-    changes.deleted.sort();
-    return changes;
+    if (!stopped) {
+      for (const { path } of inventory) {
+        if (base.has(path) || ignored.has(path)) continue;
+        if (!changes.add("added", path)) break;
+      }
+    }
+    return changes.finish();
   }
 
   /** Hibernate idle sandboxes; the container stops while its Docker volume is retained. */

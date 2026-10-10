@@ -389,6 +389,69 @@ describe("ExecutionService", () => {
     }
   });
 
+  it("bounds raw snapshot status at the shared entry limit", async () => {
+    const { roomId, participantIds } = await makeParticipants();
+    const root = await mkdtemp(join(tmpdir(), "crossover-execution-status-cap-"));
+    try {
+      const checkoutPath = join(root, "checkout");
+      await mkdir(checkoutPath);
+      await git(["init", "--quiet", checkoutPath], { timeoutMs: 10_000 });
+      const repoPath = join(checkoutPath, ".git");
+      await writeFile(join(checkoutPath, "base.txt"), "base\n");
+      await git(["add", "."], { cwd: checkoutPath, timeoutMs: 10_000 });
+      await git(
+        [
+          "-c",
+          "user.name=Sandbox Test",
+          "-c",
+          "user.email=test@example.invalid",
+          "commit",
+          "--quiet",
+          "-m",
+          "base",
+        ],
+        { cwd: checkoutPath, timeoutMs: 10_000 },
+      );
+      const baseCommit = (
+        await git(["rev-parse", "HEAD"], { gitDir: repoPath, timeoutMs: 10_000 })
+      ).stdout.trim();
+      const baseBlob = (
+        await git(["rev-parse", `${baseCommit}:base.txt`], { gitDir: repoPath, timeoutMs: 10_000 })
+      ).stdout.trim();
+      const workspaceId = newId("ws");
+      await db.pool.query("INSERT INTO workspaces (id, room_id, repo_path) VALUES ($1, $2, $3)", [
+        workspaceId,
+        roomId,
+        repoPath,
+      ]);
+      await db.pool.query(
+        `INSERT INTO workspace_revisions (workspace_id, room_id, revision, commit_sha)
+         VALUES ($1, $2, 1, $3)`,
+        [workspaceId, roomId, baseCommit],
+      );
+      const driver = new MaterializingExecutionDriver();
+      driver.snapshotEntries = [
+        { path: "base.txt", mode: "100644", sha: baseBlob, size: 5 },
+        ...Array.from({ length: 10_001 }, (_, index) => ({
+          path: `new/file-${index}.txt`,
+          mode: "100644",
+          sha: null,
+          size: 1,
+        })),
+      ];
+      const execution = new ExecutionService(db.pool, driver);
+      await execution.ensure(roomId, participantIds[0]!);
+
+      const status = await execution.status(roomId, participantIds[0]!);
+      expect(status.added).toContain("new/file-0.txt");
+      expect(status.added).toHaveLength(10_000);
+      expect(status.added).not.toContain("new/file-10000.txt");
+      expect(status.truncated).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("creates one sandbox per room participant and records the selected disk policy", async () => {
     const { roomId, participantIds } = await makeParticipants(2);
     const driver = new FakeExecutionDriver();
