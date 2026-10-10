@@ -40,9 +40,18 @@ export function isAllowedEgressHost(host: string, roomAllowlist: readonly string
   const canonical = normalizeEgressHost(host);
   return (
     DEFAULT_EGRESS_ALLOWLIST.includes(canonical as (typeof DEFAULT_EGRESS_ALLOWLIST)[number]) ||
-    roomAllowlist.some((pattern) =>
-      pattern.startsWith("*.") ? canonical.endsWith(`.${pattern.slice(2)}`) : canonical === pattern,
-    )
+    matchesHostPattern(canonical, roomAllowlist)
+  );
+}
+
+/** Match only a plugin's signed host scope; built-in sandbox hosts do not apply to plugins. */
+export function isAllowedPluginEgressHost(host: string, pluginHosts: readonly string[]): boolean {
+  return matchesHostPattern(normalizeEgressHost(host), pluginHosts);
+}
+
+function matchesHostPattern(host: string, patterns: readonly string[]): boolean {
+  return patterns.some((pattern) =>
+    pattern.startsWith("*.") ? host.endsWith(`.${pattern.slice(2)}`) : host === pattern,
   );
 }
 
