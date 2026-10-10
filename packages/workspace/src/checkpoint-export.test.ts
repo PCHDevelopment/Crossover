@@ -118,7 +118,11 @@ async function setup(opts: { pullRequests?: boolean } = {}) {
   const remote = join(remoteDir, "remote.git");
   await run(up.dir, ["push", "-q", remote, "main"]);
   const pushes: { branch: string; commit: string }[] = [];
-  const accessed: string[] = [];
+  const accessed: {
+    access: "read" | "write";
+    permissions?: Readonly<Record<string, "read" | "write">>;
+  }[] = [];
+  let credentialRevocations = 0;
   const pusher: UpstreamPusher = {
     async push(request) {
       pushes.push({ branch: request.branch, commit: request.commit });
@@ -163,9 +167,17 @@ async function setup(opts: { pullRequests?: boolean } = {}) {
       pusher,
       ...(opts.pullRequests === false ? {} : { pullRequests: provider }),
       credentials: {
-        credentialFor: async (_url, access) => {
-          accessed.push(access ?? "read");
-          return { type: "bearer", token: "tok_push_secret" } as GitCredential;
+        credentialFor: async (_url, request) => {
+          accessed.push({
+            access: request.access,
+            ...(request.permissions ? { permissions: request.permissions } : {}),
+          });
+          return {
+            credential: { type: "bearer", token: "tok_push_secret" } as GitCredential,
+            revoke: async () => {
+              credentialRevocations += 1;
+            },
+          };
         },
       },
       resolve: async () => ["93.184.216.34"],
@@ -234,6 +246,7 @@ async function setup(opts: { pullRequests?: boolean } = {}) {
     remoteGit,
     pushes,
     accessed,
+    credentialRevocations: () => credentialRevocations,
     slug,
     checkpoint,
     exportIt,
@@ -511,7 +524,8 @@ describe("checkpoints.export (§24.3, T805)", () => {
     await s.edit("src/a.ts", "export const a = 1;\n");
     await s.checkpoint("x");
     const out = await s.exportIt();
-    expect(s.accessed.at(-1)).toBe("write"); // the import before it was a read
+    expect(s.accessed.at(-1)).toEqual({ access: "write", permissions: { contents: "write" } });
+    expect(s.credentialRevocations()).toBe(2); // the import lease and the export lease
     const seen = JSON.stringify([out.response, await s.events("checkpoint.exported")]);
     expect(seen).not.toContain("tok_push_secret");
     await expect(s.exportIt({ checkpoint_id: "ckpt_nope" })).rejects.toMatchObject({

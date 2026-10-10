@@ -6,7 +6,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { git } from "./git.js";
 import type { SandboxWorkingCopyStatus } from "./execution.js";
 import {
+  createSandboxFileChangesAccumulator,
   createPorcelainStatusAccumulator,
+  MAX_STATUS_ENTRIES,
+  MAX_STATUS_OUTPUT_BYTES,
   parsePorcelainStatus,
   registerSandboxStatusCommand,
 } from "./sandbox-status.js";
@@ -65,10 +68,30 @@ describe("parsePorcelainStatus", () => {
   });
 
   it("caps large synthetic status output and reports truncation", () => {
-    const output = Array.from({ length: 10_005 }, (_, index) => ` M file-${index}.txt`).join("\0");
+    const output = Array.from(
+      { length: MAX_STATUS_ENTRIES + 5 },
+      (_, index) => ` M file-${index}.txt`,
+    ).join("\0");
     const parsed = parsePorcelainStatus(output);
-    expect(parsed.modified).toHaveLength(10_000);
+    expect(parsed.modified).toHaveLength(MAX_STATUS_ENTRIES);
     expect(parsed.truncated).toBe(true);
+  });
+
+  it("caps snapshot status at the entry and encoded-byte boundaries", () => {
+    const entries = createSandboxFileChangesAccumulator();
+    for (let index = 0; index < MAX_STATUS_ENTRIES; index += 1)
+      expect(entries.add("added", `file-${index}.txt`)).toBe(true);
+    expect(entries.add("added", "overflow.txt")).toBe(false);
+    expect(entries.finish().added).toHaveLength(MAX_STATUS_ENTRIES);
+    expect(entries.finish().truncated).toBe(true);
+
+    const bytes = createSandboxFileChangesAccumulator();
+    expect(bytes.add("modified", "x".repeat(MAX_STATUS_OUTPUT_BYTES - 4))).toBe(true);
+    expect(bytes.add("added", "over-budget.txt")).toBe(false);
+    expect(bytes.finish()).toMatchObject({
+      modified: ["x".repeat(MAX_STATUS_OUTPUT_BYTES - 4)],
+      truncated: true,
+    });
   });
 
   it("parses status records across chunks and stops reading at the combined entry limit", () => {

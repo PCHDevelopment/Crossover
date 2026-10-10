@@ -22,11 +22,16 @@ afterAll(async () => {
 });
 async function fixture(authorize: Authorizer = allowAll) {
   const room = newId("room");
+  const owner = newId("part");
   const root = await mkdtemp(join(tmpdir(), "crossover-read-test-"));
   dirs.push(root);
   await db.pool.query(
-    "INSERT INTO rooms (id, slug, name, objective, owner_id) VALUES ($1,$1,'Room','Ship','actor')",
-    [room],
+    "INSERT INTO rooms (id, slug, name, objective, owner_id) VALUES ($1,$1,'Room','Ship',$2)",
+    [room, owner],
+  );
+  await db.pool.query(
+    "INSERT INTO participants (id, room_id, kind, display_name, authority, role, status) VALUES ($2, $1, 'HUMAN', 'Actor', 'OWNER', 'LEAD', 'ACTIVE')",
+    [room, owner],
   );
   const workspace = await withTransaction(db.pool, (client) =>
     provisionWorkspace(client, room, root),
@@ -38,7 +43,7 @@ async function fixture(authorize: Authorizer = allowAll) {
   registerWorkspaceCommands(dispatcher);
   const principal = {
     room_id: room,
-    participant_id: "actor",
+    participant_id: owner,
     kind: "HUMAN" as const,
     authority: "OWNER" as const,
     role: "LEAD" as const,
@@ -61,7 +66,7 @@ async function fixture(authorize: Authorizer = allowAll) {
       },
       true,
     );
-  return { room, workspace, repo, options, dispatch, apply };
+  return { room, workspace, repo, options, dispatch, apply, owner };
 }
 
 it("reads old contents and file revisions after later modification/deletion, independent of cached refs", async () => {
