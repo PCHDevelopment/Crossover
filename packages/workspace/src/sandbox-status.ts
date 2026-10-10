@@ -9,7 +9,53 @@ export interface SandboxFileChanges {
   truncated: boolean;
 }
 
-const MAX_STATUS_ENTRIES = 10_000;
+export const MAX_STATUS_ENTRIES = 10_000;
+export const MAX_STATUS_OUTPUT_BYTES = 16 * 1024 * 1024;
+
+export type SandboxChangeKind = "modified" | "added" | "deleted";
+
+export interface SandboxFileChangesAccumulator {
+  /** Add one change, or return false once the entry or byte budget is exhausted. */
+  add(kind: SandboxChangeKind, path: string): boolean;
+  /** Mark unconsumed status as truncated when a separate output limit is exhausted. */
+  truncate(): void;
+  finish(): SandboxFileChanges;
+}
+
+/** Bound all status sources with the same entry and encoded-output limits. */
+export function createSandboxFileChangesAccumulator(): SandboxFileChangesAccumulator {
+  const changes: SandboxFileChanges = { modified: [], added: [], deleted: [], truncated: false };
+  let entryCount = 0;
+  let outputBytes = 0;
+  let stopped = false;
+
+  return {
+    add(kind, path) {
+      if (stopped) return false;
+      // Porcelain v1 records encode each path as "XY path\\0".
+      const bytes = Buffer.byteLength(path) + 4;
+      if (entryCount >= MAX_STATUS_ENTRIES || outputBytes + bytes > MAX_STATUS_OUTPUT_BYTES) {
+        changes.truncated = true;
+        stopped = true;
+        return false;
+      }
+      changes[kind].push(path);
+      entryCount += 1;
+      outputBytes += bytes;
+      return true;
+    },
+    truncate() {
+      stopped = true;
+      changes.truncated = true;
+    },
+    finish() {
+      changes.modified.sort();
+      changes.added.sort();
+      changes.deleted.sort();
+      return changes;
+    },
+  };
+}
 
 export interface PorcelainStatusAccumulator {
   /** Consume one stdout chunk; false means the consumer reached its output limit. */
@@ -22,7 +68,7 @@ export interface PorcelainStatusAccumulator {
 
 /** Incrementally parse porcelain records without retaining the complete helper output. */
 export function createPorcelainStatusAccumulator(): PorcelainStatusAccumulator {
-  const changes: SandboxFileChanges = { modified: [], added: [], deleted: [], truncated: false };
+  const changes = createSandboxFileChangesAccumulator();
   let pending = "";
   let stopped = false;
 
@@ -38,18 +84,15 @@ export function createPorcelainStatusAccumulator(): PorcelainStatusAccumulator {
     if (state.includes("R") || state.includes("C"))
       throw new Error("Git rename detection must be disabled for sandbox status");
 
-    if (
-      changes.modified.length + changes.added.length + changes.deleted.length >=
-      MAX_STATUS_ENTRIES
-    ) {
-      changes.truncated = true;
-      stopped = true;
-      return false;
-    }
-    if (state === "??" || state.includes("A")) changes.added.push(path);
-    else if (state.includes("D")) changes.deleted.push(path);
-    else changes.modified.push(path);
-    return true;
+    const kind =
+      state === "??" || state.includes("A")
+        ? "added"
+        : state.includes("D")
+          ? "deleted"
+          : "modified";
+    const keepReading = changes.add(kind, path);
+    if (!keepReading) stopped = true;
+    return keepReading;
   };
 
   return {
@@ -68,17 +111,14 @@ export function createPorcelainStatusAccumulator(): PorcelainStatusAccumulator {
       return true;
     },
     truncate() {
-      pending = "";
       stopped = true;
-      changes.truncated = true;
+      pending = "";
+      changes.truncate();
     },
     finish() {
       if (!stopped && pending) addRecord(pending);
       pending = "";
-      changes.modified.sort();
-      changes.added.sort();
-      changes.deleted.sort();
-      return changes;
+      return changes.finish();
     },
   };
 }

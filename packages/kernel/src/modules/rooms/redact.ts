@@ -15,6 +15,8 @@ export const seesDenials = (viewer: EventViewer): boolean =>
 const base = (value: unknown): unknown =>
   typeof value === "string" ? (value.split(":", 1)[0] ?? value) : value;
 
+const SANDBOX_PATH_FIELDS = ["changed_paths", "conflicted_paths", "intents"] as const;
+
 /**
  * What `viewer` may see of `event`. A `capability.denied` event records which resource a
  * participant tried to touch (a workspace path, say), which tells everyone who can read the
@@ -29,14 +31,16 @@ export function redactEventFor(viewer: EventViewer, event: RoomEvent): RoomEvent
   if (event.type.startsWith("sandbox.")) {
     const payload = event.payload as Record<string, unknown>;
     if (
-      !Object.hasOwn(payload, "changed_paths") ||
+      !SANDBOX_PATH_FIELDS.some((field) => Object.hasOwn(payload, field)) ||
       payload.participant_id === viewer.participant_id ||
       seesDenials(viewer)
     ) {
       return event;
     }
-    const { changed_paths: _changedPaths, ...rest } = payload;
-    void _changedPaths;
+    const pathFields = new Set<string>(SANDBOX_PATH_FIELDS);
+    const rest = Object.fromEntries(
+      Object.entries(payload).filter(([key]) => !pathFields.has(key)),
+    );
     return { ...event, payload: { ...rest, paths_redacted: true } };
   }
   if (event.type !== "capability.denied") return event;

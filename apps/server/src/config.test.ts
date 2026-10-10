@@ -14,7 +14,12 @@ describe("sandbox disk enforcement configuration", () => {
       sandboxVolumeOptions: {},
     });
     expect(
-      loadConfig({ ...env, NODE_ENV: "production", SANDBOX_DISK_ENFORCEMENT: "soft" }),
+      loadConfig({
+        ...env,
+        NODE_ENV: "production",
+        SANDBOX_DISK_ENFORCEMENT: "soft",
+        INTEGRATION_KMS_KEY_ID: "alias/crossover-test",
+      }),
     ).toMatchObject({ sandboxDiskEnforcement: "soft", sandboxVolumeOptions: {} });
   });
 
@@ -26,6 +31,7 @@ describe("sandbox disk enforcement configuration", () => {
       loadConfig({
         ...env,
         NODE_ENV: "production",
+        INTEGRATION_KMS_KEY_ID: "alias/crossover-test",
         SANDBOX_VOLUME_DRIVER: "local",
         SANDBOX_VOLUME_OPTS: '{"type":"none","device":"/srv/sandbox","o":"bind,pquota"}',
       }),
@@ -34,6 +40,32 @@ describe("sandbox disk enforcement configuration", () => {
       sandboxVolumeDriver: "local",
       sandboxVolumeOptions: { type: "none", device: "/srv/sandbox", o: "bind,pquota" },
     });
+  });
+
+  it("uses a config key only in development and requires KMS for production", () => {
+    const configured = loadConfig({ ...env, INTEGRATION_SECRET_KEY: "ab".repeat(32) });
+    expect(Buffer.from(configured.integrationSecretKey ?? []).toString("hex")).toBe(
+      "ab".repeat(32),
+    );
+    expect(() => loadConfig({ ...env, INTEGRATION_SECRET_KEY: "too-short" })).toThrow(
+      /INTEGRATION_SECRET_KEY/,
+    );
+    expect(() =>
+      loadConfig({
+        ...env,
+        NODE_ENV: "production",
+        SANDBOX_DISK_ENFORCEMENT: "soft",
+      }),
+    ).toThrow(/INTEGRATION_KMS_KEY_ID is required in production/);
+    expect(() =>
+      loadConfig({
+        ...env,
+        NODE_ENV: "production",
+        SANDBOX_DISK_ENFORCEMENT: "soft",
+        INTEGRATION_KMS_KEY_ID: "alias/crossover-test",
+        INTEGRATION_SECRET_KEY: "ab".repeat(32),
+      }),
+    ).toThrow(/INTEGRATION_SECRET_KEY is development-only/);
   });
 
   it("rejects invalid enforcement values and malformed volume options", () => {
@@ -133,5 +165,44 @@ describe("internal Git listener configuration", () => {
         GIT_INTERNAL_TOKEN_SECRET: "0123456789abcdef0123456789abcdef",
       }),
     ).toThrow(/specific private-network address/);
+  });
+});
+
+describe("GitHub integration configuration", () => {
+  it("requires operator credentials as a complete set and normalizes PEM newlines", () => {
+    expect(() => loadConfig({ ...env, GITHUB_APP_ID: "123" })).toThrow(
+      /must be configured together/,
+    );
+    const configured = loadConfig({
+      ...env,
+      GITHUB_APP_ID: "123",
+      GITHUB_CLIENT_ID: "client-id",
+      GITHUB_CLIENT_SECRET: "client-secret",
+      GITHUB_APP_PRIVATE_KEY: `-----BEGIN PRIVATE KEY-----\\n${"x".repeat(100)}\\n-----END PRIVATE KEY-----`,
+    });
+    expect(configured.githubApp).toMatchObject({
+      appId: "123",
+      clientId: "client-id",
+      clientSecret: "client-secret",
+      privateKey: expect.stringContaining("\n"),
+    });
+  });
+
+  it("accepts only a digest-pinned GitHub plugin worker image", () => {
+    expect(() =>
+      loadConfig({ ...env, GITHUB_PLUGIN_IMAGE: "crossover-github-plugin:latest" }),
+    ).toThrow(/GITHUB_PLUGIN_IMAGE/);
+    const image = `ghcr.io/peterheo/crossover-github-plugin@sha256:${"a".repeat(64)}`;
+    expect(loadConfig({ ...env, GITHUB_PLUGIN_IMAGE: image }).githubPluginImage).toBe(image);
+  });
+});
+
+describe("browser plugin image configuration", () => {
+  it("accepts only digest-pinned browser worker images", () => {
+    const image = `ghcr.io/peterheo/crossover-browser-plugin@sha256:${"b".repeat(64)}`;
+    expect(() =>
+      loadConfig({ ...env, BROWSER_PLUGIN_IMAGE: "crossover-browser-plugin:latest" }),
+    ).toThrow(/BROWSER_PLUGIN_IMAGE/);
+    expect(loadConfig({ ...env, BROWSER_PLUGIN_IMAGE: image }).browserPluginImage).toBe(image);
   });
 });

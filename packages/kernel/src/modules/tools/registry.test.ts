@@ -32,6 +32,132 @@ describe("ToolRegistry", () => {
     expect(() => r.register(tool({ tier: 0 }))).toThrow(/tier 0 .* tier 2/);
     r.register(tool({ tier: 2 }));
   });
+
+  it("requires an immutable digest for executable plugin images", () => {
+    const r = new ToolRegistry();
+    const execution = {
+      image: `busybox:1.36.1-musl@sha256:${"a".repeat(64)}`,
+      command: ["/bin/busybox", "true"],
+      egressHosts: [],
+    };
+    r.register(tool({ execution }));
+
+    for (const image of [
+      "busybox:latest",
+      "busybox:1.36.1-musl",
+      `busybox@sha256:${"A".repeat(64)}`,
+      `busybox@sha256:${"a".repeat(63)}`,
+    ]) {
+      const next = new ToolRegistry();
+      expect(() => next.register(tool({ execution: { ...execution, image } }))).toThrow(
+        /pinned by a sha256 digest/,
+      );
+    }
+  });
+
+  it("validates credential requirements and GitHub repository scoping", () => {
+    const base = {
+      image: `busybox:1.36.1-musl@sha256:${"a".repeat(64)}`,
+      command: ["/bin/busybox", "true"],
+      egressHosts: [],
+    };
+    const registry = new ToolRegistry();
+    expect(() =>
+      registry.register(tool({ execution: { ...base, integrations: [{ provider: "github" }] } })),
+    ).toThrow(/requires explicit permissions/);
+    expect(() =>
+      registry.register(
+        tool({ execution: { ...base, integrations: [{ provider: "github", permissions: {} }] } }),
+      ),
+    ).toThrow(/requires explicit permissions/);
+    expect(() =>
+      registry.register(
+        tool({
+          execution: {
+            ...base,
+            integrations: [{ provider: "github", permissions: { contents: "read" } }],
+          },
+        }),
+      ),
+    ).not.toThrow();
+    const { scope: _scope, ...unscoped } = tool();
+    void _scope;
+    expect(() =>
+      new ToolRegistry().register({
+        ...unscoped,
+        execution: {
+          ...base,
+          integrations: [{ provider: "github", permissions: { contents: "read" } }],
+        },
+      }),
+    ).toThrow(/repository-scoped/);
+    expect(() =>
+      new ToolRegistry().register(
+        tool({
+          execution: {
+            ...base,
+            integrations: [{ provider: "aws", permissions: { contents: "read" } }],
+          },
+        }),
+      ),
+    ).toThrow(/permissions are invalid/);
+    expect(() =>
+      new ToolRegistry().register(
+        tool({
+          execution: {
+            ...base,
+            integrations: [{ provider: "aws" }, { provider: "aws" }],
+          },
+        }),
+      ),
+    ).toThrow(/more than once/);
+  });
+
+  it("validates per-plugin output bounds", () => {
+    const base = {
+      image: `busybox:1.36.1-musl@sha256:${"a".repeat(64)}`,
+      command: ["/bin/busybox", "true"],
+      egressHosts: [],
+    };
+    expect(() =>
+      new ToolRegistry().register(tool({ execution: { ...base, maxOutputBytes: 256 * 1024 } })),
+    ).not.toThrow();
+    for (const maxOutputBytes of [0, 256 * 1024 + 1, Number.NaN]) {
+      expect(() =>
+        new ToolRegistry().register(tool({ execution: { ...base, maxOutputBytes } })),
+      ).toThrow(/execution output limit/);
+    }
+  });
+
+  it("accepts immutable local image IDs for Docker-built integration fixtures", () => {
+    expect(() =>
+      new ToolRegistry().register(
+        tool({
+          execution: {
+            image: `sha256:${"b".repeat(64)}`,
+            command: ["/bin/busybox", "true"],
+            egressHosts: [],
+          },
+        }),
+      ),
+    ).not.toThrow();
+  });
+
+  it("caps per-tool container process limits", () => {
+    const base = {
+      image: `busybox:1.36.1-musl@sha256:${"a".repeat(64)}`,
+      command: ["/bin/busybox", "true"],
+      egressHosts: [],
+    };
+    expect(() =>
+      new ToolRegistry().register(tool({ execution: { ...base, pidsLimit: 256 } })),
+    ).not.toThrow();
+    for (const pidsLimit of [0, 257, Number.NaN]) {
+      expect(() =>
+        new ToolRegistry().register(tool({ execution: { ...base, pidsLimit } })),
+      ).toThrow(/process limit/);
+    }
+  });
 });
 
 describe("capabilityFor", () => {

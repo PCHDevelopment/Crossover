@@ -19,8 +19,13 @@ export const EXTERNAL_TIERS: Readonly<Record<string, Tier>> = {
   "aws.deploy_lambda": 3,
 };
 
+/** Capabilities whose risk tier depends on their concrete scope. Missing scope stays strict. */
+export const SCOPED_TIERS: Readonly<Record<string, (scope: string | undefined) => Tier>> = {
+  "aws.deploy_lambda": (scope) => (scope?.startsWith("staging-") ? 2 : 3),
+};
+
 /**
- * The risk tier of a capability's base (`<resource>.<action>`, any scope ignored):
+ * The risk tier of a capability's base and optional concrete scope:
  * - 0: reads, including the room's own read capabilities;
  * - 1: room-internal writes (messages, tasks, memory, workspace, sandbox, and the authority
  *   powers, which are governed by authority rather than grants);
@@ -29,7 +34,9 @@ export const EXTERNAL_TIERS: Readonly<Record<string, Tier>> = {
  *   were harmless (fail closed).
  * `capabilities.grant_tier3` is itself Tier 3.
  */
-export function capabilityTier(base: string): Tier {
+export function capabilityTier(base: string, scope?: string): Tier {
+  const scoped = SCOPED_TIERS[base];
+  if (scoped) return scoped(scope);
   if (Object.hasOwn(EXTERNAL_TIERS, base)) return EXTERNAL_TIERS[base]!;
   if (isCapability(base)) {
     if (base === "capabilities.grant_tier3") return 3;

@@ -1,4 +1,4 @@
-import { createPool, type Pool } from "@crossover/db";
+import { createPool, withTransaction, type Pool } from "@crossover/db";
 import {
   buildGateway,
   type SandboxOutputMetadata,
@@ -6,8 +6,14 @@ import {
 } from "@crossover/gateway";
 import { registerMcp } from "@crossover/mcp";
 import { buildInternalGitServer } from "./internal-git.js";
+import { IntegrationCredentialBroker } from "./integration-broker.js";
+import { GitHubPullRequestProvider } from "./github-pull-request.js";
+import { registerBrowserTools } from "./browser-plugin.js";
+import { registerGitHubTools } from "./github-plugin.js";
+import { registerAwsTools } from "./aws-plugin.js";
 import {
   Dispatcher,
+  filterReadablePaths,
   RedisBudgetLimiter,
   type BudgetLimiter,
   LeaseRenewer,
@@ -21,7 +27,9 @@ import {
   registerDecisionDecideCommands,
   registerApprovalCommands,
   registerToolCommands,
+  registerIntegrationCommands,
   ToolRegistry,
+  type IntegrationCommandsOptions,
   type ToolRunner,
   registerWakeSecretCommand,
   WakeWebhookService,
@@ -47,14 +55,19 @@ import {
   registerTaskLifecycleCommands,
   registerTaskReadCommands,
   type Authorizer,
+  type Principal,
   type EventPublisher,
   type EventSubscriber,
   RedisEditIntentStore,
   RedisPresenceStore,
 } from "@crossover/kernel";
-import { postWebhook } from "@crossover/security";
+import { CrossoverError } from "@crossover/protocol";
+import { normalizeRoomEgressAllowlist, postWebhook } from "@crossover/security";
 import { authorize, tierOf } from "@crossover/policy";
 import { join } from "node:path";
+import { DockerToolRunner } from "./plugin-runner.js";
+import { AwsKmsDataKeyOperations, KmsRoomDataKeyProvider } from "./kms-secret-keys.js";
+import { ConfigKeyRoomDataKeyProvider, EnvelopeSecretStore } from "./secret-store.js";
 import {
   ConflictEscalationSweeper,
   DockerExecutionDriver,
@@ -64,11 +77,14 @@ import {
   workspaceHealthGate,
   provisionWorkspace,
   reconcileRef,
+  githubRepositoryFromUrl,
   registerWorkspaceCommands,
+  type GitCredentialProvider,
   runHealthCheck,
   publishHealthResult,
   normalizePath,
   registerSandboxStatusCommand,
+  registerSandboxSyncCommand,
   registerSandboxSubmitCommand,
   registerSandboxExecCommands,
   FileLogStore,
@@ -100,6 +116,8 @@ export interface ComposeOverrides {
   budgets?: BudgetLimiter;
   /** Tools plugins declare, and what runs them (the plugin runner, T1202); none by default. */
   tools?: { registry?: ToolRegistry; runner?: ToolRunner; timeoutMs?: number };
+  /** Secret storage and provider verification seams for integration commands. */
+  integrations?: IntegrationCommandsOptions;
   /** How `git.import` reaches an upstream (fetcher, credentials, host check); production: HTTPS clone, no credentials. */
   upstream?: UpstreamDeps;
 }
@@ -141,6 +159,8 @@ export async function composeServer(
   let leaseSweeper: LeaseSweeper | undefined;
   let wakeWebhooks: WakeWebhookService | undefined;
   let executionService: ExecutionService | undefined;
+  let pluginRunner: DockerToolRunner | undefined;
+  let kmsOperations: AwsKmsDataKeyOperations | undefined;
   let gitApp: ReturnType<typeof buildInternalGitServer> | undefined;
   let healthInstallSweepTimer: NodeJS.Timeout | undefined;
   let sandboxLogSweepTimer: NodeJS.Timeout | undefined;
@@ -220,19 +240,56 @@ export async function composeServer(
           : {}),
         gitFetcherImage: config.gitFetcherImage ?? "crossover-git-fetcher:latest",
       });
+    const pathAuthorizer = overrides.authorize ?? authorize;
+    const readableSandboxPaths = async (
+      roomId: string,
+      participantId: string,
+      paths: readonly string[],
+    ): Promise<string[]> =>
+      withTransaction(pool, async (client) => {
+        const { rows } = await client.query<Principal>(
+          `SELECT id AS participant_id, room_id, kind, authority, role FROM participants
+           WHERE id = $1 AND room_id = $2 AND status = 'ACTIVE'`,
+          [participantId, roomId],
+        );
+        const principal = rows[0];
+        if (!principal) return [];
+        return filterReadablePaths(paths, async (path) => {
+          try {
+            await pathAuthorizer(
+              principal,
+              "workspace.read",
+              { room_id: roomId, path },
+              { method: "sandbox.status", params: {}, client },
+            );
+            return true;
+          } catch (error) {
+            if (error instanceof CrossoverError && error.code === "FORBIDDEN") return false;
+            throw error;
+          }
+        });
+      });
     executionService = new ExecutionService(pool, executionDriver, {
       diskEnforcement: config.sandboxDiskEnforcement ?? "soft",
+      readablePaths: readableSandboxPaths,
+      listIntents: (roomId) => intentStore.list(roomId),
     });
     executionService.startSweeper();
 
     const dispatcher = new Dispatcher({
       pool,
-      authorize: overrides.authorize ?? authorize,
+      authorize: pathAuthorizer,
       nodeId: config.nodeId,
       publisher,
       budgets,
       onLeaseAcquire: (roomId) => reconcileRef(pool, roomId),
       ...(overrides.leaseTtlMs !== undefined ? { leaseTtlMs: overrides.leaseTtlMs } : {}),
+    });
+    executionService.setSandboxEventSink(async (roomId, events) => {
+      await dispatcher.runSystem(roomId, "sandbox.canonical_advance", async () => ({
+        result: undefined,
+        events: [...events],
+      }));
     });
     const healthRunner = new DockerHealthRunner({
       allowedImages: config.healthImages,
@@ -272,6 +329,84 @@ export async function composeServer(
           await publishHealthResult(pool, dispatcher, roomId, revision, outcome.id, outcome.result);
       },
     });
+    const toolRegistry = overrides.tools?.registry ?? new ToolRegistry({ tierOf });
+    if (!overrides.tools?.registry && config.githubPluginImage)
+      registerGitHubTools(toolRegistry, config.githubPluginImage);
+    if (!overrides.tools?.registry && config.browserPluginImage)
+      registerBrowserTools(toolRegistry, config.browserPluginImage);
+    if (!overrides.tools?.registry && config.awsPluginImage)
+      registerAwsTools(toolRegistry, config.awsPluginImage);
+    kmsOperations = config.integrationKmsKeyId ? new AwsKmsDataKeyOperations() : undefined;
+    const integrationSecretStore =
+      overrides.integrations?.secretStore ??
+      (kmsOperations && config.integrationKmsKeyId
+        ? new EnvelopeSecretStore(
+            new KmsRoomDataKeyProvider(kmsOperations, config.integrationKmsKeyId),
+          )
+        : config.integrationSecretKey
+          ? new EnvelopeSecretStore(new ConfigKeyRoomDataKeyProvider(config.integrationSecretKey))
+          : undefined);
+    const credentialBroker = integrationSecretStore
+      ? new IntegrationCredentialBroker({
+          pool,
+          secretStore: integrationSecretStore,
+          ...(config.githubApp ? { github: config.githubApp } : {}),
+        })
+      : undefined;
+    const githubCredentials: GitCredentialProvider = {
+      credentialFor: async (url, request) => {
+        if (url.hostname.toLowerCase() !== "github.com" || !credentialBroker) return null;
+        return credentialBroker.githubCredentialForRoom({
+          ...request,
+          repository: githubRepositoryFromUrl(url),
+        });
+      },
+    };
+    const upstream = {
+      ...overrides.upstream,
+      credentials: overrides.upstream?.credentials ?? githubCredentials,
+      pullRequests: overrides.upstream?.pullRequests ?? new GitHubPullRequestProvider(),
+    };
+    const toolRunner =
+      overrides.tools?.runner ??
+      (pluginRunner = new DockerToolRunner({
+        registry: toolRegistry,
+        ...(config.sandboxRuntime ? { runtime: config.sandboxRuntime } : {}),
+        ...(config.sandboxEgressProxyContainer
+          ? { egressProxyContainer: config.sandboxEgressProxyContainer }
+          : {}),
+        ...(config.sandboxEgressProxyPort !== undefined
+          ? { egressProxyPort: config.sandboxEgressProxyPort }
+          : {}),
+        ...(config.sandboxEgressProxySecret
+          ? { egressProxySecret: config.sandboxEgressProxySecret }
+          : {}),
+        ...(credentialBroker
+          ? {
+              credentials: (invocation, execution) =>
+                credentialBroker.credentialsFor(invocation, execution),
+            }
+          : {}),
+        roomEgressHosts: async (invocation) => {
+          const { rows } = await pool.query<{ hosts: unknown }>(
+            "SELECT settings -> 'egress_allowlist' AS hosts FROM rooms WHERE id = $1",
+            [invocation.room_id],
+          );
+          if (!rows[0]) throw new Error("Plugin room was not found");
+          return normalizeRoomEgressAllowlist(rows[0].hosts);
+        },
+        timeoutMs: Math.min(overrides.tools?.timeoutMs ?? 60_000, 55_000),
+      }));
+    const integrationOptions: IntegrationCommandsOptions = {
+      ...overrides.integrations,
+      ...(integrationSecretStore ? { secretStore: integrationSecretStore } : {}),
+      ...(overrides.integrations?.verifyAwsRole || !credentialBroker
+        ? {}
+        : { verifyAwsRole: credentialBroker.verifyAwsRole }),
+      ...(overrides.integrations?.verifyGitHubConnection || !credentialBroker || !config.githubApp
+        ? {}
+        : { verifyGitHubConnection: credentialBroker.verifyGitHubConnection }),
+    };
     registerCommands(
       dispatcher,
       config,
@@ -281,8 +416,13 @@ export async function composeServer(
       executionService,
       sandboxLogStore,
       sandboxOutputHub,
-      overrides.upstream,
-      overrides.tools,
+      {
+        ...(overrides.tools ?? {}),
+        registry: toolRegistry,
+        runner: toolRunner,
+      },
+      upstream,
+      integrationOptions,
     );
 
     const renewer = new LeaseRenewer({ leases: dispatcher.leases, actors: dispatcher.actors });
@@ -345,6 +485,8 @@ export async function composeServer(
         if (sandboxLogSweepTimer) clearInterval(sandboxLogSweepTimer);
         await wakeWebhooks?.stop();
         await executionService?.close();
+        await pluginRunner?.close();
+        kmsOperations?.close();
         await renewer.stop();
         await gitApp?.close();
         await app.close();
@@ -367,6 +509,8 @@ export async function composeServer(
     if (sandboxLogSweepTimer) clearInterval(sandboxLogSweepTimer);
     await wakeWebhooks?.stop();
     await executionService?.close();
+    await pluginRunner?.close();
+    kmsOperations?.close();
     await gitApp?.close();
     await redis?.close();
     await redisSubscriber?.close();
@@ -389,8 +533,9 @@ function registerCommands(
   execution: ExecutionService,
   logs: LogStore,
   outputHub: SandboxOutputHub,
+  tools: { registry: ToolRegistry; runner: ToolRunner; timeoutMs?: number },
   upstream?: UpstreamDeps,
-  tools: ComposeOverrides["tools"] = {},
+  integrationOptions: IntegrationCommandsOptions = {},
 ): void {
   registerRoomCommands(dispatcher, {
     provision: async ({ client, room_id }) => {
@@ -418,12 +563,12 @@ function registerCommands(
   registerRoomDigestCommand(dispatcher);
   registerInboxCommands(dispatcher);
   registerApprovalCommands(dispatcher);
-  // Tools plugins declare (T1201); the plugin runner (T1202) will be what runs them.
   registerToolCommands(dispatcher, {
-    registry: tools.registry ?? new ToolRegistry({ tierOf }),
-    ...(tools.runner ? { runner: tools.runner } : {}),
+    registry: tools.registry,
+    runner: tools.runner,
     ...(tools.timeoutMs !== undefined ? { timeoutMs: tools.timeoutMs } : {}),
   });
+  registerIntegrationCommands(dispatcher, integrationOptions);
   registerWakeSecretCommand(dispatcher, config.wakeWebhookKey);
   registerPresenceIntentCommands(dispatcher, intentStore, normalizePath);
   registerPresenceCommands(dispatcher, presenceStore, normalizePath);
@@ -443,10 +588,13 @@ function registerCommands(
   // apply_changeset plus reads; schedule health for every committed revision.
   const workspaceDeps: WorkspaceCommandDeps = {
     scheduleHealthCheck: (roomId, revision) => healthQueue.enqueue(roomId, revision),
+    scheduleSandboxAdvance: (roomId, revision) =>
+      execution.scheduleCanonicalAdvance(roomId, revision),
     ...(upstream ? { upstream } : {}),
   };
   registerWorkspaceCommands(dispatcher, workspaceDeps);
   registerSandboxStatusCommand(dispatcher, execution);
+  registerSandboxSyncCommand(dispatcher, execution);
   registerSandboxSubmitCommand(dispatcher, execution, workspaceDeps);
   registerSandboxExecCommands(dispatcher, execution, logs, { outputHub });
 }
