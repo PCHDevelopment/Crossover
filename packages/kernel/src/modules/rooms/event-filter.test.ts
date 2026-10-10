@@ -90,6 +90,18 @@ describe("relevant profile (decided from the event)", () => {
 
 describe("relevant profile: what travels with the event", () => {
   const match = createEventMatcher(principal(), { profile: "relevant" });
+  it("a command run in my sandbox, started and finished, is mine; one in someone else's is not", () => {
+    // `sandbox.exec.finished` is written by the system, so only the payload says whose it is.
+    expect(match(event("sandbox.exec.started", { exec_id: "e", participant_id: me }, me))).toBe(
+      true,
+    );
+    expect(
+      match(event("sandbox.exec.finished", { exec_id: "e", participant_id: me }, "system")),
+    ).toBe(true);
+    expect(
+      match(event("sandbox.exec.finished", { exec_id: "e", participant_id: "part_b" }, "system")),
+    ).toBe(false);
+  });
   it("a task event is about the owner it names (as of the event), a reviewer it names, and a new task nobody owns", () => {
     expect(match(event("task.started", { task_id: "t", owner_id: me }))).toBe(true);
     expect(match(event("task.started", { task_id: "t", owner_id: "part_b" }))).toBe(false);
