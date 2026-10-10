@@ -8,6 +8,7 @@ import { registerMcp } from "@crossover/mcp";
 import { buildInternalGitServer } from "./internal-git.js";
 import { IntegrationCredentialBroker } from "./integration-broker.js";
 import { GitHubPullRequestProvider } from "./github-pull-request.js";
+import { registerBrowserTools } from "./browser-plugin.js";
 import { registerGitHubTools } from "./github-plugin.js";
 import {
   Dispatcher,
@@ -54,7 +55,7 @@ import {
   type EventSubscriber,
   RedisEditIntentStore,
 } from "@crossover/kernel";
-import { postWebhook } from "@crossover/security";
+import { normalizeRoomEgressAllowlist, postWebhook } from "@crossover/security";
 import { authorize, tierOf } from "@crossover/policy";
 import { join } from "node:path";
 import { DockerToolRunner } from "./plugin-runner.js";
@@ -283,6 +284,8 @@ export async function composeServer(
     const toolRegistry = overrides.tools?.registry ?? new ToolRegistry({ tierOf });
     if (!overrides.tools?.registry && config.githubPluginImage)
       registerGitHubTools(toolRegistry, config.githubPluginImage);
+    if (!overrides.tools?.registry && config.browserPluginImage)
+      registerBrowserTools(toolRegistry, config.browserPluginImage);
     kmsOperations = config.integrationKmsKeyId ? new AwsKmsDataKeyOperations() : undefined;
     const integrationSecretStore =
       overrides.integrations?.secretStore ??
@@ -334,6 +337,14 @@ export async function composeServer(
                 credentialBroker.credentialsFor(invocation, execution),
             }
           : {}),
+        roomEgressHosts: async (invocation) => {
+          const { rows } = await pool.query<{ hosts: unknown }>(
+            "SELECT settings -> 'egress_allowlist' AS hosts FROM rooms WHERE id = $1",
+            [invocation.room_id],
+          );
+          if (!rows[0]) throw new Error("Plugin room was not found");
+          return normalizeRoomEgressAllowlist(rows[0].hosts);
+        },
         timeoutMs: Math.min(overrides.tools?.timeoutMs ?? 60_000, 55_000),
       }));
     const integrationOptions: IntegrationCommandsOptions = {

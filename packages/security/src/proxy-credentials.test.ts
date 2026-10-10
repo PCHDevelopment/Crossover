@@ -79,6 +79,33 @@ describe("plugin proxy credentials", () => {
     expect(verifyPluginProxyCredential(`${payload}.bad`, secret, now)).toBeNull();
   });
 
+  it("rejects an empty host scope, noncanonical lists, and oversized lists", () => {
+    const secret = "a-secret-with-32-chars-1234567890";
+    const base = {
+      invocationId: "cmd_1",
+      roomId: "room_1",
+      participantId: "part_1",
+      hosts: [] as string[],
+      expiresAt: Date.now() + 1_000,
+    };
+    expect(() => createPluginProxyCredential(base, secret)).toThrow(/claims are invalid/);
+    expect(() =>
+      createPluginProxyCredential({ ...base, hosts: ["z.example.com", "a.example.com"] }, secret),
+    ).toThrow(/claims are invalid/);
+    expect(() =>
+      createPluginProxyCredential(
+        {
+          ...base,
+          hosts: Array.from({ length: 16 }, (_, index) => {
+            const first = `h${index}`.padEnd(63, "a");
+            return `${first}.${"b".repeat(63)}.${"c".repeat(61)}.${"d".repeat(63)}`;
+          }),
+        },
+        secret,
+      ),
+    ).toThrow(/claims are invalid/);
+  });
+
   it("rejects invalid or overlong claims before they become proxy credentials", () => {
     const base = {
       invocationId: "cmd_1",

@@ -196,3 +196,13 @@ describe("GitHub integration configuration", () => {
     expect(loadConfig({ ...env, GITHUB_PLUGIN_IMAGE: image }).githubPluginImage).toBe(image);
   });
 });
+
+describe("browser plugin image configuration", () => {
+  it("accepts only digest-pinned browser worker images", () => {
+    const image = `ghcr.io/peterheo/crossover-browser-plugin@sha256:${"b".repeat(64)}`;
+    expect(() =>
+      loadConfig({ ...env, BROWSER_PLUGIN_IMAGE: "crossover-browser-plugin:latest" }),
+    ).toThrow(/BROWSER_PLUGIN_IMAGE/);
+    expect(loadConfig({ ...env, BROWSER_PLUGIN_IMAGE: image }).browserPluginImage).toBe(image);
+  });
+});

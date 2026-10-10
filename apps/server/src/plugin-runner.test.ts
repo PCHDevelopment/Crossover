@@ -17,8 +17,10 @@ function registry(
     idempotent?: boolean;
     integrations?: ToolExecutionSpec["integrations"];
     maxOutputBytes?: number;
+    pidsLimit?: number;
     name?: string;
     capability?: string;
+    roomEgressAllowlist?: boolean;
   } = {},
 ) {
   const tools = new ToolRegistry();
@@ -34,6 +36,8 @@ function registry(
       image: `busybox:1.36.1-musl@sha256:${"a".repeat(64)}`,
       command: ["node", "dist/worker.js"],
       egressHosts: options.hosts ?? ["API.GITHUB.COM."],
+      ...(options.roomEgressAllowlist ? { roomEgressAllowlist: true } : {}),
+      ...(options.pidsLimit === undefined ? {} : { pidsLimit: options.pidsLimit }),
       ...(options.integrations ? { integrations: options.integrations } : {}),
       ...(options.maxOutputBytes === undefined ? {} : { maxOutputBytes: options.maxOutputBytes }),
     },
@@ -136,6 +140,33 @@ describe("DockerToolRunner", () => {
       true,
     );
     expect(calls.some((call) => call.args[0] === "network" && call.args[1] === "rm")).toBe(true);
+  });
+
+  it("fails with a stable validation error before starting Docker when the room host list is empty", async () => {
+    const calls: { args: readonly string[]; options: Parameters<PluginDockerInvoker>[2] }[] = [];
+    const invoke: PluginDockerInvoker = async (_binary, args, options) => {
+      calls.push({ args, options });
+      return args[0] === "run"
+        ? { code: 0, stdout: '{"result":{"ok":true}}', stderr: "" }
+        : { code: 0, stdout: "", stderr: "" };
+    };
+    const roomEgressHosts = vi.fn(async () => [] as string[]);
+    const runner = new DockerToolRunner({
+      registry: registry({ hosts: [], roomEgressAllowlist: true, pidsLimit: 256 }),
+      egressProxyContainer: "crossover-egress-proxy",
+      egressProxySecret: SECRET,
+      roomEgressHosts,
+      invoke,
+    });
+
+    await expect(runner.run(invocation, new AbortController().signal)).rejects.toMatchObject({
+      name: "ToolProviderError",
+      message: "egress not configured",
+      options: { retryable: false, code: "VALIDATION" },
+    });
+    expect(roomEgressHosts).toHaveBeenCalledTimes(1);
+    expect(roomEgressHosts).toHaveBeenCalledWith(invocation);
+    expect(calls).toEqual([]);
   });
 
   it("maps a sanitized worker rate-limit response to a retryable stable provider error", async () => {

@@ -4,6 +4,7 @@ export {
   matchesHostPattern,
   normalizeEgressHost,
   normalizeRoomEgressAllowlist,
+  ROOM_EGRESS_ALLOWLIST_MAX_BYTES,
 } from "./egress-allowlist.js";
 export {
   createSandboxReadToken,

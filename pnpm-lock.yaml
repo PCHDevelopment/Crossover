@@ -289,6 +289,12 @@ importers:
         specifier: ^4.6.5
         version: 4.6.5
 
+  plugins/browser:
+    dependencies:
+      playwright-core:
+        specifier: 1.63.0
+        version: 1.63.0
+
 packages:
 
   '@aws-sdk/client-kms@3.1149.0':
