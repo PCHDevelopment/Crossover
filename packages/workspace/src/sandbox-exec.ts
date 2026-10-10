@@ -56,10 +56,19 @@ export function registerSandboxExecCommands(
     mutating: true,
     params: sandboxExecParamsSchema,
     prepare: async (ctx, params) => prepareExec(ctx, params, execution),
+    disposePrepared: async (prepared) => {
+      const exec = prepared as PreparedExec | undefined;
+      if (exec) await execution.releaseExecReservation(exec.exec_id);
+    },
     execute: async (ctx, params) => {
       const prepared = ctx.prepared as PreparedExec | undefined;
       if (!prepared) throw new CrossoverError("UNAVAILABLE", "Sandbox execution was not prepared");
-      execution.assertExecCapacityFor(prepared.sandbox_id);
+      execution.assertExecReservation(
+        ctx.room_id,
+        ctx.principal.participant_id,
+        prepared.sandbox_id,
+        prepared.exec_id,
+      );
       const execId = prepared.exec_id;
       const response = { exec_id: execId, timeout_s: prepared.timeout_s };
       const events: EmittedEvent[] = [
@@ -88,10 +97,12 @@ export function registerSandboxExecCommands(
     params: sandboxExecCancelParamsSchema,
     execute: async (ctx, params) => {
       const metadata = await logs.get(params.exec_id);
-      if (!metadata || metadata.room_id !== ctx.room_id) {
+      const pending = metadata ? undefined : execution.pendingExec(params.exec_id);
+      const target = metadata ?? pending;
+      if (!target || target.room_id !== ctx.room_id) {
         throw new CrossoverError("NOT_FOUND", "Sandbox execution not found");
       }
-      if (metadata.participant_id !== ctx.principal.participant_id) {
+      if (target.participant_id !== ctx.principal.participant_id) {
         const { rows } = await ctx.client.query<{ role: string; authority: string }>(
           `SELECT role, authority FROM participants
            WHERE id = $1 AND room_id = $2 AND status = 'ACTIVE'`,
@@ -104,7 +115,7 @@ export function registerSandboxExecCommands(
         )
           throw new CrossoverError("NOT_FOUND", "Sandbox execution not found");
       }
-      if (metadata.finished_at !== undefined) {
+      if (metadata?.finished_at !== undefined) {
         return {
           response: {
             exec_id: params.exec_id,
@@ -115,16 +126,18 @@ export function registerSandboxExecCommands(
           },
         };
       }
-      if (metadata.cancelled_by !== undefined)
+      if (metadata?.cancelled_by !== undefined || pending?.reason !== undefined)
         return { response: { exec_id: params.exec_id, cancelled: true } };
       ctx.afterCommit(async () => {
         try {
           const cancelled = await execution.cancelExec(
             ctx.room_id,
-            metadata.participant_id,
+            target.participant_id,
             params.exec_id,
+            "cancelled",
+            ctx.principal.participant_id,
           );
-          if (cancelled)
+          if (cancelled && (await logs.get(params.exec_id)))
             await logs.update(params.exec_id, { cancelled_by: ctx.principal.participant_id });
         } catch (error) {
           console.error("Failed to cancel sandbox exec", error);
@@ -140,7 +153,6 @@ async function prepareExec(
   params: SandboxExecParams,
   execution: ExecutionService,
 ): Promise<PreparedExec> {
-  const sandboxId = await execution.assertExecCapacity(ctx.room_id, ctx.principal.participant_id);
   const { rows } = await ctx.pool.query<{ settings: unknown }>(
     "SELECT settings FROM rooms WHERE id = $1",
     [ctx.room_id],
@@ -159,10 +171,17 @@ async function prepareExec(
       : DEFAULT_TIMEOUT_S;
   const requested = params.timeout_s ?? DEFAULT_TIMEOUT_S;
   const timeout_s = Math.min(requested, ceiling, MAX_TIMEOUT_S);
+  const cwd = normalizeSandboxCwd(params.cwd);
+  const exec_id = newId("exec");
+  const sandbox_id = await execution.reserveExec(
+    ctx.room_id,
+    ctx.principal.participant_id,
+    exec_id,
+  );
   return {
-    exec_id: newId("exec"),
-    sandbox_id: sandboxId,
-    cwd: normalizeSandboxCwd(params.cwd),
+    exec_id,
+    sandbox_id,
+    cwd,
     timeout_s,
   };
 }
@@ -188,6 +207,7 @@ async function startPreparedExec(
   prepared: PreparedExec,
 ): Promise<void> {
   const startedAt = new Date();
+  const pending = execution.pendingExec(prepared.exec_id);
   const metadata: SandboxExecLogMetadata = {
     exec_id: prepared.exec_id,
     room_id: roomId,
@@ -199,6 +219,7 @@ async function startPreparedExec(
     started_at: startedAt.toISOString(),
     output_bytes: 0,
     truncated: false,
+    ...(pending?.cancelled_by !== undefined ? { cancelled_by: pending.cancelled_by } : {}),
   };
   let cursor = 0;
   let outputBytes = 0;
@@ -280,6 +301,8 @@ async function startPreparedExec(
       timeoutMs: prepared.timeout_s * 1000,
       onOutput,
     });
+    if (process.cancelled_by !== undefined)
+      await logs.update(prepared.exec_id, { cancelled_by: process.cancelled_by });
     void process.finished.then(finish, (error: unknown) => {
       console.error("Sandbox exec process failed", error);
       return finish({

@@ -29,6 +29,8 @@ export interface SandboxExecOutcome {
 export interface SandboxExecProcess {
   finished: Promise<SandboxExecOutcome>;
   cancel(reason: SandboxExecTermination): Promise<void>;
+  /** Set when a reserved exec was cancelled before its driver process could start. */
+  cancelled_by?: string;
 }
 
 export interface SandboxRecord {
@@ -134,6 +136,14 @@ export interface ExecutionDriver {
 
 type SandboxRow = SandboxRecord;
 
+interface PendingSandboxExec {
+  room_id: string;
+  participant_id: string;
+  sandbox_id: string;
+  cancelled_by?: string;
+  reason?: SandboxExecTermination;
+}
+
 export interface ExecutionServiceOptions {
   idleMs?: number;
   sweepIntervalMs?: number;
@@ -155,6 +165,7 @@ export class ExecutionService {
     string,
     { room_id: string; participant_id: string; sandbox_id: string; process: SandboxExecProcess }
   >();
+  private readonly pendingExecs = new Map<string, PendingSandboxExec>();
 
   constructor(
     private readonly pool: Pool,
@@ -201,23 +212,65 @@ export class ExecutionService {
     return Boolean(this.driver.exec);
   }
 
-  /** Preflight the concurrency limit before committing the command's start event. */
-  async assertExecCapacity(roomId: string, participantId: string): Promise<string> {
+  /** Reserve capacity before the command commits its started event. */
+  async reserveExec(roomId: string, participantId: string, execId: string): Promise<string> {
     return this.withSandboxLock(roomId, participantId, async (sandbox) => {
       if (!this.driver.exec)
         throw new CrossoverError(
           "UNAVAILABLE",
           "Sandbox execution is not supported by this driver",
         );
+      if (this.pendingExecs.has(execId) || this.activeExecs.has(execId))
+        throw new CrossoverError("CONFLICT_VERSION", "Sandbox execution id is already reserved");
       this.assertExecCapacityFor(sandbox.id);
+      this.pendingExecs.set(execId, {
+        room_id: roomId,
+        participant_id: participantId,
+        sandbox_id: sandbox.id,
+      });
       return sandbox.id;
     });
   }
 
-  assertExecCapacityFor(sandboxId: string): void {
+  /** Check that prepare still owns the slot before committing the started event. */
+  assertExecReservation(
+    roomId: string,
+    participantId: string,
+    sandboxId: string,
+    execId: string,
+  ): void {
+    const pending = this.pendingExecs.get(execId);
+    if (
+      !pending ||
+      pending.room_id !== roomId ||
+      pending.participant_id !== participantId ||
+      pending.sandbox_id !== sandboxId
+    )
+      throw new CrossoverError(
+        "UNAVAILABLE",
+        "Sandbox execution reservation is no longer available",
+      );
+  }
+
+  /** Read a pending reservation so cancel can find an exec before its private log exists. */
+  pendingExec(execId: string): PendingSandboxExec | undefined {
+    const pending = this.pendingExecs.get(execId);
+    return pending ? { ...pending } : undefined;
+  }
+
+  /** Release a slot after commit or rollback; consuming it at start makes this a no-op. */
+  async releaseExecReservation(execId: string): Promise<void> {
+    const pending = this.pendingExecs.get(execId);
+    if (!pending) return;
+    await this.withEnsureLock(pending.room_id, pending.participant_id, async () => {
+      if (this.pendingExecs.get(execId) === pending) this.pendingExecs.delete(execId);
+    });
+  }
+
+  private assertExecCapacityFor(sandboxId: string): void {
     if (!this.driver.exec)
       throw new CrossoverError("UNAVAILABLE", "Sandbox execution is not supported by this driver");
-    if (this.activeCount(sandboxId) >= 8)
+    if (this.execCount(sandboxId) >= 8)
       throw new CrossoverError("VALIDATION", "A sandbox may run at most 8 commands at once", {
         details: { reason: "too_many_execs", maximum: 8 },
       });
@@ -234,25 +287,55 @@ export class ExecutionService {
     onOutput: (stream: "stdout" | "stderr", chunk: Buffer) => Promise<void>;
   }): Promise<SandboxExecProcess> {
     return this.withSandboxLock(input.room_id, input.participant_id, async (sandbox) => {
+      const pending = this.pendingExecs.get(input.exec_id);
+      if (
+        !pending ||
+        pending.room_id !== input.room_id ||
+        pending.participant_id !== input.participant_id ||
+        pending.sandbox_id !== sandbox.id
+      )
+        throw new CrossoverError(
+          "UNAVAILABLE",
+          "Sandbox execution reservation is no longer available",
+        );
+
+      if (pending.reason !== undefined) {
+        this.pendingExecs.delete(input.exec_id);
+        return {
+          ...(pending.cancelled_by !== undefined ? { cancelled_by: pending.cancelled_by } : {}),
+          finished: Promise.resolve({
+            exit_code: null,
+            duration_ms: 0,
+            reason: pending.reason,
+          }),
+          cancel: async () => undefined,
+        };
+      }
+
       const run = this.driver.exec;
-      if (!run || !sandbox.volume_ref || !sandbox.container_ref)
+      if (!run || !sandbox.volume_ref || !sandbox.container_ref) {
+        this.pendingExecs.delete(input.exec_id);
         throw new CrossoverError(
           "UNAVAILABLE",
           "Sandbox execution is not supported by this driver",
         );
-      if (this.activeCount(sandbox.id) >= 8)
-        throw new CrossoverError("VALIDATION", "A sandbox may run at most 8 commands at once", {
-          details: { reason: "too_many_execs", maximum: 8 },
+      }
+      let process: SandboxExecProcess;
+      try {
+        process = await run.call(this.driver, {
+          sandbox_id: sandbox.id,
+          resources: this.resources(sandbox),
+          exec_id: input.exec_id,
+          command: input.command,
+          cwd: input.cwd,
+          timeoutMs: input.timeoutMs,
+          onOutput: input.onOutput,
         });
-      const process = await run.call(this.driver, {
-        sandbox_id: sandbox.id,
-        resources: this.resources(sandbox),
-        exec_id: input.exec_id,
-        command: input.command,
-        cwd: input.cwd,
-        timeoutMs: input.timeoutMs,
-        onOutput: input.onOutput,
-      });
+      } catch (error) {
+        this.pendingExecs.delete(input.exec_id);
+        throw error;
+      }
+      this.pendingExecs.delete(input.exec_id);
       this.activeExecs.set(input.exec_id, {
         room_id: input.room_id,
         participant_id: input.participant_id,
@@ -277,13 +360,30 @@ export class ExecutionService {
     participantId: string,
     execId: string,
     reason: SandboxExecTermination = "cancelled",
+    cancelledBy?: string,
   ): Promise<boolean> {
+    const pending = this.pendingExecs.get(execId);
     const active = this.activeExecs.get(execId);
-    if (!active || active.room_id !== roomId || active.participant_id !== participantId)
-      return false;
-    await active.process.cancel(reason);
-    await active.process.finished.catch(() => undefined);
-    return true;
+    const known = pending ?? active;
+    if (!known || known.room_id !== roomId || known.participant_id !== participantId) return false;
+    return this.withEnsureLock(roomId, participantId, async () => {
+      const stillPending = this.pendingExecs.get(execId);
+      if (stillPending?.room_id === roomId && stillPending.participant_id === participantId) {
+        stillPending.reason = reason;
+        if (cancelledBy !== undefined) stillPending.cancelled_by = cancelledBy;
+        return true;
+      }
+      const stillActive = this.activeExecs.get(execId);
+      if (
+        !stillActive ||
+        stillActive.room_id !== roomId ||
+        stillActive.participant_id !== participantId
+      )
+        return false;
+      await stillActive.process.cancel(reason);
+      await stillActive.process.finished.catch(() => undefined);
+      return true;
+    });
   }
 
   async cancelParticipantExecs(
@@ -296,6 +396,9 @@ export class ExecutionService {
       const active = [...this.activeExecs.values()].filter(
         (run) => run.room_id === roomId && run.participant_id === participantId,
       );
+      for (const pending of this.pendingExecs.values())
+        if (pending.room_id === roomId && pending.participant_id === participantId)
+          pending.reason = reason;
       const cancelling = active.map((run) => run.process.cancel(reason).catch(() => undefined));
       if (reason === "revoked" && sandbox?.status === "RUNNING") {
         const resources = this.resources(sandbox);
@@ -311,6 +414,7 @@ export class ExecutionService {
   }
 
   async cancelAllExecs(reason: SandboxExecTermination): Promise<void> {
+    for (const pending of this.pendingExecs.values()) pending.reason = reason;
     const active = [...this.activeExecs.values()];
     await Promise.all(active.map((run) => run.process.cancel(reason).catch(() => undefined)));
     await Promise.all(active.map((run) => run.process.finished.catch(() => undefined)));
@@ -319,6 +423,12 @@ export class ExecutionService {
   private activeCount(sandboxId: string): number {
     let count = 0;
     for (const run of this.activeExecs.values()) if (run.sandbox_id === sandboxId) count++;
+    return count;
+  }
+
+  private execCount(sandboxId: string): number {
+    let count = this.activeCount(sandboxId);
+    for (const pending of this.pendingExecs.values()) if (pending.sandbox_id === sandboxId) count++;
     return count;
   }
 
