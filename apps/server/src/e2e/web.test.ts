@@ -504,7 +504,9 @@ describe.skipIf(!executablePath && !inCi)("web app in a browser", () => {
     await page.getByTestId("merge-view").waitFor();
     await expect
       .poll(async () =>
-        page.locator('[data-testid="merge-editor"] .modified .view-lines').textContent(),
+        page
+          .locator('[data-testid="merge-editor"] .modified .view-lines[role="presentation"]')
+          .textContent(),
       )
       .toContain("two-mine");
     expect(problems).toEqual([]);
@@ -592,7 +594,9 @@ describe.skipIf(!executablePath && !inCi)("web app in a browser", () => {
     await page.keyboard.press("Control+s");
     await page.getByTestId("merge-view").waitFor();
     expect(await page.getByTestId("merge-conflict").count()).toBe(1);
-    const result = page.locator('[data-testid="merge-editor"] .modified .view-lines');
+    const result = page.locator(
+      '[data-testid="merge-editor"] .modified .view-lines[role="presentation"]',
+    );
     await expect.poll(async () => result.textContent()).toContain("two-mine");
     await page.getByTestId("take-both").click();
     await expect.poll(async () => result.textContent()).toContain("two-theirs");
