@@ -81,6 +81,7 @@ import {
   publishHealthResult,
   normalizePath,
   registerSandboxStatusCommand,
+  registerSandboxSyncCommand,
   registerSandboxSubmitCommand,
   registerSandboxExecCommands,
   FileLogStore,
@@ -580,6 +581,7 @@ function registerCommands(
   };
   registerWorkspaceCommands(dispatcher, workspaceDeps);
   registerSandboxStatusCommand(dispatcher, execution);
+  registerSandboxSyncCommand(dispatcher, execution);
   registerSandboxSubmitCommand(dispatcher, execution, workspaceDeps);
   registerSandboxExecCommands(dispatcher, execution, logs, { outputHub });
 }
