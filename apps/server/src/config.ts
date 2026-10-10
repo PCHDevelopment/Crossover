@@ -109,7 +109,7 @@ export interface ServerConfig {
   /** Operator-provisioned HTTP allowlist proxy; absent means network-none sandboxes. */
   sandboxEgressProxyContainer?: string;
   sandboxEgressProxyPort?: number;
-  /** Shared HMAC secret for sandbox and short-lived health-install proxy credentials. */
+  /** Shared HMAC secret for sandbox, health-install and short-lived plugin proxy credentials. */
   sandboxEgressProxySecret?: string;
   /** Bind address and private, unpublished port of the internal Git-only listener. */
   gitInternalHost?: string;

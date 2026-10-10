@@ -52,6 +52,7 @@ import {
 import { postWebhook } from "@crossover/security";
 import { authorize, tierOf } from "@crossover/policy";
 import { join } from "node:path";
+import { DockerToolRunner } from "./plugin-runner.js";
 import {
   ConflictEscalationSweeper,
   DockerExecutionDriver,
@@ -138,6 +139,7 @@ export async function composeServer(
   let leaseSweeper: LeaseSweeper | undefined;
   let wakeWebhooks: WakeWebhookService | undefined;
   let executionService: ExecutionService | undefined;
+  let pluginRunner: DockerToolRunner | undefined;
   let gitApp: ReturnType<typeof buildInternalGitServer> | undefined;
   let healthInstallSweepTimer: NodeJS.Timeout | undefined;
   let sandboxLogSweepTimer: NodeJS.Timeout | undefined;
@@ -266,6 +268,23 @@ export async function composeServer(
           await publishHealthResult(pool, dispatcher, roomId, revision, outcome.id, outcome.result);
       },
     });
+    const toolRegistry = overrides.tools?.registry ?? new ToolRegistry({ tierOf });
+    const toolRunner =
+      overrides.tools?.runner ??
+      (pluginRunner = new DockerToolRunner({
+        registry: toolRegistry,
+        ...(config.sandboxRuntime ? { runtime: config.sandboxRuntime } : {}),
+        ...(config.sandboxEgressProxyContainer
+          ? { egressProxyContainer: config.sandboxEgressProxyContainer }
+          : {}),
+        ...(config.sandboxEgressProxyPort !== undefined
+          ? { egressProxyPort: config.sandboxEgressProxyPort }
+          : {}),
+        ...(config.sandboxEgressProxySecret
+          ? { egressProxySecret: config.sandboxEgressProxySecret }
+          : {}),
+        timeoutMs: Math.min(overrides.tools?.timeoutMs ?? 60_000, 55_000),
+      }));
     registerCommands(
       dispatcher,
       config,
@@ -274,8 +293,12 @@ export async function composeServer(
       executionService,
       sandboxLogStore,
       sandboxOutputHub,
+      {
+        ...(overrides.tools ?? {}),
+        registry: toolRegistry,
+        runner: toolRunner,
+      },
       overrides.upstream,
-      overrides.tools,
     );
 
     const renewer = new LeaseRenewer({ leases: dispatcher.leases, actors: dispatcher.actors });
@@ -338,6 +361,7 @@ export async function composeServer(
         if (sandboxLogSweepTimer) clearInterval(sandboxLogSweepTimer);
         await wakeWebhooks?.stop();
         await executionService?.close();
+        await pluginRunner?.close();
         await renewer.stop();
         await gitApp?.close();
         await app.close();
@@ -358,6 +382,7 @@ export async function composeServer(
     if (sandboxLogSweepTimer) clearInterval(sandboxLogSweepTimer);
     await wakeWebhooks?.stop();
     await executionService?.close();
+    await pluginRunner?.close();
     await gitApp?.close();
     await redis?.close();
     await redisSubscriber?.close();
@@ -377,8 +402,8 @@ function registerCommands(
   execution: ExecutionService,
   logs: LogStore,
   outputHub: SandboxOutputHub,
+  tools: { registry: ToolRegistry; runner: ToolRunner; timeoutMs?: number },
   upstream?: UpstreamDeps,
-  tools: ComposeOverrides["tools"] = {},
 ): void {
   registerRoomCommands(dispatcher, {
     provision: async ({ client, room_id }) => {
@@ -406,10 +431,9 @@ function registerCommands(
   registerRoomDigestCommand(dispatcher);
   registerInboxCommands(dispatcher);
   registerApprovalCommands(dispatcher);
-  // Tools plugins declare (T1201); the plugin runner (T1202) will be what runs them.
   registerToolCommands(dispatcher, {
-    registry: tools.registry ?? new ToolRegistry({ tierOf }),
-    ...(tools.runner ? { runner: tools.runner } : {}),
+    registry: tools.registry,
+    runner: tools.runner,
     ...(tools.timeoutMs !== undefined ? { timeoutMs: tools.timeoutMs } : {}),
   });
   registerWakeSecretCommand(dispatcher, config.wakeWebhookKey);
