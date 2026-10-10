@@ -178,6 +178,19 @@ export interface SandboxAdvanceEvent {
   payload: Record<string, unknown>;
 }
 
+export type SandboxSyncResponse =
+  | { synced_to: number; conflicted_paths?: string[] }
+  | {
+      base_revision: number;
+      head_revision: number;
+      reason: "process_running" | "status_truncated" | "unsupported_local_change";
+    };
+
+export interface SandboxSyncResult {
+  response: SandboxSyncResponse;
+  event?: SandboxAdvanceEvent;
+}
+
 let softEnforcementWarningLogged = false;
 
 /** Persists per-participant sandbox ownership and manages its container lifecycle. */
@@ -577,6 +590,101 @@ export class ExecutionService {
         files,
         deletePaths,
       );
+    });
+  }
+
+  /** Rebase a participant's local changes onto the latest canonical head on explicit sync. */
+  async syncWorkingCopy(roomId: string, participantId: string): Promise<SandboxSyncResult> {
+    return this.withSandboxLock(roomId, participantId, async (sandbox) => {
+      if (sandbox.base_revision === null || !sandbox.volume_ref || !sandbox.container_ref)
+        throw new CrossoverError("CONFLICT_VERSION", "Sandbox workspace is not ready");
+      const head = await this.canonicalHead(roomId);
+      if (sandbox.base_revision > head.revision)
+        throw new CrossoverError("CONFLICT_VERSION", "Sandbox base is ahead of the workspace");
+      if (sandbox.base_revision === head.revision)
+        return { response: { synced_to: head.revision } };
+
+      const base = await this.workspaceRevision(roomId, sandbox.base_revision);
+      const changedPaths = await changedWorkspacePaths(
+        base.repo_path,
+        base.commit_sha,
+        head.commit_sha,
+      );
+      const visibleChanged = await this.readablePaths(roomId, participantId, changedPaths);
+      const working = await this.snapshotChanges(sandbox, base.repo_path, base.commit_sha);
+      const localPaths = [...working.modified, ...working.added, ...working.deleted];
+      const visibleLocal = await this.readablePaths(roomId, participantId, localPaths);
+      const overlaps = visibleChanged.some((path) =>
+        visibleLocal.some((local) => pathsOverlap(path, local)),
+      );
+      const intents = await this.filteredIntents(roomId, participantId);
+      const behindPayload = {
+        participant_id: participantId,
+        behind_by: Math.max(0, head.revision - sandbox.base_revision),
+        changed_paths: visibleChanged,
+        overlaps_local_changes: overlaps || working.truncated,
+        intents,
+      };
+      const behind = (reason: string): SandboxAdvanceEvent => ({
+        type: "sandbox.behind",
+        actor_id: "system",
+        payload: { ...behindPayload, reason },
+      });
+      const blocked = (
+        reason: Extract<SandboxSyncResponse, { reason: string }>["reason"],
+      ): SandboxSyncResult => ({
+        response: {
+          base_revision: sandbox.base_revision!,
+          head_revision: head.revision,
+          reason,
+        },
+        event: behind(reason),
+      });
+
+      if (this.activeCount(sandbox.id) > 0) return blocked("process_running");
+      if (working.truncated) return blocked("status_truncated");
+      if (
+        !this.driver.updateSnapshot ||
+        !this.driver.snapshotInventory ||
+        !this.driver.readSnapshotFiles
+      )
+        return blocked("unsupported_local_change");
+
+      const rebased = await this.rebaseHumanWorkingCopy(sandbox, base, head, working);
+      if (!rebased) return blocked("unsupported_local_change");
+      const conflictedPaths = await this.readablePaths(
+        roomId,
+        participantId,
+        rebased.conflicted_paths,
+      );
+      const delta = filterSnapshotDelta(
+        rebased.delta,
+        new Set([...visibleChanged, ...visibleLocal]),
+      );
+      const advanced = await this.advanceWorkingCopyLocked(
+        sandbox,
+        sandbox.base_revision,
+        head.revision,
+        delta.files,
+        delta.delete_paths,
+      );
+      if (advanced === "process_running") return blocked("process_running");
+
+      return {
+        response: {
+          synced_to: head.revision,
+          ...(conflictedPaths.length ? { conflicted_paths: conflictedPaths } : {}),
+        },
+        event: {
+          type: "sandbox.synced",
+          actor_id: "system",
+          payload: {
+            participant_id: participantId,
+            base_revision: head.revision,
+            ...(conflictedPaths.length ? { conflicted_paths: conflictedPaths } : {}),
+          },
+        },
+      };
     });
   }
 
