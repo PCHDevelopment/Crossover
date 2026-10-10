@@ -7,6 +7,7 @@ import {
   ToolProviderError,
   type ToolInvocation,
   type ToolOutput,
+  type ToolExecutionSpec,
   type ToolRegistry,
   type ToolRunner,
 } from "@crossover/kernel";
@@ -47,9 +48,15 @@ const ENV_RESERVED = new Set([
   "CROSSOVER_TOOL_REQUEST",
 ]);
 
+export interface PluginCredentialLease {
+  environment: Readonly<Record<string, string>>;
+  revoke?: () => Promise<void>;
+}
+
 export type PluginCredentialProvider = (
   invocation: ToolInvocation,
-) => Promise<Readonly<Record<string, string>>>;
+  execution: ToolExecutionSpec,
+) => Promise<Readonly<Record<string, string>> | PluginCredentialLease>;
 
 export interface DockerToolRunnerOptions {
   registry: ToolRegistry;
@@ -139,13 +146,6 @@ export class DockerToolRunner implements ToolRunner {
     if (signal.aborted) throw new Error("Plugin invocation was aborted");
 
     const hosts = normalizeHosts(execution.egressHosts);
-    let credentials: Readonly<Record<string, string>>;
-    try {
-      credentials = validateCredentialEnvironment(await this.credentials(invocation));
-    } catch {
-      throw new Error("Plugin credential provisioning failed");
-    }
-
     const runId = randomBytes(12).toString("hex");
     const containerName = `crossover-plugin-${runId}`;
     const networkName = hosts.length > 0 ? `crossover-plugin-net-${runId}` : undefined;
@@ -154,8 +154,21 @@ export class DockerToolRunner implements ToolRunner {
     let environmentDirectory: string | undefined;
     let thrown: unknown;
     let output: ToolOutput | undefined;
+    let credentials: Readonly<Record<string, string>>;
+    let lease: PluginCredentialLease | undefined;
 
     try {
+      try {
+        const supplied = await this.credentials(invocation, execution);
+        if (isCredentialLease(supplied)) {
+          lease = supplied;
+          credentials = validateCredentialEnvironment(supplied.environment);
+        } else {
+          credentials = validateCredentialEnvironment(supplied);
+        }
+      } catch {
+        throw new Error("Plugin credential provisioning failed");
+      }
       if (networkName) {
         if (!this.egressProxyContainer || !this.options.egressProxySecret)
           throw new Error("Plugin egress proxy is not configured");
@@ -273,6 +286,13 @@ export class DockerToolRunner implements ToolRunner {
           cleanupError ??= new Error("Plugin runner environment cleanup failed");
         }
       }
+      if (lease?.revoke) {
+        try {
+          await lease.revoke();
+        } catch {
+          cleanupError ??= new Error("Plugin credential revocation failed");
+        }
+      }
       if (cleanupError && !thrown) thrown = cleanupError;
     }
     if (thrown) throw thrown;
@@ -349,6 +369,12 @@ function normalizeHostPattern(input: string): string {
     throw new Error("Plugin host declaration is invalid");
   }
   return `${wildcard ? "*." : ""}${host}`;
+}
+
+function isCredentialLease(
+  value: Readonly<Record<string, string>> | PluginCredentialLease,
+): value is PluginCredentialLease {
+  return typeof value === "object" && value !== null && Object.hasOwn(value, "environment");
 }
 
 function validateCredentialEnvironment(

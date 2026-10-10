@@ -33,6 +33,7 @@ METHODS: dict[str, bool] = {
     "integrations.connect": True,
     "integrations.disconnect": True,
     "integrations.list": False,
+    "integrations.verify": True,
     "memory.delete": True,
     "memory.get": False,
     "memory.history": False,

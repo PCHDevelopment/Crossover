@@ -89,10 +89,7 @@ export class EnvelopeSecretStore implements SecretStore {
     }
   }
 
-  /**
-   * Internal cryptographic primitive; production consumers must read through
-   * `readConnectedIntegrationSecretConfig` so status and expiry checks run before decryption.
-   */
+  /** Internal primitive; application reads use the status-gated integration reader. */
   async open(roomId: string, provider: string, encrypted: EncryptedSecret): Promise<string> {
     validateRoomId(roomId);
     validateProvider(provider);

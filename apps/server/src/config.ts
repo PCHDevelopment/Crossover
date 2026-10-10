@@ -79,6 +79,13 @@ const envSchema = z.object({
     .optional(),
   /** AWS KMS key id or ARN used for production integration-secret envelope encryption. */
   INTEGRATION_KMS_KEY_ID: z.string().trim().min(1).optional(),
+  GITHUB_APP_ID: z
+    .string()
+    .regex(/^[1-9]\d{0,19}$/)
+    .optional(),
+  GITHUB_CLIENT_ID: z.string().trim().min(1).max(200).optional(),
+  GITHUB_CLIENT_SECRET: z.string().min(1).max(4096).optional(),
+  GITHUB_APP_PRIVATE_KEY: z.string().min(100).max(16_384).optional(),
   GIT_INTERNAL_HOST: z.string().trim().min(1).optional(),
   GIT_INTERNAL_PORT: z.coerce.number().int().min(1).max(65_535).default(8081),
   GIT_INTERNAL_CONTAINER: z
@@ -122,6 +129,7 @@ export interface ServerConfig {
   integrationSecretKey?: Uint8Array;
   /** KMS key id or ARN for production room-scoped integration secret encryption. */
   integrationKmsKeyId?: string;
+  githubApp?: { appId: string; clientId: string; clientSecret: string; privateKey: string };
   /** Bind address and private, unpublished port of the internal Git-only listener. */
   gitInternalHost?: string;
   gitInternalPort?: number;
@@ -194,6 +202,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
       "Invalid server configuration:\n  INTEGRATION_SECRET_KEY is development-only; production must use KMS",
     );
   }
+  const githubAppValues = [
+    e.GITHUB_APP_ID,
+    e.GITHUB_CLIENT_ID,
+    e.GITHUB_CLIENT_SECRET,
+    e.GITHUB_APP_PRIVATE_KEY,
+  ];
+  if (githubAppValues.some(Boolean) && githubAppValues.some((value) => !value)) {
+    throw new Error(
+      "Invalid server configuration:\n  GITHUB_APP_ID, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET and GITHUB_APP_PRIVATE_KEY must be configured together",
+    );
+  }
   return {
     databaseUrl: e.DATABASE_URL,
     redisUrl: e.REDIS_URL,
@@ -223,6 +242,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
       ? { integrationSecretKey: Buffer.from(e.INTEGRATION_SECRET_KEY, "hex") }
       : {}),
     ...(e.INTEGRATION_KMS_KEY_ID ? { integrationKmsKeyId: e.INTEGRATION_KMS_KEY_ID } : {}),
+    ...(e.GITHUB_APP_ID && e.GITHUB_CLIENT_ID && e.GITHUB_CLIENT_SECRET && e.GITHUB_APP_PRIVATE_KEY
+      ? {
+          githubApp: {
+            appId: e.GITHUB_APP_ID,
+            clientId: e.GITHUB_CLIENT_ID,
+            clientSecret: e.GITHUB_CLIENT_SECRET,
+            privateKey: e.GITHUB_APP_PRIVATE_KEY.replace(/\\n/g, "\n"),
+          },
+        }
+      : {}),
     ...(e.GIT_INTERNAL_HOST ? { gitInternalHost: e.GIT_INTERNAL_HOST } : {}),
     gitInternalPort: e.GIT_INTERNAL_PORT,
     ...(e.GIT_INTERNAL_CONTAINER ? { gitInternalContainer: e.GIT_INTERNAL_CONTAINER } : {}),

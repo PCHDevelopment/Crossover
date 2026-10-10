@@ -18,17 +18,35 @@ export const integrationsConnectParams = z
     role_arn: z.string().regex(ROLE_ARN_PATTERN).optional(),
     access_token: z.string().min(1).max(8192).optional(),
     expires_at: z.iso.datetime({ offset: true }).optional(),
+    installation_id: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+    code: z.string().min(1).max(8192).optional(),
+    repositories: z
+      .array(z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/))
+      .min(1)
+      .max(100)
+      .optional(),
   })
   .superRefine((params, ctx) => {
     const only = (allowed: readonly string[]) => {
-      for (const field of ["role_arn", "access_token", "expires_at"] as const) {
+      for (const field of [
+        "role_arn",
+        "access_token",
+        "expires_at",
+        "installation_id",
+        "code",
+        "repositories",
+      ] as const) {
         if (!allowed.includes(field) && params[field] !== undefined) {
           ctx.addIssue({ code: "custom", path: [field], message: "Not valid for this provider" });
         }
       }
     };
     if (params.provider === "github") {
-      only([]);
+      only(["installation_id", "code", "repositories"]);
+      for (const field of ["installation_id", "code", "repositories"] as const) {
+        if (params[field] === undefined)
+          ctx.addIssue({ code: "custom", path: [field], message: "Required" });
+      }
     } else if (params.provider === "aws") {
       only(["role_arn"]);
       if (!params.role_arn)
@@ -41,6 +59,7 @@ export const integrationsConnectParams = z
   });
 
 export const integrationsDisconnectParams = z.strictObject({ provider: providerSchema });
+export const integrationsVerifyParams = z.strictObject({ provider: z.literal("aws") });
 export const integrationsListParams = z.strictObject({});
 
 export type IntegrationConnectionStatus = "PENDING" | "CONNECTED" | "EXPIRED";
@@ -51,30 +70,38 @@ export interface AwsRoleVerifier {
   }>;
 }
 
+export interface GitHubConnectionVerifier {
+  (input: { installation_id: number; code: string; repositories: readonly string[] }): Promise<{
+    repository_ids: readonly string[];
+  }>;
+}
+
 export interface IntegrationCommandsOptions {
   /** Encrypts all provider secrets before the command opens its PostgreSQL transaction. */
   secretStore?: SecretStore;
   /** Implemented by the broker layer; failed role assumptions stay pending. */
   verifyAwsRole?: AwsRoleVerifier;
+  verifyGitHubConnection?: GitHubConnectionVerifier;
 }
 
-/** Return decrypted secret config only for a live, connected integration (§21.5). */
 export async function readConnectedIntegrationSecretConfig(
   pool: Pool,
   secretStore: SecretStore,
   roomId: string,
   provider: string,
-): Promise<Readonly<Record<string, string>>> {
+  requiredStatus: "CONNECTED" | "PENDING" = "CONNECTED",
+): Promise<{ configuration: Readonly<Record<string, string>>; encrypted_secret: EncryptedSecret }> {
   const { rows } = await pool.query<{
     status: IntegrationConnectionStatus;
     encrypted_secret: EncryptedSecret;
+    public_config: Record<string, unknown>;
   }>(
-    `SELECT status, encrypted_secret FROM integrations
+    `SELECT status, encrypted_secret, public_config FROM integrations
      WHERE room_id = $1 AND provider = $2`,
     [roomId, provider],
   );
   const row = rows[0];
-  if (!row || row.status !== "CONNECTED") {
+  if (!row || row.status !== requiredStatus) {
     throw new CrossoverError("PROVIDER_UNAVAILABLE", "Integration credential is unavailable");
   }
 
@@ -91,13 +118,28 @@ export async function readConnectedIntegrationSecretConfig(
       throw new Error("Invalid integration secret config");
     }
     const values = config as Record<string, string>;
+    const publicValues = Object.fromEntries(
+      Object.entries(row.public_config).filter(
+        (entry): entry is [string, string] => typeof entry[1] === "string",
+      ),
+    );
     if (
       typeof values.expires_at === "string" &&
       new Date(values.expires_at).getTime() <= Date.now()
     ) {
+      await pool.query(
+        `UPDATE integrations SET status = 'EXPIRED', status_reason = 'token_expired',
+           updated_at = clock_timestamp()
+         WHERE room_id = $1 AND provider = $2 AND status = 'CONNECTED'
+           AND encrypted_secret = $3::jsonb`,
+        [roomId, provider, JSON.stringify(row.encrypted_secret)],
+      );
       throw new Error("Integration credential expired");
     }
-    return Object.freeze(values);
+    return {
+      configuration: Object.freeze({ ...publicValues, ...values }),
+      encrypted_secret: row.encrypted_secret,
+    };
   } catch {
     throw new CrossoverError("PROVIDER_UNAVAILABLE", "Integration credential is unavailable");
   }
@@ -192,6 +234,70 @@ export function registerIntegrationCommands(
   });
 
   dispatcher.registerCommand({
+    method: "integrations.verify",
+    action: "integrations.manage",
+    mutating: true,
+    params: integrationsVerifyParams,
+    prepare: async (ctx) => {
+      await requireOwner(ctx.pool, ctx.room_id, ctx.principal.participant_id);
+      if (!options.secretStore || !options.verifyAwsRole)
+        throw new CrossoverError("PROVIDER_UNAVAILABLE", "Integration verification is unavailable");
+      const row = await readConnectedIntegrationSecretConfig(
+        ctx.pool,
+        options.secretStore,
+        ctx.room_id,
+        "aws",
+        "PENDING",
+      );
+      const roleArn = row.configuration.role_arn;
+      const externalId = row.configuration.external_id;
+      if (!roleArn || !externalId)
+        throw new CrossoverError("PROVIDER_UNAVAILABLE", "Integration credential is unavailable");
+      let connected: boolean;
+      try {
+        connected = (
+          await options.verifyAwsRole({
+            room_id: ctx.room_id,
+            role_arn: roleArn,
+            external_id: externalId,
+          })
+        ).connected;
+      } catch {
+        connected = false;
+      }
+      return { connected, encrypted_secret: row.encrypted_secret };
+    },
+    execute: async (ctx) => {
+      await requireOwner(ctx.client, ctx.room_id, ctx.principal.participant_id);
+      const prepared = ctx.prepared as
+        { connected: boolean; encrypted_secret: EncryptedSecret } | undefined;
+      if (!prepared)
+        throw new CrossoverError("PROVIDER_UNAVAILABLE", "Integration verification failed");
+      const status: IntegrationConnectionStatus = prepared.connected ? "CONNECTED" : "PENDING";
+      const statusReason = prepared.connected ? null : "assume_role_failed";
+      const { rowCount } = await ctx.client.query(
+        `UPDATE integrations SET status = $3, status_reason = $4,
+           connected_at = CASE WHEN $3 = 'CONNECTED' THEN clock_timestamp() ELSE NULL END,
+           updated_at = clock_timestamp()
+         WHERE room_id = $1 AND provider = 'aws' AND status = 'PENDING'
+           AND encrypted_secret = $2::jsonb`,
+        [ctx.room_id, JSON.stringify(prepared.encrypted_secret), status, statusReason],
+      );
+      if (!(rowCount ?? 0))
+        throw new CrossoverError("CONFLICT_VERSION", "The AWS integration changed; retry verify", {
+          retryable: true,
+          details: { reason: "integration_changed" },
+        });
+      return {
+        response: { provider: "aws", status, status_reason: statusReason },
+        ...(prepared.connected
+          ? { events: [{ type: "integration.connected", payload: { provider: "aws" } }] }
+          : {}),
+      };
+    },
+  });
+
+  dispatcher.registerCommand({
     method: "integrations.disconnect",
     action: "integrations.manage",
     mutating: true,
@@ -256,8 +362,60 @@ async function prepareConnection(
   params: z.infer<typeof integrationsConnectParams>,
   options: IntegrationCommandsOptions,
 ): Promise<PreparedConnection> {
+  await requireOwner(ctx.pool, ctx.room_id, ctx.principal.participant_id);
   if (params.provider === "github") {
-    throw new CrossoverError("VALIDATION", "GitHub integration is not available yet");
+    if (!options.secretStore)
+      throw new CrossoverError("PROVIDER_UNAVAILABLE", "Integration secret storage is unavailable");
+    if (!options.verifyGitHubConnection)
+      throw new CrossoverError("PROVIDER_UNAVAILABLE", "GitHub integration is unavailable");
+    let verified: Awaited<ReturnType<GitHubConnectionVerifier>>;
+    try {
+      verified = await options.verifyGitHubConnection({
+        installation_id: params.installation_id!,
+        code: params.code!,
+        repositories: params.repositories!.map((repo) => repo.toLowerCase()),
+      });
+    } catch {
+      throw new CrossoverError("VALIDATION", "GitHub installation could not be verified");
+    }
+    if (
+      verified.repository_ids.length !== params.repositories!.length ||
+      new Set(verified.repository_ids).size !== verified.repository_ids.length ||
+      verified.repository_ids.some((id) => !/^[1-9]\d{0,19}$/.test(id))
+    ) {
+      throw new CrossoverError("VALIDATION", "GitHub installation could not be verified");
+    }
+    const wrappedKeyResult = await ctx.pool.query<IntegrationKeyRow>(
+      "SELECT key_strategy, wrapped_data_key FROM integration_room_keys WHERE room_id = $1",
+      [ctx.room_id],
+    );
+    const { rows: existing } = wrappedKeyResult;
+    const repositories = params.repositories!.map((repository) => repository.toLowerCase());
+    const installationId = String(params.installation_id);
+    const publicConfig = { installation_id: installationId, repositories };
+    let encrypted: EncryptedSecret;
+    try {
+      encrypted = await options.secretStore.seal(
+        ctx.room_id,
+        "github",
+        JSON.stringify({
+          installation_id: installationId,
+          repositories_json: JSON.stringify(repositories),
+          repository_ids_json: JSON.stringify(verified.repository_ids),
+        }),
+        existing[0]?.wrapped_data_key,
+      );
+    } catch {
+      throw new CrossoverError("PROVIDER_UNAVAILABLE", "Integration secret storage is unavailable");
+    }
+    return {
+      provider: "github",
+      status: "CONNECTED",
+      status_reason: null,
+      public_config: publicConfig,
+      encrypted_secret: encrypted,
+      connected_at: new Date().toISOString(),
+    };
   }
   if (!options.secretStore) {
     throw new CrossoverError("PROVIDER_UNAVAILABLE", "Integration secret storage is unavailable");
@@ -300,7 +458,7 @@ async function prepareConnection(
         : "verification_pending";
     connectedAt = verified ? new Date().toISOString() : null;
     publicConfig = { role_arn: params.role_arn! };
-    secretConfig = { external_id: externalId };
+    secretConfig = { external_id: externalId, role_arn: params.role_arn! };
   } else {
     const expired =
       params.expires_at !== undefined && new Date(params.expires_at).getTime() <= Date.now();

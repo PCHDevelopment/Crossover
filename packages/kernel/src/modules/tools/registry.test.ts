@@ -54,6 +54,64 @@ describe("ToolRegistry", () => {
       );
     }
   });
+
+  it("validates credential requirements and GitHub repository scoping", () => {
+    const base = {
+      image: `busybox:1.36.1-musl@sha256:${"a".repeat(64)}`,
+      command: ["/bin/busybox", "true"],
+      egressHosts: [],
+    };
+    const registry = new ToolRegistry();
+    expect(() =>
+      registry.register(tool({ execution: { ...base, integrations: [{ provider: "github" }] } })),
+    ).toThrow(/requires explicit permissions/);
+    expect(() =>
+      registry.register(
+        tool({ execution: { ...base, integrations: [{ provider: "github", permissions: {} }] } }),
+      ),
+    ).toThrow(/requires explicit permissions/);
+    expect(() =>
+      registry.register(
+        tool({
+          execution: {
+            ...base,
+            integrations: [{ provider: "github", permissions: { contents: "read" } }],
+          },
+        }),
+      ),
+    ).not.toThrow();
+    const { scope: _scope, ...unscoped } = tool();
+    void _scope;
+    expect(() =>
+      new ToolRegistry().register({
+        ...unscoped,
+        execution: {
+          ...base,
+          integrations: [{ provider: "github", permissions: { contents: "read" } }],
+        },
+      }),
+    ).toThrow(/repository-scoped/);
+    expect(() =>
+      new ToolRegistry().register(
+        tool({
+          execution: {
+            ...base,
+            integrations: [{ provider: "aws", permissions: { contents: "read" } }],
+          },
+        }),
+      ),
+    ).toThrow(/permissions are invalid/);
+    expect(() =>
+      new ToolRegistry().register(
+        tool({
+          execution: {
+            ...base,
+            integrations: [{ provider: "aws" }, { provider: "aws" }],
+          },
+        }),
+      ),
+    ).toThrow(/more than once/);
+  });
 });
 
 describe("capabilityFor", () => {

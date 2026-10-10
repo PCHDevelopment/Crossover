@@ -111,6 +111,7 @@ export const METHODS = {
 
   "integrations.connect": { mutating: true },
   "integrations.disconnect": { mutating: true },
+  "integrations.verify": { mutating: true },
   "integrations.list": { mutating: false },
 
   "git.import": { mutating: true },

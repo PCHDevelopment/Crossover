@@ -167,3 +167,24 @@ describe("internal Git listener configuration", () => {
     ).toThrow(/specific private-network address/);
   });
 });
+
+describe("GitHub integration configuration", () => {
+  it("requires operator credentials as a complete set and normalizes PEM newlines", () => {
+    expect(() => loadConfig({ ...env, GITHUB_APP_ID: "123" })).toThrow(
+      /must be configured together/,
+    );
+    const configured = loadConfig({
+      ...env,
+      GITHUB_APP_ID: "123",
+      GITHUB_CLIENT_ID: "client-id",
+      GITHUB_CLIENT_SECRET: "client-secret",
+      GITHUB_APP_PRIVATE_KEY: `-----BEGIN PRIVATE KEY-----\\n${"x".repeat(100)}\\n-----END PRIVATE KEY-----`,
+    });
+    expect(configured.githubApp).toMatchObject({
+      appId: "123",
+      clientId: "client-id",
+      clientSecret: "client-secret",
+      privateKey: expect.stringContaining("\n"),
+    });
+  });
+});
