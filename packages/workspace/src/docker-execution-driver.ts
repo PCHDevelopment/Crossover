@@ -927,6 +927,8 @@ export class DockerExecutionDriver implements ExecutionDriver {
     entries?: unknown[];
     pruned_directories?: unknown[];
     error?: string;
+    size?: number;
+    limit?: number;
     installed?: boolean;
     file?: unknown;
   }> {
@@ -981,6 +983,8 @@ export class DockerExecutionDriver implements ExecutionDriver {
       entries?: unknown[];
       pruned_directories?: unknown[];
       error?: string;
+      size?: number;
+      limit?: number;
       installed?: boolean;
       file?: unknown;
     };
@@ -989,6 +993,8 @@ export class DockerExecutionDriver implements ExecutionDriver {
         entries?: unknown[];
         pruned_directories?: unknown[];
         error?: string;
+        size?: number;
+        limit?: number;
         installed?: boolean;
         file?: unknown;
       };
@@ -999,10 +1005,19 @@ export class DockerExecutionDriver implements ExecutionDriver {
       if (payload.error === "changed_during_read") throw snapshotChanged();
       if (payload.error === "path_not_found")
         throw new CrossoverError("NOT_FOUND", "Sandbox working-copy file not found");
-      if (payload.error === "too_large" && input["action"] === "file_read")
+      if (payload.error === "too_large" && input["action"] === "file_read") {
+        const limit =
+          typeof payload.limit === "number" && Number.isSafeInteger(payload.limit)
+            ? payload.limit
+            : Number(input["max_bytes"]);
+        const size =
+          typeof payload.size === "number" && Number.isSafeInteger(payload.size)
+            ? payload.size
+            : limit + 1;
         throw new CrossoverError("VALIDATION", "Sandbox file exceeds the read limit", {
-          details: { reason: "file_too_large" },
+          details: { reason: "file_too_large", size, limit },
         });
+      }
       if (payload.error === "unsupported_file_type" && input["action"] === "file_read")
         throw new CrossoverError("VALIDATION", "Sandbox path is not a regular file", {
           details: { reason: "not_a_regular_file" },

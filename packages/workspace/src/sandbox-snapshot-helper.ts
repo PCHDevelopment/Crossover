@@ -258,16 +258,38 @@ async function sandboxSnapshotHelper(
         const before = await fs.lstat(target, { bigint: true });
         if (!before.isFile()) throw new Error("unsupported_file_type");
         const maxBytes = input.max_bytes ?? 5 * 1024 * 1024;
-        if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) throw new Error("invalid_request");
-        if (before.size > BigInt(maxBytes)) throw new Error("too_large");
+        if (!Number.isSafeInteger(maxBytes) || maxBytes < 0 || maxBytes >= Number.MAX_SAFE_INTEGER)
+          throw new Error("invalid_request");
+        if (before.size > BigInt(maxBytes)) {
+          throw Object.assign(new Error("too_large"), {
+            size: Number(before.size),
+            limit: maxBytes,
+          });
+        }
         const file = await fs.open(target, constants.O_RDONLY | constants.O_NOFOLLOW);
         let content: Buffer;
         try {
           const opened = await file.stat({ bigint: true });
           if (!sameStat(before, opened)) throw new Error("changed_during_read");
-          content = await file.readFile();
+          const chunks: Buffer[] = [];
+          let totalBytes = 0;
+          while (totalBytes <= maxBytes) {
+            const capacity = Math.min(64 * 1024, maxBytes + 1 - totalBytes);
+            const chunk = Buffer.allocUnsafe(capacity);
+            const { bytesRead } = await file.read(chunk, 0, capacity, null);
+            if (bytesRead === 0) break;
+            chunks.push(chunk.subarray(0, bytesRead));
+            totalBytes += bytesRead;
+          }
           const after = await file.stat({ bigint: true });
           if (!sameStat(opened, after)) throw new Error("changed_during_read");
+          if (totalBytes > maxBytes) {
+            throw Object.assign(new Error("too_large"), {
+              size: Number(after.size),
+              limit: maxBytes,
+            });
+          }
+          content = Buffer.concat(chunks, totalBytes);
         } finally {
           await file.close();
         }
@@ -468,6 +490,9 @@ export const SANDBOX_SNAPSHOT_HELPER = `const wildcardMatch = ${sharedWildcardMa
 const pathGlobMatch = ${sharedPathGlobMatch.toString()};
 (${sandboxSnapshotHelper.toString()})(pathGlobMatch, ${JSON.stringify(SNAPSHOT_HELPER_LIMITS)}).catch((error) => {
   const code = typeof error?.message === "string" ? error.message : "snapshot_failed";
-  process.stdout.write(JSON.stringify({ error: code }));
+  const details = Number.isSafeInteger(error?.size) && Number.isSafeInteger(error?.limit)
+    ? { size: error.size, limit: error.limit }
+    : {};
+  process.stdout.write(JSON.stringify({ error: code, ...details }));
   process.exitCode = 1;
 });`;

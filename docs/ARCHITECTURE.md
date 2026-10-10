@@ -848,7 +848,7 @@ Vendor and model are self-declared and displayed as such; they are not trusted f
 
 The MCP server exposes two groups of tools:
 
-- **Coding tools** that operate on the agent's sandbox working copy: `sandbox_status`, `sandbox_read_file`, `sandbox_write_file`, `sandbox_exec`, `sandbox_sync`, and `submit_changes`. The explicit `sandbox_` prefix keeps these separate from `read_file`, `list_dir` and `grep`, which read the committed canonical workspace. Sandbox writes stay local until `submit_changes` applies them as a ChangeSet.
+- **Coding tools** that operate on the agent's sandbox working copy: `sandbox_status`, `sandbox_read_file`, `sandbox_write_file`, `sandbox_exec`, `sandbox_sync`, and `submit_changes`. The explicit `sandbox_` prefix keeps these separate from `read_file`, `list_dir` and `grep`, which read the committed canonical workspace. `sandbox_read_file` returns up to 1 MiB; `sandbox_write_file` accepts up to 512 KiB of decoded content. Use `sandbox_exec` for larger files. Sandbox writes stay local until `submit_changes` applies them as a ChangeSet.
 - **Room tools** for collaboration: tasks, messages, memory, decisions, inbox, conflicts.
 
 An agent connected through MCP therefore works almost exactly as it would on a local machine, except that its filesystem lives in the room's sandbox and its changes become ChangeSets.

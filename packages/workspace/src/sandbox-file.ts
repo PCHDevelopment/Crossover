@@ -2,15 +2,18 @@ import { isUtf8 } from "node:buffer";
 import type { Dispatcher } from "@crossover/kernel";
 import { CrossoverError } from "@crossover/protocol";
 import { z } from "zod";
-import { BINARY_SIZE, MAX_FILE_SIZE } from "./binary.js";
+import { BINARY_SIZE } from "./binary.js";
 import { contentBytes, contentSize } from "./content.js";
 import type { ExecutionService } from "./execution.js";
 import { pathSchema } from "./reads.js";
 
+export const SANDBOX_FILE_READ_LIMIT_BYTES = 1024 * 1024;
+export const SANDBOX_FILE_WRITE_LIMIT_BYTES = 512 * 1024;
+
 export const sandboxFileReadParamsSchema = z.strictObject({ path: pathSchema() });
 export const sandboxFileWriteInputSchema = z.strictObject({
   path: pathSchema(),
-  content: z.string().max(35 * 1024 * 1024),
+  content: z.string().max(1024 * 1024),
   encoding: z.enum(["utf8", "base64"]).optional(),
 });
 export const sandboxFileWriteParamsSchema = sandboxFileWriteInputSchema.transform((params) => {
@@ -19,9 +22,9 @@ export const sandboxFileWriteParamsSchema = sandboxFileWriteInputSchema.transfor
       details: { reason: "binary_requires_base64" },
     });
   const size = contentSize(params.content, params.encoding);
-  if (size > MAX_FILE_SIZE)
-    throw new CrossoverError("VALIDATION", "Sandbox file exceeds the 25 MiB write limit", {
-      details: { reason: "file_too_large", size, limit: MAX_FILE_SIZE },
+  if (size > SANDBOX_FILE_WRITE_LIMIT_BYTES)
+    throw new CrossoverError("VALIDATION", "Sandbox file exceeds the 512 KiB write limit", {
+      details: { reason: "file_too_large", size, limit: SANDBOX_FILE_WRITE_LIMIT_BYTES },
     });
   return params;
 });
@@ -44,7 +47,7 @@ export function registerSandboxFileCommands(
         ctx.room_id,
         ctx.principal.participant_id,
         params.path,
-        MAX_FILE_SIZE,
+        SANDBOX_FILE_READ_LIMIT_BYTES,
       );
       const encoding =
         file.content.length > BINARY_SIZE ||
@@ -69,8 +72,8 @@ export function registerSandboxFileCommands(
     perPathAuthorize: true,
     mutating: true,
     params: sandboxFileWriteParamsSchema,
-    execute: async (ctx, params) => {
-      await ctx.authorize("workspace.write", { path: params.path });
+    prepare: async (ctx, params) => {
+      if (!(await ctx.isAllowed("workspace.write", { path: params.path }))) return { denied: true };
       const content = contentBytes(params.content, params.encoding);
       await execution.writeWorkingCopyFile(
         ctx.room_id,
@@ -79,6 +82,14 @@ export function registerSandboxFileCommands(
         content,
       );
       return { response: { path: params.path, written_bytes: content.length } };
+    },
+    execute: async (ctx, params) => {
+      await ctx.authorize("workspace.write", { path: params.path });
+      const prepared = ctx.prepared as
+        { denied: true } | { response: { path: string; written_bytes: number } } | undefined;
+      if (!prepared || "denied" in prepared)
+        throw new CrossoverError("UNAVAILABLE", "Sandbox file write was not prepared");
+      return { response: prepared.response };
     },
   });
 }

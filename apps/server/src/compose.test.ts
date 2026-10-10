@@ -11,6 +11,8 @@ import {
   type SandboxExecOutcome,
   type SandboxExecProcess,
   type SandboxLimits,
+  SANDBOX_FILE_READ_LIMIT_BYTES,
+  SANDBOX_FILE_WRITE_LIMIT_BYTES,
 } from "@crossover/workspace";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { composeServer, type ComposeOverrides, type CrossoverServer } from "./compose.js";
@@ -47,6 +49,7 @@ class RecordingExecutionDriver implements ExecutionDriver {
   failSnapshotUpdate = false;
   finishExec: ((outcome: SandboxExecOutcome) => void) | undefined;
   snapshotInventoryPause: { started: () => void; wait: Promise<void> } | undefined;
+  snapshotUpdatePause: { started: () => void; wait: Promise<void> } | undefined;
   readonly commands: string[] = [];
 
   async create({ sandbox_id }: { sandbox_id: string; limits: SandboxLimits }) {
@@ -61,8 +64,6 @@ class RecordingExecutionDriver implements ExecutionDriver {
     if (!file) throw new CrossoverError("NOT_FOUND", "test sandbox path not found");
     if (file.mode === "120000")
       throw new CrossoverError("VALIDATION", "test driver does not follow sandbox symlinks");
-    if (file.content.length > input.max_bytes)
-      throw new CrossoverError("VALIDATION", "test sandbox file too large");
     return { mode: file.mode, content: Buffer.from(file.content) };
   }
   async materialize(
@@ -110,6 +111,12 @@ class RecordingExecutionDriver implements ExecutionDriver {
   async updateSnapshot(
     input: Parameters<NonNullable<ExecutionDriver["updateSnapshot"]>>[0],
   ): Promise<void> {
+    const pause = this.snapshotUpdatePause;
+    if (pause) {
+      this.snapshotUpdatePause = undefined;
+      pause.started();
+      await pause.wait;
+    }
     if (this.failSnapshotUpdate) {
       this.failSnapshotUpdate = false;
       throw new Error("injected snapshot update failure");
@@ -1696,6 +1703,128 @@ describe("composeServer", () => {
       await cmd(envelope("workspace.read", { path: "src/hello.ts" }), token),
     );
     expect(finalFile.response.content).toBe(resolution);
+  });
+
+  it("moves sandbox file writes off the room actor", async () => {
+    const driver = new RecordingExecutionDriver();
+    const { server } = await start({}, new RecordingPublisher(), { executionDriver: driver });
+    const { roomId, agent, cmd } = await walkthrough(server.app, false);
+    await server.dispatcher.actors.get(roomId).idle();
+
+    let markWriteStarted!: () => void;
+    const writeStarted = new Promise<void>((resolve) => {
+      markWriteStarted = resolve;
+    });
+    let releaseWrite!: () => void;
+    const writeWait = new Promise<void>((resolve) => {
+      releaseWrite = resolve;
+    });
+    driver.snapshotUpdatePause = { started: markWriteStarted, wait: writeWait };
+
+    const writing = cmd(
+      envelope("sandbox.file.write", { path: "paused.txt", content: "prepared write" }),
+      agent.tokens.access_token,
+    );
+    try {
+      await writeStarted;
+      const messageSent = await Promise.race([
+        cmd(
+          envelope("messages.send", { body: "While the sandbox write is preparing" }),
+          agent.tokens.access_token,
+        ).then((response) => {
+          expect(response.statusCode, response.body).toBe(200);
+          return "sent" as const;
+        }),
+        new Promise<"blocked">((resolve) => setTimeout(() => resolve("blocked"), 2_000)),
+      ]);
+      expect(messageSent).toBe("sent");
+    } finally {
+      releaseWrite();
+    }
+
+    const result = await ok(await writing);
+    expect(result.response).toEqual({ path: "paused.txt", written_bytes: 14 });
+    const sandbox = await server.execution.get(roomId, agent.participant_id as string);
+    expect(driver.working.get(sandbox!.id)?.get("paused.txt")?.content.toString()).toBe(
+      "prepared write",
+    );
+  });
+
+  it("enforces practical sandbox file read and write size limits", async () => {
+    const driver = new RecordingExecutionDriver();
+    const { server } = await start({}, new RecordingPublisher(), { executionDriver: driver });
+    const { roomId, agent, cmd } = await walkthrough(server.app, false);
+    const token = agent.tokens.access_token as string;
+
+    const exactWrite = Buffer.alloc(SANDBOX_FILE_WRITE_LIMIT_BYTES, 0x77).toString("base64");
+    const written = await cmd(
+      envelope("sandbox.file.write", {
+        path: "limits/write.txt",
+        content: exactWrite,
+        encoding: "base64",
+      }),
+      token,
+    );
+    expect(written.statusCode, written.body).toBe(200);
+    expect(written.json().response).toEqual({
+      path: "limits/write.txt",
+      written_bytes: SANDBOX_FILE_WRITE_LIMIT_BYTES,
+    });
+
+    const oversizedWrite = await cmd(
+      envelope("sandbox.file.write", {
+        path: "limits/oversized-write.txt",
+        content: Buffer.alloc(SANDBOX_FILE_WRITE_LIMIT_BYTES + 1, 0x77).toString("base64"),
+        encoding: "base64",
+      }),
+      token,
+    );
+    expect(oversizedWrite.statusCode).toBe(400);
+    expect(oversizedWrite.json().error).toMatchObject({
+      code: "VALIDATION",
+      details: {
+        reason: "file_too_large",
+        size: SANDBOX_FILE_WRITE_LIMIT_BYTES + 1,
+        limit: SANDBOX_FILE_WRITE_LIMIT_BYTES,
+      },
+    });
+
+    const sandbox = await server.execution.ensure(roomId, agent.participant_id as string);
+    const files = driver.working.get(sandbox.id)!;
+    files.set("limits/read.txt", {
+      mode: "100644",
+      content: Buffer.alloc(SANDBOX_FILE_READ_LIMIT_BYTES, 0x72),
+    });
+    files.set("limits/oversized-read.txt", {
+      mode: "100644",
+      content: Buffer.alloc(SANDBOX_FILE_READ_LIMIT_BYTES + 1, 0x72),
+    });
+
+    const readAtLimit = await cmd(
+      envelope("sandbox.file.read", { path: "limits/read.txt" }),
+      token,
+    );
+    expect(readAtLimit.statusCode).toBe(200);
+    expect(readAtLimit.json().response).toMatchObject({
+      path: "limits/read.txt",
+      encoding: "utf8",
+      size: SANDBOX_FILE_READ_LIMIT_BYTES,
+    });
+    expect(readAtLimit.json().response.content).toHaveLength(SANDBOX_FILE_READ_LIMIT_BYTES);
+
+    const oversizedRead = await cmd(
+      envelope("sandbox.file.read", { path: "limits/oversized-read.txt" }),
+      token,
+    );
+    expect(oversizedRead.statusCode).toBe(400);
+    expect(oversizedRead.json().error).toMatchObject({
+      code: "VALIDATION",
+      details: {
+        reason: "file_too_large",
+        size: SANDBOX_FILE_READ_LIMIT_BYTES + 1,
+        limit: SANDBOX_FILE_READ_LIMIT_BYTES,
+      },
+    });
   });
 
   it("uses path-scoped workspace permissions for sandbox file tools", async () => {

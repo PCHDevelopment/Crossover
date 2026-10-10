@@ -141,7 +141,8 @@ export const SANDBOX_TOOLS: readonly McpToolDefinition[] = [
   },
   {
     name: "sandbox_read_file",
-    description: "Read a file from your current sandbox working copy, including unsubmitted edits.",
+    description:
+      "Read up to 1 MiB from your current sandbox working copy, including unsubmitted edits. Use sandbox_exec to read larger files in pieces.",
     method: "sandbox.file.read",
     input: sandboxFileReadParamsSchema.shape,
     mutating: false,
@@ -149,7 +150,7 @@ export const SANDBOX_TOOLS: readonly McpToolDefinition[] = [
   {
     name: "sandbox_write_file",
     description:
-      "Write UTF-8 or base64 content to a file in your sandbox working copy. This does not change the canonical workspace; use submit_changes to submit it.",
+      "Write up to 512 KiB of decoded UTF-8 or base64 content to a file in your sandbox working copy. Use sandbox_exec for larger files. This does not change the canonical workspace; use submit_changes to submit it.",
     method: "sandbox.file.write",
     input: sandboxFileWriteInputSchema.shape,
     mutating: true,

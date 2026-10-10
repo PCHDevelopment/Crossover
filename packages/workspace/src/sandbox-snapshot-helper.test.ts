@@ -110,7 +110,7 @@ describe("sandbox snapshot helper", () => {
     ).toMatchObject({ code: 1, error: "invalid_path" });
     expect(
       await runHelper(root, { action: "file_read", path: path64("file.txt"), max_bytes: 2 }),
-    ).toMatchObject({ code: 1, error: "too_large" });
+    ).toMatchObject({ code: 1, error: "too_large", size: 13, limit: 2 });
   });
 
   it("reads raw bytes, ignores sandbox Git configuration, and never follows symlinks", async () => {

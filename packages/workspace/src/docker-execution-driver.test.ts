@@ -418,6 +418,29 @@ describe("DockerExecutionDriver", () => {
     );
   });
 
+  it("reports the actual size and limit when a bounded file read is too large", async () => {
+    const sandboxId = newId("sandbox");
+    const suffix = sandboxId.toLowerCase();
+    const resources = {
+      volume_ref: `crossover-sbx-${suffix}`,
+      container_ref: `crossover-sbx-${suffix}`,
+    };
+    const driver = new DockerExecutionDriver({
+      invoke: async () => ({
+        code: 0,
+        stdout: JSON.stringify({ error: "too_large", size: 1025, limit: 1024 }),
+        stderr: "",
+      }),
+    });
+
+    await expect(
+      driver.readFile({ sandbox_id: sandboxId, resources, path: "large.bin", max_bytes: 1024 }),
+    ).rejects.toMatchObject({
+      code: "VALIDATION",
+      details: { reason: "file_too_large", size: 1025, limit: 1024 },
+    });
+  });
+
   it("streams status beyond 8 MiB and stops at the entry limit", async () => {
     const root = await mkdtemp(join(tmpdir(), "crossover-status-stream-test-"));
     const fakeDocker = join(root, "docker.mjs");

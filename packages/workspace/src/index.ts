@@ -88,6 +88,8 @@ export {
 export type { SandboxExecCommandDeps } from "./sandbox-exec.js";
 export {
   registerSandboxFileCommands,
+  SANDBOX_FILE_READ_LIMIT_BYTES,
+  SANDBOX_FILE_WRITE_LIMIT_BYTES,
   sandboxFileReadParamsSchema,
   sandboxFileWriteInputSchema,
   sandboxFileWriteParamsSchema,

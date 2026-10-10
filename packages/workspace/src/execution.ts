@@ -1188,12 +1188,17 @@ export class ExecutionService {
           "Sandbox file reads are not supported by this driver",
         );
       try {
-        return await this.driver.readFile({
+        const file = await this.driver.readFile({
           sandbox_id: sandbox.id,
           resources: { volume_ref: sandbox.volume_ref, container_ref: sandbox.container_ref },
           path,
           max_bytes: maxBytes,
         });
+        if (file.content.length > maxBytes)
+          throw new CrossoverError("VALIDATION", "Sandbox file exceeds the read limit", {
+            details: { reason: "file_too_large", size: file.content.length, limit: maxBytes },
+          });
+        return file;
       } catch (cause) {
         if (cause instanceof CrossoverError) throw cause;
         throw new CrossoverError(
