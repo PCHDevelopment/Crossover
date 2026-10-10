@@ -439,4 +439,70 @@ describe.skipIf(!executablePath && !inCi)("web app in a browser", () => {
     await expect.poll(async () => (await peter())?.cursor ?? null).toBeNull();
     expect(problems).toEqual([]);
   }, 120_000);
+
+  it("the editor never overwrites someone else's change: a save after an overlapping change comes back as a Conflict", async () => {
+    const page: Page = await browser!.newPage();
+    const problems: string[] = [];
+    page.on("pageerror", (e) => problems.push(`pageerror: ${e.message}`));
+    page.on("console", (m) => {
+      if (m.type() === "error") problems.push(`console: ${m.text()} @ ${m.location().url}`);
+    });
+    await page.goto(baseUrl);
+    await page.getByTestId("login-name").fill("Peter");
+    await page.getByTestId("login-submit").click();
+    await page.getByTestId("room-name").fill("Overlap room");
+    await page.getByTestId("room-objective").fill("Keep both");
+    await page.getByTestId("room-create").click();
+    await page.getByTestId("room-title").waitFor();
+    const roomId = /\/rooms\/([^/]+)/.exec(new URL(page.url()).pathname)![1]!;
+    const client = new CrossoverClient({ baseUrl });
+    const login = await client.devLogin({ subject: "Peter", display_name: "Peter" });
+    const api = client.room(
+      roomId,
+      (await client.roomSession(login.session_token, roomId)).tokens.access_token,
+    ).api;
+    await api.workspace.apply_changeset({
+      source: "API",
+      message: "Seed",
+      base_workspace_revision: 0,
+      operations: [{ type: "create", path: "src/o.txt", content: "one\ntwo\nthree" }],
+    });
+    await page.getByTestId("tab-files").click();
+    await page.getByTestId("tree-dir").click();
+    await page.locator('[data-path="src/o.txt"]').click();
+    const lines = page.locator(".monaco-editor .view-lines");
+    await expect.poll(async () => lines.textContent()).toContain("three");
+
+    // Peter edits line 2; before his draft flushes, someone else rewrites the same line.
+    await lines.click();
+    await page.keyboard.press("Control+Home");
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("End");
+    await page.keyboard.type("-mine");
+    await api.workspace.apply_changeset({
+      source: "API",
+      message: "Theirs",
+      base_workspace_revision: 1,
+      base_file_revisions: { "src/o.txt": 1 },
+      operations: [{ type: "modify", path: "src/o.txt", content: "one\ntwo-theirs\nthree" }],
+    });
+    await page.getByTestId("conflict-banner").waitFor();
+    await page.keyboard.press("Control+s");
+    await expect
+      .poll(async () =>
+        (
+          await db.pool.query(
+            "SELECT source, status FROM changesets WHERE room_id = $1 ORDER BY created_at",
+            [roomId],
+          )
+        ).rows.map((r) => `${r.source} ${r.status}`),
+      )
+      .toEqual(["API APPLIED", "API APPLIED", "EDITOR CONFLICT"]);
+    const now = await api.workspace.read<{ content: string }>({ path: "src/o.txt" });
+    expect(now.response.content).toBe("one\ntwo-theirs\nthree");
+    // Peter's edit is still in his buffer, and the banner still says so.
+    expect(await lines.textContent()).toContain("two-mine");
+    expect(await page.getByTestId("conflict-banner").count()).toBe(1);
+    expect(problems).toEqual([]);
+  }, 120_000);
 });

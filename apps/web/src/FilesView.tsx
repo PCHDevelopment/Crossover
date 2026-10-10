@@ -75,7 +75,6 @@ export default function FilesView(props: {
   /** Flushes asked for while one was in flight: they run as soon as it ends. */
   const requested = useRef(new Set<string>());
   const loaded = useRef(new Set<string>());
-  const workspaceRevision = useRef(0);
   const applying = useRef(false);
   const sender = useRef<PresenceSender>(undefined);
   const remote = useRef<monaco.editor.IEditorDecorationsCollection>(undefined);
@@ -147,17 +146,14 @@ export default function FilesView(props: {
       const sent = draft.text;
       let failed = false;
       try {
-        const applied = await room.api.workspace.apply_changeset<ApplyResponse>(
-          flushParams(draft, workspaceRevision.current),
-        );
+        const applied = await room.api.workspace.apply_changeset<ApplyResponse>(flushParams(draft));
         if (applied.response.status === "APPLIED") {
           const revision = applied.response.applied_revision;
-          workspaceRevision.current = Math.max(workspaceRevision.current, revision);
           const read = await room.api.workspace.read<ReadResponse>({ path, revision });
           const now = drafts.current.get(path)!;
           // An incoming change may already have rebased the buffer onto this revision or later.
           if (read.response.file_revision > now.baseRevision)
-            setDraft(flushed(now, sent, read.response.file_revision));
+            setDraft(flushed(now, sent, read.response.file_revision, revision));
         } else {
           setDraft({ ...drafts.current.get(path)!, conflicted: true });
         }
@@ -196,10 +192,6 @@ export default function FilesView(props: {
     async (dir: string, refresh = false) => {
       try {
         const res = await room.api.workspace.list<ListResponse>(dir ? { path: dir } : {});
-        workspaceRevision.current = Math.max(
-          workspaceRevision.current,
-          res.response.workspace_revision,
-        );
         loaded.current.add(dir);
         setDirs((d) => new Map(d).set(dir, res.response.entries));
       } catch (error) {
@@ -289,9 +281,7 @@ export default function FilesView(props: {
     let chain = Promise.resolve();
     return onEvent((event) => {
       if (event.type !== "workspace.changeset.applied") return;
-      const revision = Number(event.payload?.["applied_revision"]);
       chain = chain.then(async () => {
-        if (revision > workspaceRevision.current) workspaceRevision.current = revision;
         for (const path of drafts.current.keys()) {
           try {
             const read = await room.api.workspace.read<ReadResponse>({ path });
@@ -300,6 +290,7 @@ export default function FilesView(props: {
               drafts.current.get(path)!,
               read.response.content,
               read.response.file_revision,
+              read.response.workspace_revision,
             );
             setDraft(draft);
             showText(path, draft.text);
@@ -325,11 +316,12 @@ export default function FilesView(props: {
           setNotice(`${path} is binary and can't be edited here`);
           return;
         }
-        workspaceRevision.current = Math.max(
-          workspaceRevision.current,
+        const draft = openDraft(
+          path,
+          read.response.file_revision,
+          read.response.content,
           read.response.workspace_revision,
         );
-        const draft = openDraft(path, read.response.file_revision, read.response.content);
         model = monaco.editor.createModel(draft.text, undefined, monaco.Uri.file(path));
         models.current.set(path, model);
         setDraft(draft);

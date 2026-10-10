@@ -16,6 +16,12 @@ export interface Draft {
   path: string;
   /** The file revision the buffer is based on (`base_file_revisions` when flushing). */
   baseRevision: number;
+  /**
+   * The workspace revision `base` was read at. A flush sends it as `base_workspace_revision`,
+   * which is what the server merges from: a later one would make someone else's change since
+   * look like part of the base, and the flush would overwrite it instead of conflicting.
+   */
+  baseWorkspace: number;
   /** Canonical content at `baseRevision`. */
   base: string;
   /** The buffer. */
@@ -27,9 +33,15 @@ export interface Draft {
   conflicted?: boolean;
 }
 
-export const openDraft = (path: string, baseRevision: number, content: string): Draft => ({
+export const openDraft = (
+  path: string,
+  baseRevision: number,
+  content: string,
+  baseWorkspace: number,
+): Draft => ({
   path,
   baseRevision,
+  baseWorkspace,
   base: content,
   text: content,
 });
@@ -67,26 +79,27 @@ export function nextFlushAt(draft: Draft): number | undefined {
 }
 
 /** The parameters of `workspace.apply_changeset` for this flush. */
-export function flushParams(draft: Draft, baseWorkspaceRevision: number) {
+export function flushParams(draft: Draft) {
   return {
     source: "EDITOR" as const,
     message: `Edit ${draft.path}`,
-    base_workspace_revision: baseWorkspaceRevision,
+    base_workspace_revision: draft.baseWorkspace,
     base_file_revisions: { [draft.path]: draft.baseRevision },
     operations: [{ type: "modify" as const, path: draft.path, content: draft.text }],
   };
 }
 
 /**
- * The flush of `sent` was applied as file revision `revision`. Edits typed after the flush was
- * sent stay in the buffer, now based on what was sent.
+ * The flush of `sent` was applied as file revision `revision`, at workspace revision
+ * `workspace`. Edits typed after the flush was sent stay in the buffer, now based on what was
+ * sent.
  */
-export function flushed(draft: Draft, sent: string, revision: number): Draft {
+export function flushed(draft: Draft, sent: string, revision: number, workspace: number): Draft {
   const { firstEditAt: _first, lastEditAt: _last, conflicted: _conflicted, ...rest } = draft;
   void _first;
   void _last;
   void _conflicted;
-  const next: Draft = { ...rest, base: sent, baseRevision: revision };
+  const next: Draft = { ...rest, base: sent, baseRevision: revision, baseWorkspace: workspace };
   // Still typing: those edits are a new draft starting now (`lastEditAt` keeps the idle timer).
   return draft.text === sent || draft.lastEditAt === undefined
     ? next
@@ -96,7 +109,8 @@ export function flushed(draft: Draft, sent: string, revision: number): Draft {
 export type IncomingOutcome = "unchanged" | "replaced" | "rebased" | "conflict";
 
 /**
- * Someone else's ChangeSet changed this file to `content` at `revision` (§13.3). A clean buffer is
+ * Someone else's ChangeSet changed this file to `content` at `revision`, read at workspace
+ * revision `workspace` (§13.3). A clean buffer is
  * replaced; a dirty one is merged three-way in the browser: if it merges cleanly the buffer is
  * rebased onto the new base, otherwise the buffer is kept as is, marked conflicted, and the next
  * flush is expected to come back as a Conflict (which opens the merge view, T1105c).
@@ -105,10 +119,11 @@ export function applyIncoming(
   draft: Draft,
   content: string,
   revision: number,
+  workspace: number,
 ): { draft: Draft; outcome: IncomingOutcome } {
   if (revision <= draft.baseRevision) return { draft, outcome: "unchanged" };
   if (!isDirty(draft)) {
-    return { draft: { ...openDraft(draft.path, revision, content) }, outcome: "replaced" };
+    return { draft: openDraft(draft.path, revision, content, workspace), outcome: "replaced" };
   }
   const merged = merge3(draft.base, draft.text, content);
   if (!merged.clean) return { draft: { ...draft, conflicted: true }, outcome: "conflict" };
@@ -116,13 +131,16 @@ export function applyIncoming(
     ...draft,
     base: content,
     baseRevision: revision,
+    baseWorkspace: workspace,
     text: merged.text,
     conflicted: false,
   };
   // Nothing of ours left (the change was our own flush, back before its response): a clean
   // draft, and its edit times go with it.
   return {
-    draft: isDirty(next) ? next : { ...openDraft(next.path, revision, content), conflicted: false },
+    draft: isDirty(next)
+      ? next
+      : { ...openDraft(next.path, revision, content, workspace), conflicted: false },
     outcome: "rebased",
   };
 }
