@@ -219,4 +219,140 @@ describe.skipIf(!executablePath && !inCi)("web app in a browser", () => {
     await page.getByTestId("sign-out").click();
     await page.getByTestId("login-name").waitFor();
   }, 120_000);
+
+  it("the editor (T1105a): open a file from the tree, edits flush as EDITOR ChangeSets on idle and on Ctrl+S, and someone else's change replaces a clean buffer", async () => {
+    const page: Page = await browser!.newPage();
+    const problems: string[] = [];
+    page.on("pageerror", (e) => problems.push(`pageerror: ${e.message}`));
+    page.on("console", (m) => {
+      if (m.type() === "error") problems.push(`console: ${m.text()} @ ${m.location().url}`);
+    });
+    await page.goto(baseUrl);
+    await page.getByTestId("login-name").fill("Peter");
+    await page.getByTestId("login-submit").click();
+    await page.getByTestId("room-name").fill("Editor room");
+    await page.getByTestId("room-objective").fill("Edit files");
+    await page.getByTestId("room-create").click();
+    await page.getByTestId("room-title").waitFor();
+    const roomId = /\/rooms\/([^/]+)/.exec(new URL(page.url()).pathname)![1]!;
+
+    // An agent (here: Peter from code) puts a file in the workspace.
+    const client = new CrossoverClient({ baseUrl });
+    const login = await client.devLogin({ subject: "Peter", display_name: "Peter" });
+    const api = client.room(
+      roomId,
+      (await client.roomSession(login.session_token, roomId)).tokens.access_token,
+    ).api;
+    await api.workspace.apply_changeset({
+      source: "API",
+      message: "Seed",
+      base_workspace_revision: 0,
+      operations: [{ type: "create", path: "src/notes.txt", content: "one\ntwo\nthree\n" }],
+    });
+    const onServer = async () =>
+      (await api.workspace.read<{ content: string }>({ path: "src/notes.txt" })).response.content;
+
+    // Open it from the tree.
+    await page.getByTestId("tab-files").click();
+    await page.getByTestId("tree-dir").click();
+    await page.locator('[data-path="src/notes.txt"]').click();
+    const lines = page.locator(".monaco-editor .view-lines");
+    await expect.poll(async () => lines.textContent()).toContain("three");
+    expect(await page.getByTestId("editor-path").textContent()).toContain("src/notes.txt");
+
+    // Typing makes a draft; 1.5 s without typing flushes it as an EDITOR ChangeSet.
+    await lines.click();
+    await page.keyboard.press("Control+End");
+    await page.keyboard.type("four");
+    await page.getByTestId("draft-indicator").waitFor();
+    await expect.poll(onServer, { timeout: 10_000 }).toBe("one\ntwo\nthree\nfour");
+    await page.getByTestId("draft-indicator").waitFor({ state: "detached" });
+    const sources = await db.pool.query(
+      "SELECT source FROM changesets WHERE room_id = $1 AND status = 'APPLIED' ORDER BY created_at",
+      [roomId],
+    );
+    expect(sources.rows.map((r) => r.source)).toEqual(["API", "EDITOR"]);
+
+    // Ctrl+S flushes at once, even while another flush is in flight (held here for a second): keep
+    // typing with no 1.5 s pause (and well within 10 s), and the text from before the second save
+    // reaches the server while the latest keystroke has not.
+    let held = false;
+    await page.route("**/v1/rooms/*/commands", async (route) => {
+      if (!held && route.request().postData()?.includes("workspace.apply_changeset")) {
+        held = true;
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+      }
+      await route.continue();
+    });
+    await page.keyboard.type("A");
+    await page.keyboard.press("Control+s");
+    await expect.poll(() => held).toBe(true);
+    await page.keyboard.type("B");
+    await page.keyboard.press("Control+s");
+    const typed: string[] = [];
+    let saved = "";
+    for (const key of ["C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N"]) {
+      await page.waitForTimeout(400);
+      await page.keyboard.type(key);
+      typed.push(key);
+      saved = await onServer();
+      if (saved.includes("fourAB")) break;
+    }
+    expect(saved).toContain("fourAB");
+    expect(saved).not.toContain(typed.at(-1));
+    await page.unroute("**/v1/rooms/*/commands");
+    const final = `one\ntwo\nthree\nfourAB${typed.join("")}`;
+    await expect.poll(onServer, { timeout: 10_000 }).toBe(final);
+    await page.getByTestId("draft-indicator").waitFor({ state: "detached" });
+
+    // Someone else changes the file: the clean buffer follows.
+    const current = await api.workspace.read<{ workspace_revision: number; file_revision: number }>(
+      { path: "src/notes.txt" },
+    );
+    await api.workspace.apply_changeset({
+      source: "API",
+      message: "Shout",
+      base_workspace_revision: current.response.workspace_revision,
+      base_file_revisions: { "src/notes.txt": current.response.file_revision },
+      operations: [{ type: "modify", path: "src/notes.txt", content: final.replace("one", "ONE") }],
+    });
+    await expect.poll(async () => lines.textContent()).toContain("ONE");
+    expect(await page.getByTestId("draft-indicator").count()).toBe(0);
+    expect(await onServer()).toBe(final.replace("one", "ONE"));
+
+    // A new file shows up in the folder that is already open in the tree.
+    await api.workspace.apply_changeset({
+      source: "API",
+      message: "Add",
+      base_workspace_revision: current.response.workspace_revision + 1,
+      operations: [{ type: "create", path: "src/new.txt", content: "new\n" }],
+    });
+    await page.locator('[data-path="src/new.txt"]').waitFor();
+
+    // A refused flush is reported once and not retried until the next edit or save.
+    let attempts = 0;
+    await page.route("**/v1/rooms/*/commands", async (route) => {
+      if (!route.request().postData()?.includes("workspace.apply_changeset"))
+        return route.continue();
+      attempts++;
+      await route.fulfill({
+        status: 403,
+        contentType: "application/json",
+        body: JSON.stringify({ error: { code: "FORBIDDEN", message: "Not allowed here" } }),
+      });
+    });
+    await lines.click();
+    await page.keyboard.press("Control+End");
+    await page.keyboard.type("Z");
+    await page.getByTestId("files-notice").waitFor();
+    await page.waitForTimeout(3_000);
+    expect(attempts).toBe(1);
+    expect(await page.getByTestId("draft-indicator").count()).toBe(1);
+    await page.unroute("**/v1/rooms/*/commands");
+    await page.keyboard.press("Control+s");
+    await expect.poll(onServer, { timeout: 10_000 }).toContain("Z");
+
+    // The browser logs the refused request itself; nothing else may have gone wrong.
+    expect(problems.filter((p) => !p.includes("status of 403"))).toEqual([]);
+  }, 120_000);
 });

@@ -792,6 +792,7 @@ describe("GET /v1/rooms and the static web app (T1104)", () => {
     await mkdir(join(root, "assets"), { recursive: true });
     await writeFile(join(root, "index.html"), "<!doctype html><title>app</title>");
     await writeFile(join(root, "assets", "app-abc.js"), "console.log(1)");
+    await writeFile(join(root, "assets", "codicon-abc.ttf"), "font"); // Monaco's icon font
     await writeFile(join(root, "secret.txt"), "not served");
     const outside = join(parent, "outside.js");
     await writeFile(outside, "outside");
@@ -806,6 +807,7 @@ describe("GET /v1/rooms and the static web app (T1104)", () => {
     expect(asset.body).toBe("console.log(1)");
     expect(asset.headers["cache-control"]).toContain("immutable");
     expect(asset.headers["content-type"]).toContain("text/javascript");
+    expect((await get("/assets/codicon-abc.ttf")).headers["content-type"]).toBe("font/ttf");
     expect((await get("/secret.txt")).statusCode).toBe(404); // not a type the app has
     for (const url of [
       "/..%2foutside.js",
