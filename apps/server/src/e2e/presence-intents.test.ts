@@ -224,3 +224,76 @@ describe("edit intents over the server API", () => {
     }
   });
 });
+
+describe("presence over the server API (§13.4)", () => {
+  it("updates replace the caller's record, observers may update, nothing reaches the ledger, and updates are validated and rate-limited", async () => {
+    const a = await makeRoom();
+    const observerToken = await inviteAgent(a, "OBSERVER");
+    const before = await db.pool.query<{ count: string }>(
+      "SELECT count(*) AS count FROM events WHERE room_id = $1",
+      [a.roomId],
+    );
+    const cursor = {
+      path: "src/auth.ts",
+      line: 4,
+      column: 2,
+      selection: { start_line: 4, start_column: 2, end_line: 6, end_column: 1 },
+    };
+    const set = await ok(
+      await a.cmd("presence.update", { open_files: ["src//auth.ts", "docs/a.md"], cursor }),
+    );
+    expect(new Date(set.response.expires_at).getTime()).toBeGreaterThan(Date.now());
+    await ok(await a.cmd("presence.update", { status: "idle" }, observerToken));
+    const listed = (await ok(await a.cmd("presence.list"))).response.presence;
+    expect(listed).toHaveLength(2);
+    expect(listed).toContainEqual(
+      expect.objectContaining({
+        status: "active",
+        open_files: ["src/auth.ts", "docs/a.md"],
+        cursor,
+      }),
+    );
+    expect(listed).toContainEqual(
+      expect.objectContaining({ status: "idle", open_files: [], cursor: null }),
+    );
+
+    for (const params of [
+      { open_files: ["docs/a.md"], cursor: { path: "src/auth.ts", line: 1, column: 1 } },
+      {
+        open_files: ["src/auth.ts"],
+        cursor: {
+          ...cursor,
+          selection: { start_line: 6, start_column: 1, end_line: 4, end_column: 1 },
+        },
+      },
+      { open_files: ["../secret"] },
+      { status: "away" },
+    ]) {
+      const refused = await a.cmd("presence.update", params);
+      expect(refused.statusCode, JSON.stringify(params)).toBe(400);
+    }
+
+    // 45 updates span at most two one-second windows of 20.
+    const codes = [];
+    for (let i = 0; i < 45; i++) {
+      const res = await a.cmd("presence.update", { open_files: ["src/auth.ts"] });
+      codes.push(res.statusCode);
+      if (res.statusCode !== 200) {
+        expect(res.json().error).toMatchObject({
+          code: "RATE_LIMITED",
+          retryable: true,
+          details: { retry_after: 1 },
+        });
+        expect(res.headers["retry-after"]).toBe("1");
+        break;
+      }
+    }
+    expect(codes.at(-1)).toBe(429);
+
+    const after = await db.pool.query<{ count: string }>(
+      "SELECT count(*) AS count FROM events WHERE room_id = $1",
+      [a.roomId],
+    );
+    expect(after.rows[0]?.count).toBe(before.rows[0]?.count);
+  });
+});
