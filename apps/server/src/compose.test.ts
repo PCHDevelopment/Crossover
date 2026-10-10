@@ -12,7 +12,7 @@ import {
   type SandboxExecProcess,
   type SandboxLimits,
 } from "@crossover/workspace";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { composeServer, type ComposeOverrides, type CrossoverServer } from "./compose.js";
 import { loadConfig, type ServerConfig } from "./config.js";
 
@@ -383,7 +383,7 @@ describe("composeServer", () => {
     expect(Number(count.rows[0]!.count)).toBe(1);
   });
 
-  it("reports a failed sandbox advance and keeps the old base revision", async () => {
+  it("reports a failed queued advance while submit still moves its own base", async () => {
     const driver = new RecordingExecutionDriver();
     const { server, publisher } = await start({}, new RecordingPublisher(), {
       executionDriver: driver,
@@ -409,13 +409,22 @@ describe("composeServer", () => {
       base_revision: 0,
       sandbox_advance: "scheduled",
     });
-    await server.dispatcher.actors.get(roomId).idle();
+    await vi.waitFor(() => {
+      expect(
+        publisher.events.some(
+          (event) =>
+            event.room_id === roomId &&
+            event.type === "sandbox.behind" &&
+            event.payload.reason === "advance_failed",
+        ),
+      ).toBe(true);
+    });
     expect(publisher.events.find((event) => event.type === "sandbox.behind")).toMatchObject({
       actor_id: "system",
       payload: { participant_id: participantId, behind_by: 1, reason: "advance_failed" },
     });
     const status = await ok(await cmd(envelope("sandbox.status"), owner.tokens.access_token));
-    expect(status.response).toMatchObject({ base_revision: 0, head_revision: 1, behind_by: 1 });
+    expect(status.response).toMatchObject({ base_revision: 1, head_revision: 1, behind_by: 0 });
   });
 
   it("reports process_running instead of claiming a blocked submit advance synced", async () => {
@@ -620,7 +629,7 @@ describe("composeServer", () => {
     const scopedEvent = (scopedEvents.response.events as RoomEvent[])[0]!;
     expect(ownerEvent.payload).toMatchObject({
       participant_id: ownerId,
-      changed_paths: expect.arrayContaining(["private/owner-only.txt", "submitted.txt"]),
+      changed_paths: expect.arrayContaining(["private/owner-only.txt"]),
     });
     expect(scopedEvent.payload).toMatchObject({
       participant_id: ownerId,
@@ -889,11 +898,9 @@ describe("composeServer", () => {
     ).resolves.toBeDefined();
   });
 
-  it("keeps the old base and emits sandbox.behind when local rebasing conflicts", async () => {
+  it("leaves human conflict markers at the new base and refuses to submit them", async () => {
     const driver = new RecordingExecutionDriver();
-    const { server, publisher } = await start({}, new RecordingPublisher(), {
-      executionDriver: driver,
-    });
+    const { server } = await start({}, new RecordingPublisher(), { executionDriver: driver });
     const { roomId, owner, cmd } = await walkthrough(server.app, false);
     const participantId = await ownerParticipantId(roomId);
     const sandbox = await server.execution.ensure(roomId, participantId);
@@ -917,35 +924,64 @@ describe("composeServer", () => {
       ),
     );
 
-    const submitted = await ok(
+    await vi.waitFor(async () => {
+      expect((await server.execution.get(roomId, participantId))?.base_revision).toBe(1);
+      expect(driver.working.get(sandbox.id)!.get("local.txt")?.content.toString()).toContain(
+        "<<<<<<<",
+      );
+    });
+    const rejected = await cmd(
+      envelope("changes.submit", { paths: ["local.txt"], message: "Submit unresolved conflict" }),
+      owner.tokens.access_token,
+    );
+    expect(rejected.statusCode).toBe(400);
+    expect(rejected.json().error).toMatchObject({
+      code: "VALIDATION",
+      details: { reason: "conflict_markers", paths: ["local.txt"] },
+    });
+    expect(await server.execution.get(roomId, participantId)).toMatchObject({ base_revision: 1 });
+  });
+
+  it("leaves an agent sandbox behind when local changes overlap the canonical advance", async () => {
+    const driver = new RecordingExecutionDriver();
+    const { server, publisher } = await start({}, new RecordingPublisher(), {
+      executionDriver: driver,
+    });
+    const { roomId, owner, agent, cmd } = await walkthrough(server.app, false);
+    const participantId = agent.participant_id as string;
+    const sandbox = await server.execution.ensure(roomId, participantId);
+    driver.working.get(sandbox.id)!.set("local.txt", {
+      mode: "100644",
+      content: Buffer.from("sandbox version"),
+    });
+
+    await ok(
       await cmd(
-        envelope("changes.submit", {
-          paths: ["submitted.txt"],
-          message: "Submit disjoint file",
+        envelope("workspace.apply_changeset", {
+          source: "API",
+          message: "Concurrent canonical edit",
+          base_workspace_revision: 0,
+          operations: [{ type: "create", path: "local.txt", content: "canonical version" }],
         }),
         owner.tokens.access_token,
       ),
     );
-    expect(submitted.response).toMatchObject({
-      status: "APPLIED",
-      applied_revision: 2,
-      base_revision: 0,
-      sandbox_advance: "behind",
+    await vi.waitFor(() => {
+      expect(
+        publisher.events.some(
+          (event) =>
+            event.room_id === roomId &&
+            event.type === "sandbox.behind" &&
+            event.payload.participant_id === participantId &&
+            event.payload.reason === "local_changes",
+        ),
+      ).toBe(true);
     });
+
     expect(await server.execution.get(roomId, participantId)).toMatchObject({ base_revision: 0 });
     expect(driver.working.get(sandbox.id)!.get("local.txt")?.content.toString()).toBe(
       "sandbox version",
     );
-    const behind = publisher.events.find(
-      (event) => event.room_id === roomId && event.type === "sandbox.behind",
-    );
-    expect(behind?.payload).toMatchObject({
-      participant_id: participantId,
-      behind_by: 2,
-      changed_paths: ["local.txt", "submitted.txt"],
-      overlaps_local_changes: true,
-      intents: [],
-    });
   });
 
   it("serves tasks, messages, room events and room lifecycle over HTTP", async () => {

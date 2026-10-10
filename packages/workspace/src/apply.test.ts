@@ -65,7 +65,14 @@ async function fixture(authorize: Authorizer = allowAll, deps: WorkspaceCommandD
   const repo = rows[0].repo_path as string;
   const options = { gitDir: repo, timeoutMs: 10_000 };
   const dispatcher = new Dispatcher({ pool: db.pool, authorize, nodeId: room });
-  registerWorkspaceCommands(dispatcher, deps);
+  const scheduledAdvances: Array<{ room_id: string; revision: number }> = [];
+  registerWorkspaceCommands(dispatcher, {
+    ...deps,
+    scheduleSandboxAdvance: (roomId, revision) => {
+      scheduledAdvances.push({ room_id: roomId, revision });
+      deps.scheduleSandboxAdvance?.(roomId, revision);
+    },
+  });
   const head = async () => (await git(["rev-parse", "refs/room/canonical"], options)).stdout.trim();
   const request = (operations: Operation[], base = 0, key = newId("cmd")) => ({
     id: newId("cmd"),
@@ -164,6 +171,7 @@ async function fixture(authorize: Authorizer = allowAll, deps: WorkspaceCommandD
     applyDirect,
     rowsFor,
     dispatcher,
+    scheduledAdvances,
   };
 }
 
@@ -321,6 +329,11 @@ describe("workspace.apply_changeset", () => {
     };
     const result = await f.dispatchAs(lead, "LEAD")(resolutionRequest);
     expect(result.response).toMatchObject({ status: "APPLIED", applied_revision: 3 });
+    expect(f.scheduledAdvances).toEqual([
+      { room_id: f.room, revision: 1 },
+      { room_id: f.room, revision: 2 },
+      { room_id: f.room, revision: 3 },
+    ]);
     expect(result.events.map((event) => event.type)).toEqual([
       "workspace.changeset.applied",
       "workspace.conflict.resolved",

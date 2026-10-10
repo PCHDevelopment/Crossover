@@ -109,7 +109,10 @@ async function setup(extra: { pullLimits?: { files?: number; bytes?: number } } 
   ).rows[0].repo_path as string;
   const fetcher = new FixtureFetcher(up.dir);
   const d = new Dispatcher({ pool: db.pool, authorize: allowAll, nodeId: roomId });
+  const scheduledAdvances: Array<{ room_id: string; revision: number }> = [];
   registerWorkspaceCommands(d, {
+    scheduleSandboxAdvance: (scheduledRoom, revision) =>
+      scheduledAdvances.push({ room_id: scheduledRoom, revision }),
     upstream: { fetcher, resolve: async () => ["93.184.216.34"], ...extra },
   });
   registerMessageCommands(d);
@@ -171,6 +174,7 @@ async function setup(extra: { pullLimits?: { files?: number; bytes?: number } } 
     upstreamRow,
     events,
     pull,
+    scheduledAdvances,
     edit,
     read,
     d,
@@ -196,6 +200,10 @@ describe("git.pull_upstream (§24.2, T803)", () => {
       await unlink(join(dir, "old.txt"));
     });
     const out = await s.pull();
+    expect(s.scheduledAdvances).toEqual([
+      { room_id: s.roomId, revision: 1 },
+      { room_id: s.roomId, revision: 2 },
+    ]);
     expect(out.response).toMatchObject({
       status: "APPLIED",
       applied_revision: 2,

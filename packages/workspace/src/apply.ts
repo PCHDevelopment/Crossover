@@ -22,6 +22,7 @@ import { registerWorkspaceHealthReads } from "./health-events.js";
 import { parseConflicts } from "./parse-check.js";
 import { registerCheckpointExport } from "./checkpoint-export.js";
 import { registerCheckpointCommands } from "./checkpoints.js";
+import { recordWorkspaceRevision } from "./revision.js";
 import { registerGitImport, type UpstreamDeps } from "./upstream-import.js";
 import {
   advanceUpstreamAfterResolution,
@@ -40,6 +41,8 @@ export interface WorkspaceCommandDeps {
   parseConflicts?: typeof parseConflicts;
   /** Schedule health for an applied head after its transaction commits. */
   scheduleHealthCheck?: (roomId: string, revision: number) => void;
+  /** Coalesce sandbox reconciliation work after a canonical revision commits. */
+  scheduleSandboxAdvance?: (roomId: string, revision: number) => void;
   /** How `git.import` reaches an upstream: the fetcher, the credentials, the host check. */
   upstream?: UpstreamDeps;
 }
@@ -85,6 +88,7 @@ export function registerWorkspaceCommands(
     ...(deps.updateCanonicalRef ? { updateCanonicalRef: deps.updateCanonicalRef } : {}),
     ...(deps.refreshSearchTree ? { refreshSearchTree: deps.refreshSearchTree } : {}),
     ...(deps.scheduleHealthCheck ? { scheduleHealthCheck: deps.scheduleHealthCheck } : {}),
+    ...(deps.scheduleSandboxAdvance ? { scheduleSandboxAdvance: deps.scheduleSandboxAdvance } : {}),
   });
 }
 
@@ -712,10 +716,15 @@ export async function apply(
       },
     })
   ).stdout.trim();
-  await client.query(
-    `INSERT INTO workspace_revisions (workspace_id, room_id, revision, commit_sha, changeset_id)
-     VALUES ($1,$2,$3,$4,$5)`,
-    [ws.id, room_id, revision, commit, id],
+  await recordWorkspaceRevision(
+    client,
+    { workspace_id: ws.id, room_id, revision, commit_sha: commit, changeset_id: id },
+    {
+      afterCommit: (callback) => ctx.afterCommit(callback),
+      ...(deps.scheduleSandboxAdvance
+        ? { scheduleSandboxAdvance: deps.scheduleSandboxAdvance }
+        : {}),
+    },
   );
   for (const { path, blob } of changedFiles) {
     await client.query(

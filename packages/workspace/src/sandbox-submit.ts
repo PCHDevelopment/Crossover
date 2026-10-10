@@ -149,14 +149,21 @@ export function registerSandboxSubmitCommand(
               },
             };
           };
-          if (!rebasedTree.clean) return { events: [await behindEvent()] };
+          const keepSubmitterOutOfAdvanceQueue = () =>
+            execution.scheduleCanonicalAdvance(
+              ctx.room_id,
+              applied.revision,
+              ctx.principal.participant_id,
+            );
+          if (!rebasedTree.clean)
+            return { events: [await behindEvent()], afterCommit: keepSubmitterOutOfAdvanceQueue };
           const delta = await snapshotDelta(
             prepared.object_repo,
             prepared.snapshot_commit,
             rebasedTree.tree,
           );
           if (overwritesOmittedPaths(delta, prepared.protected_paths))
-            return { events: [await behindEvent()] };
+            return { events: [await behindEvent()], afterCommit: keepSubmitterOutOfAdvanceQueue };
           sandboxAdvance = "scheduled";
           return {
             afterCommit: () =>
@@ -173,10 +180,12 @@ export function registerSandboxSubmitCommand(
                   async (result) => {
                     if (result === "advanced") {
                       reportAdvanceEvent("sandbox.synced", { base_revision: applied.revision });
+                      keepSubmitterOutOfAdvanceQueue();
                       return;
                     }
                     const behind = await behindEvent("process_running");
                     reportAdvanceEvent("sandbox.behind", behind.payload ?? {});
+                    keepSubmitterOutOfAdvanceQueue();
                   },
                   (error: unknown) => {
                     console.error("Sandbox submit applied, but working copy advance failed", error);
@@ -328,6 +337,13 @@ async function prepareSandboxSubmit(
       objectFormat,
       MAX_REBASE_BYTES,
     );
+    const conflictMarkerPaths = fileBytes
+      .filter((file) => selectedPaths.has(file.path) && hasUnresolvedConflictMarkers(file.content))
+      .map(({ path }) => path);
+    if (conflictMarkerPaths.length)
+      throw new CrossoverError("VALIDATION", "Resolve conflict markers before submitting", {
+        details: { reason: "conflict_markers", paths: conflictMarkerPaths },
+      });
     const byPath = new Map(fileBytes.map((file) => [file.path, file]));
     const allOperations = operationsForChanges(rebaseChanges, byPath);
     const submittedPaths = selectedPaths;
@@ -588,6 +604,21 @@ function noChanges(): CrossoverError {
     details: { reason: "no_changes" },
   });
 }
+
+function hasUnresolvedConflictMarkers(content: Buffer): boolean {
+  const lines = content.toString("utf8").split(/\r?\n/);
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!/^<{7} .+$/.test(lines[index]!)) continue;
+    let separator = index + 1;
+    while (separator < lines.length && !/^={7}$/.test(lines[separator]!)) separator += 1;
+    if (separator === lines.length) continue;
+    let closing = separator + 1;
+    while (closing < lines.length && !/^>{7} .+$/.test(lines[closing]!)) closing += 1;
+    if (closing < lines.length) return true;
+  }
+  return false;
+}
+
 function tooLarge(reason: string, limit: number, path?: string): CrossoverError {
   return new CrossoverError("VALIDATION", "Sandbox working copy exceeds submission limits", {
     details: { reason, limit, ...(path ? { path } : {}) },
