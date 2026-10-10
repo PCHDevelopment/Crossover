@@ -153,6 +153,12 @@ export interface ExecutionServiceOptions {
   diskEnforcement?: DiskEnforcementMode;
   /** Test seam for a failure after Docker resources exist but before their refs are persisted. */
   afterDriverCreate?: (sandbox: SandboxRecord) => Promise<void>;
+  /** Canonical paths readable by the participant whose own status is being reported. */
+  readablePaths?: (
+    roomId: string,
+    participantId: string,
+    paths: readonly string[],
+  ) => Promise<string[]>;
 }
 
 let softEnforcementWarningLogged = false;
@@ -687,8 +693,15 @@ export class ExecutionService {
   ): Promise<SandboxFileChanges> {
     if (!this.driver.snapshotInventory)
       throw new CrossoverError("UNAVAILABLE", "Sandbox snapshot is not supported by this driver");
-    const base = await readWorkspaceTree(repoPath, baseCommit);
-    const ignoreRules = await readWorkspaceIgnoreRules(repoPath, base);
+    const fullBase = await readWorkspaceTree(repoPath, baseCommit);
+    const visiblePaths = this.options.readablePaths
+      ? await this.options.readablePaths(sandbox.room_id, sandbox.participant_id, [
+          ...fullBase.keys(),
+        ])
+      : [...fullBase.keys()];
+    const visible = new Set(visiblePaths);
+    const base = new Map([...fullBase].filter(([path]) => visible.has(path)));
+    const ignoreRules = await readWorkspaceIgnoreRules(repoPath, fullBase);
     const objectFormat = (
       await git(["rev-parse", "--show-object-format"], { gitDir: repoPath, timeoutMs: 10_000 })
     ).stdout.trim();

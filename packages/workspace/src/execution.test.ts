@@ -282,6 +282,7 @@ describe("ExecutionService", () => {
       await mkdir(join(checkoutPath, "src"));
       await writeFile(join(checkoutPath, "src/changed.ts"), "base\n");
       await writeFile(join(checkoutPath, "old.txt"), "old\n");
+      await writeFile(join(checkoutPath, "secret.txt"), "hidden\n");
       const commit = async (message: string) => {
         await git(["add", "-A"], { cwd: checkoutPath, timeoutMs: 10_000 });
         await git(
@@ -345,7 +346,10 @@ describe("ExecutionService", () => {
         { path: "src/changed.ts", mode: "100644", sha: localBlob, size: 6 },
         { path: "notes/new.md", mode: "100644", sha: null, size: 3 },
       ];
-      const execution = new ExecutionService(db.pool, driver);
+      const execution = new ExecutionService(db.pool, driver, {
+        readablePaths: async (_roomId, _participantId, paths) =>
+          paths.filter((path) => path !== "secret.txt"),
+      });
       const sandbox = await execution.ensure(roomId, participantIds[0]!);
       await db.pool.query(
         `INSERT INTO workspace_revisions (workspace_id, room_id, revision, commit_sha)

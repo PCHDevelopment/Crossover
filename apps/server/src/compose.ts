@@ -1,4 +1,4 @@
-import { createPool, type Pool } from "@crossover/db";
+import { createPool, withTransaction, type Pool } from "@crossover/db";
 import {
   buildGateway,
   type SandboxOutputMetadata,
@@ -13,6 +13,7 @@ import { registerGitHubTools } from "./github-plugin.js";
 import { registerAwsTools } from "./aws-plugin.js";
 import {
   Dispatcher,
+  filterReadablePaths,
   RedisBudgetLimiter,
   type BudgetLimiter,
   LeaseRenewer,
@@ -52,10 +53,12 @@ import {
   registerTaskLifecycleCommands,
   registerTaskReadCommands,
   type Authorizer,
+  type Principal,
   type EventPublisher,
   type EventSubscriber,
   RedisEditIntentStore,
 } from "@crossover/kernel";
+import { CrossoverError } from "@crossover/protocol";
 import { normalizeRoomEgressAllowlist, postWebhook } from "@crossover/security";
 import { authorize, tierOf } from "@crossover/policy";
 import { join } from "node:path";
@@ -230,14 +233,44 @@ export async function composeServer(
           : {}),
         gitFetcherImage: config.gitFetcherImage ?? "crossover-git-fetcher:latest",
       });
+    const pathAuthorizer = overrides.authorize ?? authorize;
+    const readableSandboxPaths = async (
+      roomId: string,
+      participantId: string,
+      paths: readonly string[],
+    ): Promise<string[]> =>
+      withTransaction(pool, async (client) => {
+        const { rows } = await client.query<Principal>(
+          `SELECT id AS participant_id, room_id, kind, authority, role FROM participants
+           WHERE id = $1 AND room_id = $2 AND status = 'ACTIVE'`,
+          [participantId, roomId],
+        );
+        const principal = rows[0];
+        if (!principal) return [];
+        return filterReadablePaths(paths, async (path) => {
+          try {
+            await pathAuthorizer(
+              principal,
+              "workspace.read",
+              { room_id: roomId, path },
+              { method: "sandbox.status", params: {}, client },
+            );
+            return true;
+          } catch (error) {
+            if (error instanceof CrossoverError && error.code === "FORBIDDEN") return false;
+            throw error;
+          }
+        });
+      });
     executionService = new ExecutionService(pool, executionDriver, {
       diskEnforcement: config.sandboxDiskEnforcement ?? "soft",
+      readablePaths: readableSandboxPaths,
     });
     executionService.startSweeper();
 
     const dispatcher = new Dispatcher({
       pool,
-      authorize: overrides.authorize ?? authorize,
+      authorize: pathAuthorizer,
       nodeId: config.nodeId,
       publisher,
       budgets,
