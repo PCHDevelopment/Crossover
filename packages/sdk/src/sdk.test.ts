@@ -1,5 +1,5 @@
 import { CrossoverError } from "@crossover/protocol";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { makeApi } from "./api.js";
 import { CrossoverClient } from "./client.js";
 import { TransportError, type FetchLike } from "./http.js";
@@ -439,6 +439,50 @@ describe("subscribe", () => {
     expect(errors).toHaveLength(1);
     expect(FakeSocket.instances).toHaveLength(1); // no retry storm
   });
+
+  it("stops retrying a failing refresh once 25 s have passed since the first failure, inside the server's 30 s grace", async () => {
+    FakeSocket.instances = [];
+    FakeSocket.script = undefined;
+    // Every connection is refused for an expired token, so the stream must refresh.
+    class Expired extends FakeSocket {
+      override send(data: string) {
+        const frame = JSON.parse(data) as Record<string, unknown>;
+        if (frame["type"] === "hello") {
+          this.emit({
+            type: "error",
+            error: { code: "UNAUTHENTICATED", message: "expired", retryable: false },
+          });
+          this.drop(4401);
+        }
+      }
+    }
+    // Each refresh fails for a transient reason and takes 10 s of (fake) time.
+    const realNow = Date.now.bind(Date);
+    let skew = 0;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => realNow() + skew);
+    let refreshes = 0;
+    try {
+      const room = clientWith(
+        async (input) => {
+          if (String(input).endsWith("/v1/auth/refresh")) {
+            refreshes += 1;
+            skew += 10_000;
+            return new Response("busy", { status: 503 });
+          }
+          return ok();
+        },
+        { WebSocket: Expired as unknown as WebSocketCtor },
+      ).room("room_1", { access_token: "old", refresh_token: "rt" });
+      const sub = room.subscribe({ reconnect: { minMs: 1, maxMs: 2 } });
+      await expect(take(sub, 1)).rejects.toBeInstanceOf(Error);
+      // The first failure starts the clock. Retries checked 0, 10 and 20 s after it are inside the
+      // 25 s patience; the one at 30 s is not sent (it could land outside the server's 30 s grace
+      // and revoke the login), so four refreshes go out and the stream ends.
+      expect(refreshes).toBe(4);
+    } finally {
+      clock.mockRestore();
+    }
+  }, 10_000);
 
   it("close() ends the stream and the connection", async () => {
     const sub = subscribeWith((s) => s.event(1));

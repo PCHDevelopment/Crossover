@@ -18,6 +18,13 @@ export interface WsConfig {
   /** `ws://…/v1/rooms/<room>/ws` */
   url: string;
   token: string;
+  /** The current access token, read at each connect (it changes when the client renews it). */
+  getToken?: () => string;
+  /**
+   * Renew after `failed` was refused as expired: true if a newer token is now held. Without it
+   * (or when it says false) a refused token ends the subscription.
+   */
+  refresh?: (failed: string) => Promise<boolean>;
   WebSocket: WebSocketCtor;
   client: string;
   clientVersion: string;
@@ -65,7 +72,7 @@ export class WsSession {
             protocol_version: PROTOCOL_VERSION,
             client: config.client,
             client_version: config.clientVersion,
-            token: config.token,
+            token: config.getToken?.() ?? config.token,
           }),
         );
       socket.onmessage = (event) => {
@@ -120,6 +127,9 @@ export class WsSession {
     }
   }
 }
+
+/** How long a subscription keeps retrying a failing refresh (the server's grace for a spent token is 30 s). */
+const REFRESH_PATIENCE_MS = 25_000;
 
 /** The longest the stream waits because a server asked it to (a budget's `retry_after`). */
 const MAX_RETRY_AFTER_MS = 10 * 60_000;
@@ -198,7 +208,17 @@ export class RoomSocket {
     mutating: boolean,
     options: CallOptions = {},
   ): Promise<CommandResult> {
-    const session = await this.connect();
+    let session: WsSession;
+    const used = this.config.getToken?.() ?? this.config.token;
+    try {
+      session = await this.connect();
+    } catch (error) {
+      // An expired access token: renew it and connect once more.
+      const expired = error instanceof CrossoverError && error.code === "UNAUTHENTICATED";
+      // A refresh that fails for a transient reason throws its own (retryable) error.
+      if (!expired || !this.config.refresh || !(await this.config.refresh(used))) throw error;
+      session = await this.connect();
+    }
     const id = newId("cmd");
     const result = new Promise<CommandResult>((resolve, reject) =>
       this.pending.set(id, { resolve, reject }),
@@ -295,10 +315,32 @@ export class Subscription implements AsyncIterable<SdkEvent> {
     const max = this.options.reconnect?.maxMs ?? 5_000;
     let attempt = 0;
     let first = true;
+    // One renewal per refusal: a token that is refused again right after renewing ends it.
+    let renewed = false;
+    // "later": the refresh itself failed in a way that may pass (the server busy, the network),
+    // which is not the token being refused: wait and connect again. But only for so long: a refresh
+    // token is single-use and the server takes a spent one for a retry only briefly, so a retry
+    // after REFRESH_PATIENCE_MS could revoke the login. Past that the stream ends with the error.
+    let refreshSince: number | undefined;
+    const renew = async (used: string): Promise<"renewed" | "refused" | "later"> => {
+      if (!this.config.refresh) return "refused";
+      if (refreshSince !== undefined && Date.now() - refreshSince > REFRESH_PATIENCE_MS)
+        return "refused";
+      try {
+        const renewedNow = await this.config.refresh(used);
+        refreshSince = undefined;
+        return renewedNow ? "renewed" : "refused";
+      } catch (error) {
+        refreshSince ??= Date.now();
+        if (error instanceof CrossoverError) this.retryAfterMs = retryAfterOf(error);
+        return "later";
+      }
+    };
     while (!this.done) {
       this.options.onState?.(first ? "connecting" : "reconnecting");
       first = false;
-      let end: "dropped" | "fatal" = "dropped";
+      let end: "dropped" | "fatal" | "expired" = "dropped";
+      const used = this.config.getToken?.() ?? this.config.token;
       try {
         const session = await WsSession.open(this.config);
         if (this.done) {
@@ -306,11 +348,12 @@ export class Subscription implements AsyncIterable<SdkEvent> {
           return;
         }
         this.session = session;
-        end = await new Promise<"dropped" | "fatal">((resolve) => {
+        end = await new Promise<"dropped" | "fatal" | "expired">((resolve) => {
           session.onFrame((frame) => {
             switch (frame.type) {
               case "subscribed":
                 attempt = 0;
+                renewed = false;
                 this.options.onState?.("live");
                 break;
               case "event": {
@@ -332,7 +375,10 @@ export class Subscription implements AsyncIterable<SdkEvent> {
                 // budget, an overloaded server) wait as long as it asks and reconnect; otherwise
                 // it ends here.
                 const error = frameError(frame);
-                if (error.retryable) {
+                if (error.code === "UNAUTHENTICATED") {
+                  resolve("expired");
+                  session.close();
+                } else if (error.retryable) {
                   this.retryAfterMs = retryAfterOf(error);
                   session.close();
                 } else {
@@ -345,7 +391,11 @@ export class Subscription implements AsyncIterable<SdkEvent> {
           });
           session.onClose((code) => {
             resolve(
-              code === CLOSE.UNAUTHENTICATED || code === CLOSE.NOT_FOUND ? "fatal" : "dropped",
+              code === CLOSE.UNAUTHENTICATED
+                ? "expired"
+                : code === CLOSE.NOT_FOUND
+                  ? "fatal"
+                  : "dropped",
             );
           });
           session.send({ type: "subscribe", after: this.lastSequence });
@@ -353,6 +403,18 @@ export class Subscription implements AsyncIterable<SdkEvent> {
       } catch (error) {
         if (error instanceof CrossoverError && error.retryable) {
           this.retryAfterMs = retryAfterOf(error);
+        } else if (error instanceof CrossoverError && error.code === "UNAUTHENTICATED") {
+          // The access token expired: renew it and connect again at once.
+          const outcome = renewed ? "refused" : await renew(used);
+          if (outcome === "renewed") {
+            renewed = true;
+            continue;
+          }
+          if (outcome === "refused") {
+            this.finish(error);
+            return;
+          }
+          end = "dropped"; // "later": back off below
         } else if (
           error instanceof CrossoverError ||
           (error instanceof TransportError && !error.retryable)
@@ -363,7 +425,15 @@ export class Subscription implements AsyncIterable<SdkEvent> {
       }
       this.session = undefined;
       if (this.done) return;
-      if (end === "fatal") {
+      if (end === "expired" && !renewed) {
+        const outcome = await renew(used);
+        if (outcome === "renewed") {
+          renewed = true;
+          continue;
+        }
+        if (outcome === "later") end = "dropped";
+      }
+      if (end === "fatal" || end === "expired") {
         this.finish(new CrossoverError("UNAUTHENTICATED", "The subscription can't continue"));
         return;
       }

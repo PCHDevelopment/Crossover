@@ -1468,6 +1468,34 @@ describe("loadConfig", () => {
     expect(c.workspaceRoot.startsWith("/")).toBe(true);
   });
 
+  it("reads the proxy and refresh-limit settings", () => {
+    expect(loadConfig(env)).toMatchObject({ trustProxy: [], refreshPerMinute: 30 });
+    expect(
+      loadConfig({ ...env, TRUST_PROXY: "10.0.0.0/8, 127.0.0.1", REFRESH_PER_MINUTE: "5" }),
+    ).toMatchObject({
+      trustProxy: ["10.0.0.0/8", "127.0.0.1"],
+      refreshPerMinute: 5,
+    });
+    expect(() => loadConfig({ ...env, REFRESH_PER_MINUTE: "0" })).toThrow(/REFRESH_PER_MINUTE/);
+    // Anything that isn't an address or CIDR is refused at boot, naming the variable.
+    for (const bad of [
+      "true",
+      "garbage",
+      "1",
+      "0",
+      "10.0.0.0/33",
+      "::1/129",
+      "10.0.0.0/8,nope",
+      "1.2.3.4/",
+    ]) {
+      expect(() => loadConfig({ ...env, TRUST_PROXY: bad }), bad).toThrow(/TRUST_PROXY/);
+    }
+    expect(loadConfig({ ...env, TRUST_PROXY: "::1, 2001:db8::/32" }).trustProxy).toEqual([
+      "::1",
+      "2001:db8::/32",
+    ]);
+  });
+
   it("turns dev login on only for an explicit true", () => {
     expect(loadConfig({ ...env, DEV_LOGIN: "true" }).devLogin).toBe(true);
     expect(loadConfig({ ...env, DEV_LOGIN: "0" }).devLogin).toBe(false);

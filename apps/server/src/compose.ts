@@ -265,6 +265,23 @@ export async function composeServer(
       dispatcher,
       pool,
       devLogin: config.devLogin,
+      trustProxy: config.trustProxy && config.trustProxy.length > 0 ? config.trustProxy : false,
+      refreshLimit: {
+        limiter: {
+          // The budget limiter's counters, under keys no room can have.
+          hit: async (key, limit, windowMs) => {
+            const d = await budgets.consume(
+              { room_id: "_auth", participant_id: key, budget: "commands" },
+              limit,
+              windowMs,
+            );
+            return d.allowed
+              ? { allowed: true }
+              : { allowed: false, retry_after_ms: d.retry_after_ms };
+          },
+        },
+        perMinute: config.refreshPerMinute ?? 30,
+      },
       ...(config.webRoot ? { staticRoot: config.webRoot } : {}),
       ws: { subscriber },
     });
