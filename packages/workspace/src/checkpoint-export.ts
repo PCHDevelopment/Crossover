@@ -4,6 +4,7 @@ import { z } from "zod";
 import { git } from "./git.js";
 import {
   assertPublicHttpsUrl,
+  githubRepositoryFromUrl,
   HttpsGitPusher,
   noCredentials,
   scrub,
@@ -37,11 +38,6 @@ interface Contributor {
   id: string;
   kind: string;
   display_name: string;
-}
-
-/** `owner/repo` of a repository URL, the scope of `github.create_pull_request`. */
-function repoOf(url: string): string {
-  return new URL(url).pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
 }
 
 /** A line a Git trailer parser would take for a trailer (`Token: value`). */
@@ -145,7 +141,7 @@ export function registerCheckpointExport(dispatcher: Dispatcher, deps: UpstreamD
         if (!pullRequests) {
           throw refuse("no_pull_request_provider", "No pull request provider is configured");
         }
-        await ctx.authorize(`github.create_pull_request:${repoOf(upstream.url)}`);
+        await ctx.authorize(`github.create_pull_request:${githubRepositoryFromUrl(upstream.url)}`);
       }
 
       const { rows: checkpoints } = await client.query<{
@@ -315,46 +311,70 @@ export function registerCheckpointExport(dispatcher: Dispatcher, deps: UpstreamD
       }
 
       const url = await assertPublicHttpsUrl(upstream.url, deps.resolve);
-      const credential = await credentials.credentialFor(url, "write");
-      await pusher.push({ url: url.href, branch, credential, repo: ws.repo_path, commit: parent });
+      const lease = await credentials.credentialFor(url, {
+        room_id,
+        invocation_id: ctx.command_id,
+        access: "write",
+        permissions: p.pull_request
+          ? { contents: "write", pull_requests: "write" }
+          : { contents: "write" },
+      });
+      const credential = lease?.credential ?? null;
 
       let pullRequest: { url: string; number: number } | undefined;
-      if (p.pull_request && pullRequests) {
-        try {
-          pullRequest = await pullRequests.create({
-            url: url.href,
-            head: branch,
-            base: upstream.branch,
-            title: p.pull_request.title ?? target.message,
-            body:
-              p.pull_request.body ??
-              `Exported from room ${roomRows[0]?.slug ?? room_id}:\n\n${pendingCheckpoints
-                .map((c) => `- ${c.message}`)
-                .join("\n")}`,
-            credential,
-          });
-        } catch (error) {
-          // The branch is pushed and the commits are deterministic: exporting again retries this.
-          // What the provider says may carry the credential it was given: scrub it.
-          if (error instanceof CrossoverError) {
-            throw new CrossoverError(error.code, scrub(error.message, credential), {
-              retryable: error.retryable,
-              ...(error.details
-                ? {
-                    details: JSON.parse(scrub(JSON.stringify(error.details), credential)) as Record<
-                      string,
-                      unknown
-                    >,
-                  }
-                : {}),
+      let revokeFailed = false;
+      try {
+        await pusher.push({
+          url: url.href,
+          branch,
+          credential,
+          repo: ws.repo_path,
+          commit: parent,
+        });
+        if (p.pull_request && pullRequests) {
+          try {
+            pullRequest = await pullRequests.create({
+              url: url.href,
+              head: branch,
+              base: upstream.branch,
+              title: p.pull_request.title ?? target.message,
+              body:
+                p.pull_request.body ??
+                `Exported from room ${roomRows[0]?.slug ?? room_id}:\n\n${pendingCheckpoints
+                  .map((c) => `- ${c.message}`)
+                  .join("\n")}`,
+              credential,
+            });
+          } catch (error) {
+            // The branch is pushed and the commits are deterministic: exporting again retries this.
+            // What the provider says may carry the credential it was given: scrub it.
+            if (error instanceof CrossoverError) {
+              throw new CrossoverError(error.code, scrub(error.message, credential), {
+                retryable: error.retryable,
+                ...(error.details
+                  ? {
+                      details: JSON.parse(
+                        scrub(JSON.stringify(error.details), credential),
+                      ) as Record<string, unknown>,
+                    }
+                  : {}),
+              });
+            }
+            const text = scrub(error instanceof Error ? error.message : String(error), credential);
+            throw refuse("pull_request_failed", "The pull request couldn't be opened", {
+              message: text.split("\n")[0]?.slice(0, 300) ?? "",
             });
           }
-          const text = scrub(error instanceof Error ? error.message : String(error), credential);
-          throw refuse("pull_request_failed", "The pull request couldn't be opened", {
-            message: text.split("\n")[0]?.slice(0, 300) ?? "",
-          });
+        }
+      } finally {
+        try {
+          await lease?.revoke();
+        } catch {
+          revokeFailed = true;
         }
       }
+      if (revokeFailed)
+        throw new CrossoverError("PROVIDER_UNAVAILABLE", "Upstream credential revocation failed");
       const payload = {
         checkpoint_id: target.id,
         checkpoint_ids: pendingCheckpoints.map((c) => c.id),

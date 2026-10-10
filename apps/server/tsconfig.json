@@ -7,6 +7,7 @@
     { "path": "../../packages/db" },
     { "path": "../../packages/kernel" },
     { "path": "../../packages/mcp" },
+    { "path": "../../packages/github-api" },
     { "path": "../../packages/policy" },
     { "path": "../../packages/workspace" },
     { "path": "../../packages/gateway" },

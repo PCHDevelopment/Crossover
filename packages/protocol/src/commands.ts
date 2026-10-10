@@ -17,6 +17,7 @@ export const METHODS = {
   "room.digest": { mutating: false },
   "room.events.subscribe": { mutating: false },
   "room.events.list": { mutating: false },
+  "room.set_egress_allowlist": { mutating: true },
   "events.redact": { mutating: true },
   "room.set_lead": { mutating: true },
   "room.transfer_lead": { mutating: true },
@@ -108,6 +109,11 @@ export const METHODS = {
 
   "tools.list": { mutating: false },
   "tools.invoke": { mutating: true },
+
+  "integrations.connect": { mutating: true },
+  "integrations.disconnect": { mutating: true },
+  "integrations.verify": { mutating: true },
+  "integrations.list": { mutating: false },
 
   "git.import": { mutating: true },
   "git.pull_upstream": { mutating: true },

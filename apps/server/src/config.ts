@@ -72,6 +72,35 @@ const envSchema = z.object({
     .optional(),
   SANDBOX_EGRESS_PROXY_PORT: z.coerce.number().int().min(1).max(65_535).optional(),
   SANDBOX_EGRESS_PROXY_SECRET: z.string().min(32).optional(),
+  /** 32-byte hex key for development integration-secret encryption. */
+  INTEGRATION_SECRET_KEY: z
+    .string()
+    .regex(/^[a-fA-F0-9]{64}$/)
+    .optional(),
+  /** AWS KMS key id or ARN used for production integration-secret envelope encryption. */
+  INTEGRATION_KMS_KEY_ID: z.string().trim().min(1).optional(),
+  GITHUB_APP_ID: z
+    .string()
+    .regex(/^[1-9]\d{0,19}$/)
+    .optional(),
+  GITHUB_CLIENT_ID: z.string().trim().min(1).max(200).optional(),
+  GITHUB_CLIENT_SECRET: z.string().min(1).max(4096).optional(),
+  GITHUB_APP_PRIVATE_KEY: z.string().min(100).max(16_384).optional(),
+  /** Operator-provisioned immutable GitHub plugin worker image. */
+  GITHUB_PLUGIN_IMAGE: z
+    .string()
+    .regex(/^[A-Za-z0-9][A-Za-z0-9._/:+-]{0,254}@sha256:[a-f0-9]{64}$/)
+    .optional(),
+  /** Operator-provisioned immutable browser plugin worker image. */
+  BROWSER_PLUGIN_IMAGE: z
+    .string()
+    .regex(/^[A-Za-z0-9][A-Za-z0-9._/:+-]{0,254}@sha256:[a-f0-9]{64}$/)
+    .optional(),
+  /** Operator-provisioned immutable AWS plugin worker image. */
+  AWS_PLUGIN_IMAGE: z
+    .string()
+    .regex(/^[A-Za-z0-9][A-Za-z0-9._/:+-]{0,254}@sha256:[a-f0-9]{64}$/)
+    .optional(),
   GIT_INTERNAL_HOST: z.string().trim().min(1).optional(),
   GIT_INTERNAL_PORT: z.coerce.number().int().min(1).max(65_535).default(8081),
   GIT_INTERNAL_CONTAINER: z
@@ -109,8 +138,19 @@ export interface ServerConfig {
   /** Operator-provisioned HTTP allowlist proxy; absent means network-none sandboxes. */
   sandboxEgressProxyContainer?: string;
   sandboxEgressProxyPort?: number;
-  /** Shared HMAC secret for sandbox and short-lived health-install proxy credentials. */
+  /** Shared HMAC secret for sandbox, health-install and short-lived plugin proxy credentials. */
   sandboxEgressProxySecret?: string;
+  /** Development-only master key for room-scoped integration secret encryption. */
+  integrationSecretKey?: Uint8Array;
+  /** KMS key id or ARN for production room-scoped integration secret encryption. */
+  integrationKmsKeyId?: string;
+  githubApp?: { appId: string; clientId: string; clientSecret: string; privateKey: string };
+  /** Digest-pinned isolated GitHub worker image; GitHub tools are unavailable when unset. */
+  githubPluginImage?: string;
+  /** Digest-pinned isolated browser worker image; browser tools are unavailable when unset. */
+  browserPluginImage?: string;
+  /** Digest-pinned isolated AWS worker image; AWS tools are unavailable when unset. */
+  awsPluginImage?: string;
   /** Bind address and private, unpublished port of the internal Git-only listener. */
   gitInternalHost?: string;
   gitInternalPort?: number;
@@ -173,6 +213,27 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
       "Invalid server configuration:\n  SANDBOX_DISK_ENFORCEMENT=hard requires SANDBOX_VOLUME_DRIVER and SANDBOX_VOLUME_OPTS (a nonempty JSON object)",
     );
   }
+  if (env.NODE_ENV === "production" && !e.INTEGRATION_KMS_KEY_ID) {
+    throw new Error(
+      "Invalid server configuration:\n  INTEGRATION_KMS_KEY_ID is required in production for integration secrets",
+    );
+  }
+  if (env.NODE_ENV === "production" && e.INTEGRATION_SECRET_KEY) {
+    throw new Error(
+      "Invalid server configuration:\n  INTEGRATION_SECRET_KEY is development-only; production must use KMS",
+    );
+  }
+  const githubAppValues = [
+    e.GITHUB_APP_ID,
+    e.GITHUB_CLIENT_ID,
+    e.GITHUB_CLIENT_SECRET,
+    e.GITHUB_APP_PRIVATE_KEY,
+  ];
+  if (githubAppValues.some(Boolean) && githubAppValues.some((value) => !value)) {
+    throw new Error(
+      "Invalid server configuration:\n  GITHUB_APP_ID, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET and GITHUB_APP_PRIVATE_KEY must be configured together",
+    );
+  }
   return {
     databaseUrl: e.DATABASE_URL,
     redisUrl: e.REDIS_URL,
@@ -198,6 +259,23 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     ...(e.SANDBOX_EGRESS_PROXY_SECRET
       ? { sandboxEgressProxySecret: e.SANDBOX_EGRESS_PROXY_SECRET }
       : {}),
+    ...(e.INTEGRATION_SECRET_KEY
+      ? { integrationSecretKey: Buffer.from(e.INTEGRATION_SECRET_KEY, "hex") }
+      : {}),
+    ...(e.INTEGRATION_KMS_KEY_ID ? { integrationKmsKeyId: e.INTEGRATION_KMS_KEY_ID } : {}),
+    ...(e.GITHUB_APP_ID && e.GITHUB_CLIENT_ID && e.GITHUB_CLIENT_SECRET && e.GITHUB_APP_PRIVATE_KEY
+      ? {
+          githubApp: {
+            appId: e.GITHUB_APP_ID,
+            clientId: e.GITHUB_CLIENT_ID,
+            clientSecret: e.GITHUB_CLIENT_SECRET,
+            privateKey: e.GITHUB_APP_PRIVATE_KEY.replace(/\\n/g, "\n"),
+          },
+        }
+      : {}),
+    ...(e.GITHUB_PLUGIN_IMAGE ? { githubPluginImage: e.GITHUB_PLUGIN_IMAGE } : {}),
+    ...(e.BROWSER_PLUGIN_IMAGE ? { browserPluginImage: e.BROWSER_PLUGIN_IMAGE } : {}),
+    ...(e.AWS_PLUGIN_IMAGE ? { awsPluginImage: e.AWS_PLUGIN_IMAGE } : {}),
     ...(e.GIT_INTERNAL_HOST ? { gitInternalHost: e.GIT_INTERNAL_HOST } : {}),
     gitInternalPort: e.GIT_INTERNAL_PORT,
     ...(e.GIT_INTERNAL_CONTAINER ? { gitInternalContainer: e.GIT_INTERNAL_CONTAINER } : {}),

@@ -475,8 +475,12 @@ describe("tierOf", () => {
     expect(tierOf("capabilities.grant_tier3")).toBe(3);
   });
 
-  it("ignores the scope", () => {
+  it("uses scope for scoped tiers and otherwise preserves the base tier", () => {
     expect(tierOf("aws.deploy_lambda:function/staging-*")).toBe(3);
+    expect(tierOf("aws.deploy_lambda:staging-api")).toBe(2);
+    expect(tierOf("aws.deploy_lambda:prod-api")).toBe(3);
+    expect(tierOf("aws.deploy_lambda:Staging-api")).toBe(3);
+    expect(tierOf("aws.deploy_lambda")).toBe(3);
     expect(tierOf("workspace.write:src/**")).toBe(1);
     expect(tierOf("github.create_pull_request:org/repo")).toBe(2);
   });

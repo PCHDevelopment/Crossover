@@ -22,11 +22,16 @@ afterAll(async () => {
 });
 async function fixture(authorize: Authorizer = allowAll) {
   const room = newId("room");
+  const owner = newId("part");
   const root = await mkdtemp(join(tmpdir(), "crossover-blame-test-"));
   dirs.push(root);
   await db.pool.query(
-    "INSERT INTO rooms (id, slug, name, objective, owner_id) VALUES ($1,$1,'Room','Ship','actor')",
-    [room],
+    "INSERT INTO rooms (id, slug, name, objective, owner_id) VALUES ($1,$1,'Room','Ship',$2)",
+    [room, owner],
+  );
+  await db.pool.query(
+    "INSERT INTO participants (id, room_id, kind, display_name, authority, role, status) VALUES ($2, $1, 'HUMAN', 'Actor', 'OWNER', 'LEAD', 'ACTIVE')",
+    [room, owner],
   );
   const workspace = await withTransaction(db.pool, (client) =>
     provisionWorkspace(client, room, root),
@@ -38,7 +43,7 @@ async function fixture(authorize: Authorizer = allowAll) {
   registerWorkspaceCommands(dispatcher);
   const principal = {
     room_id: room,
-    participant_id: "actor",
+    participant_id: owner,
     kind: "HUMAN" as const,
     authority: "OWNER" as const,
     role: "LEAD" as const,
@@ -47,7 +52,7 @@ async function fixture(authorize: Authorizer = allowAll) {
     method: string,
     params: Record<string, unknown>,
     mutating = false,
-    actor = "actor",
+    actor: string = owner,
   ) =>
     dispatcher.dispatch(
       { ...principal, participant_id: actor },
@@ -58,7 +63,7 @@ async function fixture(authorize: Authorizer = allowAll) {
         ...(mutating ? { idempotency_key: newId("cmd") } : {}),
       },
     );
-  const apply = (operations: Operation[], base = 0, actor = "actor") =>
+  const apply = (operations: Operation[], base = 0, actor: string = owner) =>
     dispatch(
       "workspace.apply_changeset",
       {
@@ -70,7 +75,7 @@ async function fixture(authorize: Authorizer = allowAll) {
       true,
       actor,
     );
-  return { room, workspace, repo, options, dispatch, apply };
+  return { room, workspace, repo, options, dispatch, apply, owner };
 }
 
 it("attributes edits by two actors, merges adjacent ranges, and reads history despite stale refs", async () => {
@@ -90,16 +95,16 @@ it("attributes edits by two actors, merges adjacent ranges, and reads history de
     workspace_revision: 3,
     line_count: 4,
     ranges: [
-      { start: 1, end: 2, workspace_revision: 1, actor_id: "actor" },
+      { start: 1, end: 2, workspace_revision: 1, actor_id: f.owner },
       { start: 2, end: 4, workspace_revision: 2, actor_id: "second" },
-      { start: 4, end: 5, workspace_revision: 1, actor_id: "actor" },
+      { start: 4, end: 5, workspace_revision: 1, actor_id: f.owner },
     ],
   });
   expect(JSON.stringify(result.response)).not.toMatch(/\b[0-9a-f]{40}\b/);
   expect((await f.dispatch("workspace.blame", { path: "file[1]", revision: 1 })).response).toEqual({
     workspace_revision: 1,
     line_count: 4,
-    ranges: [{ start: 1, end: 5, workspace_revision: 1, actor_id: "actor" }],
+    ranges: [{ start: 1, end: 5, workspace_revision: 1, actor_id: f.owner }],
   });
   await expect(f.dispatch("workspace.blame", { path: "file[1]" })).rejects.toMatchObject({
     code: "NOT_FOUND",
@@ -119,7 +124,7 @@ it("counts empty, blank, CRLF and unterminated lines, including unusual path nam
       workspace_revision: 1,
       line_count: file.count,
       ranges: file.count
-        ? [{ start: 1, end: file.count + 1, workspace_revision: 1, actor_id: "actor" }]
+        ? [{ start: 1, end: file.count + 1, workspace_revision: 1, actor_id: f.owner }]
         : [],
     });
   }
@@ -144,7 +149,7 @@ it("maps imported ancestry to revision zero without leaking Git authors or objec
     line_count: 2,
     ranges: [
       { start: 1, end: 2, workspace_revision: 0, actor_id: null },
-      { start: 2, end: 3, workspace_revision: 1, actor_id: "actor" },
+      { start: 2, end: 3, workspace_revision: 1, actor_id: f.owner },
     ],
   });
   const other = await fixture();

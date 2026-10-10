@@ -8,6 +8,7 @@ import { updateCanonicalRef } from "./reconcile.js";
 import { refreshSearchTree } from "./search-tree.js";
 import { suggestHealthCommand } from "./health-suggestion.js";
 import { treeChanges } from "./tree-changes.js";
+import { recordWorkspaceRevision } from "./revision.js";
 import {
   assertPublicHttpsUrl,
   HttpsGitFetcher,
@@ -52,6 +53,7 @@ export interface ImportHooks {
   updateCanonicalRef?: (repo: string, commit: string, expected: string) => Promise<void>;
   refreshSearchTree?: (repo: string, commit: string, previousCommit?: string) => Promise<void>;
   scheduleHealthCheck?: (roomId: string, revision: number) => void;
+  scheduleSandboxAdvance?: (roomId: string, revision: number) => void;
 }
 
 export const refuse = (reason: string, message: string, details: Record<string, unknown> = {}) =>
@@ -191,7 +193,7 @@ export async function disposeFetched(prepared: PreparedFetch | undefined): Promi
  * doesn't work, and cleans up after itself if anything past the fetch fails.
  */
 export async function fetchIntoRoomRepo(
-  ctx: { command_id: string },
+  ctx: { room_id: string; command_id: string },
   repo_path: string,
   request: { url: string; branch: string },
   fetcher: UpstreamFetcher,
@@ -199,8 +201,26 @@ export async function fetchIntoRoomRepo(
   deps: UpstreamDeps,
 ): Promise<PreparedFetch> {
   const url = await assertPublicHttpsUrl(request.url, deps.resolve);
-  const credential = await credentials.credentialFor(url);
-  const fetched = await fetcher.fetch({ url: url.href, branch: request.branch, credential });
+  const lease = await credentials.credentialFor(url, {
+    room_id: ctx.room_id,
+    invocation_id: ctx.command_id,
+    access: "read",
+    permissions: { contents: "read" },
+  });
+  const credential = lease?.credential ?? null;
+  let fetched: FetchedUpstream;
+  try {
+    fetched = await fetcher.fetch({ url: url.href, branch: request.branch, credential });
+  } catch (error) {
+    await lease?.revoke().catch(() => undefined);
+    throw error;
+  }
+  try {
+    await lease?.revoke();
+  } catch {
+    await fetched.cleanup().catch(() => undefined);
+    throw new CrossoverError("PROVIDER_UNAVAILABLE", "Upstream credential revocation failed");
+  }
   const ref = `refs/upstream/prepare/${ctx.command_id.replace(/[^A-Za-z0-9_-]/g, "_")}`;
   const prepared: PreparedFetch = { fetched, repo_path, ref, url, sha: fetched.sha };
   try {
@@ -348,10 +368,15 @@ async function importUpstream(
         }),
       ],
     );
-    await client.query(
-      `INSERT INTO workspace_revisions (workspace_id, room_id, revision, commit_sha, changeset_id)
-       VALUES ($1, $2, 1, $3, $4)`,
-      [ws.id, room_id, commit, changesetId],
+    await recordWorkspaceRevision(
+      client,
+      { workspace_id: ws.id, room_id, revision: 1, commit_sha: commit, changeset_id: changesetId },
+      {
+        afterCommit: (callback) => ctx.afterCommit(callback),
+        ...(hooks.scheduleSandboxAdvance
+          ? { scheduleSandboxAdvance: hooks.scheduleSandboxAdvance }
+          : {}),
+      },
     );
     for (const { path, blob } of changed) {
       await client.query(

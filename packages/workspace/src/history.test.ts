@@ -22,11 +22,16 @@ afterAll(async () => {
 });
 async function fixture(authorize: Authorizer = allowAll) {
   const room = newId("room");
+  const owner = newId("part");
   const root = await mkdtemp(join(tmpdir(), "crossover-history-test-"));
   dirs.push(root);
   await db.pool.query(
-    "INSERT INTO rooms (id, slug, name, objective, owner_id) VALUES ($1,$1,'Room','Ship','actor')",
-    [room],
+    "INSERT INTO rooms (id, slug, name, objective, owner_id) VALUES ($1,$1,'Room','Ship',$2)",
+    [room, owner],
+  );
+  await db.pool.query(
+    "INSERT INTO participants (id, room_id, kind, display_name, authority, role, status) VALUES ($2, $1, 'HUMAN', 'Actor', 'OWNER', 'LEAD', 'ACTIVE')",
+    [room, owner],
   );
   const workspace = await withTransaction(db.pool, (client) =>
     provisionWorkspace(client, room, root),
@@ -38,7 +43,7 @@ async function fixture(authorize: Authorizer = allowAll) {
   registerWorkspaceCommands(dispatcher);
   const principal = {
     room_id: room,
-    participant_id: "actor",
+    participant_id: owner,
     kind: "HUMAN" as const,
     authority: "OWNER" as const,
     role: "LEAD" as const,
@@ -61,7 +66,7 @@ async function fixture(authorize: Authorizer = allowAll) {
       },
       true,
     );
-  return { room, workspace, repo, options, dispatch, apply };
+  return { room, workspace, repo, options, dispatch, apply, owner };
 }
 
 it("diffs historical snapshots with literal path filters and no engine IDs or index lines", async () => {
@@ -127,7 +132,7 @@ it("paginates workspace and exact-path history, retaining deletion and revision 
     workspace_revision: 3,
     file_revision: 2,
     deleted: true,
-    actor_id: "actor",
+    actor_id: f.owner,
     message: "Edit",
     created_at: expect.any(String),
   });

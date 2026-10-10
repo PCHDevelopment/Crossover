@@ -23,6 +23,7 @@ let db: TestDatabase;
 let root: string;
 let server: CrossoverServer;
 let serial = 0;
+const TEST_PLUGIN_IMAGE = `busybox:1.36.1-musl@sha256:${"a".repeat(64)}`;
 const invoked: ToolInvocation[] = [];
 let gate: Promise<void> | undefined;
 const hung: (() => void)[] = [];
@@ -31,11 +32,19 @@ const runner: ToolRunner = {
   async run(invocation): Promise<ToolOutput> {
     invoked.push(invocation);
     const args = invocation.args as Record<string, unknown>;
+    if (invocation.tool === "github.read_repository" && args["repo"] === "acme/large")
+      return { result: { content: "x".repeat(240 * 1024) } };
     if (args["title"] === "slow") await gate;
     if (args["title"] === "hang" || args["url"] === "hang")
       await new Promise<void>((resolve) => hung.push(resolve));
     if (args["title"] === "boom")
       throw new ToolProviderError("GitHub is down", { retryable: true });
+    if (args["title"] === "rate-limited")
+      throw new ToolProviderError("GitHub rate limit reached", {
+        retryable: true,
+        code: "RATE_LIMITED",
+        details: { provider: "github", provider_code: "rate_limited", retry_after: 12 },
+      });
     if (args["title"] === "weird") throw new Error("socket hang up, token tok_leaky_secret");
     return { result: { ok: true, tool: invocation.tool } };
   },
@@ -51,6 +60,12 @@ function registry() {
     input: z.object({ repo: z.string() }),
     scope: (a) => a.repo,
     idempotent: true,
+    execution: {
+      image: TEST_PLUGIN_IMAGE,
+      command: ["run"],
+      egressHosts: [],
+      maxOutputBytes: 256 * 1024,
+    },
   });
   r.register({
     name: "github.create_pull_request",
@@ -266,17 +281,37 @@ describe("tools over HTTP", () => {
     expect(page.response.provenance).toMatchObject({ trust: "external" });
   });
 
-  it("tier 3 needs the owner's time-limited grant, and nothing in a role bundle gives it", async () => {
+  it("allows repository content within the fixed 256 KiB result limit", async () => {
+    const r = await newRoom();
+    await ok(await r.grant("github.read_repository:acme/large"));
+    const content = await ok(await r.invoke("github.read_repository", { repo: "acme/large" }));
+    expect(content.response.result.content).toHaveLength(240 * 1024);
+    expect(content.response.provenance).toMatchObject({ trust: "external" });
+  });
+
+  it("staging deploys are Tier 2; production requires an owner grant and records the denial", async () => {
     const r = await newRoom();
     const denied = await r.invoke("aws.deploy_lambda", { function: "staging-api" });
     expect(denied.statusCode).toBe(403);
-    const noExpiry = await r.grant("aws.deploy_lambda:staging-*");
-    expect(noExpiry.statusCode).toBe(400);
-    await ok(await r.grant("aws.deploy_lambda:staging-*", { expires_at: tomorrow() }));
+    const stagingGrant = await r.grant("aws.deploy_lambda:staging-*");
+    const stagingGrantResult = await ok(stagingGrant);
+    expect(stagingGrantResult.response.tier).toBe(2);
     await ok(await r.invoke("aws.deploy_lambda", { function: "staging-api" }));
+    expect((await r.events("tool.invoked")).at(-1)!.payload).toMatchObject({
+      capability: "aws.deploy_lambda:staging-api",
+      tier: 2,
+    });
     const prod = await r.invoke("aws.deploy_lambda", { function: "prod-api" });
     expect(prod.statusCode).toBe(403);
-    expect((await r.events("tool.invoked")).at(-1)!.payload).toMatchObject({ tier: 3 });
+    expect((await r.events("capability.denied")).at(-1)!.payload).toMatchObject({
+      missing_capability: "aws.deploy_lambda:prod-api",
+    });
+    await ok(await r.grant("aws.deploy_lambda:prod-*", { expires_at: tomorrow() }));
+    await ok(await r.invoke("aws.deploy_lambda", { function: "prod-api" }));
+    expect((await r.events("tool.invoked")).at(-1)!.payload).toMatchObject({
+      capability: "aws.deploy_lambda:prod-api",
+      tier: 3,
+    });
   });
 
   it("a provider outage is a retryable PROVIDER_UNAVAILABLE, the platform doesn't retry, and nothing a runner throws by accident leaks", async () => {
@@ -302,6 +337,21 @@ describe("tools over HTTP", () => {
     expect(weird.statusCode).toBe(503);
     expect(weird.body).not.toContain("tok_leaky_secret");
     expect(weird.json().error.retryable).toBe(false);
+  });
+
+  it("preserves the GitHub rate-limit code and retry delay from the worker", async () => {
+    const r = await newRoom();
+    await ok(await r.grant("github.create_pull_request:acme/widgets"));
+    const limited = await r.invoke("github.create_pull_request", {
+      repo: "acme/widgets",
+      title: "rate-limited",
+    });
+    expect(limited.statusCode).toBe(429);
+    expect(limited.json().error).toMatchObject({
+      code: "RATE_LIMITED",
+      retryable: true,
+      details: { provider: "github", provider_code: "rate_limited", retry_after: 12 },
+    });
   });
 
   it("the same idempotency key replays the result and doesn't run the tool again", async () => {

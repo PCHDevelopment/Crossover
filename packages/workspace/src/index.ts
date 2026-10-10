@@ -70,6 +70,8 @@ export type {
   SandboxWorkspaceHead,
   SandboxSnapshotEntry,
   SandboxSnapshotFile,
+  SandboxSyncResponse,
+  SandboxSyncResult,
 } from "./execution.js";
 export { DockerExecutionDriver } from "./docker-execution-driver.js";
 export type {
@@ -91,6 +93,7 @@ export { parsePorcelainStatus, registerSandboxStatusCommand } from "./sandbox-st
 export { sandboxStatusParamsSchema } from "./sandbox-status.js";
 export type { SandboxFileChanges } from "./sandbox-status.js";
 export type { SandboxWorkingCopyStatus } from "./execution.js";
+export { registerSandboxSyncCommand, sandboxSyncParamsSchema } from "./sandbox-sync.js";
 export { changesSubmitParamsSchema, registerSandboxSubmitCommand } from "./sandbox-submit.js";
 export type { SandboxSubmitResponse } from "./sandbox-submit.js";
 export * from "./upstream.js";

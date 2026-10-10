@@ -27,6 +27,7 @@ export const CAPABILITIES = {
   "memory.read": { mutating: false },
   "decisions.read": { mutating: false },
   "tools.read": { mutating: false },
+  "integrations.read": { mutating: false },
   "checkpoints.read": { mutating: false },
 
   // ---- presence: the one mutation every role has (ephemeral, self only)
@@ -90,6 +91,7 @@ export const CAPABILITIES = {
   /** Granting Tier 3 capabilities (§21.2): owner only. */
   "capabilities.grant_tier3": { mutating: true },
   "events.redact": { mutating: true },
+  "integrations.manage": { mutating: true },
 } as const satisfies Record<string, { mutating: boolean }>;
 
 export type Capability = keyof typeof CAPABILITIES;
@@ -118,6 +120,7 @@ const READS = [
   "memory.read",
   "decisions.read",
   "tools.read",
+  "integrations.read",
   "checkpoints.read",
 ] as const satisfies readonly Capability[];
 
@@ -227,12 +230,13 @@ const OWNER_POWERS = [
   "conflicts.abandon",
   "capabilities.grant_tier3",
   "events.redact",
+  "integrations.manage",
 ] as const satisfies readonly Capability[];
 
 /**
  * What each authority level can do on top of its role's bundle (§6.2). Only humans can be
  * owner or admin (D8, enforced by the database). Owner-only: freeze/resume/archive, Tier 3
- * grants, and redaction.
+ * grants, redaction, and managing room integrations.
  */
 export const AUTHORITY_POWERS: Readonly<Record<Authority, ReadonlySet<Capability>>> = {
   OWNER: new Set<Capability>(OWNER_POWERS),

@@ -1,13 +1,16 @@
 import type { CommandContext, CommandResult, Dispatcher, EmittedEvent } from "@crossover/kernel";
+import { deliverInbox } from "@crossover/kernel";
 import { CrossoverError, newId } from "@crossover/protocol";
+import { fingerprint, scanSecrets, type SecretFinding } from "@crossover/security";
 import { changesetParamsSchema, type ChangesetParams } from "./changeset.js";
 import { classifyConflicts, type ClassifiedConflict } from "./conflicts.js";
 import { git } from "./git.js";
 import { materialize } from "./materialize.js";
 import { merge } from "./merge.js";
-import type { Operation } from "./operations.js";
+import type { ContentEncoding, Operation } from "./operations.js";
 import { treeChanges } from "./tree-changes.js";
 import { updateCanonicalRef } from "./reconcile.js";
+import { UPSTREAM_ACTOR } from "./upstream-import.js";
 import { registerWorkspaceReads } from "./reads.js";
 import { registerWorkspaceHistory } from "./history.js";
 import { registerWorkspaceBlame } from "./blame.js";
@@ -19,6 +22,7 @@ import { registerWorkspaceHealthReads } from "./health-events.js";
 import { parseConflicts } from "./parse-check.js";
 import { registerCheckpointExport } from "./checkpoint-export.js";
 import { registerCheckpointCommands } from "./checkpoints.js";
+import { recordWorkspaceRevision } from "./revision.js";
 import { registerGitImport, type UpstreamDeps } from "./upstream-import.js";
 import {
   advanceUpstreamAfterResolution,
@@ -37,6 +41,8 @@ export interface WorkspaceCommandDeps {
   parseConflicts?: typeof parseConflicts;
   /** Schedule health for an applied head after its transaction commits. */
   scheduleHealthCheck?: (roomId: string, revision: number) => void;
+  /** Coalesce sandbox reconciliation work after a canonical revision commits. */
+  scheduleSandboxAdvance?: (roomId: string, revision: number) => void;
   /** How `git.import` reaches an upstream: the fetcher, the credentials, the host check. */
   upstream?: UpstreamDeps;
 }
@@ -82,6 +88,7 @@ export function registerWorkspaceCommands(
     ...(deps.updateCanonicalRef ? { updateCanonicalRef: deps.updateCanonicalRef } : {}),
     ...(deps.refreshSearchTree ? { refreshSearchTree: deps.refreshSearchTree } : {}),
     ...(deps.scheduleHealthCheck ? { scheduleHealthCheck: deps.scheduleHealthCheck } : {}),
+    ...(deps.scheduleSandboxAdvance ? { scheduleSandboxAdvance: deps.scheduleSandboxAdvance } : {}),
   });
 }
 
@@ -103,6 +110,259 @@ export interface ApplyExtras {
       changed_paths: readonly string[];
     },
   ) => Promise<{ events?: EmittedEvent[]; afterCommit?: () => void | Promise<void> }>;
+}
+
+/** A scanner finding tagged with the ChangeSet path it came from. */
+interface PathFinding extends SecretFinding {
+  path: string;
+}
+
+/** At most this many findings are reported per ChangeSet (details and inbox). */
+const MAX_FINDINGS_PER_CHANGESET = 100;
+
+/**
+ * Total bytes scanned across all files in one ChangeSet. Beyond this the
+ * remaining files are reported as `scan_skipped` so a large ChangeSet cannot
+ * block the event loop for seconds of synchronous regex. Distinct from the
+ * scanner's per-file MAX_SCAN_BYTES (2 MiB): this bounds the whole ChangeSet.
+ */
+const MAX_SCAN_TOTAL_BYTES = 8 * 1024 * 1024;
+
+/** Decode an operation's content to the text the scanner reads. */
+function decodeContent(content: string | Buffer, encoding?: ContentEncoding): string {
+  if (Buffer.isBuffer(content)) return content.toString("utf8");
+  if (encoding === "base64") return Buffer.from(content, "base64").toString("utf8");
+  return content;
+}
+
+/** Every line of `text` is added (a new file has no base to differ from). */
+const allLines = (text: string): Set<number> => {
+  const n = text === "" ? 0 : text.split("\n").length;
+  const s = new Set<number>();
+  for (let i = 1; i <= n; i++) s.add(i);
+  return s;
+};
+
+/**
+ * Reconstruct the new-file text from a unified diff, padded so text line N is
+ * new-file line N, and return the set of added (`+`) line numbers. Context lines
+ * are kept so multi-line structures (a private-key block) stay intact; removals
+ * are dropped, so a patch that deletes a secret no longer trips the scanner.
+ *
+ * `---`/`+++` are file headers only before the first hunk; once a hunk has
+ * started, a line beginning with `+` is an added line even if its content
+ * itself starts with `+` (e.g. `+++foo`), so it is not mistaken for a header.
+ */
+function patchAddedText(patch: string): { text: string; addedLines: Set<number> } {
+  const out: string[] = [];
+  const addedLines = new Set<number>();
+  let newLine = 0;
+  let inHunk = false;
+  for (const raw of patch.split("\n")) {
+    const hunk = raw.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+    if (hunk) {
+      const start = Number(hunk[1]);
+      while (out.length < start - 1) out.push("");
+      newLine = start - 1;
+      inHunk = true;
+      continue;
+    }
+    if (!inHunk) continue; // file headers (and any preamble) before the first hunk
+    if (raw.startsWith("+")) {
+      newLine++;
+      out.push(raw.slice(1));
+      addedLines.add(newLine);
+    } else if (raw.startsWith(" ") || raw === "") {
+      newLine++;
+      out.push(raw.startsWith(" ") ? raw.slice(1) : "");
+    }
+  }
+  return { text: out.join("\n"), addedLines };
+}
+
+/**
+ * The new-file line numbers that differ from the base version. A common prefix
+ * and suffix are unchanged; everything between is treated as added. Keeps a
+ * pre-existing secret (an imported repo, a fixture) from wedging an edit that
+ * doesn't touch it.
+ */
+function addedLinesForContent(base: string, next: string): Set<number> {
+  const baseLines = base.split("\n");
+  const nextLines = next.split("\n");
+  let prefix = 0;
+  const minLen = Math.min(baseLines.length, nextLines.length);
+  while (prefix < minLen && baseLines[prefix] === nextLines[prefix]) prefix++;
+  let suffix = 0;
+  while (
+    suffix < minLen - prefix &&
+    baseLines[baseLines.length - 1 - suffix] === nextLines[nextLines.length - 1 - suffix]
+  )
+    suffix++;
+  const added = new Set<number>();
+  for (let i = prefix; i < nextLines.length - suffix; i++) added.add(i + 1);
+  return added;
+}
+
+/**
+ * Read the base versions of multiple files in a single `git cat-file --batch`
+ * call. The `<commit>:<path>` refs are fed on stdin (not argv), so non-ASCII
+ * paths are not C-quoted by an intermediate `ls-tree` and big ChangeSets do not
+ * overflow argv.
+ *
+ * A path containing a newline is left out of the batch and given base "" (so
+ * it is scanned whole): `cat-file --batch` reads one ref per line, so a newline
+ * in the path would split it into two refs and shift every later file's base.
+ * That is the fail-safe direction — a false positive only for a path with such
+ * a strange name.
+ *
+ * Exactly one header is expected per ref written; any other count is an error
+ * (a desync would silently assign the wrong base to later files). A missing
+ * object yields a `missing` line and maps to ""; a cat-file error propagates
+ * (the apply fails UNAVAILABLE) rather than treating every line as added.
+ */
+async function readBaseFiles(
+  repoPath: string,
+  commit: string,
+  paths: string[],
+): Promise<Map<string, string>> {
+  const result = new Map<string, string>();
+  for (const p of paths) result.set(p, "");
+  if (paths.length === 0) return result;
+  // Only paths without a newline can be sent as one ref per line.
+  const batchPaths = paths.filter((p) => !p.includes("\n"));
+  if (batchPaths.length === 0) return result;
+  const refs = batchPaths.map((p) => `${commit}:${p}`);
+  // cat-file --batch prints, in input order, either
+  //   "<oid> SP <type> SP <size> LF <content> LF"   (object present)
+  // or
+  //   "<ref> SP missing LF"                          (object absent)
+  // The content is exactly <size> bytes. A buffer keeps byte offsets exact.
+  const { stdout } = await git(["cat-file", "--batch"], {
+    cwd: repoPath,
+    timeoutMs: 10_000,
+    encoding: "buffer",
+    input: refs.join("\n") + "\n",
+  });
+  const buf = stdout as Buffer;
+  let offset = 0;
+  for (let i = 0; i < batchPaths.length; i++) {
+    const path = batchPaths[i]!;
+    const nl = buf.indexOf(0x0a, offset);
+    if (nl < 0) {
+      // Fewer headers than refs: the batch desynced. Fail rather than assign
+      // the wrong base to the remaining files.
+      throw new CrossoverError(
+        "PROVIDER_UNAVAILABLE",
+        "git cat-file --batch returned fewer headers than refs",
+      );
+    }
+    const header = buf.toString("utf8", offset, nl);
+    offset = nl + 1;
+    if (header.endsWith(" missing")) {
+      result.set(path, "");
+      continue;
+    }
+    const size = Number(header.split(" ")[2]);
+    if (!Number.isInteger(size) || size < 0) {
+      throw new CrossoverError(
+        "PROVIDER_UNAVAILABLE",
+        "git cat-file --batch returned a malformed header",
+      );
+    }
+    result.set(path, buf.toString("utf8", offset, offset + size));
+    offset += size + 1; // content + trailing LF
+  }
+  return result;
+}
+
+/** The scannable text of one operation, with the lines the ChangeSet adds. */
+function operationScanTargets(
+  op: Operation,
+  baseFiles: Map<string, string>,
+): Array<{ path: string; text: string; addedLines: Set<number> }> {
+  if (op.type === "delete") return [];
+  if (op.type === "rename") {
+    if (op.content === undefined) return [];
+    const text = decodeContent(op.content, op.encoding);
+    return [{ path: op.to, text, addedLines: allLines(text) }];
+  }
+  if (op.type === "modify") {
+    if (op.patch !== undefined) {
+      const { text, addedLines } = patchAddedText(op.patch);
+      return [{ path: op.path, text, addedLines }];
+    }
+    if (op.content === undefined) return [];
+    const text = decodeContent(op.content, op.encoding);
+    const base = baseFiles.get(op.path) ?? "";
+    return [{ path: op.path, text, addedLines: addedLinesForContent(base, text) }];
+  }
+  // create
+  if (op.content === undefined) return [];
+  const text = decodeContent(op.content, op.encoding);
+  return [{ path: op.path, text, addedLines: allLines(text) }];
+}
+
+/**
+ * Scan every operation; split findings by confidence, each tagged with its
+ * path. Base file contents are read in a single `git cat-file --batch` (not one
+ * `git show` per file). The event loop is yielded to between files, and the
+ * total bytes scanned is bounded by MAX_SCAN_TOTAL_BYTES: once the budget is
+ * spent, remaining files are reported as `scan_skipped` rather than scanned,
+ * so a large ChangeSet cannot block the node for seconds of synchronous regex.
+ */
+async function scanChangeSet(
+  operations: Operation[],
+  baseCommit: string,
+  repoPath: string,
+): Promise<{ high: PathFinding[]; low: PathFinding[] }> {
+  // Read every base file the ChangeSet needs in one batched git call.
+  const basePaths = operations
+    .filter((op) => op.type === "modify" && op.patch === undefined && op.content !== undefined)
+    .map((op) => (op as { path: string }).path);
+  const baseFiles = await readBaseFiles(repoPath, baseCommit, basePaths);
+  const high: PathFinding[] = [];
+  const low: PathFinding[] = [];
+  let totalBytes = 0;
+  for (const op of operations) {
+    // Yield to the event loop between files so a large ChangeSet does not
+    // block the node while the (synchronous) scanner runs.
+    await new Promise((resolve) => setImmediate(resolve));
+    for (const { path, text, addedLines } of operationScanTargets(op, baseFiles)) {
+      const bytes = Buffer.byteLength(text, "utf8");
+      if (totalBytes + bytes > MAX_SCAN_TOTAL_BYTES) {
+        low.push({
+          rule: "scan_skipped",
+          confidence: "low",
+          path,
+          line: 1,
+          col: 1,
+          fingerprint: fingerprint(`skipped:${text.length}`),
+        });
+        continue;
+      }
+      totalBytes += bytes;
+      for (const finding of scanSecrets(text, { path, addedLines })) {
+        (finding.confidence === "high" ? high : low).push({ ...finding, path });
+      }
+    }
+  }
+  return { high, low };
+}
+
+/**
+ * Inbox summary for flagged findings. Names the file, line and rule — never the
+ * matched value, which the scanner already withholds. `scan_skipped` files are
+ * noted separately (too large to scan, so unchecked); `omitted` counts findings
+ * dropped by the per-ChangeSet cap.
+ */
+function secretScanSummary(findings: PathFinding[], omitted: number): string {
+  const secrets = findings.filter((f) => f.rule !== "scan_skipped");
+  const skipped = findings.filter((f) => f.rule === "scan_skipped");
+  const shown = secrets.slice(0, 5).map((f) => `${f.path}:${f.line} (${f.rule})`);
+  const more = secrets.length > 5 ? ` (+${secrets.length - 5} more)` : "";
+  const skippedNote = skipped.length > 0 ? ` ${skipped.length} file(s) too large to scan.` : "";
+  const omittedNote = omitted > 0 ? ` ${omitted} more omitted.` : "";
+  return `Secret scan: ${shown.join(", ")}${more}${skippedNote}${omittedNote} Review before this change ships.`;
 }
 
 export async function apply(
@@ -128,12 +388,69 @@ export async function apply(
     operations.flatMap((op) => (op.type === "rename" ? [op.from, op.to] : [op.path])),
   );
   for (const path of touched) await ctx.authorize("workspace.write", { path });
+  // Step 2: secret scan (§23.3, T901). The base commit and repo path are read
+  // WITHOUT the workspace lock, so a slow scan (a large file, a long identifier
+  // run) does not hold the FOR UPDATE lock and block other writers. The base
+  // commit is fixed by params.base_workspace_revision and the repo path is set
+  // at provisioning, so neither changes between the unlocked read and the locked
+  // write below. High confidence blocks the ChangeSet with VALIDATION naming the
+  // file and line; low confidence is applied, then flagged to the author and the
+  // room owner via inbox. Upstream pulls are never blocked — the room doesn't
+  // control upstream content — so every finding there is flagged instead, and
+  // never addressed to the non-participant `system:upstream` actor. The value is
+  // never echoed.
+  const ws0 = await client.query<{ id: string; repo_path: string }>(
+    "SELECT id, repo_path FROM workspaces WHERE room_id = $1",
+    [room_id],
+  );
+  const ws0row = ws0.rows[0];
+  if (!ws0row) throw new CrossoverError("NOT_FOUND", "Workspace not provisioned");
+  const base0 = await client.query<{ commit_sha: string }>(
+    `SELECT commit_sha FROM workspace_revisions
+     WHERE room_id = $1 AND workspace_id = $2 AND revision = $3`,
+    [room_id, ws0row.id, params.base_workspace_revision],
+  );
+  const base0row = base0.rows[0];
+  if (!base0row) throw new CrossoverError("VALIDATION", "Unknown workspace revision");
+  const secrets = await scanChangeSet(operations, base0row.commit_sha, ws0row.repo_path);
+  const isUpstream = actorId === UPSTREAM_ACTOR;
+  if (!isUpstream && secrets.high.length > 0) {
+    const shown = secrets.high.slice(0, MAX_FINDINGS_PER_CHANGESET);
+    const omitted = secrets.high.length - shown.length;
+    throw new CrossoverError("VALIDATION", "ChangeSet contains a high-confidence secret", {
+      details: {
+        reason: "secret_detected",
+        findings: shown.map((f) => ({
+          rule: f.rule,
+          path: f.path,
+          line: f.line,
+          col: f.col,
+          fingerprint: f.fingerprint,
+        })),
+        ...(omitted > 0 ? { omitted } : {}),
+      },
+    });
+  }
+  // Now acquire the workspace lock for the write.
   const workspace = await client.query<{ id: string; repo_path: string }>(
     "SELECT id, repo_path FROM workspaces WHERE room_id = $1 FOR UPDATE",
     [room_id],
   );
   const ws = workspace.rows[0];
   if (!ws) throw new CrossoverError("NOT_FOUND", "Workspace not provisioned");
+  const headRow = await client.query<{ revision: string; commit_sha: string }>(
+    `SELECT revision, commit_sha FROM workspace_revisions
+     WHERE room_id = $1 AND workspace_id = $2 ORDER BY revision DESC LIMIT 1`,
+    [room_id, ws.id],
+  );
+  const baseRow = await client.query<{ commit_sha: string }>(
+    `SELECT commit_sha FROM workspace_revisions
+     WHERE room_id = $1 AND workspace_id = $2 AND revision = $3`,
+    [room_id, ws.id, params.base_workspace_revision],
+  );
+  const head = headRow.rows[0];
+  const base = baseRow.rows[0];
+  if (!head || !base) throw new CrossoverError("VALIDATION", "Unknown workspace revision");
   let resolution:
     | {
         conflictId: string;
@@ -188,19 +505,6 @@ export async function apply(
       leadParticipantId: conflict.lead_participant_id,
     };
   }
-  const headRow = await client.query<{ revision: string; commit_sha: string }>(
-    `SELECT revision, commit_sha FROM workspace_revisions
-     WHERE room_id = $1 AND workspace_id = $2 ORDER BY revision DESC LIMIT 1`,
-    [room_id, ws.id],
-  );
-  const baseRow = await client.query<{ commit_sha: string }>(
-    `SELECT commit_sha FROM workspace_revisions
-     WHERE room_id = $1 AND workspace_id = $2 AND revision = $3`,
-    [room_id, ws.id, params.base_workspace_revision],
-  );
-  const head = headRow.rows[0];
-  const base = baseRow.rows[0];
-  if (!head || !base) throw new CrossoverError("VALIDATION", "Unknown workspace revision");
   const revision = Number(head.revision) + 1;
   if (!Number.isSafeInteger(revision))
     throw new CrossoverError("VALIDATION", "Workspace revision limit reached");
@@ -412,10 +716,15 @@ export async function apply(
       },
     })
   ).stdout.trim();
-  await client.query(
-    `INSERT INTO workspace_revisions (workspace_id, room_id, revision, commit_sha, changeset_id)
-     VALUES ($1,$2,$3,$4,$5)`,
-    [ws.id, room_id, revision, commit, id],
+  await recordWorkspaceRevision(
+    client,
+    { workspace_id: ws.id, room_id, revision, commit_sha: commit, changeset_id: id },
+    {
+      afterCommit: (callback) => ctx.afterCommit(callback),
+      ...(deps.scheduleSandboxAdvance
+        ? { scheduleSandboxAdvance: deps.scheduleSandboxAdvance }
+        : {}),
+    },
   );
   for (const { path, blob } of changedFiles) {
     await client.query(
@@ -430,6 +739,33 @@ export async function apply(
      WHERE room_id = $1 AND id = $2`,
     [room_id, id, revision],
   );
+  // Flagged secrets: for a normal apply, the low-confidence findings (high
+  // confidence already threw); for an upstream pull, every finding, since the
+  // pull is never blocked. `scan_skipped` is included so a file too large to
+  // scan is not silently unchecked. The summary names file and line, never the
+  // value.
+  const toFlag = isUpstream ? [...secrets.high, ...secrets.low] : secrets.low;
+  if (toFlag.length > 0) {
+    const { rows } = await client.query<{ owner_id: string }>(
+      "SELECT owner_id FROM rooms WHERE id = $1",
+      [room_id],
+    );
+    const owner_id = rows[0]?.owner_id;
+    // Never address an item to a non-participant actor (e.g. system:upstream);
+    // for an upstream pull the recipient is the participant who triggered it.
+    const actor = isUpstream ? ctx.principal.participant_id : actorId;
+    const recipients = new Set([actor, owner_id].filter((x): x is string => Boolean(x)));
+    const shown = toFlag.slice(0, MAX_FINDINGS_PER_CHANGESET);
+    const omitted = toFlag.length - shown.length;
+    for (const recipient of recipients) {
+      await deliverInbox(client, room_id, recipient, {
+        kind: "SECRET_SCAN",
+        ref: { kind: "changeset", id },
+        summary: secretScanSummary(shown, omitted),
+        author_id: "system",
+      });
+    }
+  }
   if (resolution) {
     await client.query(
       `UPDATE conflicts SET status = 'RESOLVED', resolver_id = $3,

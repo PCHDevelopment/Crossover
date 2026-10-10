@@ -1,6 +1,17 @@
 import type { Pool } from "@crossover/db";
 import { withTransaction } from "@crossover/db";
+import type { EditIntent } from "@crossover/kernel";
 import { CrossoverError, newId } from "@crossover/protocol";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { isAbsolute, join, resolve } from "node:path";
+import { ignoredWorkspacePaths } from "./ignore.js";
+import { git } from "./git.js";
+import { materialize } from "./materialize.js";
+import { merge } from "./merge.js";
+import { normalizePath } from "./path.js";
+import { createSandboxFileChangesAccumulator } from "./sandbox-status.js";
+import type { Operation } from "./operations.js";
 import type { SandboxFileChanges } from "./sandbox-status.js";
 
 const SANDBOX_IDLE_MS = 30 * 60 * 1000;
@@ -9,6 +20,7 @@ const SWEEP_BATCH_SIZE = 100;
 const DESTROY_RETRY_MS = 60 * 1000;
 const HIBERNATION_RECOVERY_MS = 60 * 1000;
 const TRANSITION_POLL_MS = 10;
+const MAX_AUTO_SYNC_BYTES = 64 * 1024 * 1024;
 
 export type SandboxStatus =
   "CREATING" | "STARTING" | "RUNNING" | "HIBERNATING" | "HIBERNATED" | "DESTROYING" | "DESTROYED";
@@ -150,6 +162,33 @@ export interface ExecutionServiceOptions {
   diskEnforcement?: DiskEnforcementMode;
   /** Test seam for a failure after Docker resources exist but before their refs are persisted. */
   afterDriverCreate?: (sandbox: SandboxRecord) => Promise<void>;
+  /** Canonical paths readable by the participant whose own status is being reported. */
+  readablePaths?: (
+    roomId: string,
+    participantId: string,
+    paths: readonly string[],
+  ) => Promise<string[]>;
+  /** Current room edit intents included in sandbox.behind. */
+  listIntents?: (roomId: string) => Promise<EditIntent[]>;
+}
+
+export interface SandboxAdvanceEvent {
+  type: "sandbox.behind" | "sandbox.synced";
+  actor_id: "system";
+  payload: Record<string, unknown>;
+}
+
+export type SandboxSyncResponse =
+  | { synced_to: number; conflicted_paths?: string[] }
+  | {
+      base_revision: number;
+      head_revision: number;
+      reason: "process_running" | "status_truncated" | "unsupported_local_change";
+    };
+
+export interface SandboxSyncResult {
+  response: SandboxSyncResponse;
+  event?: SandboxAdvanceEvent;
 }
 
 let softEnforcementWarningLogged = false;
@@ -166,6 +205,11 @@ export class ExecutionService {
     { room_id: string; participant_id: string; sandbox_id: string; process: SandboxExecProcess }
   >();
   private readonly pendingExecs = new Map<string, PendingSandboxExec>();
+  private readonly pendingAdvances = new Map<string, number>();
+  private readonly pendingAdvanceSkips = new Map<string, Map<string, number>>();
+  private readonly advanceWorkers = new Map<string, Promise<void>>();
+  private sandboxEventSink:
+    ((roomId: string, events: readonly SandboxAdvanceEvent[]) => Promise<void>) | undefined;
 
   constructor(
     private readonly pool: Pool,
@@ -185,9 +229,14 @@ export class ExecutionService {
 
   /** Create lazily, or resume, the one sandbox owned by this room participant. */
   async ensure(roomId: string, participantId: string): Promise<SandboxRecord> {
-    return this.withEnsureLock(roomId, participantId, () =>
-      this.ensureExclusive(roomId, participantId),
-    );
+    let woke = false;
+    const sandbox = await this.withEnsureLock(roomId, participantId, async () => {
+      const previous = await this.get(roomId, participantId);
+      woke = previous?.status === "HIBERNATED" || previous?.status === "HIBERNATING";
+      return this.ensureExclusive(roomId, participantId);
+    });
+    if (woke) this.scheduleLatestCanonical(roomId);
+    return sandbox;
   }
 
   /** Serialize snapshot preparation with lifecycle transitions, while keeping I/O off SQL locks. */
@@ -196,10 +245,15 @@ export class ExecutionService {
     participantId: string,
     work: (sandbox: SandboxRecord) => Promise<T>,
   ): Promise<T> {
-    return this.withEnsureLock(roomId, participantId, async () => {
+    let woke = false;
+    const result = await this.withEnsureLock(roomId, participantId, async () => {
+      const previous = await this.get(roomId, participantId);
+      woke = previous?.status === "HIBERNATED" || previous?.status === "HIBERNATING";
       const sandbox = await this.ensureExclusive(roomId, participantId);
       return work(sandbox);
     });
+    if (woke) this.scheduleLatestCanonical(roomId);
+    return result;
   }
 
   supportsSandboxSubmit(): boolean {
@@ -210,6 +264,51 @@ export class ExecutionService {
 
   supportsSandboxExec(): boolean {
     return Boolean(this.driver.exec);
+  }
+
+  /** Enqueue the latest canonical revision; one room worker coalesces bursts of commits. */
+  scheduleCanonicalAdvance(roomId: string, revision: number, skipParticipantId?: string): void {
+    this.pendingAdvances.set(roomId, Math.max(this.pendingAdvances.get(roomId) ?? 0, revision));
+    if (skipParticipantId) {
+      const skipped = this.pendingAdvanceSkips.get(roomId) ?? new Map<string, number>();
+      skipped.set(skipParticipantId, Math.max(skipped.get(skipParticipantId) ?? 0, revision));
+      this.pendingAdvanceSkips.set(roomId, skipped);
+    }
+    if (!this.advanceWorkers.has(roomId))
+      setImmediate(() => this.startCanonicalAdvanceWorker(roomId));
+  }
+
+  setSandboxEventSink(
+    sink: (roomId: string, events: readonly SandboxAdvanceEvent[]) => Promise<void>,
+  ): void {
+    this.sandboxEventSink = sink;
+  }
+
+  private async drainCanonicalAdvances(roomId: string): Promise<void> {
+    while (this.pendingAdvances.has(roomId)) {
+      const requestedRevision = this.pendingAdvances.get(roomId)!;
+      this.pendingAdvances.delete(roomId);
+      const skipped = this.pendingAdvanceSkips.get(roomId) ?? new Map<string, number>();
+      this.pendingAdvanceSkips.delete(roomId);
+      try {
+        await this.reconcileRoomSandboxes(roomId, requestedRevision, skipped);
+      } catch (error) {
+        console.error("Failed to reconcile sandboxes after a canonical advance", {
+          room_id: roomId,
+          revision: requestedRevision,
+          error,
+        });
+      }
+    }
+  }
+
+  private startCanonicalAdvanceWorker(roomId: string): void {
+    if (this.advanceWorkers.has(roomId) || !this.pendingAdvances.has(roomId)) return;
+    const worker = this.drainCanonicalAdvances(roomId).finally(() => {
+      this.advanceWorkers.delete(roomId);
+      if (this.pendingAdvances.has(roomId)) this.startCanonicalAdvanceWorker(roomId);
+    });
+    this.advanceWorkers.set(roomId, worker);
   }
 
   /** Reserve capacity before the command commits its started event. */
@@ -348,6 +447,8 @@ export class ExecutionService {
           this.withEnsureLock(input.room_id, input.participant_id, async () => {
             const active = this.activeExecs.get(input.exec_id);
             if (active?.process === process) this.activeExecs.delete(input.exec_id);
+            const head = await this.workspaceHead(input.room_id).catch(() => undefined);
+            if (head) this.scheduleCanonicalAdvance(input.room_id, head.revision);
           }),
         )
         .catch((error: unknown) => console.error("Failed to clear completed sandbox exec", error));
@@ -482,34 +583,430 @@ export class ExecutionService {
     deletePaths: readonly string[],
   ): Promise<"advanced" | "process_running"> {
     return this.withSandboxLock(roomId, participantId, async (sandbox) => {
-      if (sandbox.base_revision !== expectedBaseRevision)
-        throw new CrossoverError(
-          "CONFLICT_VERSION",
-          "Sandbox base changed; sync before submitting",
-        );
-      if (!sandbox.volume_ref || !sandbox.container_ref || !this.driver.updateSnapshot)
-        throw new CrossoverError("UNAVAILABLE", "Sandbox working copy cannot be advanced");
-      if (this.activeCount(sandbox.id) > 0) return "process_running";
-      await this.driver.updateSnapshot({
-        sandbox_id: sandbox.id,
-        resources: { volume_ref: sandbox.volume_ref, container_ref: sandbox.container_ref },
+      return this.advanceWorkingCopyLocked(
+        sandbox,
+        expectedBaseRevision,
+        nextBaseRevision,
         files,
-        delete_paths: deletePaths,
-      });
-      const { rowCount } = await withTransaction(this.pool, (client) =>
-        client.query(
-          `UPDATE sandboxes SET base_revision = $4, updated_at = clock_timestamp()
-           WHERE id = $1 AND room_id = $2 AND participant_id = $3 AND base_revision = $5`,
-          [sandbox.id, roomId, participantId, nextBaseRevision, expectedBaseRevision],
-        ),
+        deletePaths,
       );
-      if (rowCount !== 1)
-        throw new CrossoverError(
-          "CONFLICT_VERSION",
-          "Sandbox base changed while it was being advanced",
-        );
-      return "advanced";
     });
+  }
+
+  /** Rebase a participant's local changes onto the latest canonical head on explicit sync. */
+  async syncWorkingCopy(roomId: string, participantId: string): Promise<SandboxSyncResult> {
+    return this.withSandboxLock(roomId, participantId, async (sandbox) => {
+      if (sandbox.base_revision === null || !sandbox.volume_ref || !sandbox.container_ref)
+        throw new CrossoverError("CONFLICT_VERSION", "Sandbox workspace is not ready");
+      const head = await this.canonicalHead(roomId);
+      if (sandbox.base_revision > head.revision)
+        throw new CrossoverError("CONFLICT_VERSION", "Sandbox base is ahead of the workspace");
+      if (sandbox.base_revision === head.revision)
+        return { response: { synced_to: head.revision } };
+
+      const base = await this.workspaceRevision(roomId, sandbox.base_revision);
+      const changedPaths = await changedWorkspacePaths(
+        base.repo_path,
+        base.commit_sha,
+        head.commit_sha,
+      );
+      const visibleChanged = await this.readablePaths(roomId, participantId, changedPaths);
+      const working = await this.snapshotChanges(sandbox, base.repo_path, base.commit_sha);
+      const localPaths = [...working.modified, ...working.added, ...working.deleted];
+      const visibleLocal = await this.readablePaths(roomId, participantId, localPaths);
+      const overlaps = visibleChanged.some((path) =>
+        visibleLocal.some((local) => pathsOverlap(path, local)),
+      );
+      const intents = await this.filteredIntents(roomId, participantId);
+      const behindPayload = {
+        participant_id: participantId,
+        behind_by: Math.max(0, head.revision - sandbox.base_revision),
+        changed_paths: visibleChanged,
+        overlaps_local_changes: overlaps || working.truncated,
+        intents,
+      };
+      const behind = (reason: string): SandboxAdvanceEvent => ({
+        type: "sandbox.behind",
+        actor_id: "system",
+        payload: { ...behindPayload, reason },
+      });
+      const blocked = (
+        reason: Extract<SandboxSyncResponse, { reason: string }>["reason"],
+      ): SandboxSyncResult => ({
+        response: {
+          base_revision: sandbox.base_revision!,
+          head_revision: head.revision,
+          reason,
+        },
+        event: behind(reason),
+      });
+
+      if (this.activeCount(sandbox.id) > 0) return blocked("process_running");
+      if (working.truncated) return blocked("status_truncated");
+      if (
+        !this.driver.updateSnapshot ||
+        !this.driver.snapshotInventory ||
+        !this.driver.readSnapshotFiles
+      )
+        return blocked("unsupported_local_change");
+
+      const rebased = await this.rebaseHumanWorkingCopy(sandbox, base, head, working);
+      if (!rebased) return blocked("unsupported_local_change");
+      const conflictedPaths = await this.readablePaths(
+        roomId,
+        participantId,
+        rebased.conflicted_paths,
+      );
+      const delta = filterSnapshotDelta(
+        rebased.delta,
+        new Set([...visibleChanged, ...visibleLocal]),
+      );
+      const advanced = await this.advanceWorkingCopyLocked(
+        sandbox,
+        sandbox.base_revision,
+        head.revision,
+        delta.files,
+        delta.delete_paths,
+      );
+      if (advanced === "process_running") return blocked("process_running");
+
+      return {
+        response: {
+          synced_to: head.revision,
+          ...(conflictedPaths.length ? { conflicted_paths: conflictedPaths } : {}),
+        },
+        event: {
+          type: "sandbox.synced",
+          actor_id: "system",
+          payload: {
+            participant_id: participantId,
+            base_revision: head.revision,
+            ...(conflictedPaths.length ? { conflicted_paths: conflictedPaths } : {}),
+          },
+        },
+      };
+    });
+  }
+
+  private async advanceWorkingCopyLocked(
+    sandbox: SandboxRecord,
+    expectedBaseRevision: number,
+    nextBaseRevision: number,
+    files: readonly Pick<SandboxSnapshotFile, "path" | "mode" | "content">[],
+    deletePaths: readonly string[],
+  ): Promise<"advanced" | "process_running"> {
+    if (sandbox.base_revision !== expectedBaseRevision)
+      throw new CrossoverError("CONFLICT_VERSION", "Sandbox base changed; sync before submitting");
+    if (!sandbox.volume_ref || !sandbox.container_ref || !this.driver.updateSnapshot)
+      throw new CrossoverError("UNAVAILABLE", "Sandbox working copy cannot be advanced");
+    if (this.activeCount(sandbox.id) > 0) return "process_running";
+    await this.driver.updateSnapshot({
+      sandbox_id: sandbox.id,
+      resources: { volume_ref: sandbox.volume_ref, container_ref: sandbox.container_ref },
+      files,
+      delete_paths: deletePaths,
+    });
+    const { rowCount } = await withTransaction(this.pool, (client) =>
+      client.query(
+        `UPDATE sandboxes SET base_revision = $4, updated_at = clock_timestamp()
+         WHERE id = $1 AND room_id = $2 AND participant_id = $3 AND base_revision = $5`,
+        [
+          sandbox.id,
+          sandbox.room_id,
+          sandbox.participant_id,
+          nextBaseRevision,
+          expectedBaseRevision,
+        ],
+      ),
+    );
+    if (rowCount !== 1)
+      throw new CrossoverError(
+        "CONFLICT_VERSION",
+        "Sandbox base changed while it was being advanced",
+      );
+    return "advanced";
+  }
+
+  private async reconcileRoomSandboxes(
+    roomId: string,
+    requestedRevision: number,
+    skippedParticipants: ReadonlyMap<string, number>,
+  ): Promise<void> {
+    const head = await this.canonicalHead(roomId);
+    if (head.revision < requestedRevision) return;
+    const { rows } = await this.pool.query<SandboxRow & { kind: "HUMAN" | "AGENT" }>(
+      `SELECT s.id, s.room_id, s.participant_id, s.status, s.limits, s.base_revision,
+              s.volume_ref, s.container_ref, s.last_active_at, s.updated_at, p.kind
+       FROM sandboxes s JOIN participants p ON p.id = s.participant_id AND p.room_id = s.room_id
+       WHERE s.room_id = $1 AND s.status = 'RUNNING' AND s.base_revision IS NOT NULL
+         AND s.base_revision < $2 AND s.volume_ref IS NOT NULL AND s.container_ref IS NOT NULL
+         AND p.status = 'ACTIVE'
+       ORDER BY s.participant_id`,
+      [roomId, head.revision],
+    );
+    const events: SandboxAdvanceEvent[] = [];
+    for (const row of rows) {
+      if ((skippedParticipants.get(row.participant_id) ?? 0) >= head.revision) continue;
+      try {
+        events.push(...(await this.reconcileSandbox(row, head)));
+      } catch (error) {
+        console.error("Failed to reconcile one sandbox", {
+          room_id: roomId,
+          participant_id: row.participant_id,
+          revision: head.revision,
+          error,
+        });
+        events.push({
+          type: "sandbox.behind",
+          actor_id: "system",
+          payload: {
+            participant_id: row.participant_id,
+            behind_by: Math.max(0, head.revision - (row.base_revision ?? head.revision)),
+            changed_paths: [],
+            overlaps_local_changes: true,
+            intents: [],
+            reason: "advance_failed",
+          },
+        });
+      }
+    }
+    if (events.length && this.sandboxEventSink)
+      await this.sandboxEventSink(roomId, events).catch((error: unknown) =>
+        console.error("Failed to publish sandbox advance events", { room_id: roomId, error }),
+      );
+  }
+
+  private async reconcileSandbox(
+    row: SandboxRow & { kind: "HUMAN" | "AGENT" },
+    head: { repo_path: string; revision: number; commit_sha: string },
+  ): Promise<SandboxAdvanceEvent[]> {
+    return this.withEnsureLock(row.room_id, row.participant_id, async () => {
+      const sandbox = await this.get(row.room_id, row.participant_id);
+      if (
+        !sandbox ||
+        sandbox.status !== "RUNNING" ||
+        sandbox.base_revision === null ||
+        sandbox.base_revision >= head.revision ||
+        !sandbox.volume_ref ||
+        !sandbox.container_ref
+      )
+        return [];
+      const base = await this.workspaceRevision(row.room_id, sandbox.base_revision);
+      const changedPaths = await changedWorkspacePaths(
+        head.repo_path,
+        base.commit_sha,
+        head.commit_sha,
+      );
+      const visibleChanged = await this.readablePaths(
+        row.room_id,
+        row.participant_id,
+        changedPaths,
+      );
+      const working = await this.snapshotChanges(sandbox, base.repo_path, base.commit_sha);
+      const localPaths = [...working.modified, ...working.added, ...working.deleted];
+      const visibleLocal = await this.readablePaths(row.room_id, row.participant_id, localPaths);
+      const overlaps = visibleChanged.some((path) =>
+        visibleLocal.some((local) => pathsOverlap(path, local)),
+      );
+      const intents = await this.filteredIntents(row.room_id, row.participant_id);
+      const behindPayload = {
+        participant_id: row.participant_id,
+        behind_by: Math.max(0, head.revision - sandbox.base_revision),
+        changed_paths: visibleChanged,
+        overlaps_local_changes: overlaps || working.truncated,
+        intents,
+      };
+      const behind = (reason?: string): SandboxAdvanceEvent => ({
+        type: "sandbox.behind",
+        actor_id: "system",
+        payload: { ...behindPayload, ...(reason ? { reason } : {}) },
+      });
+      if (this.activeCount(sandbox.id) > 0) return [behind("process_running")];
+      if (working.truncated) return [behind("status_truncated")];
+      if (row.kind === "AGENT" && overlaps) return [behind("local_changes")];
+      if (!this.driver.updateSnapshot || !this.driver.snapshotInventory)
+        return [behind("unsupported_driver")];
+
+      let delta: { files: SandboxSnapshotFile[]; delete_paths: string[] };
+      let conflictedPaths: string[] = [];
+      if (row.kind === "HUMAN" && localPaths.length > 0) {
+        const rebased = await this.rebaseHumanWorkingCopy(sandbox, base, head, working);
+        if (!rebased) return [behind("unsupported_local_change")];
+        delta = filterSnapshotDelta(rebased.delta, new Set([...visibleChanged, ...visibleLocal]));
+        conflictedPaths = rebased.conflicted_paths;
+      } else {
+        delta = filterSnapshotDelta(
+          await snapshotDelta(head.repo_path, base.commit_sha, head.commit_sha),
+          new Set(visibleChanged),
+        );
+      }
+      let advanced: "advanced" | "process_running";
+      try {
+        advanced = await this.advanceWorkingCopyLocked(
+          sandbox,
+          sandbox.base_revision,
+          head.revision,
+          delta.files,
+          delta.delete_paths,
+        );
+      } catch (error) {
+        console.error("Failed to advance sandbox working copy", {
+          room_id: row.room_id,
+          participant_id: row.participant_id,
+          revision: head.revision,
+          error,
+        });
+        return [behind("advance_failed")];
+      }
+      if (advanced === "process_running") return [behind("process_running")];
+      return [
+        behind(),
+        {
+          type: "sandbox.synced",
+          actor_id: "system",
+          payload: {
+            participant_id: row.participant_id,
+            base_revision: head.revision,
+            ...(conflictedPaths.length ? { conflicted_paths: conflictedPaths } : {}),
+          },
+        },
+      ];
+    });
+  }
+
+  private async rebaseHumanWorkingCopy(
+    sandbox: SandboxRecord,
+    base: { repo_path: string; commit_sha: string },
+    head: { repo_path: string; revision: number; commit_sha: string },
+    changes: SandboxFileChanges,
+  ): Promise<
+    | {
+        delta: { files: SandboxSnapshotFile[]; delete_paths: string[] };
+        conflicted_paths: string[];
+      }
+    | undefined
+  > {
+    if (!this.driver.readSnapshotFiles) return undefined;
+    const baseEntries = await readWorkspaceTree(base.repo_path, base.commit_sha);
+    const visiblePaths = await this.readablePaths(sandbox.room_id, sandbox.participant_id, [
+      ...baseEntries.keys(),
+    ]);
+    const visible = new Set(visiblePaths);
+    const entries = new Map([...baseEntries].filter(([path]) => visible.has(path)));
+    const objectFormat = await workspaceObjectFormat(base.repo_path);
+    const ignoreRules = await readWorkspaceIgnoreRules(base.repo_path, baseEntries);
+    let inventory = await this.snapshotInventory(
+      sandbox,
+      [...entries.keys()],
+      objectFormat,
+      ignoreRules,
+    );
+    const newPaths = inventory.filter(({ path }) => !entries.has(path)).map(({ path }) => path);
+    if (newPaths.length) {
+      inventory = await this.snapshotInventory(
+        sandbox,
+        [...entries.keys(), ...newPaths],
+        objectFormat,
+        ignoreRules,
+      );
+    }
+    const ignored = await ignoredWorkspacePaths(base.repo_path, baseEntries, newPaths);
+    const changePaths = new Set([...changes.modified, ...changes.added, ...changes.deleted]);
+    const changedEntries = inventory.filter(
+      ({ path, sha }) => changePaths.has(path) && sha !== null,
+    );
+    const files = await this.readSnapshotFiles(
+      sandbox,
+      changedEntries,
+      objectFormat,
+      MAX_AUTO_SYNC_BYTES,
+    );
+    const byPath = new Map(files.map((file) => [file.path, file]));
+    const operations: Operation[] = [];
+    for (const path of [...changePaths].sort(comparePath)) {
+      const entry = inventory.find((candidate) => candidate.path === path);
+      if (!entry) {
+        operations.push({ type: "delete", path });
+        continue;
+      }
+      if (ignored.has(path)) continue;
+      if (entry.mode === "120000") return undefined;
+      const file = byPath.get(path);
+      if (!file) return undefined;
+      operations.push({
+        type: entries.has(path) ? "modify" : "create",
+        path,
+        content: file.content,
+      });
+    }
+    const objectRepo = await createSandboxObjectRepo(base.repo_path, objectFormat);
+    try {
+      const localCommit = await materialize(objectRepo, base.commit_sha, operations);
+      const result = await merge(objectRepo, base.commit_sha, head.commit_sha, localCommit);
+      return {
+        delta: await snapshotDelta(objectRepo, base.commit_sha, result.tree),
+        conflicted_paths: result.clean
+          ? []
+          : result.conflicts.files.map(({ path }) => path).sort(comparePath),
+      };
+    } finally {
+      await rm(objectRepo, { recursive: true, force: true });
+    }
+  }
+
+  private async readablePaths(
+    roomId: string,
+    participantId: string,
+    paths: readonly string[],
+  ): Promise<string[]> {
+    return this.options.readablePaths
+      ? this.options.readablePaths(roomId, participantId, paths)
+      : [...paths];
+  }
+
+  private async filteredIntents(roomId: string, participantId: string): Promise<EditIntent[]> {
+    const stored = (await this.options.listIntents?.(roomId)) ?? [];
+    const visible = new Set(
+      await this.readablePaths(
+        roomId,
+        participantId,
+        stored.flatMap(({ paths }) => paths),
+      ),
+    );
+    return stored.flatMap((intent) => {
+      const paths = intent.paths.filter((path) => visible.has(path));
+      if (!paths.length) return [];
+      const keep = new Set(paths);
+      return [{ ...intent, paths, ranges: intent.ranges.filter(({ path }) => keep.has(path)) }];
+    });
+  }
+
+  private async canonicalHead(
+    roomId: string,
+  ): Promise<{ repo_path: string; revision: number; commit_sha: string }> {
+    const { rows } = await this.pool.query<{
+      repo_path: string;
+      revision: string;
+      commit_sha: string;
+    }>(
+      `SELECT w.repo_path, wr.revision, wr.commit_sha
+       FROM workspaces w JOIN workspace_revisions wr ON wr.workspace_id = w.id AND wr.room_id = w.room_id
+       WHERE w.room_id = $1 ORDER BY wr.revision DESC LIMIT 1`,
+      [roomId],
+    );
+    if (!rows[0]) throw new CrossoverError("NOT_FOUND", "Workspace is not provisioned");
+    return { ...rows[0], revision: Number(rows[0].revision) };
+  }
+
+  private scheduleLatestCanonical(roomId: string): void {
+    void this.canonicalHead(roomId)
+      .then(({ revision }) => this.scheduleCanonicalAdvance(roomId, revision))
+      .catch((error: unknown) =>
+        console.error("Failed to check canonical head after sandbox wake", {
+          room_id: roomId,
+          error,
+        }),
+      );
   }
 
   private async withEnsureLock<T>(
@@ -638,12 +1135,10 @@ export class ExecutionService {
     let workspace: SandboxWorkspaceHead;
     let changes: SandboxFileChanges;
     try {
+      const base = await this.workspaceRevision(roomId, sandbox.base_revision);
       [workspace, changes] = await Promise.all([
         this.workspaceHead(roomId),
-        this.driver.status({
-          sandbox_id: sandbox.id,
-          resources: { volume_ref: sandbox.volume_ref, container_ref: sandbox.container_ref },
-        }),
+        this.snapshotChanges(sandbox, base.repo_path, base.commit_sha),
       ]);
     } catch (cause) {
       if (cause instanceof CrossoverError) throw cause;
@@ -661,6 +1156,76 @@ export class ExecutionService {
       behind_by: Math.max(0, workspace.revision - sandbox.base_revision),
       ...changes,
     };
+  }
+
+  private async workspaceRevision(
+    roomId: string,
+    revision: number,
+  ): Promise<{ repo_path: string; commit_sha: string }> {
+    const { rows } = await this.pool.query<{ repo_path: string; commit_sha: string }>(
+      `SELECT w.repo_path, wr.commit_sha
+       FROM workspaces w
+       JOIN workspace_revisions wr ON wr.workspace_id = w.id AND wr.room_id = w.room_id
+       WHERE w.room_id = $1 AND wr.revision = $2`,
+      [roomId, revision],
+    );
+    if (!rows[0])
+      throw new CrossoverError("CONFLICT_VERSION", "Sandbox base revision is unavailable");
+    return rows[0];
+  }
+
+  private async snapshotChanges(
+    sandbox: SandboxRecord,
+    repoPath: string,
+    baseCommit: string,
+  ): Promise<SandboxFileChanges> {
+    if (!this.driver.snapshotInventory)
+      throw new CrossoverError("UNAVAILABLE", "Sandbox snapshot is not supported by this driver");
+    const fullBase = await readWorkspaceTree(repoPath, baseCommit);
+    const visiblePaths = this.options.readablePaths
+      ? await this.options.readablePaths(sandbox.room_id, sandbox.participant_id, [
+          ...fullBase.keys(),
+        ])
+      : [...fullBase.keys()];
+    const visible = new Set(visiblePaths);
+    const base = new Map([...fullBase].filter(([path]) => visible.has(path)));
+    const ignoreRules = await readWorkspaceIgnoreRules(repoPath, fullBase);
+    const objectFormat = await workspaceObjectFormat(repoPath);
+    const inventory = await this.snapshotInventory(
+      sandbox,
+      [...base.keys()],
+      objectFormat,
+      ignoreRules,
+    );
+    const inventoryPaths = await this.readablePaths(
+      sandbox.room_id,
+      sandbox.participant_id,
+      inventory.map(({ path }) => path),
+    );
+    const visibleInventory = new Set(inventoryPaths);
+    const currentInventory = inventory.filter(({ path }) => visibleInventory.has(path));
+    const addedPaths = currentInventory
+      .filter((entry) => !base.has(entry.path))
+      .map(({ path }) => path);
+    const ignored = await ignoredWorkspacePaths(repoPath, fullBase, addedPaths);
+    const current = new Map(currentInventory.map((entry) => [entry.path, entry]));
+    const changes = createSandboxFileChangesAccumulator();
+    let stopped = false;
+    for (const [path, previous] of base) {
+      if (previous.mode === "160000") continue;
+      const entry = current.get(path);
+      if (!entry) stopped = !changes.add("deleted", path);
+      else if (entry.sha !== previous.sha || entry.mode !== previous.mode)
+        stopped = !changes.add("modified", path);
+      if (stopped) break;
+    }
+    if (!stopped) {
+      for (const { path } of currentInventory) {
+        if (base.has(path) || ignored.has(path)) continue;
+        if (!changes.add("added", path)) break;
+      }
+    }
+    return changes.finish();
   }
 
   /** Hibernate idle sandboxes; the container stops while its Docker volume is retained. */
@@ -1012,6 +1577,177 @@ function normalizeSandbox(sandbox: SandboxRow): SandboxRecord {
     ...sandbox,
     base_revision: sandbox.base_revision === null ? null : Number(sandbox.base_revision),
   };
+}
+
+type WorkspaceTreeEntry = { mode: string; sha: string };
+
+async function readWorkspaceTree(
+  repoPath: string,
+  commit: string,
+): Promise<Map<string, WorkspaceTreeEntry>> {
+  const { stdout } = await git(["ls-tree", "-r", "-z", "--full-tree", commit], {
+    gitDir: repoPath,
+    timeoutMs: 60_000,
+    maxBuffer: 128 * 1024 * 1024,
+  });
+  const entries = new Map<string, WorkspaceTreeEntry>();
+  for (const record of stdout.split("\0")) {
+    if (!record) continue;
+    const tab = record.indexOf("\t");
+    const [mode, type, sha] = record.slice(0, tab).split(" ");
+    const rawPath = record.slice(tab + 1);
+    if (!mode || (type !== "blob" && type !== "commit") || !sha || !rawPath)
+      throw new CrossoverError("UNAVAILABLE", "Workspace tree is malformed");
+    const path = normalizePath(rawPath);
+    if (path !== rawPath)
+      throw new CrossoverError("VALIDATION", "Workspace contains a non-canonical path");
+    entries.set(path, { mode, sha });
+  }
+  return entries;
+}
+
+async function readWorkspaceIgnoreRules(
+  repoPath: string,
+  entries: ReadonlyMap<string, WorkspaceTreeEntry>,
+): Promise<{ path: string; patterns: string[] }[]> {
+  const rules: { path: string; patterns: string[] }[] = [];
+  for (const [path, entry] of entries) {
+    if (
+      (entry.mode !== "100644" && entry.mode !== "100755") ||
+      (path !== ".roomignore" && path !== ".gitignore" && !path.endsWith("/.gitignore"))
+    )
+      continue;
+    const { stdout } = await git(["cat-file", "blob", entry.sha], {
+      gitDir: repoPath,
+      timeoutMs: 10_000,
+      encoding: "buffer",
+    });
+    rules.push({ path, patterns: stdout.toString("utf8").split(/\r?\n/) });
+  }
+  return rules;
+}
+
+async function workspaceObjectFormat(repoPath: string): Promise<"sha1" | "sha256"> {
+  const value = (
+    await git(["rev-parse", "--show-object-format"], { gitDir: repoPath, timeoutMs: 10_000 })
+  ).stdout.trim();
+  if (value !== "sha1" && value !== "sha256")
+    throw new CrossoverError("UNAVAILABLE", "Workspace Git object format is unsupported");
+  return value;
+}
+
+async function changedWorkspacePaths(
+  repoPath: string,
+  base: string,
+  head: string,
+): Promise<string[]> {
+  const [before, after] = await Promise.all([
+    readWorkspaceTree(repoPath, base),
+    readWorkspaceTree(repoPath, head),
+  ]);
+  return [...new Set([...before.keys(), ...after.keys()])]
+    .filter((path) => {
+      const old = before.get(path);
+      const next = after.get(path);
+      return !old || !next || old.mode !== next.mode || old.sha !== next.sha;
+    })
+    .sort(comparePath);
+}
+
+async function snapshotDelta(
+  repoPath: string,
+  oldCommit: string,
+  newTree: string,
+): Promise<{ files: SandboxSnapshotFile[]; delete_paths: string[] }> {
+  const [before, after] = await Promise.all([
+    readWorkspaceTree(repoPath, oldCommit),
+    readWorkspaceTree(repoPath, newTree),
+  ]);
+  const paths = [...new Set([...before.keys(), ...after.keys()])]
+    .filter((path) => {
+      const old = before.get(path);
+      const next = after.get(path);
+      return !old || !next || old.mode !== next.mode || old.sha !== next.sha;
+    })
+    .sort(comparePath);
+  const files: SandboxSnapshotFile[] = [];
+  const delete_paths: string[] = [];
+  let bytes = 0;
+  for (const path of paths) {
+    const entry = after.get(path);
+    if (!entry) {
+      delete_paths.push(path);
+      continue;
+    }
+    const { stdout } = await git(["cat-file", "blob", entry.sha], {
+      gitDir: repoPath,
+      timeoutMs: 10_000,
+      encoding: "buffer",
+      maxBuffer: MAX_AUTO_SYNC_BYTES + 1024,
+    });
+    bytes += stdout.length;
+    if (stdout.length > 25 * 1024 * 1024 || bytes > MAX_AUTO_SYNC_BYTES)
+      throw new CrossoverError("VALIDATION", "Sandbox auto-sync exceeds its size limit", {
+        details: { reason: "auto_sync_too_large" },
+      });
+    files.push({ path, mode: entry.mode, sha: entry.sha, size: stdout.length, content: stdout });
+  }
+  return { files, delete_paths };
+}
+
+function filterSnapshotDelta(
+  delta: { files: SandboxSnapshotFile[]; delete_paths: string[] },
+  allowedPaths: ReadonlySet<string>,
+): { files: SandboxSnapshotFile[]; delete_paths: string[] } {
+  return {
+    files: delta.files.filter(({ path }) => allowedPaths.has(path)),
+    delete_paths: delta.delete_paths.filter((path) => allowedPaths.has(path)),
+  };
+}
+
+async function createSandboxObjectRepo(
+  canonicalRepo: string,
+  objectFormat: "sha1" | "sha256",
+): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), "crossover-sandbox-advance-"));
+  try {
+    await git(
+      [
+        "init",
+        "--quiet",
+        "--bare",
+        "--template=",
+        ...(objectFormat === "sha256" ? ["--object-format=sha256"] : []),
+        dir,
+      ],
+      { timeoutMs: 10_000, env: { GIT_CONFIG_GLOBAL: "/dev/null" } },
+    );
+    const objectPath = (
+      await git(["rev-parse", "--git-path", "objects"], {
+        gitDir: canonicalRepo,
+        timeoutMs: 10_000,
+      })
+    ).stdout.trim();
+    const canonicalObjects = isAbsolute(objectPath)
+      ? objectPath
+      : resolve(canonicalRepo, objectPath);
+    await mkdir(join(dir, "objects", "info"), { recursive: true });
+    await writeFile(join(dir, "objects", "info", "alternates"), `${canonicalObjects}\n`, {
+      mode: 0o600,
+    });
+    return dir;
+  } catch (error) {
+    await rm(dir, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+function pathsOverlap(left: string, right: string): boolean {
+  return left === right || left.startsWith(`${right}/`) || right.startsWith(`${left}/`);
+}
+
+function comparePath(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function delay(ms: number): Promise<void> {

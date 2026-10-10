@@ -17,6 +17,9 @@
       "path": "packages/gateway"
     },
     {
+      "path": "packages/github-api"
+    },
+    {
       "path": "packages/kernel"
     },
     {
@@ -42,6 +45,12 @@
     },
     {
       "path": "apps/web/tsconfig.node-tests.json"
+    },
+    {
+      "path": "plugins/browser"
+    },
+    {
+      "path": "plugins/aws"
     }
   ]
 }
