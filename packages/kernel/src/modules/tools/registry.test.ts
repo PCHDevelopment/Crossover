@@ -32,6 +32,28 @@ describe("ToolRegistry", () => {
     expect(() => r.register(tool({ tier: 0 }))).toThrow(/tier 0 .* tier 2/);
     r.register(tool({ tier: 2 }));
   });
+
+  it("requires an immutable digest for executable plugin images", () => {
+    const r = new ToolRegistry();
+    const execution = {
+      image: `busybox:1.36.1-musl@sha256:${"a".repeat(64)}`,
+      command: ["/bin/busybox", "true"],
+      egressHosts: [],
+    };
+    r.register(tool({ execution }));
+
+    for (const image of [
+      "busybox:latest",
+      "busybox:1.36.1-musl",
+      `busybox@sha256:${"A".repeat(64)}`,
+      `busybox@sha256:${"a".repeat(63)}`,
+    ]) {
+      const next = new ToolRegistry();
+      expect(() => next.register(tool({ execution: { ...execution, image } }))).toThrow(
+        /pinned by a sha256 digest/,
+      );
+    }
+  });
 });
 
 describe("capabilityFor", () => {

@@ -30,6 +30,16 @@ export interface ToolDefinition<A = Record<string, unknown>> {
    * either way (§26); this tells callers whether they may.
    */
   idempotent: boolean;
+  /** Trusted runtime details used by T1202; never included in `tools.list` responses. */
+  execution?: ToolExecutionSpec;
+}
+
+/** Per-tool container details. Commands are passed as argv, never through a shell. */
+export interface ToolExecutionSpec {
+  image: string;
+  command: readonly string[];
+  /** Exact hosts or `*.suffix` patterns this plugin invocation may reach through the proxy. */
+  egressHosts: readonly string[];
 }
 
 /** What the runner (T1202) gets for one invocation. */
@@ -87,6 +97,33 @@ export class ToolRegistry {
       throw bad("the name must be <plugin>.<tool> in lowercase snake_case");
     if (this.tools.has(tool.name)) throw bad("already registered");
     if (!NAME.test(tool.capability)) throw bad("the capability must be <resource>.<action>");
+    if (tool.execution) {
+      const { image, command, egressHosts } = tool.execution;
+      if (!/^[A-Za-z0-9][A-Za-z0-9._/:+-]{0,254}@sha256:[a-f0-9]{64}$/.test(image))
+        throw bad("the execution image must be pinned by a sha256 digest");
+      if (
+        !Array.isArray(command) ||
+        command.length === 0 ||
+        command.length > 32 ||
+        command.some((arg) => typeof arg !== "string" || arg.length === 0 || arg.includes("\0"))
+      ) {
+        throw bad("the execution command must be a nonempty argv array");
+      }
+      if (
+        !Array.isArray(egressHosts) ||
+        egressHosts.length > 100 ||
+        egressHosts.some(
+          (host) =>
+            typeof host !== "string" ||
+            host.length === 0 ||
+            host.length > 253 ||
+            // eslint-disable-next-line no-control-regex
+            /[\s\u0000-\u001f\u007f-\u009f]/.test(host),
+        )
+      ) {
+        throw bad("the execution host allowlist is invalid");
+      }
+    }
     const expected = this.options.tierOf?.(tool.capability);
     if (expected !== undefined && expected !== tool.tier) {
       throw bad(
