@@ -796,6 +796,39 @@ export class DockerExecutionDriver implements ExecutionDriver {
     });
   }
 
+  /** Read a single regular file without following a symlink from the working copy. */
+  async readFile(input: {
+    sandbox_id: string;
+    resources: SandboxResources;
+    path: string;
+    max_bytes: number;
+  }): Promise<{ mode: string; content: Buffer }> {
+    this.assertResources(input.sandbox_id, input.resources);
+    const encodedPath = Buffer.from(input.path, "utf8").toString("base64");
+    const payload = await this.runSnapshotHelper(input.resources, {
+      action: "file_read",
+      path: encodedPath,
+      max_bytes: input.max_bytes,
+    });
+    const file = payload.file as
+      { path?: unknown; mode?: unknown; size?: unknown; content?: unknown } | undefined;
+    if (
+      !file ||
+      file.path !== encodedPath ||
+      (file.mode !== "100644" && file.mode !== "100755") ||
+      typeof file.size !== "number" ||
+      !Number.isSafeInteger(file.size) ||
+      file.size < 0 ||
+      typeof file.content !== "string"
+    ) {
+      throw snapshotUnavailable();
+    }
+    const content = Buffer.from(file.content, "base64");
+    if (content.length !== file.size || content.toString("base64") !== file.content)
+      throw snapshotUnavailable();
+    return { mode: file.mode, content };
+  }
+
   /** Return exact bytes for the selected inventory paths, rejecting changes between the two reads. */
   async readSnapshotFiles(input: {
     sandbox_id: string;
@@ -861,7 +894,9 @@ export class DockerExecutionDriver implements ExecutionDriver {
   async updateSnapshot(input: {
     sandbox_id: string;
     resources: SandboxResources;
-    files: readonly Pick<SandboxSnapshotFile, "path" | "mode" | "content">[];
+    files: readonly (Pick<SandboxSnapshotFile, "path" | "mode" | "content"> & {
+      preserve_mode?: boolean;
+    })[];
     delete_paths: readonly string[];
   }): Promise<void> {
     this.assertResources(input.sandbox_id, input.resources);
@@ -873,6 +908,7 @@ export class DockerExecutionDriver implements ExecutionDriver {
           path: Buffer.from(file.path, "utf8").toString("base64"),
           mode: file.mode,
           content: file.content.toString("base64"),
+          ...(file.preserve_mode ? { preserve_mode: true } : {}),
         })),
         delete_paths: input.delete_paths.map((path) =>
           Buffer.from(path, "utf8").toString("base64"),
@@ -892,6 +928,7 @@ export class DockerExecutionDriver implements ExecutionDriver {
     pruned_directories?: unknown[];
     error?: string;
     installed?: boolean;
+    file?: unknown;
   }> {
     let stdout = "";
     let outputTooLarge = false;
@@ -945,6 +982,7 @@ export class DockerExecutionDriver implements ExecutionDriver {
       pruned_directories?: unknown[];
       error?: string;
       installed?: boolean;
+      file?: unknown;
     };
     try {
       payload = JSON.parse(stdout) as {
@@ -952,12 +990,23 @@ export class DockerExecutionDriver implements ExecutionDriver {
         pruned_directories?: unknown[];
         error?: string;
         installed?: boolean;
+        file?: unknown;
       };
     } catch {
       throw snapshotUnavailable();
     }
     if (payload.error) {
       if (payload.error === "changed_during_read") throw snapshotChanged();
+      if (payload.error === "path_not_found")
+        throw new CrossoverError("NOT_FOUND", "Sandbox working-copy file not found");
+      if (payload.error === "too_large" && input["action"] === "file_read")
+        throw new CrossoverError("VALIDATION", "Sandbox file exceeds the read limit", {
+          details: { reason: "file_too_large" },
+        });
+      if (payload.error === "unsupported_file_type" && input["action"] === "file_read")
+        throw new CrossoverError("VALIDATION", "Sandbox path is not a regular file", {
+          details: { reason: "not_a_regular_file" },
+        });
       if (payload.error.startsWith("invalid_path_encoding:"))
         throw new CrossoverError("VALIDATION", "Sandbox contains an unsupported path encoding", {
           details: {

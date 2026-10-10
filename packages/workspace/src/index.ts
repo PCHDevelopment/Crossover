@@ -70,6 +70,7 @@ export type {
   SandboxWorkspaceHead,
   SandboxSnapshotEntry,
   SandboxSnapshotFile,
+  SandboxWorkingCopyFile,
   SandboxSyncResponse,
   SandboxSyncResult,
 } from "./execution.js";
@@ -79,8 +80,18 @@ export type {
   DockerInvocationOptions,
   DockerInvoker,
 } from "./docker-execution-driver.js";
-export { registerSandboxExecCommands } from "./sandbox-exec.js";
+export {
+  registerSandboxExecCommands,
+  sandboxExecParamsSchema,
+  sandboxExecCancelParamsSchema,
+} from "./sandbox-exec.js";
 export type { SandboxExecCommandDeps } from "./sandbox-exec.js";
+export {
+  registerSandboxFileCommands,
+  sandboxFileReadParamsSchema,
+  sandboxFileWriteInputSchema,
+  sandboxFileWriteParamsSchema,
+} from "./sandbox-file.js";
 export { FileLogStore, MemoryLogStore, SandboxOutputHub } from "./sandbox-log-store.js";
 export type {
   LogStore,

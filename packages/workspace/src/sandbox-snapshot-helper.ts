@@ -25,7 +25,7 @@ async function sandboxSnapshotHelper(
   const inputChunks: Buffer[] = [];
   for await (const chunk of process.stdin) inputChunks.push(Buffer.from(chunk));
   const input = JSON.parse(Buffer.concat(inputChunks).toString("utf8")) as {
-    action: "inventory" | "read" | "install";
+    action: "inventory" | "read" | "install" | "file_read";
     hash: "sha1" | "sha256";
     tracked_paths?: string[];
     ignore_rules?: { path: string; patterns: string[] }[];
@@ -34,8 +34,9 @@ async function sandboxSnapshotHelper(
     max_bytes?: number;
     max_entries?: number;
     root?: string;
-    files?: { path: string; mode: string; content: string }[];
+    files?: { path: string; mode: string; content: string; preserve_mode?: boolean }[];
     delete_paths?: string[];
+    path?: string;
   };
   const root = await fs.open(
     input.root ?? "/workspace",
@@ -233,6 +234,62 @@ async function sandboxSnapshotHelper(
       process.stdout.write(JSON.stringify({ entries, pruned_directories: prunedDirectories }));
       return;
     }
+    if (input.action === "file_read") {
+      if (typeof input.path !== "string") throw new Error("invalid_request");
+      const pathBytes = Buffer.from(input.path, "base64");
+      if (pathBytes.toString("base64") !== input.path) throw new Error("invalid_request");
+      checkedPath(pathBytes);
+      const parts = pathBytes
+        .toString("utf8")
+        .split("/")
+        .map((part) => Buffer.from(part));
+      let directory = root;
+      const openedDirectories: NodeFsPromises.FileHandle[] = [];
+      try {
+        for (const part of parts.slice(0, -1)) {
+          const next = await fs.open(
+            childPath(directory, part),
+            constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+          );
+          openedDirectories.push(next);
+          directory = next;
+        }
+        const target = childPath(directory, parts.at(-1)!);
+        const before = await fs.lstat(target, { bigint: true });
+        if (!before.isFile()) throw new Error("unsupported_file_type");
+        const maxBytes = input.max_bytes ?? 5 * 1024 * 1024;
+        if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) throw new Error("invalid_request");
+        if (before.size > BigInt(maxBytes)) throw new Error("too_large");
+        const file = await fs.open(target, constants.O_RDONLY | constants.O_NOFOLLOW);
+        let content: Buffer;
+        try {
+          const opened = await file.stat({ bigint: true });
+          if (!sameStat(before, opened)) throw new Error("changed_during_read");
+          content = await file.readFile();
+          const after = await file.stat({ bigint: true });
+          if (!sameStat(opened, after)) throw new Error("changed_during_read");
+        } finally {
+          await file.close();
+        }
+        process.stdout.write(
+          JSON.stringify({
+            file: {
+              path: input.path,
+              mode: gitMode(before),
+              size: content.length,
+              content: content.toString("base64"),
+            },
+          }),
+        );
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT")
+          throw new Error("path_not_found", { cause: error });
+        throw error;
+      } finally {
+        for (const opened of openedDirectories.reverse()) await opened.close();
+      }
+      return;
+    }
     if (input.action === "install") {
       const openParent = async (
         encodedPath: string,
@@ -295,13 +352,22 @@ async function sandboxSnapshotHelper(
         try {
           const content = Buffer.from(file.content, "base64");
           if (content.toString("base64") !== file.content) throw new Error("invalid_request");
-          if (file.mode === "120000") {
+          let mode = file.mode;
+          if (file.preserve_mode) {
+            try {
+              const previous = await fs.lstat(targetPath, { bigint: true });
+              if (previous.isFile()) mode = gitMode(previous);
+            } catch (error) {
+              if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+            }
+          }
+          if (mode === "120000") {
             await fs.symlink(content, temporaryPath);
-          } else if (file.mode === "100644" || file.mode === "100755") {
+          } else if (mode === "100644" || mode === "100755") {
             const output = await fs.open(
               temporaryPath,
               constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
-              file.mode === "100755" ? 0o755 : 0o644,
+              mode === "100755" ? 0o755 : 0o644,
             );
             try {
               await output.writeFile(content);

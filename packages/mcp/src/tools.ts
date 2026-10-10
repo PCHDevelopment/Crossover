@@ -36,6 +36,12 @@ import {
   workspaceListParamsSchema,
   workspaceReadParamsSchema,
   workspaceSearchParamsSchema,
+  changesSubmitParamsSchema,
+  sandboxExecParamsSchema,
+  sandboxFileReadParamsSchema,
+  sandboxFileWriteInputSchema,
+  sandboxStatusParamsSchema,
+  sandboxSyncParamsSchema,
 } from "@crossover/workspace";
 import { z } from "zod";
 
@@ -120,6 +126,55 @@ export const WORKSPACE_TOOLS: readonly McpToolDefinition[] = [
     description: "Apply a validated ChangeSet to the canonical workspace.",
     method: "workspace.apply_changeset",
     input: changesetInputSchema.shape,
+    mutating: true,
+  },
+];
+
+/** Coding tools for the caller's private working copy, alongside canonical workspace tools. */
+export const SANDBOX_TOOLS: readonly McpToolDefinition[] = [
+  {
+    name: "sandbox_status",
+    description: "Show your working-copy changes and whether it is behind the canonical workspace.",
+    method: "sandbox.status",
+    input: sandboxStatusParamsSchema.shape,
+    mutating: false,
+  },
+  {
+    name: "sandbox_read_file",
+    description: "Read a file from your current sandbox working copy, including unsubmitted edits.",
+    method: "sandbox.file.read",
+    input: sandboxFileReadParamsSchema.shape,
+    mutating: false,
+  },
+  {
+    name: "sandbox_write_file",
+    description:
+      "Write UTF-8 or base64 content to a file in your sandbox working copy. This does not change the canonical workspace; use submit_changes to submit it.",
+    method: "sandbox.file.write",
+    input: sandboxFileWriteInputSchema.shape,
+    mutating: true,
+  },
+  {
+    name: "sandbox_exec",
+    description:
+      "Run a shell command in your sandbox working copy. Output is available on the sandbox output stream.",
+    method: "sandbox.exec",
+    input: sandboxExecParamsSchema.shape,
+    mutating: true,
+  },
+  {
+    name: "submit_changes",
+    description:
+      "Submit selected sandbox working-copy changes through the canonical ChangeSet pipeline.",
+    method: "changes.submit",
+    input: changesSubmitParamsSchema.shape,
+    mutating: true,
+  },
+  {
+    name: "sandbox_sync",
+    description: "Rebase your local working-copy changes onto the latest canonical workspace.",
+    method: "sandbox.sync",
+    input: sandboxSyncParamsSchema.shape,
     mutating: true,
   },
 ];
@@ -385,4 +440,5 @@ export const MCP_TOOLS: readonly McpToolDefinition[] = [
   ...TASK_TOOLS,
   ...COLLABORATION_TOOLS,
   ...WORKSPACE_TOOLS,
+  ...SANDBOX_TOOLS,
 ];
