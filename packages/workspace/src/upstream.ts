@@ -9,9 +9,59 @@ import { git, GitError } from "./git.js";
 
 export { isPrivateAddress };
 
+/** Canonical `owner/repo` for the GitHub App, plugin scope, and PR-export integration. */
+export function githubRepositoryFromUrl(value: URL | string): string {
+  let url: URL;
+  try {
+    url = value instanceof URL ? value : new URL(value);
+  } catch {
+    throw new CrossoverError("VALIDATION", "The upstream isn't a GitHub repository URL");
+  }
+  if (
+    url.protocol !== "https:" ||
+    url.hostname.toLowerCase() !== "github.com" ||
+    url.username !== "" ||
+    url.password !== "" ||
+    (url.port !== "" && url.port !== "443") ||
+    url.search !== "" ||
+    url.hash !== ""
+  ) {
+    throw new CrossoverError("VALIDATION", "The upstream isn't a GitHub repository URL");
+  }
+  const parts = url.pathname.replace(/^\//, "").replace(/\/$/, "").split("/");
+  if (parts.length !== 2)
+    throw new CrossoverError("VALIDATION", "The upstream isn't a GitHub repository URL");
+  try {
+    const repository = parts[1]!.replace(/\.git$/i, "");
+    if (
+      !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?\/[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,98}[A-Za-z0-9_-])?$/.test(
+        `${parts[0]}/${repository}`,
+      )
+    )
+      throw new Error("invalid repository");
+    return `${parts[0]}/${repository}`.toLowerCase();
+  } catch {
+    throw new CrossoverError("VALIDATION", "The upstream isn't a GitHub repository URL");
+  }
+}
+
 /** What an upstream fetch needs to authenticate, from a {@link GitCredentialProvider}. */
 export type GitCredential =
   { type: "bearer"; token: string } | { type: "basic"; username: string; password: string };
+
+export interface GitCredentialRequest {
+  room_id: string;
+  invocation_id: string;
+  access: "read" | "write";
+  /** Fine-grained GitHub App permissions requested for this one invocation. */
+  permissions?: Readonly<Record<string, "read" | "write">>;
+}
+
+/** A credential and its invocation-scoped revocation action. */
+export interface GitCredentialLease {
+  credential: GitCredential;
+  revoke(): Promise<void>;
+}
 
 /**
  * Where a room's upstream credentials come from (§24.1). Public HTTPS repositories need none
@@ -20,8 +70,8 @@ export type GitCredential =
  * never stored, logged, put in an event or returned in a response.
  */
 export interface GitCredentialProvider {
-  /** `access` is `write` for a push (a checkpoint export), `read` (the default) for a fetch. */
-  credentialFor(url: URL, access?: "read" | "write"): Promise<GitCredential | null>;
+  /** Return a room- and invocation-scoped credential lease, or null for a public upstream. */
+  credentialFor(url: URL, request: GitCredentialRequest): Promise<GitCredentialLease | null>;
 }
 
 export const noCredentials: GitCredentialProvider = { credentialFor: async () => null };
