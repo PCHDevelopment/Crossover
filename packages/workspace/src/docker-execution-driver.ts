@@ -355,22 +355,22 @@ export class DockerExecutionDriver implements ExecutionDriver {
     const processGroupMarker = `CROSSOVER_EXEC_PGID:${input.exec_id}:`;
     const wrapper =
       `printf '%s%s\\n' '${processGroupMarker}' "$$" >&2; ` +
-      `exec sh -lc "$CROSSOVER_EXEC_COMMAND"`;
+      `physical=$(pwd -P); case "$physical" in /workspace|/workspace/*) base64 -d | sh ;; ` +
+      `*) base64 -d >/dev/null; printf 'Sandbox cwd escaped /workspace\\n' >&2; exit 126 ;; esac`;
     const child = spawn(
       this.dockerBinary,
       [
         "exec",
+        "-i",
         "--workdir",
         input.cwd,
-        "--env",
-        `CROSSOVER_EXEC_COMMAND=${input.command}`,
         input.resources.container_ref,
         "setsid",
         "sh",
         "-lc",
         wrapper,
       ],
-      { stdio: ["ignore", "pipe", "pipe"] },
+      { stdio: ["pipe", "pipe", "pipe"] },
     );
 
     const start = Date.now();
@@ -379,6 +379,7 @@ export class DockerExecutionDriver implements ExecutionDriver {
     let settled = false;
     let childCode: number | null = null;
     let outputError: unknown;
+    let launchError: unknown;
     let outputTail = Promise.resolve();
     let cancelPromise: Promise<void> | undefined;
     let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -463,9 +464,11 @@ export class DockerExecutionDriver implements ExecutionDriver {
         })
         .finally(() => {
           if (outputError) console.error("[execution] sandbox exec stream failed", outputError);
-          const finalReason: SandboxExecOutcome["reason"] = outputError
+          const finalReason: SandboxExecOutcome["reason"] = launchError
             ? "start_failed"
-            : (reason ?? "exit");
+            : outputError
+              ? "output_failed"
+              : (reason ?? "exit");
           resolveFinished({
             exit_code: finalReason === "exit" ? childCode : null,
             duration_ms: Date.now() - start,
@@ -492,9 +495,12 @@ export class DockerExecutionDriver implements ExecutionDriver {
     const process: SandboxExecProcess = { finished, cancel };
 
     child.once("error", (error) => {
-      outputError = error;
+      launchError = error;
       closed = true;
       finish();
+    });
+    child.stdin?.on("error", (error) => {
+      launchError = error;
     });
     child.once("close", (code) => {
       closed = true;
@@ -505,6 +511,7 @@ export class DockerExecutionDriver implements ExecutionDriver {
       timeout = setTimeout(() => void cancel("timed_out"), input.timeoutMs);
       timeout.unref();
     });
+    child.stdin?.end(Buffer.from(input.command).toString("base64"));
     return process;
   }
 
