@@ -24,6 +24,21 @@ function missingResources(args: readonly string[]) {
   return { code: 0, stdout: "", stderr: "" };
 }
 
+async function startDockerSandbox(driver: DockerExecutionDriver) {
+  const sandboxId = newId("sandbox");
+  const resources = await driver.create({
+    sandbox_id: sandboxId,
+    room_id: newId("room"),
+    participant_id: newId("part"),
+    limits: { disk_enforcement: "soft" },
+  });
+  return driver.start({ sandbox_id: sandboxId, resources }).then(() => ({ sandboxId, resources }));
+}
+
+function expectMissing(container: string, path: string) {
+  expect(() => execFileSync("docker", ["exec", container, "test", "-e", path])).toThrow();
+}
+
 describe("DockerExecutionDriver", () => {
   it("runs the fetcher on crossover-git with a short-lived token and hardening", async () => {
     const calls: Array<{ args: string[]; timeoutMs?: number; env?: NodeJS.ProcessEnv }> = [];
@@ -972,5 +987,60 @@ describe("DockerExecutionDriver", () => {
       }
     },
     120_000,
+  );
+
+  it.skipIf(skipDockerIntegration)(
+    "ignores a tampered pid file and times out its process group",
+    async () => {
+      const driver = new DockerExecutionDriver();
+      const { sandboxId, resources } = await startDockerSandbox(driver);
+      try {
+        const execId = newId("exec");
+        const childEffect = `/tmp/crossover-child-${execId}`;
+        const running = await driver.exec({
+          sandbox_id: sandboxId,
+          resources,
+          exec_id: execId,
+          command: `printf '99999999\\n' > /tmp/crossover-${execId}.pid; (sleep 1; touch ${childEffect}) & wait`,
+          cwd: "/workspace",
+          timeoutMs: 250,
+          onOutput: async () => {},
+        });
+        await expect(running.finished).resolves.toMatchObject({ reason: "timed_out" });
+        await new Promise((resolve) => setTimeout(resolve, 1_100));
+        expectMissing(resources.container_ref, childEffect);
+      } finally {
+        await driver.destroy({ sandbox_id: sandboxId, resources });
+      }
+    },
+    30_000,
+  );
+  it.skipIf(skipDockerIntegration)(
+    "restarts the sandbox to kill a detached setsid child",
+    async () => {
+      const driver = new DockerExecutionDriver();
+      const { sandboxId, resources } = await startDockerSandbox(driver);
+      try {
+        const execId = newId("exec");
+        const ready = `/tmp/crossover-ready-${execId}`;
+        const escaped = `/tmp/crossover-escaped-${execId}`;
+        const { finished } = await driver.exec({
+          sandbox_id: sandboxId,
+          resources,
+          exec_id: execId,
+          command: `setsid sh -lc 'touch ${ready}; sleep 1; touch ${escaped}' >/dev/null 2>&1 & while [ ! -e ${ready} ]; do sleep .01; done`,
+          cwd: "/workspace",
+          timeoutMs: 60_000,
+          onOutput: async () => {},
+        });
+        await expect(finished).resolves.toMatchObject({ reason: "exit", exit_code: 0 });
+        await driver.restart({ sandbox_id: sandboxId, resources });
+        await new Promise((resolve) => setTimeout(resolve, 1_100));
+        expectMissing(resources.container_ref, escaped);
+      } finally {
+        await driver.destroy({ sandbox_id: sandboxId, resources });
+      }
+    },
+    30_000,
   );
 });

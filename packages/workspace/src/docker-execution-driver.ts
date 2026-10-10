@@ -1,17 +1,21 @@
 import { execFile, spawn } from "node:child_process";
 import { isAbsolute } from "node:path";
+import type { Readable } from "node:stream";
 import {
   createSandboxProxyCredential,
   createSandboxReadToken,
   SANDBOX_READ_TOKEN_MAX_TTL_MS,
 } from "@crossover/security";
-import { CrossoverError } from "@crossover/protocol";
+import { CrossoverError, isId } from "@crossover/protocol";
 import { normalizePath } from "./path.js";
 import { ignoredPrunedDirectories } from "./ignore.js";
 import type {
   ExecutionDriver,
   SandboxLimits,
   SandboxResources,
+  SandboxExecOutcome,
+  SandboxExecProcess,
+  SandboxExecTermination,
   SandboxSnapshotEntry,
   SandboxSnapshotFile,
 } from "./execution.js";
@@ -320,6 +324,188 @@ export class DockerExecutionDriver implements ExecutionDriver {
     } catch (error) {
       if (!(await this.inspectContainer(input.resources.container_ref))?.running) throw error;
     }
+  }
+
+  /** Run a shell command in a fresh process group and capture stdout and stderr separately. */
+  async exec(input: {
+    sandbox_id: string;
+    resources: SandboxResources;
+    exec_id: string;
+    command: string;
+    cwd: string;
+    timeoutMs: number;
+    onOutput: (stream: "stdout" | "stderr", chunk: Buffer) => Promise<void>;
+  }): Promise<SandboxExecProcess> {
+    this.assertResources(input.sandbox_id, input.resources);
+    if (!isId(input.exec_id, "exec")) throw new Error("Invalid sandbox execution id");
+    if (input.command.includes("\0") || input.command.length === 0)
+      throw new CrossoverError("VALIDATION", "Command must be nonempty text without NUL");
+    if (
+      !Number.isSafeInteger(input.timeoutMs) ||
+      input.timeoutMs < 1 ||
+      input.timeoutMs > 3_600_000
+    )
+      throw new CrossoverError(
+        "VALIDATION",
+        "Sandbox command timeout must be from 1 to 3600000 ms",
+      );
+    if (!isAbsolute(input.cwd) || input.cwd.includes("\0"))
+      throw new CrossoverError("VALIDATION", "Sandbox working directory must be absolute");
+
+    const processGroupMarker = `CROSSOVER_EXEC_PGID:${input.exec_id}:`;
+    const wrapper =
+      `printf '%s%s\\n' '${processGroupMarker}' "$$" >&2; ` +
+      `exec sh -lc "$CROSSOVER_EXEC_COMMAND"`;
+    const child = spawn(
+      this.dockerBinary,
+      [
+        "exec",
+        "--workdir",
+        input.cwd,
+        "--env",
+        `CROSSOVER_EXEC_COMMAND=${input.command}`,
+        input.resources.container_ref,
+        "setsid",
+        "sh",
+        "-lc",
+        wrapper,
+      ],
+      { stdio: ["ignore", "pipe", "pipe"] },
+    );
+
+    const start = Date.now();
+    let reason: SandboxExecTermination | undefined;
+    let closed = false;
+    let settled = false;
+    let childCode: number | null = null;
+    let outputError: unknown;
+    let outputTail = Promise.resolve();
+    let cancelPromise: Promise<void> | undefined;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let processGroupId: number | undefined;
+    let pendingStderr = Buffer.alloc(0);
+    let resolveFinished!: (outcome: SandboxExecOutcome) => void;
+    const finished = new Promise<SandboxExecOutcome>((resolve) => (resolveFinished = resolve));
+
+    const deliverOutput = async (stream: "stdout" | "stderr", value: Buffer): Promise<void> => {
+      if (stream !== "stderr" || processGroupId !== undefined) {
+        if (value.byteLength > 0) await input.onOutput(stream, value);
+        return;
+      }
+
+      pendingStderr = Buffer.concat([pendingStderr, value]);
+      const newline = pendingStderr.indexOf(0x0a);
+      if (newline < 0) {
+        if (pendingStderr.byteLength > 256)
+          throw new Error("Sandbox exec did not report its process group");
+        return;
+      }
+
+      const line = pendingStderr.subarray(0, newline).toString("utf8");
+      const rest = pendingStderr.subarray(newline + 1);
+      const rawPid = line.startsWith(processGroupMarker)
+        ? line.slice(processGroupMarker.length)
+        : "";
+      const pid = Number(rawPid);
+      if (!/^[1-9][0-9]*$/.test(rawPid) || !Number.isSafeInteger(pid) || pid <= 1) {
+        throw new Error("Sandbox exec returned an invalid process-group marker");
+      }
+
+      processGroupId = pid;
+      pendingStderr = Buffer.alloc(0);
+      if (rest.byteLength > 0) await input.onOutput("stderr", rest);
+    };
+    const queueOutput = (stream: "stdout" | "stderr", source: Readable) => {
+      source.on("data", (value: Buffer) => {
+        source.pause();
+        outputTail = outputTail
+          .then(() => deliverOutput(stream, value))
+          .catch((error: unknown) => {
+            outputError = error;
+          })
+          .finally(() => source.resume());
+      });
+    };
+    if (child.stdout) queueOutput("stdout", child.stdout);
+    if (child.stderr) queueOutput("stderr", child.stderr);
+
+    const signalGroup = async (signal: "TERM" | "KILL"): Promise<void> => {
+      const deadline = Date.now() + 5_000;
+      while (!closed && processGroupId === undefined && Date.now() < deadline)
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      const pid = processGroupId;
+      if (pid === undefined) return;
+      await this.invoke(
+        [
+          "exec",
+          input.resources.container_ref,
+          "sh",
+          "-lc",
+          `kill -${signal} -${pid} 2>/dev/null || true`,
+        ],
+        { timeoutMs: 5_000, maxBuffer: 1024 },
+      );
+    };
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      if (timeout) clearTimeout(timeout);
+      void outputTail
+        .then(async () => {
+          if (pendingStderr.byteLength > 0) {
+            const tail = pendingStderr;
+            pendingStderr = Buffer.alloc(0);
+            await input.onOutput("stderr", tail);
+          }
+        })
+        .catch((error: unknown) => {
+          outputError = error;
+        })
+        .finally(() => {
+          if (outputError) console.error("[execution] sandbox exec stream failed", outputError);
+          const finalReason: SandboxExecOutcome["reason"] = outputError
+            ? "start_failed"
+            : (reason ?? "exit");
+          resolveFinished({
+            exit_code: finalReason === "exit" ? childCode : null,
+            duration_ms: Date.now() - start,
+            reason: finalReason,
+          });
+        });
+    };
+
+    const cancel = (why: SandboxExecTermination): Promise<void> => {
+      if (why === "revoked" || why === "sandbox_stopped") reason = why;
+      else reason ??= why;
+      if (closed) return Promise.resolve();
+      if (cancelPromise) return cancelPromise;
+      cancelPromise = (async () => {
+        await signalGroup("TERM");
+        const stopped = await Promise.race([
+          finished.then(() => true),
+          new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 5_000)),
+        ]);
+        if (!stopped && !closed) await signalGroup("KILL");
+      })();
+      return cancelPromise;
+    };
+    const process: SandboxExecProcess = { finished, cancel };
+
+    child.once("error", (error) => {
+      outputError = error;
+      closed = true;
+      finish();
+    });
+    child.once("close", (code) => {
+      closed = true;
+      childCode = code;
+      finish();
+    });
+    child.once("spawn", () => {
+      timeout = setTimeout(() => void cancel("timed_out"), input.timeoutMs);
+      timeout.unref();
+    });
+    return process;
   }
 
   /** Fetch one scoped shallow checkout through a short-lived, isolated Git fetcher. */
@@ -803,6 +989,14 @@ export class DockerExecutionDriver implements ExecutionDriver {
     } catch (error) {
       if ((await this.inspectContainer(input.resources.container_ref))?.running) throw error;
     }
+  }
+
+  async restart(input: { sandbox_id: string; resources: SandboxResources }): Promise<void> {
+    this.assertResources(input.sandbox_id, input.resources);
+    await this.mustSucceed(
+      ["container", "restart", "--time", "0", input.resources.container_ref],
+      "ERROR: Docker container restart failed",
+    );
   }
 
   async destroy(input: { sandbox_id: string; resources?: SandboxResources }): Promise<void> {
