@@ -14,6 +14,7 @@
     "start": "node --env-file-if-exists=../../.env dist/main.js"
   },
   "dependencies": {
+    "@aws-sdk/client-kms": "^3.1149.0",
     "@crossover/db": "workspace:*",
     "@crossover/gateway": "workspace:*",
     "@crossover/kernel": "workspace:*",

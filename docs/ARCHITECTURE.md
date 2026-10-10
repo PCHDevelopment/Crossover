@@ -272,7 +272,9 @@ The owner (and admins, except where noted) can:
 - override any lead decision (veto, §7.3),
 - abandon any workspace conflict as room owner, regardless of project role (§11.3),
 - set budgets and the sandbox egress allowlist,
-- redact events (§19.6).
+- redact events (§19.6),
+- read non-secret integration configuration (admins only),
+- connect and disconnect room integrations (owner only).
 
 ## 6.3 Limits on an agent lead
 
@@ -934,6 +936,10 @@ DECISIONS
 TOOLS
   tools.list / tools.invoke
 
+INTEGRATIONS
+  integrations.connect / integrations.disconnect    room owner only
+  integrations.list                                  participants; non-secret config for owner/admin
+
 GIT
   git.import / git.pull_upstream
   checkpoints.create / checkpoints.list / checkpoints.export
@@ -1200,6 +1206,8 @@ sandbox.exec.started / sandbox.exec.finished
 
 tool.invoked / tool.completed / tool.failed
 
+integration.connected / integration.disconnected
+
 budget.exceeded / circuit_breaker.tripped / loop.detected
 event.redacted
 ```
@@ -1254,6 +1262,8 @@ aws.read_logs:arn:aws:logs:…
 aws.deploy_lambda:function/staging-*
 browser.navigate
 sandbox.exec
+integrations.read
+integrations.manage
 ```
 
 A participant's effective capabilities = role bundle (§6.1) + explicit grants − explicit revocations.
@@ -1286,12 +1296,12 @@ Full autonomy applies to every tier the agent has been granted. Approval gates (
 
 ## 21.5 Secrets
 
-- The owner connects integrations per room:
-  - **GitHub:** GitHub App installation, scoped to selected repositories.
-  - **AWS:** an IAM role in the customer's account assumed via STS with an external ID; scoped by the role's own policy.
-  - Others: OAuth tokens.
-- Long-lived secrets are stored in AWS Secrets Manager, encrypted with a per-room KMS key.
-- The Plugin Runner mints short-lived credentials per invocation (STS sessions ≤ 15 min, GitHub installation tokens ≤ 1 h).
+- `integrations.connect` and `integrations.disconnect` are owner-only. `integrations.list` is visible to room participants and returns each provider's status, connection time and connecting participant; owners and admins also see non-secret configuration. `integration.connected` and `integration.disconnected` events contain only the provider name.
+- **GitHub:** the verified OAuth connection flow is introduced with the credential broker (PR B); until then, `integrations.connect { provider: "github" }` returns `VALIDATION` and accepts no credentials. The enabled flow takes an installation ID, a user-to-server OAuth code and an explicit selection of 1–100 `owner/repo` names. Exchange the code and confirm that user controls the installation; confirm every selected repository belongs to it. There is no implicit all-repositories selection. Tokens are minted for exactly those repositories and the tool's declared permissions, live for at most one hour, and are revoked when the invocation ends.
+- **AWS:** connect takes a role ARN. The platform generates a random external ID for that room and returns it to the owner to configure in the role trust policy; the owner does not choose it. Try `AssumeRole` on connect. A failed assumption leaves the integration pending with a safe reason, and `integrations.verify` retries it. Invocations use a 900-second session whose name contains the invocation ID; the role's policy scopes its access.
+- **OAuth:** providers are named `oauth:<name>`, where `<name>` matches `^[a-z][a-z0-9_]{1,31}$`. Connect stores an access token and optional expiry. An expired token is marked expired and is not handed to a tool; the owner reconnects. Refresh tokens and automatic refresh are deferred.
+- The `SecretStore` interface stores secret configuration as AES-256-GCM ciphertext with a stable data key per room. Authenticated data binds both the room ID and provider, so ciphertext cannot be moved between rows. Production wraps each room key with AWS KMS; development and CI derive it from a configured 32-byte key. PostgreSQL stores ciphertext and only the KMS-wrapped room key, never plaintext keys or credentials.
+- The Plugin Runner mints short-lived credentials per invocation and passes only those credentials, named by the tool's declared integration, into the isolated runner environment. No long-lived secret or minted credential appears in responses, events, logs or `tool.invoked` payloads.
 
 ---
 

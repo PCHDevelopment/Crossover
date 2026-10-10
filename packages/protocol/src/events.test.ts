@@ -36,6 +36,8 @@ sandbox.exec.started / sandbox.exec.finished
 
 tool.invoked / tool.completed / tool.failed
 
+integration.connected / integration.disconnected
+
 budget.exceeded / circuit_breaker.tripped / loop.detected
 event.redacted
 `;
@@ -57,7 +59,7 @@ const valid = {
 
 describe("EVENT_TYPES", () => {
   it("contains every type in the §19.5 catalog, and nothing else", () => {
-    expect(catalogTypes).toHaveLength(65);
+    expect(catalogTypes).toHaveLength(67);
     expect([...EVENT_TYPES].sort()).toEqual([...catalogTypes].sort());
   });
 

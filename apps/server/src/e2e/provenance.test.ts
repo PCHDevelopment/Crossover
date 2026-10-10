@@ -301,6 +301,7 @@ describe("provenance labels (§16.5)", () => {
       "presence.clear_intent": "writes the caller's own intent",
       "presence.list_intents": "paths announced by participants; no free text",
       "capabilities.list": "platform permission records",
+      "integrations.list": "integration configuration metadata; no room content",
       "tasks.heartbeat": "the caller's own lease",
       "tools.list":
         "tool descriptions the platform registered, filtered to what the caller may use",

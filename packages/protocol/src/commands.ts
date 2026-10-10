@@ -109,6 +109,10 @@ export const METHODS = {
   "tools.list": { mutating: false },
   "tools.invoke": { mutating: true },
 
+  "integrations.connect": { mutating: true },
+  "integrations.disconnect": { mutating: true },
+  "integrations.list": { mutating: false },
+
   "git.import": { mutating: true },
   "git.pull_upstream": { mutating: true },
   "checkpoints.create": { mutating: true },

@@ -14,7 +14,12 @@ describe("sandbox disk enforcement configuration", () => {
       sandboxVolumeOptions: {},
     });
     expect(
-      loadConfig({ ...env, NODE_ENV: "production", SANDBOX_DISK_ENFORCEMENT: "soft" }),
+      loadConfig({
+        ...env,
+        NODE_ENV: "production",
+        SANDBOX_DISK_ENFORCEMENT: "soft",
+        INTEGRATION_KMS_KEY_ID: "alias/crossover-test",
+      }),
     ).toMatchObject({ sandboxDiskEnforcement: "soft", sandboxVolumeOptions: {} });
   });
 
@@ -26,6 +31,7 @@ describe("sandbox disk enforcement configuration", () => {
       loadConfig({
         ...env,
         NODE_ENV: "production",
+        INTEGRATION_KMS_KEY_ID: "alias/crossover-test",
         SANDBOX_VOLUME_DRIVER: "local",
         SANDBOX_VOLUME_OPTS: '{"type":"none","device":"/srv/sandbox","o":"bind,pquota"}',
       }),
@@ -34,6 +40,32 @@ describe("sandbox disk enforcement configuration", () => {
       sandboxVolumeDriver: "local",
       sandboxVolumeOptions: { type: "none", device: "/srv/sandbox", o: "bind,pquota" },
     });
+  });
+
+  it("uses a config key only in development and requires KMS for production", () => {
+    const configured = loadConfig({ ...env, INTEGRATION_SECRET_KEY: "ab".repeat(32) });
+    expect(Buffer.from(configured.integrationSecretKey ?? []).toString("hex")).toBe(
+      "ab".repeat(32),
+    );
+    expect(() => loadConfig({ ...env, INTEGRATION_SECRET_KEY: "too-short" })).toThrow(
+      /INTEGRATION_SECRET_KEY/,
+    );
+    expect(() =>
+      loadConfig({
+        ...env,
+        NODE_ENV: "production",
+        SANDBOX_DISK_ENFORCEMENT: "soft",
+      }),
+    ).toThrow(/INTEGRATION_KMS_KEY_ID is required in production/);
+    expect(() =>
+      loadConfig({
+        ...env,
+        NODE_ENV: "production",
+        SANDBOX_DISK_ENFORCEMENT: "soft",
+        INTEGRATION_KMS_KEY_ID: "alias/crossover-test",
+        INTEGRATION_SECRET_KEY: "ab".repeat(32),
+      }),
+    ).toThrow(/INTEGRATION_SECRET_KEY is development-only/);
   });
 
   it("rejects invalid enforcement values and malformed volume options", () => {

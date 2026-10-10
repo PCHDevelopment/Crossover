@@ -20,7 +20,9 @@ import {
   registerDecisionDecideCommands,
   registerApprovalCommands,
   registerToolCommands,
+  registerIntegrationCommands,
   ToolRegistry,
+  type IntegrationCommandsOptions,
   type ToolRunner,
   registerWakeSecretCommand,
   WakeWebhookService,
@@ -53,6 +55,8 @@ import { postWebhook } from "@crossover/security";
 import { authorize, tierOf } from "@crossover/policy";
 import { join } from "node:path";
 import { DockerToolRunner } from "./plugin-runner.js";
+import { AwsKmsDataKeyOperations, KmsRoomDataKeyProvider } from "./kms-secret-keys.js";
+import { ConfigKeyRoomDataKeyProvider, EnvelopeSecretStore } from "./secret-store.js";
 import {
   ConflictEscalationSweeper,
   DockerExecutionDriver,
@@ -98,6 +102,8 @@ export interface ComposeOverrides {
   budgets?: BudgetLimiter;
   /** Tools plugins declare, and what runs them (the plugin runner, T1202); none by default. */
   tools?: { registry?: ToolRegistry; runner?: ToolRunner; timeoutMs?: number };
+  /** Secret storage and provider verification seams for integration commands. */
+  integrations?: IntegrationCommandsOptions;
   /** How `git.import` reaches an upstream (fetcher, credentials, host check); production: HTTPS clone, no credentials. */
   upstream?: UpstreamDeps;
 }
@@ -140,6 +146,7 @@ export async function composeServer(
   let wakeWebhooks: WakeWebhookService | undefined;
   let executionService: ExecutionService | undefined;
   let pluginRunner: DockerToolRunner | undefined;
+  let kmsOperations: AwsKmsDataKeyOperations | undefined;
   let gitApp: ReturnType<typeof buildInternalGitServer> | undefined;
   let healthInstallSweepTimer: NodeJS.Timeout | undefined;
   let sandboxLogSweepTimer: NodeJS.Timeout | undefined;
@@ -285,6 +292,20 @@ export async function composeServer(
           : {}),
         timeoutMs: Math.min(overrides.tools?.timeoutMs ?? 60_000, 55_000),
       }));
+    kmsOperations = config.integrationKmsKeyId ? new AwsKmsDataKeyOperations() : undefined;
+    const integrationSecretStore =
+      overrides.integrations?.secretStore ??
+      (kmsOperations && config.integrationKmsKeyId
+        ? new EnvelopeSecretStore(
+            new KmsRoomDataKeyProvider(kmsOperations, config.integrationKmsKeyId),
+          )
+        : config.integrationSecretKey
+          ? new EnvelopeSecretStore(new ConfigKeyRoomDataKeyProvider(config.integrationSecretKey))
+          : undefined);
+    const integrationOptions: IntegrationCommandsOptions = {
+      ...overrides.integrations,
+      ...(integrationSecretStore ? { secretStore: integrationSecretStore } : {}),
+    };
     registerCommands(
       dispatcher,
       config,
@@ -299,6 +320,7 @@ export async function composeServer(
         runner: toolRunner,
       },
       overrides.upstream,
+      integrationOptions,
     );
 
     const renewer = new LeaseRenewer({ leases: dispatcher.leases, actors: dispatcher.actors });
@@ -362,6 +384,7 @@ export async function composeServer(
         await wakeWebhooks?.stop();
         await executionService?.close();
         await pluginRunner?.close();
+        kmsOperations?.close();
         await renewer.stop();
         await gitApp?.close();
         await app.close();
@@ -383,6 +406,7 @@ export async function composeServer(
     await wakeWebhooks?.stop();
     await executionService?.close();
     await pluginRunner?.close();
+    kmsOperations?.close();
     await gitApp?.close();
     await redis?.close();
     await redisSubscriber?.close();
@@ -404,6 +428,7 @@ function registerCommands(
   outputHub: SandboxOutputHub,
   tools: { registry: ToolRegistry; runner: ToolRunner; timeoutMs?: number },
   upstream?: UpstreamDeps,
+  integrationOptions: IntegrationCommandsOptions = {},
 ): void {
   registerRoomCommands(dispatcher, {
     provision: async ({ client, room_id }) => {
@@ -436,6 +461,7 @@ function registerCommands(
     runner: tools.runner,
     ...(tools.timeoutMs !== undefined ? { timeoutMs: tools.timeoutMs } : {}),
   });
+  registerIntegrationCommands(dispatcher, integrationOptions);
   registerWakeSecretCommand(dispatcher, config.wakeWebhookKey);
   registerPresenceIntentCommands(dispatcher, intentStore, normalizePath);
   registerRoomEventsSubscribeCommand(dispatcher); // the WebSocket `subscribe` frame
