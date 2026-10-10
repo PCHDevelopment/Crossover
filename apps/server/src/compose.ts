@@ -1,5 +1,9 @@
 import { createPool, type Pool } from "@crossover/db";
-import { buildGateway } from "@crossover/gateway";
+import {
+  buildGateway,
+  type SandboxOutputMetadata,
+  type SandboxOutputSource,
+} from "@crossover/gateway";
 import { registerMcp } from "@crossover/mcp";
 import { buildInternalGitServer } from "./internal-git.js";
 import {
@@ -47,6 +51,7 @@ import {
 } from "@crossover/kernel";
 import { postWebhook } from "@crossover/security";
 import { authorize, tierOf } from "@crossover/policy";
+import { join } from "node:path";
 import {
   ConflictEscalationSweeper,
   DockerExecutionDriver,
@@ -62,6 +67,11 @@ import {
   normalizePath,
   registerSandboxStatusCommand,
   registerSandboxSubmitCommand,
+  registerSandboxExecCommands,
+  FileLogStore,
+  SandboxOutputHub,
+  type LogStore,
+  type SandboxExecLogMetadata,
   type ExecutionDriver,
   type UpstreamDeps,
   type WorkspaceCommandDeps,
@@ -130,6 +140,7 @@ export async function composeServer(
   let executionService: ExecutionService | undefined;
   let gitApp: ReturnType<typeof buildInternalGitServer> | undefined;
   let healthInstallSweepTimer: NodeJS.Timeout | undefined;
+  let sandboxLogSweepTimer: NodeJS.Timeout | undefined;
   if (overrides.publisher) {
     publisher = overrides.publisher;
   } else {
@@ -149,11 +160,35 @@ export async function composeServer(
   const intentStore = new RedisEditIntentStore(config.redisUrl);
   const ownBudgets = overrides.budgets ? undefined : new RedisBudgetLimiter(config.redisUrl);
   const budgets = overrides.budgets ?? ownBudgets!;
+  const sandboxLogStore = new FileLogStore(join(config.workspaceRoot, ".sandbox-exec-logs"));
+  const sandboxOutputHub = new SandboxOutputHub();
+  const sandboxOutput: SandboxOutputSource = {
+    async get(execId) {
+      const metadata = await sandboxLogStore.get(execId);
+      return metadata ? toSandboxOutputMetadata(metadata) : undefined;
+    },
+    lastSequence: (execId) => sandboxLogStore.lastCursor(execId),
+    read: (execId, afterCursor, limit) => sandboxLogStore.read(execId, afterCursor, limit),
+    subscribe: (execId, listener) =>
+      sandboxOutputHub.subscribe(execId, (update) =>
+        listener(
+          update.kind === "chunk"
+            ? update
+            : { kind: "finished", metadata: toSandboxOutputMetadata(update.metadata) },
+        ),
+      ),
+  };
 
   try {
     if (redis) await redis.ready();
     await intentStore.ready();
     await ownBudgets?.ready();
+    await sweepSandboxLogs(sandboxLogStore);
+    sandboxLogSweepTimer = setInterval(
+      () => void sweepSandboxLogs(sandboxLogStore),
+      24 * 60 * 60 * 1000,
+    );
+    sandboxLogSweepTimer.unref();
 
     const executionDriver =
       overrides.executionDriver ??
@@ -237,6 +272,8 @@ export async function composeServer(
       healthQueue,
       intentStore,
       executionService,
+      sandboxLogStore,
+      sandboxOutputHub,
       overrides.upstream,
       overrides.tools,
     );
@@ -267,7 +304,7 @@ export async function composeServer(
       pool,
       devLogin: config.devLogin,
       ...(config.webRoot ? { staticRoot: config.webRoot } : {}),
-      ws: { subscriber },
+      ws: { subscriber, sandboxOutput },
     });
     gitApp = buildInternalGitServer({
       pool,
@@ -282,6 +319,7 @@ export async function composeServer(
         await escalations?.stop();
         await leaseSweeper?.stop();
         if (healthInstallSweepTimer) clearInterval(healthInstallSweepTimer);
+        if (sandboxLogSweepTimer) clearInterval(sandboxLogSweepTimer);
         await wakeWebhooks?.stop();
         await executionService?.close();
         await renewer.stop();
@@ -301,6 +339,7 @@ export async function composeServer(
     await escalations?.stop();
     await leaseSweeper?.stop();
     if (healthInstallSweepTimer) clearInterval(healthInstallSweepTimer);
+    if (sandboxLogSweepTimer) clearInterval(sandboxLogSweepTimer);
     await wakeWebhooks?.stop();
     await executionService?.close();
     await gitApp?.close();
@@ -320,6 +359,8 @@ function registerCommands(
   healthQueue: HealthCheckQueue,
   intentStore: RedisEditIntentStore,
   execution: ExecutionService,
+  logs: LogStore,
+  outputHub: SandboxOutputHub,
   upstream?: UpstreamDeps,
   tools: ComposeOverrides["tools"] = {},
 ): void {
@@ -378,4 +419,30 @@ function registerCommands(
   registerWorkspaceCommands(dispatcher, workspaceDeps);
   registerSandboxStatusCommand(dispatcher, execution);
   registerSandboxSubmitCommand(dispatcher, execution, workspaceDeps);
+  registerSandboxExecCommands(dispatcher, execution, logs, { outputHub });
+}
+
+async function sweepSandboxLogs(logs: LogStore): Promise<void> {
+  try {
+    await logs.sweepExpired();
+  } catch (error) {
+    process.emitWarning(
+      error instanceof Error ? error : new Error(String(error)),
+      "SandboxLogSweepWarning",
+    );
+  }
+}
+
+function toSandboxOutputMetadata(metadata: SandboxExecLogMetadata): SandboxOutputMetadata {
+  return {
+    exec_id: metadata.exec_id,
+    room_id: metadata.room_id,
+    sandbox_id: metadata.sandbox_id,
+    participant_id: metadata.participant_id,
+    ...(metadata.finished_at !== undefined ? { finished_at: metadata.finished_at } : {}),
+    ...(metadata.exit_code !== undefined ? { exit_code: metadata.exit_code } : {}),
+    ...(metadata.duration_ms !== undefined ? { duration_ms: metadata.duration_ms } : {}),
+    ...(metadata.reason !== undefined ? { reason: metadata.reason } : {}),
+    truncated: metadata.truncated,
+  };
 }

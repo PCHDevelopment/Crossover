@@ -20,13 +20,15 @@
     "@crossover/mcp": "workspace:*",
     "@crossover/policy": "workspace:*",
     "@crossover/protocol": "workspace:*",
-    "@crossover/security": "workspace:*",
     "@crossover/sdk": "workspace:*",
+    "@crossover/security": "workspace:*",
     "@crossover/workspace": "workspace:*",
     "fastify": "^5.12.5",
     "zod": "^4.6.5"
   },
   "devDependencies": {
-    "playwright-core": "^1.63.0"
+    "@types/ws": "^8.18.2",
+    "playwright-core": "^1.63.0",
+    "ws": "^8.22.0"
   }
 }
