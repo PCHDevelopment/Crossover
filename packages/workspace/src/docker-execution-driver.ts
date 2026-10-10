@@ -352,11 +352,10 @@ export class DockerExecutionDriver implements ExecutionDriver {
     if (!isAbsolute(input.cwd) || input.cwd.includes("\0"))
       throw new CrossoverError("VALIDATION", "Sandbox working directory must be absolute");
 
-    const pidFile = `/tmp/crossover-${input.exec_id}.pid`;
+    const processGroupMarker = `CROSSOVER_EXEC_PGID:${input.exec_id}:`;
     const wrapper =
-      `printf '%s\\n' "$$" > "${pidFile}"; ` +
-      `trap 'rm -f "${pidFile}"' EXIT; ` +
-      `sh -lc "$CROSSOVER_EXEC_COMMAND"`;
+      `printf '%s%s\\n' '${processGroupMarker}' "$$" >&2; ` +
+      `exec sh -lc "$CROSSOVER_EXEC_COMMAND"`;
     const child = spawn(
       this.dockerBinary,
       [
@@ -383,14 +382,44 @@ export class DockerExecutionDriver implements ExecutionDriver {
     let outputTail = Promise.resolve();
     let cancelPromise: Promise<void> | undefined;
     let timeout: ReturnType<typeof setTimeout> | undefined;
+    let processGroupId: number | undefined;
+    let pendingStderr = Buffer.alloc(0);
     let resolveFinished!: (outcome: SandboxExecOutcome) => void;
     const finished = new Promise<SandboxExecOutcome>((resolve) => (resolveFinished = resolve));
 
+    const deliverOutput = async (stream: "stdout" | "stderr", value: Buffer): Promise<void> => {
+      if (stream !== "stderr" || processGroupId !== undefined) {
+        if (value.byteLength > 0) await input.onOutput(stream, value);
+        return;
+      }
+
+      pendingStderr = Buffer.concat([pendingStderr, value]);
+      const newline = pendingStderr.indexOf(0x0a);
+      if (newline < 0) {
+        if (pendingStderr.byteLength > 256)
+          throw new Error("Sandbox exec did not report its process group");
+        return;
+      }
+
+      const line = pendingStderr.subarray(0, newline).toString("utf8");
+      const rest = pendingStderr.subarray(newline + 1);
+      const rawPid = line.startsWith(processGroupMarker)
+        ? line.slice(processGroupMarker.length)
+        : "";
+      const pid = Number(rawPid);
+      if (!/^[1-9][0-9]*$/.test(rawPid) || !Number.isSafeInteger(pid) || pid <= 1) {
+        throw new Error("Sandbox exec returned an invalid process-group marker");
+      }
+
+      processGroupId = pid;
+      pendingStderr = Buffer.alloc(0);
+      if (rest.byteLength > 0) await input.onOutput("stderr", rest);
+    };
     const queueOutput = (stream: "stdout" | "stderr", source: Readable) => {
       source.on("data", (value: Buffer) => {
         source.pause();
         outputTail = outputTail
-          .then(() => input.onOutput(stream, value))
+          .then(() => deliverOutput(stream, value))
           .catch((error: unknown) => {
             outputError = error;
           })
@@ -400,22 +429,11 @@ export class DockerExecutionDriver implements ExecutionDriver {
     if (child.stdout) queueOutput("stdout", child.stdout);
     if (child.stderr) queueOutput("stderr", child.stderr);
 
-    const readPid = async (): Promise<number | undefined> => {
-      const result = await this.invoke(
-        ["exec", input.resources.container_ref, "sh", "-lc", `cat ${pidFile}`],
-        { timeoutMs: 5_000, maxBuffer: 1024 },
-      );
-      if (result.code !== 0) return undefined;
-      const pid = Number(result.stdout.trim());
-      return Number.isSafeInteger(pid) && pid > 1 ? pid : undefined;
-    };
     const signalGroup = async (signal: "TERM" | "KILL"): Promise<void> => {
-      let pid: number | undefined;
       const deadline = Date.now() + 5_000;
-      while (!closed && pid === undefined && Date.now() < deadline) {
-        pid = await readPid().catch(() => undefined);
-        if (pid === undefined) await new Promise((resolve) => setTimeout(resolve, 25));
-      }
+      while (!closed && processGroupId === undefined && Date.now() < deadline)
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      const pid = processGroupId;
       if (pid === undefined) return;
       await this.invoke(
         [
@@ -432,22 +450,35 @@ export class DockerExecutionDriver implements ExecutionDriver {
       if (settled) return;
       settled = true;
       if (timeout) clearTimeout(timeout);
-      void outputTail.finally(() => {
-        const finalReason: SandboxExecOutcome["reason"] = outputError
-          ? "start_failed"
-          : (reason ?? "exit");
-        resolveFinished({
-          exit_code: finalReason === "exit" ? childCode : null,
-          duration_ms: Date.now() - start,
-          reason: finalReason,
+      void outputTail
+        .then(async () => {
+          if (pendingStderr.byteLength > 0) {
+            const tail = pendingStderr;
+            pendingStderr = Buffer.alloc(0);
+            await input.onOutput("stderr", tail);
+          }
+        })
+        .catch((error: unknown) => {
+          outputError = error;
+        })
+        .finally(() => {
+          if (outputError) console.error("[execution] sandbox exec stream failed", outputError);
+          const finalReason: SandboxExecOutcome["reason"] = outputError
+            ? "start_failed"
+            : (reason ?? "exit");
+          resolveFinished({
+            exit_code: finalReason === "exit" ? childCode : null,
+            duration_ms: Date.now() - start,
+            reason: finalReason,
+          });
         });
-      });
     };
 
     const cancel = (why: SandboxExecTermination): Promise<void> => {
-      if (cancelPromise) return cancelPromise;
+      if (why === "revoked" || why === "sandbox_stopped") reason = why;
+      else reason ??= why;
       if (closed) return Promise.resolve();
-      reason ??= why;
+      if (cancelPromise) return cancelPromise;
       cancelPromise = (async () => {
         await signalGroup("TERM");
         const stopped = await Promise.race([
@@ -958,6 +989,14 @@ export class DockerExecutionDriver implements ExecutionDriver {
     } catch (error) {
       if ((await this.inspectContainer(input.resources.container_ref))?.running) throw error;
     }
+  }
+
+  async restart(input: { sandbox_id: string; resources: SandboxResources }): Promise<void> {
+    this.assertResources(input.sandbox_id, input.resources);
+    await this.mustSucceed(
+      ["container", "restart", "--time", "0", input.resources.container_ref],
+      "ERROR: Docker container restart failed",
+    );
   }
 
   async destroy(input: { sandbox_id: string; resources?: SandboxResources }): Promise<void> {

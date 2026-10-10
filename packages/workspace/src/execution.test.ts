@@ -75,6 +75,10 @@ class FakeExecutionDriver implements ExecutionDriver {
     this.running.delete(input.sandbox_id);
   }
 
+  async restart(input: { sandbox_id: string; resources: SandboxResources }): Promise<void> {
+    this.stopped.push(input.sandbox_id);
+  }
+
   async destroy(input: { sandbox_id: string; resources?: SandboxResources }): Promise<void> {
     this.destroyCalls.push(input.sandbox_id);
     const resources = this.provisioned.get(input.sandbox_id);
@@ -92,9 +96,7 @@ class FakeExecutionDriver implements ExecutionDriver {
     return this.changes;
   }
 
-  async exec(
-    _input: Parameters<NonNullable<ExecutionDriver["exec"]>>[0],
-  ): Promise<SandboxExecProcess> {
+  async exec(): Promise<SandboxExecProcess> {
     let finish!: (outcome: SandboxExecOutcome) => void;
     const finished = new Promise<SandboxExecOutcome>((resolve) => (finish = resolve));
     return {
@@ -391,6 +393,8 @@ describe("ExecutionService", () => {
     const execution = new ExecutionService(db.pool, driver);
     const participantId = participantIds[0]!;
     await execution.ensure(roomId, participantId);
+    await execution.cancelParticipantExecs(roomId, participantId, "revoked");
+    expect(driver.stopped).toHaveLength(1);
     await execution.startExec({
       room_id: roomId,
       participant_id: participantId,
@@ -400,9 +404,7 @@ describe("ExecutionService", () => {
       timeoutMs: 60_000,
       onOutput: async () => {},
     });
-
     await execution.hibernateRoom(roomId, true);
-
     expect(driver.execCancellations).toEqual(["sandbox_stopped"]);
     expect(await execution.get(roomId, participantId)).toMatchObject({ status: "HIBERNATED" });
   });

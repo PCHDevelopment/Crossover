@@ -24,6 +24,21 @@ function missingResources(args: readonly string[]) {
   return { code: 0, stdout: "", stderr: "" };
 }
 
+async function startDockerSandbox(driver: DockerExecutionDriver) {
+  const sandboxId = newId("sandbox");
+  const resources = await driver.create({
+    sandbox_id: sandboxId,
+    room_id: newId("room"),
+    participant_id: newId("part"),
+    limits: { disk_enforcement: "soft" },
+  });
+  return driver.start({ sandbox_id: sandboxId, resources }).then(() => ({ sandboxId, resources }));
+}
+
+function expectMissing(container: string, path: string) {
+  expect(() => execFileSync("docker", ["exec", container, "test", "-e", path])).toThrow();
+}
+
 describe("DockerExecutionDriver", () => {
   it("runs the fetcher on crossover-git with a short-lived token and hardening", async () => {
     const calls: Array<{ args: string[]; timeoutMs?: number; env?: NodeJS.ProcessEnv }> = [];
@@ -975,60 +990,54 @@ describe("DockerExecutionDriver", () => {
   );
 
   it.skipIf(skipDockerIntegration)(
-    "streams output and cancels a shell process group with its child",
+    "ignores a tampered pid file and times out its process group",
     async () => {
       const driver = new DockerExecutionDriver();
-      const sandboxId = newId("sandbox");
-      const resources = await driver.create({
-        sandbox_id: sandboxId,
-        room_id: newId("room"),
-        participant_id: newId("part"),
-        limits: { disk_enforcement: "soft" },
-      });
-      let running: Awaited<ReturnType<typeof driver.exec>> | undefined;
+      const { sandboxId, resources } = await startDockerSandbox(driver);
       try {
-        await driver.start({ sandbox_id: sandboxId, resources });
-        const output: Buffer[] = [];
-        running = await driver.exec({
+        const execId = newId("exec");
+        const childEffect = `/tmp/crossover-child-${execId}`;
+        const running = await driver.exec({
           sandbox_id: sandboxId,
           resources,
-          exec_id: newId("exec"),
-          command: 'sleep 300 & child=$!; printf "CHILD=%s\\n" "$child"; wait',
+          exec_id: execId,
+          command: `printf '99999999\\n' > /tmp/crossover-${execId}.pid; (sleep 1; touch ${childEffect}) & wait`,
+          cwd: "/workspace",
+          timeoutMs: 250,
+          onOutput: async () => {},
+        });
+        await expect(running.finished).resolves.toMatchObject({ reason: "timed_out" });
+        await new Promise((resolve) => setTimeout(resolve, 1_100));
+        expectMissing(resources.container_ref, childEffect);
+      } finally {
+        await driver.destroy({ sandbox_id: sandboxId, resources });
+      }
+    },
+    30_000,
+  );
+  it.skipIf(skipDockerIntegration)(
+    "restarts the sandbox to kill a detached setsid child",
+    async () => {
+      const driver = new DockerExecutionDriver();
+      const { sandboxId, resources } = await startDockerSandbox(driver);
+      try {
+        const execId = newId("exec");
+        const ready = `/tmp/crossover-ready-${execId}`;
+        const escaped = `/tmp/crossover-escaped-${execId}`;
+        const { finished } = await driver.exec({
+          sandbox_id: sandboxId,
+          resources,
+          exec_id: execId,
+          command: `setsid sh -lc 'touch ${ready}; sleep 1; touch ${escaped}' >/dev/null 2>&1 & while [ ! -e ${ready} ]; do sleep .01; done`,
           cwd: "/workspace",
           timeoutMs: 60_000,
-          onOutput: async (_stream, chunk) => void output.push(Buffer.from(chunk)),
+          onOutput: async () => {},
         });
-        const deadline = Date.now() + 5_000;
-        while (!Buffer.concat(output).toString("utf8").includes("CHILD=") && Date.now() < deadline)
-          await new Promise((resolve) => setTimeout(resolve, 20));
-        const match = /CHILD=(\d+)/.exec(Buffer.concat(output).toString("utf8"));
-        expect(match, "the child PID should be reported before cancellation").not.toBeNull();
-        const childPid = match![1]!;
-
-        await running.cancel("cancelled");
-        await expect(running.finished).resolves.toMatchObject({
-          reason: "cancelled",
-          exit_code: null,
-        });
-        let childState = "";
-        for (let attempt = 0; attempt < 30; attempt++) {
-          childState = execFileSync(
-            "docker",
-            [
-              "exec",
-              resources.container_ref,
-              "node",
-              "-e",
-              `try{const s=require("node:fs").readFileSync("/proc/${childPid}/stat","utf8");const i=s.lastIndexOf(") ");process.stdout.write(i<0?"?":s.slice(i+2,i+3))}catch{process.stdout.write("gone")}`,
-            ],
-            { encoding: "utf8", timeout: 5_000 },
-          );
-          if (childState === "gone" || childState === "Z") break;
-          await new Promise((resolve) => setTimeout(resolve, 50));
-        }
-        expect(["gone", "Z"]).toContain(childState);
+        await expect(finished).resolves.toMatchObject({ reason: "exit", exit_code: 0 });
+        await driver.restart({ sandbox_id: sandboxId, resources });
+        await new Promise((resolve) => setTimeout(resolve, 1_100));
+        expectMissing(resources.container_ref, escaped);
       } finally {
-        await running?.cancel("sandbox_stopped").catch(() => undefined);
         await driver.destroy({ sandbox_id: sandboxId, resources });
       }
     },

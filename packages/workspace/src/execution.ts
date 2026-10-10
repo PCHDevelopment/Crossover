@@ -117,7 +117,6 @@ export interface ExecutionDriver {
     files: readonly Pick<SandboxSnapshotFile, "path" | "mode" | "content">[];
     delete_paths: readonly string[];
   }): Promise<void>;
-  /** Start a tracked shell process inside the running sandbox. */
   exec?(input: {
     sandbox_id: string;
     resources: SandboxResources;
@@ -129,6 +128,7 @@ export interface ExecutionDriver {
   }): Promise<SandboxExecProcess>;
   start(input: { sandbox_id: string; resources: SandboxResources }): Promise<void>;
   stop(input: { sandbox_id: string; resources: SandboxResources }): Promise<void>;
+  restart?(input: { sandbox_id: string; resources: SandboxResources }): Promise<void>;
   destroy(input: { sandbox_id: string; resources?: SandboxResources }): Promise<void>;
 }
 
@@ -284,11 +284,23 @@ export class ExecutionService {
     participantId: string,
     reason: SandboxExecTermination,
   ): Promise<void> {
-    const active = [...this.activeExecs.values()].filter(
-      (run) => run.room_id === roomId && run.participant_id === participantId,
-    );
-    await Promise.all(active.map((run) => run.process.cancel(reason).catch(() => undefined)));
-    await Promise.all(active.map((run) => run.process.finished.catch(() => undefined)));
+    await this.withEnsureLock(roomId, participantId, async () => {
+      const sandbox = await this.get(roomId, participantId);
+      const active = [...this.activeExecs.values()].filter(
+        (run) => run.room_id === roomId && run.participant_id === participantId,
+      );
+      const cancelling = active.map((run) => run.process.cancel(reason).catch(() => undefined));
+      if (reason === "revoked" && sandbox?.status === "RUNNING") {
+        const resources = this.resources(sandbox);
+        if (this.driver.restart) await this.driver.restart({ sandbox_id: sandbox.id, resources });
+        else
+          await this.driver
+            .stop({ sandbox_id: sandbox.id, resources })
+            .then(() => this.driver.start({ sandbox_id: sandbox.id, resources }));
+      }
+      await Promise.all(cancelling);
+      await Promise.all(active.map((run) => run.process.finished.catch(() => undefined)));
+    });
   }
 
   async cancelAllExecs(reason: SandboxExecTermination): Promise<void> {
@@ -778,8 +790,9 @@ export class ExecutionService {
 
       const resources = this.resources(sandbox);
       try {
-        await this.cancelSandboxExecs(sandbox.id, "sandbox_stopped");
-        await this.driver.stop({ sandbox_id: sandbox.id, resources });
+        await this.cancelSandboxExecs(sandbox.id, "sandbox_stopped", () =>
+          this.driver.stop({ sandbox_id: sandbox.id, resources }),
+        );
         const rowCount = await withTransaction(this.pool, async (client) => {
           const result = await client.query(
             `UPDATE sandboxes SET status = 'HIBERNATED', updated_at = clock_timestamp()
@@ -830,13 +843,14 @@ export class ExecutionService {
 
     const destroy = async (): Promise<boolean> => {
       const sandbox = claim.sandbox;
-      await this.cancelSandboxExecs(sandbox.id, "sandbox_stopped");
-      await this.driver.destroy({
-        sandbox_id: sandbox.id,
-        ...(sandbox.volume_ref && sandbox.container_ref
-          ? { resources: this.resources(sandbox) }
-          : {}),
-      });
+      await this.cancelSandboxExecs(sandbox.id, "sandbox_stopped", () =>
+        this.driver.destroy({
+          sandbox_id: sandbox.id,
+          ...(sandbox.volume_ref && sandbox.container_ref
+            ? { resources: this.resources(sandbox) }
+            : {}),
+        }),
+      );
       await withTransaction(this.pool, async (client) =>
         client.query(
           `UPDATE sandboxes SET status = 'DESTROYED', volume_ref = NULL, container_ref = NULL,
@@ -860,9 +874,12 @@ export class ExecutionService {
   private async cancelSandboxExecs(
     sandboxId: string,
     reason: SandboxExecTermination,
+    terminateSandbox?: () => Promise<void>,
   ): Promise<void> {
     const active = [...this.activeExecs.values()].filter((run) => run.sandbox_id === sandboxId);
-    await Promise.all(active.map((run) => run.process.cancel(reason).catch(() => undefined)));
+    const cancelling = active.map((run) => run.process.cancel(reason).catch(() => undefined));
+    await terminateSandbox?.();
+    await Promise.all(cancelling);
     await Promise.all(active.map((run) => run.process.finished.catch(() => undefined)));
   }
 
