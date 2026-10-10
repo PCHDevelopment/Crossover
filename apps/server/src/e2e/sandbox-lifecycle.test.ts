@@ -27,6 +27,10 @@ class RecordingExecutionDriver implements ExecutionDriver {
     };
   }
 
+  async status(_input: Parameters<ExecutionDriver["status"]>[0]) {
+    return { modified: [], added: [], deleted: [], truncated: false };
+  }
+
   async start(_input: Parameters<ExecutionDriver["start"]>[0]): Promise<void> {}
 
   async stop({ sandbox_id }: Parameters<ExecutionDriver["stop"]>[0]): Promise<void> {

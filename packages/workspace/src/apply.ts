@@ -91,6 +91,18 @@ export interface ApplyExtras {
   actorId?: string;
   /** Stored in the ChangeSet's payload beside the operations. */
   payload?: Record<string, unknown>;
+  /** Optional source-specific work computed from an applied commit, still inside this transaction. */
+  onApplied?: (
+    ctx: CommandContext,
+    applied: {
+      repo_path: string;
+      base_commit: string;
+      head_commit: string;
+      applied_commit: string;
+      revision: number;
+      changed_paths: readonly string[];
+    },
+  ) => Promise<{ events?: EmittedEvent[]; afterCommit?: () => void | Promise<void> }>;
 }
 
 export async function apply(
@@ -436,6 +448,14 @@ export async function apply(
   const synced = resolution
     ? await advanceUpstreamAfterResolution(ctx, resolution.originalChangesetId, revision)
     : null;
+  const completion = await extras.onApplied?.(ctx, {
+    repo_path: ws.repo_path,
+    base_commit: base.commit_sha,
+    head_commit: head.commit_sha,
+    applied_commit: commit,
+    revision,
+    changed_paths: changedFiles.map(({ path }) => path),
+  });
   if (synced) {
     ctx.afterCommit(() => setUpstreamRef(ws.repo_path, synced.last_synced_sha));
   }
@@ -447,6 +467,7 @@ export async function apply(
     else await refreshSearchTree(ws.repo_path, commit, head.commit_sha);
   });
   if (deps.scheduleHealthCheck) ctx.afterCommit(() => deps.scheduleHealthCheck!(room_id, revision));
+  if (completion?.afterCommit) ctx.afterCommit(completion.afterCommit);
   return {
     response: { status: "APPLIED" as const, changeset_id: id, applied_revision: revision },
     events: [
@@ -470,6 +491,7 @@ export async function apply(
             },
           ]
         : []),
+      ...(completion?.events ?? []),
     ],
   };
 }

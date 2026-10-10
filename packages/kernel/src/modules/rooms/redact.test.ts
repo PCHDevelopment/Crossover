@@ -38,6 +38,15 @@ const denied = (actor: string, payload: Record<string, unknown> = {}): RoomEvent
     },
   }) as unknown as RoomEvent;
 
+const sandboxBehind = (participantId: string, changedPaths = ["private/config.yml"]): RoomEvent =>
+  ({
+    room_id: "room_x",
+    sequence: 2,
+    actor_id: "system",
+    type: "sandbox.behind",
+    payload: { participant_id: participantId, changed_paths: changedPaths, behind_by: 1 },
+  }) as unknown as RoomEvent;
+
 const viewer = (id: string, role = "DEVELOPER", authority = "MEMBER") => ({
   participant_id: id,
   role,
@@ -100,6 +109,29 @@ describe("redactEventFor", () => {
     } as unknown as RoomEvent;
     expect(redactEventFor(viewer("part_z"), e)).toBe(e);
   });
+
+  it("shows sandbox paths to the sandbox owner, lead, owner and admins", () => {
+    const e = sandboxBehind("part_a");
+    expect(redactEventFor(viewer("part_a"), e)).toBe(e);
+    expect(redactEventFor(viewer("part_l", "LEAD"), e)).toBe(e);
+    expect(redactEventFor(viewer("part_o", "DEVELOPER", "OWNER"), e)).toBe(e);
+    expect(redactEventFor(viewer("part_m", "OBSERVER", "ADMIN"), e)).toBe(e);
+  });
+
+  it.each(["DEVELOPER", "REVIEWER", "OBSERVER"])(
+    "a %s without sandbox authority gets changed_paths removed",
+    (role) => {
+      const e = sandboxBehind("part_a");
+      const out = redactEventFor(viewer("part_z", role), e);
+      expect(out.payload).toEqual({
+        participant_id: "part_a",
+        behind_by: 1,
+        paths_redacted: true,
+      });
+      expect(JSON.stringify(out)).not.toContain("private/config.yml");
+      expect((e.payload as Record<string, unknown>).changed_paths).toEqual(["private/config.yml"]);
+    },
+  );
 
   it("who sees denials: lead, owner, admin", () => {
     expect(seesDenials(viewer("a", "LEAD"))).toBe(true);

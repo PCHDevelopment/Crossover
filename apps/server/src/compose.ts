@@ -15,6 +15,9 @@ import {
   registerDecisionCommands,
   registerDecisionDecideCommands,
   registerApprovalCommands,
+  registerToolCommands,
+  ToolRegistry,
+  type ToolRunner,
   registerWakeSecretCommand,
   WakeWebhookService,
   registerInboxCommands,
@@ -43,7 +46,7 @@ import {
   RedisEditIntentStore,
 } from "@crossover/kernel";
 import { postWebhook } from "@crossover/security";
-import { authorize } from "@crossover/policy";
+import { authorize, tierOf } from "@crossover/policy";
 import {
   ConflictEscalationSweeper,
   DockerExecutionDriver,
@@ -57,8 +60,11 @@ import {
   runHealthCheck,
   publishHealthResult,
   normalizePath,
+  registerSandboxStatusCommand,
+  registerSandboxSubmitCommand,
   type ExecutionDriver,
   type UpstreamDeps,
+  type WorkspaceCommandDeps,
 } from "@crossover/workspace";
 import type { ServerConfig } from "./config.js";
 
@@ -79,6 +85,8 @@ export interface ComposeOverrides {
   executionDriver?: ExecutionDriver;
   /** Use this limiter for agents' budgets (§22.3) instead of Redis at `redisUrl` (tests); not closed by `close()`. */
   budgets?: BudgetLimiter;
+  /** Tools plugins declare, and what runs them (the plugin runner, T1202); none by default. */
+  tools?: { registry?: ToolRegistry; runner?: ToolRunner; timeoutMs?: number };
   /** How `git.import` reaches an upstream (fetcher, credentials, host check); production: HTTPS clone, no credentials. */
   upstream?: UpstreamDeps;
 }
@@ -230,6 +238,7 @@ export async function composeServer(
       intentStore,
       executionService,
       overrides.upstream,
+      overrides.tools,
     );
 
     const renewer = new LeaseRenewer({ leases: dispatcher.leases, actors: dispatcher.actors });
@@ -244,19 +253,35 @@ export async function composeServer(
         : {}),
     });
     leaseSweeper.start();
-    if (config.wakeWebhookKey) {
-      wakeWebhooks = new WakeWebhookService({
-        pool,
-        key: config.wakeWebhookKey,
-        sender: (request) => postWebhook(request),
-      });
-      wakeWebhooks.start();
-    }
+    // Runs without a key too: then it sends nothing and only keeps the outbox from growing.
+    wakeWebhooks = new WakeWebhookService({
+      pool,
+      key: config.wakeWebhookKey,
+      sender: (request) => postWebhook(request),
+    });
+    wakeWebhooks.start();
 
     const app = buildGateway({
       dispatcher,
       pool,
       devLogin: config.devLogin,
+      trustProxy: config.trustProxy && config.trustProxy.length > 0 ? config.trustProxy : false,
+      refreshLimit: {
+        limiter: {
+          // The budget limiter's counters, under keys no room can have.
+          hit: async (key, limit, windowMs) => {
+            const d = await budgets.consume(
+              { room_id: "_auth", participant_id: key, budget: "commands" },
+              limit,
+              windowMs,
+            );
+            return d.allowed
+              ? { allowed: true }
+              : { allowed: false, retry_after_ms: d.retry_after_ms };
+          },
+        },
+        perMinute: config.refreshPerMinute ?? 30,
+      },
       ...(config.webRoot ? { staticRoot: config.webRoot } : {}),
       ws: { subscriber },
     });
@@ -312,6 +337,7 @@ function registerCommands(
   intentStore: RedisEditIntentStore,
   execution: ExecutionService,
   upstream?: UpstreamDeps,
+  tools: ComposeOverrides["tools"] = {},
 ): void {
   registerRoomCommands(dispatcher, {
     provision: async ({ client, room_id }) => {
@@ -339,6 +365,12 @@ function registerCommands(
   registerRoomDigestCommand(dispatcher);
   registerInboxCommands(dispatcher);
   registerApprovalCommands(dispatcher);
+  // Tools plugins declare (T1201); the plugin runner (T1202) will be what runs them.
+  registerToolCommands(dispatcher, {
+    registry: tools.registry ?? new ToolRegistry({ tierOf }),
+    ...(tools.runner ? { runner: tools.runner } : {}),
+    ...(tools.timeoutMs !== undefined ? { timeoutMs: tools.timeoutMs } : {}),
+  });
   registerWakeSecretCommand(dispatcher, config.wakeWebhookKey);
   registerPresenceIntentCommands(dispatcher, intentStore, normalizePath);
   registerRoomEventsSubscribeCommand(dispatcher); // the WebSocket `subscribe` frame
@@ -355,8 +387,11 @@ function registerCommands(
   registerDecisionDecideCommands(dispatcher);
 
   // apply_changeset plus reads; schedule health for every committed revision.
-  registerWorkspaceCommands(dispatcher, {
+  const workspaceDeps: WorkspaceCommandDeps = {
     scheduleHealthCheck: (roomId, revision) => healthQueue.enqueue(roomId, revision),
     ...(upstream ? { upstream } : {}),
-  });
+  };
+  registerWorkspaceCommands(dispatcher, workspaceDeps);
+  registerSandboxStatusCommand(dispatcher, execution);
+  registerSandboxSubmitCommand(dispatcher, execution, workspaceDeps);
 }

@@ -10,6 +10,7 @@ import {
   ROLES,
   type Capability,
 } from "./bundles.js";
+import { capabilityTier } from "./tiers.js";
 
 // The expectations below are written out by hand from ARCHITECTURE §6.1 (not derived from
 // ROLE_BUNDLES), so a change to the table has to change them too.
@@ -144,16 +145,15 @@ describe("role bundles (§6.1)", () => {
   });
 
   it("no role bundle holds an authority power, except documented shared capabilities", () => {
-    // Leads may pause, resume and set roles (T211/T212 enforce the §6.3 limits). The sole
-    // shared role/authority capability is conflicts.abandon: submitter-capable roles get it,
-    // while owner authority grants it regardless of project role.
+    // Leads may pause, resume and set roles (T211/T212 enforce the §6.3 limits). Shared
+    // role/authority capabilities are conflicts.abandon and sandbox.output.
     const leadOnly = ["participants.pause", "participants.resume", "participants.set_role"];
     const powers = new Set([...AUTHORITY_POWERS.OWNER, ...AUTHORITY_POWERS.ADMIN]);
     for (const role of ROLES) {
       for (const c of ROLE_BUNDLES[role]) {
         const allowed =
           (role === "LEAD" && leadOnly.includes(c)) ||
-          (c === "conflicts.abandon" && role !== "OBSERVER");
+          ((c === "conflicts.abandon" || c === "sandbox.output") && role !== "OBSERVER");
         expect(powers.has(c) && !allowed, `${role} ${c}`).toBe(false);
       }
     }
@@ -166,6 +166,7 @@ describe("role bundles (§6.1)", () => {
 
 describe("authority powers (§6.2)", () => {
   const ADMIN = [
+    "sandbox.output",
     "room.invite",
     "room.set_lead",
     "participants.set_role",
@@ -255,6 +256,20 @@ describe("authority powers (§6.2)", () => {
     expect(effective.has("room.archive")).toBe(true);
     expect(effective.has("conflicts.abandon")).toBe(true);
     expect(effective.has("workspace.write")).toBe(false);
+  });
+});
+
+describe("tiers and bundles (§21.2)", () => {
+  it("no role and no authority level gets a Tier 3 capability, and none gets a Tier 2 one", () => {
+    for (const role of ROLES) {
+      for (const authority of AUTHORITIES) {
+        for (const capability of effectiveCapabilities(role, authority)) {
+          // `capabilities.grant_tier3` is the owner's power to hand Tier 3 out, not a Tier 3 action.
+          if (capability === "capabilities.grant_tier3") continue;
+          expect(capabilityTier(capability), `${role}/${authority} ${capability}`).toBeLessThan(2);
+        }
+      }
+    }
   });
 });
 

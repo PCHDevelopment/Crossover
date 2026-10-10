@@ -8,6 +8,7 @@ import {
   tierOf,
 } from "./capability.js";
 import { CAPABILITIES } from "./bundles.js";
+import { pathGlobMatch } from "./glob.js";
 
 describe("parseCapability", () => {
   it.each([
@@ -430,6 +431,10 @@ describe("capabilityMatches never throws", () => {
     const t2 = Date.now();
     expect(capabilityMatches(`aws.read_logs:${stars}`, `aws.read_logs:${text}`)).toBe(false);
     expect(Date.now() - t2).toBeLessThan(1_000);
+
+    const wildcardStarted = performance.now();
+    expect(pathGlobMatch("*x".repeat(12) + "y", "x".repeat(255))).toBe(false);
+    expect(performance.now() - wildcardStarted).toBeLessThan(50);
   });
 });
 

@@ -47,7 +47,7 @@ export async function materialize(
   const options = {
     gitDir: repo,
     timeoutMs: 10_000,
-    env: { GIT_INDEX_FILE: join(dir, "index") },
+    env: { GIT_CONFIG_GLOBAL: "/dev/null", GIT_INDEX_FILE: join(dir, "index") },
   };
   try {
     const base = (

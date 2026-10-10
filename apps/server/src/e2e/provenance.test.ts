@@ -290,6 +290,7 @@ describe("provenance labels (§16.5)", () => {
       "workspace.history": "commit messages: the MCP provenance framing is T711",
       "workspace.blame": "authors are named per line; the MCP provenance framing is T711",
       "workspace.health.get": "platform-run output",
+      "sandbox.status": "working-copy paths and canonical revision numbers",
       "conflicts.list": "ChangeSet metadata",
       "conflicts.get": "ChangeSet metadata",
       "room.events.list": "events carry actor_id and type, the ledger's own provenance",
@@ -301,6 +302,8 @@ describe("provenance labels (§16.5)", () => {
       "presence.list_intents": "paths announced by participants; no free text",
       "capabilities.list": "platform permission records",
       "tasks.heartbeat": "the caller's own lease",
+      "tools.list":
+        "tool descriptions the platform registered, filtered to what the caller may use",
       "participants.wake_secret": "the caller's own webhook secret",
     };
     const reads = server.dispatcher
