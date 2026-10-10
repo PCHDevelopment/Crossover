@@ -564,7 +564,7 @@ describe("subscribe: ordered, exactly-once events", () => {
 
     const watch = async (token: string) => {
       const c = await ready(env, token);
-      c.send({ type: "subscribe", after: 0 });
+      c.send({ type: "subscribe", after: 0, profile: "all" });
       await c.frame("subscribed");
       await c.until(() => c.events().some((e) => e.type === "capability.denied"), "a denial");
       return c;
@@ -620,7 +620,7 @@ describe("subscribe: ordered, exactly-once events", () => {
     const watcher = await ready(env, lead);
     const leadId = (watcher.frames.find((f) => f.type === "hello_ok") as Frame).participant_id;
     await asOwner("room.set_lead", { participant_id: leadId });
-    watcher.send({ type: "subscribe", after: 0 });
+    watcher.send({ type: "subscribe", after: 0, profile: "all" });
     await watcher.frame("subscribed");
 
     const deny = async () => {
@@ -970,5 +970,27 @@ describe("backpressure and token lifetime (§20)", () => {
     const c = await ready(env);
     await env.app.close();
     expect(await c.closed()).toBe(1001);
+  });
+});
+
+describe("subscribe: a filter that fails delivers", () => {
+  it("an event whose match throws is delivered and reported, not dropped, and the stream goes on", async () => {
+    const reported: unknown[] = [];
+    let calls = 0;
+    const env = await setup({
+      createMatcher: () => () => {
+        calls += 1;
+        if (calls === 2) throw new Error("matcher bug");
+        return true;
+      },
+      onInternalError: (e: unknown) => void reported.push(e),
+    });
+    await invite(env, 3);
+    const c = await ready(env);
+    c.send({ type: "subscribe", after: 0 });
+    await c.frame("subscribed");
+    await c.until(() => c.sequences().length >= 5, "all the events");
+    expect(c.sequences()).toEqual([1, 2, 3, 4, 5]); // the one whose match threw is among them
+    expect(reported).toHaveLength(1);
   });
 });

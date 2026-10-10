@@ -473,7 +473,11 @@ export async function apply(
     events: [
       {
         type: "workspace.changeset.applied" as const,
-        payload: { changeset_id: id, applied_revision: revision },
+        payload: {
+          changeset_id: id,
+          applied_revision: revision,
+          author_id: ctx.principal.participant_id,
+        },
       },
       ...(synced
         ? [{ type: "workspace.upstream_synced" as const, payload: { ...synced, imported: false } }]
@@ -487,6 +491,7 @@ export async function apply(
                 changeset_id: resolution.originalChangesetId,
                 resolution_changeset_id: id,
                 resolver_id: ctx.principal.participant_id,
+                submitter_id: resolution.submitterId,
               },
             },
           ]

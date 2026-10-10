@@ -308,6 +308,7 @@ describe("SDK token refresh against a real server", () => {
     const received: number[] = [];
     const sub = dev.subscribe({
       after: 0,
+      profile: "all", // every event, so a lost or repeated one shows (an agent's default filters)
       reconnect: { minMs: 20, maxMs: 60 },
       onEvent: (e) => received.push(e.sequence),
     });
@@ -391,6 +392,7 @@ describe("SDK token refresh against a real server", () => {
     const received: number[] = [];
     const sub = dev.subscribe({
       after: 0,
+      profile: "all", // every event, so a lost or repeated one shows (an agent's default filters)
       reconnect: { minMs: 20, maxMs: 60 },
       onEvent: (e) => received.push(e.sequence),
     });

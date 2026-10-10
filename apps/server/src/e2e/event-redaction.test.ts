@@ -307,7 +307,7 @@ describe("events.redact over HTTP", () => {
       expect(done()).toBe(true);
     };
     await until(() => frames.some((f) => f.includes('"hello_ok"')));
-    sock.send(JSON.stringify({ type: "subscribe", after: 0 }));
+    sock.send(JSON.stringify({ type: "subscribe", after: 0, profile: "all" }));
     await until(() => frames.some((f) => f.includes('"subscribed"')));
     await until(() => frames.some((f) => f.includes("task.created")));
     sock.close();

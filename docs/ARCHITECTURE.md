@@ -784,7 +784,7 @@ Tests run in a sandbox only validate that sandbox's view. Canonical truth comes 
 
 - `sandbox.exec` stdout/stderr streams over a dedicated WebSocket channel (`sandbox.output`), not the event ledger.
 - Output is stored in S3 as chunked log objects (30-day retention).
-- The ledger records only `sandbox.exec.started` and `sandbox.exec.finished { exit_code, duration_ms, log_ref }`.
+- The ledger records only `sandbox.exec.started { exec_id, participant_id }` and `sandbox.exec.finished { exec_id, participant_id, exit_code, duration_ms, log_ref }`; `participant_id` is whose sandbox ran it, so a `relevant` subscription (§17.1) delivers both to that participant.
 
 ## 14.9 Future execution options
 
@@ -1026,6 +1026,8 @@ room.events.subscribe {
 ```
 
 The default profile for agents is **`relevant`**: events where the agent is the target (assigned, mentioned, review requested, conflict on its ChangeSet, its task changed, its sandbox is behind), lead decisions, lead changes, room status changes, and health turning RED on a range that includes its ChangeSets.
+
+T704: the subscriber says what it wants in the `subscribe` frame (and `room.events.subscribe`): `profile` (`relevant`, `all`, `custom`), and for `custom` `types` (patterns where `*` stays inside one dotted name: `task.*`, `workspace.conflict.*`) and `scopes` (`tasks: "mine" | "all"`; `mentions: true` also delivers messages that mention the subscriber whatever `types` says). Without a profile an agent gets `relevant` and a human `all`; `types` or `scopes` alone mean `custom`. `files` scopes aren't supported yet (`VALIDATION`). The `subscribed` frame carries the resolved `filter`. `relevant` delivers: room status changes, lead changes, lead decisions (`decided`, `vetoed`, `superseded`), messages that mention the agent, events that name the agent (assignments, its participant, capability and approval changes), changes to tasks it owns, conflicts and ChangeSet events on its own ChangeSets (and escalations, for the lead), its sandbox's events (behind, synced, command started and finished), and health turning RED where it is among the suspects (`suspect_ids`); its own denials. Sequence numbers stay the room's, so **a filtered stream has gaps by design**: what it delivers is in order and complete for the filter, each event once, and a reconnect resumes with `after` = the last sequence seen. The SDK doesn't treat a filtered stream's gaps as lost events. The viewer's redaction applies to whatever passes. The filter decides from the event alone, never the database; an event written before its type carried the field the filter needs is delivered (fail open).
 
 ## 17.2 Inbox
 

@@ -249,6 +249,15 @@ export interface SubscribeOptions {
   onError?: (error: unknown) => void;
   /** `connecting` → `live`, `reconnecting` after a drop, `closed` at the end. */
   onState?: (state: "connecting" | "live" | "reconnecting" | "closed") => void;
+  /**
+   * Which events to receive (§17.1). Without it the server decides: `relevant` for an agent, `all`
+   * for a human. `custom` takes `types` (`task.*`) and `scopes` (`{ tasks: "mine", mentions: true }`).
+   * A filtered stream skips sequence numbers by design; what it delivers is still in order and
+   * complete for the filter.
+   */
+  profile?: "relevant" | "all" | "custom";
+  types?: string[];
+  scopes?: { tasks?: "mine" | "all"; mentions?: boolean };
   /** Reconnect waits: first `minMs` (default 100), doubling with jitter up to `maxMs` (default 5000). */
   reconnect?: { minMs?: number; maxMs?: number };
 }
@@ -336,6 +345,8 @@ export class Subscription implements AsyncIterable<SdkEvent> {
         return "later";
       }
     };
+    // A filtered stream (the default for agents) skips sequence numbers on purpose.
+    let filtered = false;
     while (!this.done) {
       this.options.onState?.(first ? "connecting" : "reconnecting");
       first = false;
@@ -354,12 +365,16 @@ export class Subscription implements AsyncIterable<SdkEvent> {
               case "subscribed":
                 attempt = 0;
                 renewed = false;
+                {
+                  const profile = (frame["filter"] as { profile?: string } | undefined)?.profile;
+                  filtered = profile !== undefined && profile !== "all";
+                }
                 this.options.onState?.("live");
                 break;
               case "event": {
                 const event = frame["event"] as SdkEvent;
                 if (event.sequence <= this.lastSequence) break; // already delivered
-                if (event.sequence !== this.lastSequence + 1) {
+                if (!filtered && event.sequence !== this.lastSequence + 1) {
                   // Something was skipped: start over from what we have rather than skip it.
                   session.close();
                   break;
@@ -398,7 +413,13 @@ export class Subscription implements AsyncIterable<SdkEvent> {
                   : "dropped",
             );
           });
-          session.send({ type: "subscribe", after: this.lastSequence });
+          session.send({
+            type: "subscribe",
+            after: this.lastSequence,
+            ...(this.options.profile ? { profile: this.options.profile } : {}),
+            ...(this.options.types ? { types: this.options.types } : {}),
+            ...(this.options.scopes ? { scopes: this.options.scopes } : {}),
+          });
         });
       } catch (error) {
         if (error instanceof CrossoverError && error.retryable) {
