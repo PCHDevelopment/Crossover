@@ -123,6 +123,13 @@ describe("sandbox snapshot helper", () => {
     );
     expect(inventory.entries?.map(({ path }) => decodePath(path))).toEqual(["keep.txt"]);
     expect(inventory.pruned_directories?.map(decodePath)).toEqual(["node_modules"]);
+    const unpruned = await runHelper(root, {
+      action: "inventory",
+      ignore_rules: [{ path: ".gitignore", patterns: ["node_modules/"] }],
+      unprune_directories: [path64("node_modules")],
+    });
+    expect(unpruned.entries?.map(({ path }) => decodePath(path))).toContain("node_modules/file-0");
+    expect(unpruned.pruned_directories).toEqual([]);
     const tooMany = await runHelper(root, { action: "inventory", max_entries: 1 });
     expect(tooMany.error).toBe("too_many_entries");
     const tooLargeInput = {

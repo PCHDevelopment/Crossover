@@ -526,7 +526,7 @@ export class DockerExecutionDriver implements ExecutionDriver {
     ignore_rules?: { path: string; patterns: string[] }[];
   }): Promise<SandboxSnapshotEntry[]> {
     this.assertResources(input.sandbox_id, input.resources);
-    const payload = await this.runSnapshotHelper(input.resources, {
+    const request = {
       action: "inventory",
       hash: input.object_format,
       tracked_paths: input.tracked_paths.map((path) =>
@@ -534,33 +534,45 @@ export class DockerExecutionDriver implements ExecutionDriver {
       ),
       ignore_rules: input.ignore_rules ?? [],
       max_bytes: 1024 * 1024 * 1024,
-    });
+    };
+    let payload = await this.runSnapshotHelper(input.resources, request);
     if (!Array.isArray(payload.entries) || !Array.isArray(payload.pruned_directories))
       throw snapshotUnavailable();
-    const prunedDirectories = payload.pruned_directories.map((path) => {
-      if (typeof path !== "string") throw snapshotUnavailable();
-      return decodeSnapshotPath(path);
-    });
-    let ignoredDirectories: ReadonlySet<string>;
-    try {
-      ignoredDirectories = await ignoredPrunedDirectories(
-        input.ignore_rules ?? [],
-        prunedDirectories,
-      );
-    } catch (cause) {
-      throw new CrossoverError(
-        "UNAVAILABLE",
-        "Canonical Git ignore rules could not verify sandbox pruning; retry the request",
-        { cause, retryable: true, details: { reason: "ignore_pruning_verification_failed" } },
-      );
+    const verifiedPrunedDirectories = async (reported: unknown[]) => {
+      const paths = reported.map((path) => {
+        if (typeof path !== "string") throw snapshotUnavailable();
+        return decodeSnapshotPath(path);
+      });
+      let ignored: ReadonlySet<string>;
+      try {
+        ignored = await ignoredPrunedDirectories(input.ignore_rules ?? [], paths);
+      } catch (cause) {
+        throw new CrossoverError(
+          "UNAVAILABLE",
+          "Canonical Git ignore rules could not verify sandbox pruning; retry the request",
+          { cause, retryable: true, details: { reason: "ignore_pruning_verification_failed" } },
+        );
+      }
+      return paths.filter((path) => !ignored.has(path));
+    };
+    let mismatches = await verifiedPrunedDirectories(payload.pruned_directories);
+    if (mismatches.length) {
+      const path = mismatches[0]!;
+      try {
+        payload = await this.runSnapshotHelper(input.resources, {
+          ...request,
+          unprune_directories: mismatches.map((entry) =>
+            Buffer.from(entry, "utf8").toString("base64"),
+          ),
+        });
+        if (!Array.isArray(payload.entries) || !Array.isArray(payload.pruned_directories))
+          throw new Error("invalid_inventory");
+        mismatches = await verifiedPrunedDirectories(payload.pruned_directories);
+        if (mismatches.length) throw new Error(`pruning_mismatch:${mismatches[0]}`);
+      } catch (cause) {
+        throw snapshotPruningRetryFailed(path, cause);
+      }
     }
-    const mismatch = prunedDirectories.find((path) => !ignoredDirectories.has(path));
-    if (mismatch)
-      throw new CrossoverError(
-        "UNAVAILABLE",
-        "Sandbox ignore pruning disagreed with canonical Git rules; retry the request",
-        { retryable: true, details: { reason: "ignore_pruning_mismatch", path: mismatch } },
-      );
     return payload.entries.map((entry: unknown) => {
       if (
         !entry ||
@@ -1240,6 +1252,14 @@ function snapshotUnavailable(): CrossoverError {
     {
       retryable: true,
     },
+  );
+}
+
+function snapshotPruningRetryFailed(path: string, cause: unknown): CrossoverError {
+  return new CrossoverError(
+    "VALIDATION",
+    `Gitignore matcher disagreed for ${path}; unpruned re-inventory failed`,
+    { cause, retryable: false, details: { reason: "ignore_pruning_retry_failed", path } },
   );
 }
 

@@ -162,11 +162,34 @@ describe("DockerExecutionDriver", () => {
 
   it("isolates snapshot reads and installs behind a bounded no-network helper", async () => {
     const calls: Array<{ args: string[]; input: string }> = [];
+    let failUnprunedRetry = false;
     const driver = new DockerExecutionDriver({
       invoke: async (args, options) => {
         const input = String(options?.input ?? "");
         calls.push({ args: [...args], input });
-        const request = JSON.parse(input) as { action: string };
+        const request = JSON.parse(input) as {
+          action: string;
+          unprune_directories?: string[];
+        };
+        if (request.action === "inventory" && request.unprune_directories) {
+          return {
+            code: failUnprunedRetry ? 1 : 0,
+            stdout: failUnprunedRetry
+              ? JSON.stringify({ error: "too_many_entries" })
+              : JSON.stringify({
+                  entries: [
+                    {
+                      path: Buffer.from("node_modules/new.txt").toString("base64"),
+                      mode: "100644",
+                      sha: null,
+                      size: 0,
+                    },
+                  ],
+                  pruned_directories: [],
+                }),
+            stderr: "",
+          };
+        }
         return {
           code: 0,
           stdout:
@@ -212,10 +235,21 @@ describe("DockerExecutionDriver", () => {
         object_format: "sha1",
         ignore_rules: [{ path: ".gitignore", patterns: ["*.txt"] }],
       }),
+    ).resolves.toMatchObject([{ path: "node_modules/new.txt" }]);
+    failUnprunedRetry = true;
+    await expect(
+      driver.snapshotInventory({
+        sandbox_id: sandboxId,
+        resources,
+        tracked_paths: [],
+        object_format: "sha1",
+        ignore_rules: [{ path: ".gitignore", patterns: ["*.txt"] }],
+      }),
     ).rejects.toMatchObject({
-      code: "UNAVAILABLE",
-      retryable: true,
-      details: { reason: "ignore_pruning_mismatch", path: "node_modules" },
+      code: "VALIDATION",
+      retryable: false,
+      message: expect.stringContaining("node_modules"),
+      details: { reason: "ignore_pruning_retry_failed", path: "node_modules" },
     });
     await driver.updateSnapshot({
       sandbox_id: sandboxId,
@@ -224,8 +258,8 @@ describe("DockerExecutionDriver", () => {
       delete_paths: ["old.txt"],
     });
 
-    expect(calls).toHaveLength(3);
-    const [read, mismatch, install] = calls;
+    expect(calls).toHaveLength(6);
+    const [read, mismatch, retry, , failedRetry, install] = calls;
     expect(read!.args).toContain("--network=none");
     expect(read!.args).toContain("--read-only");
     expect(read!.args).toContain(
@@ -238,6 +272,12 @@ describe("DockerExecutionDriver", () => {
     });
     expect(JSON.parse(mismatch!.input)).toMatchObject({
       ignore_rules: [{ path: ".gitignore", patterns: ["*.txt"] }],
+    });
+    expect(JSON.parse(retry!.input)).toMatchObject({
+      unprune_directories: [Buffer.from("node_modules").toString("base64")],
+    });
+    expect(JSON.parse(failedRetry!.input)).toMatchObject({
+      unprune_directories: [Buffer.from("node_modules").toString("base64")],
     });
     expect(install!.args).toContain("--network=none");
     expect(install!.args).not.toContain(
