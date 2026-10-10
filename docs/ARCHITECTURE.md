@@ -1445,6 +1445,7 @@ Per participant: commands, ChangeSets applied / conflicted / rejected, conflict 
 | Sandbox host fails | Sandboxes on it restart on another host from their volumes (EBS snapshots every 15 min); in-flight execs fail with retryable errors |
 | Health sandbox fails | Health status `ERROR`; checkpoints blocked until GREEN or owner override |
 | Plugin provider outage (GitHub, AWS) | `tools.invoke` fails with retryable error; no retries by the platform on non-idempotent tools |
+| Plugin capability revoked mid-invocation | New invocations are denied immediately; a signed proxy credential can remain valid for at most 5 min, and an established egress tunnel can remain open until its 10 min lifetime limit |
 
 ---
 

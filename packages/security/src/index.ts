@@ -7,11 +7,14 @@ export {
 } from "./sandbox-read-token.js";
 export type { SandboxReadTokenClaims } from "./sandbox-read-token.js";
 export {
+  createPluginProxyCredential,
   createHealthInstallProxyCredential,
   createSandboxProxyCredential,
+  verifyPluginProxyCredential,
   verifyHealthInstallProxyCredential,
   verifySandboxProxyCredential,
 } from "./proxy-credentials.js";
+export type { PluginProxyClaims } from "./proxy-credentials.js";
 export { postWebhook } from "./webhook.js";
 export type { PostWebhookOptions, WebhookRequest } from "./webhook.js";
 export { ENTROPY_THRESHOLD, fingerprint, scanSecrets } from "./secret-scanner.js";
