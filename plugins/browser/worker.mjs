@@ -1,3 +1,4 @@
+// @ts-check
 import { Buffer } from "node:buffer";
 import process, { stdin, stdout } from "node:process";
 import { pathToFileURL, URL } from "node:url";
@@ -5,6 +6,18 @@ import { TextDecoder } from "node:util";
 import { chromium } from "playwright-core";
 
 /* global window */
+
+/** @typedef {{ text: string, href: string }} BrowserLink */
+/** @typedef {{ final_url: string, status: number, title: string }} BrowserPageSummary */
+/** @typedef {BrowserPageSummary & { links: BrowserLink[] }} NavigateResult */
+/** @typedef {BrowserPageSummary & { text: string, truncated: boolean }} ReadPageResult */
+/** @typedef {NavigateResult | ReadPageResult} BrowserResult */
+/** @typedef {{ chromium?: typeof chromium, ignoreHTTPSErrors?: boolean }} BrowserInvocationOptions */
+
+/** @param {unknown} value @returns {value is Record<string, unknown>} */
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 
 const MAX_REQUEST_BYTES = 64 * 1024;
 const MAX_TOOL_OUTPUT_BYTES = 256 * 1024;
@@ -15,6 +28,7 @@ const MAX_LINK_HREF = 2_048;
 const NAVIGATION_TIMEOUT_MS = 20_000;
 
 export class BrowserPluginError extends Error {
+  /** @param {string} code @param {string} message @param {boolean} [retryable] */
   constructor(code, message, retryable = false) {
     super(message);
     this.code = code;
@@ -22,13 +36,19 @@ export class BrowserPluginError extends Error {
   }
 }
 
+/**
+ * @param {unknown} invocation
+ * @param {BrowserInvocationOptions} [options]
+ * @returns {Promise<BrowserResult>}
+ */
 export async function handleBrowserInvocation(invocation, options = {}) {
-  const tool = invocation?.tool;
+  const request = isRecord(invocation) ? invocation : undefined;
+  if (!request) throw new BrowserPluginError("validation", "Browser tool is invalid");
+  const tool = request.tool;
   if (tool !== "browser.navigate" && tool !== "browser.read_page")
     throw new BrowserPluginError("validation", "Browser tool is invalid");
-  const args = invocation.args;
-  if (!args || typeof args !== "object" || Array.isArray(args))
-    throw new BrowserPluginError("validation", "Browser arguments are invalid");
+  const args = request.args;
+  if (!isRecord(args)) throw new BrowserPluginError("validation", "Browser arguments are invalid");
   const url = validateUrl(args.url);
   if (tool === "browser.navigate" && Object.keys(args).some((key) => key !== "url"))
     throw new BrowserPluginError("validation", "Browser navigation arguments are invalid");
@@ -45,7 +65,9 @@ export async function handleBrowserInvocation(invocation, options = {}) {
 
   const proxy = parseProxy(process.env.HTTPS_PROXY ?? process.env.https_proxy);
   const browserType = options.chromium ?? chromium;
+  /** @type {import("playwright-core").Browser | undefined} */
   let browser;
+  /** @type {import("playwright-core").BrowserContext | undefined} */
   let context;
   try {
     browser = await browserType.launch({
@@ -121,7 +143,7 @@ export async function handleBrowserInvocation(invocation, options = {}) {
       return result;
     }
 
-    const selector = args.selector;
+    const selector = typeof args.selector === "string" ? args.selector : undefined;
     let text = "";
     if (selector === undefined) {
       text = await page.locator("body").innerText();
@@ -153,6 +175,7 @@ export async function handleBrowserInvocation(invocation, options = {}) {
   }
 }
 
+/** @param {unknown} value @returns {URL} */
 function validateUrl(value) {
   if (
     typeof value !== "string" ||
@@ -178,6 +201,7 @@ function validateUrl(value) {
   return url;
 }
 
+/** @param {string | undefined} value */
 function parseProxy(value) {
   let url;
   try {
@@ -205,13 +229,17 @@ function parseProxy(value) {
   };
 }
 
+/** @param {import("playwright-core").Page} page @returns {Promise<BrowserLink[]>} */
 async function collectLinks(page) {
   const candidates = await page.locator("a[href]").evaluateAll(
     (anchors, maxLinkText) =>
-      anchors.slice(0, 1_000).map((anchor) => ({
-        href: anchor.href,
-        text: (anchor.innerText ?? "").trim().slice(0, maxLinkText),
-      })),
+      anchors.slice(0, 1_000).map((anchor) => {
+        const link = /** @type {HTMLAnchorElement} */ (anchor);
+        return {
+          href: link.href,
+          text: (link.innerText ?? "").trim().slice(0, maxLinkText),
+        };
+      }),
     MAX_LINK_TEXT,
   );
   const links = [];
@@ -237,12 +265,14 @@ async function collectLinks(page) {
   return links;
 }
 
+/** @param {string} value @returns {string} */
 function boundedPageUrl(value) {
   if (value.length > MAX_LINK_HREF)
     throw new BrowserPluginError("unavailable", "Browser page URL exceeds the size limit");
   return value;
 }
 
+/** @param {string} value @param {number} maxBytes */
 function truncateUtf8(value, maxBytes) {
   const bytes = Buffer.from(value, "utf8");
   if (bytes.length <= maxBytes) return { text: value, truncated: false };
@@ -260,11 +290,13 @@ function truncateUtf8(value, maxBytes) {
   return { text: "", truncated: true };
 }
 
+/** @param {BrowserResult} result */
 function assertOutputBound(result) {
   if (Buffer.byteLength(JSON.stringify({ result })) > MAX_TOOL_OUTPUT_BYTES)
     throw new BrowserPluginError("unavailable", "Browser result exceeds the size limit");
 }
 
+/** @returns {Promise<unknown>} */
 async function readRequest() {
   const chunks = [];
   let size = 0;
@@ -283,17 +315,18 @@ async function readRequest() {
 
 async function main() {
   try {
-    const { invocation } = await readRequest();
+    const request = await readRequest();
+    const invocation = isRecord(request) ? request.invocation : undefined;
     const result = await handleBrowserInvocation(invocation);
     stdout.write(`${JSON.stringify({ result })}\n`);
   } catch (error) {
-    const known = error instanceof BrowserPluginError;
+    const known = error instanceof BrowserPluginError ? error : undefined;
     stdout.write(
       `${JSON.stringify({
         error: {
-          code: known ? error.code : "unavailable",
-          message: known ? error.message : "Browser plugin failed",
-          retryable: known ? error.retryable : true,
+          code: known?.code ?? "unavailable",
+          message: known?.message ?? "Browser plugin failed",
+          retryable: known?.retryable ?? true,
         },
       })}\n`,
     );

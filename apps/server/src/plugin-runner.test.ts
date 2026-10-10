@@ -142,15 +142,10 @@ describe("DockerToolRunner", () => {
     expect(calls.some((call) => call.args[0] === "network" && call.args[1] === "rm")).toBe(true);
   });
 
-  it("uses the current room host list and still forces the proxy when that list is empty", async () => {
+  it("fails with a stable validation error before starting Docker when the room host list is empty", async () => {
     const calls: { args: readonly string[]; options: Parameters<PluginDockerInvoker>[2] }[] = [];
-    let environmentContents = "";
     const invoke: PluginDockerInvoker = async (_binary, args, options) => {
       calls.push({ args, options });
-      if (args[0] === "run") {
-        const envFileIndex = args.indexOf("--env-file");
-        environmentContents = await readFile(args[envFileIndex + 1]!, "utf8");
-      }
       return args[0] === "run"
         ? { code: 0, stdout: '{"result":{"ok":true}}', stderr: "" }
         : { code: 0, stdout: "", stderr: "" };
@@ -164,27 +159,14 @@ describe("DockerToolRunner", () => {
       invoke,
     });
 
-    await expect(runner.run(invocation, new AbortController().signal)).resolves.toEqual({
-      result: { ok: true },
+    await expect(runner.run(invocation, new AbortController().signal)).rejects.toMatchObject({
+      name: "ToolProviderError",
+      message: "egress not configured",
+      options: { retryable: false, code: "VALIDATION" },
     });
     expect(roomEgressHosts).toHaveBeenCalledTimes(1);
     expect(roomEgressHosts).toHaveBeenCalledWith(invocation);
-    expect(calls.some((call) => call.args[0] === "network" && call.args[1] === "create")).toBe(
-      true,
-    );
-    expect(calls.find((call) => call.args[0] === "run")?.args).toContain("--pids-limit=256");
-    const env = Object.fromEntries(
-      environmentContents
-        .trimEnd()
-        .split("\n")
-        .map((entry) => {
-          const separator = entry.indexOf("=");
-          return [entry.slice(0, separator), entry.slice(separator + 1)];
-        }),
-    );
-    expect(
-      verifyPluginProxyCredential(decodeURIComponent(new URL(env.HTTPS_PROXY!).password), SECRET),
-    ).toMatchObject({ hosts: [] });
+    expect(calls).toEqual([]);
   });
 
   it("maps a sanitized worker rate-limit response to a retryable stable provider error", async () => {

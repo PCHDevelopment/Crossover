@@ -79,7 +79,7 @@ describe("plugin proxy credentials", () => {
     expect(verifyPluginProxyCredential(`${payload}.bad`, secret, now)).toBeNull();
   });
 
-  it("allows an empty host scope and rejects noncanonical or oversized lists", () => {
+  it("rejects an empty host scope, noncanonical lists, and oversized lists", () => {
     const secret = "a-secret-with-32-chars-1234567890";
     const base = {
       invocationId: "cmd_1",
@@ -88,8 +88,7 @@ describe("plugin proxy credentials", () => {
       hosts: [] as string[],
       expiresAt: Date.now() + 1_000,
     };
-    const noEgress = createPluginProxyCredential(base, secret);
-    expect(verifyPluginProxyCredential(noEgress, secret)?.hosts).toEqual([]);
+    expect(() => createPluginProxyCredential(base, secret)).toThrow(/claims are invalid/);
     expect(() =>
       createPluginProxyCredential({ ...base, hosts: ["z.example.com", "a.example.com"] }, secret),
     ).toThrow(/claims are invalid/);

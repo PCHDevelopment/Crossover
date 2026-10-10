@@ -121,6 +121,7 @@ function validPluginClaims(
     return false;
   }
   if (
+    canonicalHosts.length === 0 ||
     canonicalHosts.length !== claims.hosts.length ||
     canonicalHosts.some((host, index) => host !== claims.hosts![index])
   ) {

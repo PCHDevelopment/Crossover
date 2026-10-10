@@ -157,6 +157,12 @@ export class DockerToolRunner implements ToolRunner {
       ? await this.readRoomEgressHosts(invocation)
       : [];
     const hosts = normalizeHosts([...execution.egressHosts, ...roomHosts]);
+    if (execution.roomEgressAllowlist === true && hosts.length === 0) {
+      throw new ToolProviderError("egress not configured", {
+        retryable: false,
+        code: "VALIDATION",
+      });
+    }
     const proxyRequired =
       execution.roomEgressAllowlist === true || execution.egressHosts.length > 0;
     const runId = randomBytes(12).toString("hex");
