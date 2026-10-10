@@ -162,11 +162,34 @@ describe("DockerExecutionDriver", () => {
 
   it("isolates snapshot reads and installs behind a bounded no-network helper", async () => {
     const calls: Array<{ args: string[]; input: string }> = [];
+    let unprunedError: string | undefined;
     const driver = new DockerExecutionDriver({
       invoke: async (args, options) => {
         const input = String(options?.input ?? "");
         calls.push({ args: [...args], input });
-        const request = JSON.parse(input) as { action: string };
+        const request = JSON.parse(input) as {
+          action: string;
+          unprune_directories?: string[];
+        };
+        if (request.action === "inventory" && request.unprune_directories) {
+          if (unprunedError)
+            return { code: 1, stdout: JSON.stringify({ error: unprunedError }), stderr: "" };
+          return {
+            code: 0,
+            stdout: JSON.stringify({
+              entries: [
+                {
+                  path: Buffer.from("node_modules/new.txt").toString("base64"),
+                  mode: "100644",
+                  sha: null,
+                  size: 0,
+                },
+              ],
+              pruned_directories: [],
+            }),
+            stderr: "",
+          };
+        }
         return {
           code: 0,
           stdout:
@@ -180,6 +203,7 @@ describe("DockerExecutionDriver", () => {
                       size: 0,
                     },
                   ],
+                  pruned_directories: [Buffer.from("node_modules").toString("base64")],
                 })
               : JSON.stringify({ installed: true }),
           stderr: "",
@@ -203,6 +227,45 @@ describe("DockerExecutionDriver", () => {
         ignore_rules: [{ path: ".gitignore", patterns: ["node_modules/"] }],
       }),
     ).resolves.toMatchObject([{ path: "src/a.txt", mode: "100644", sha: null, size: 0 }]);
+    await expect(
+      driver.snapshotInventory({
+        sandbox_id: sandboxId,
+        resources,
+        tracked_paths: [],
+        object_format: "sha1",
+        ignore_rules: [{ path: ".gitignore", patterns: ["*.txt"] }],
+      }),
+    ).resolves.toMatchObject([{ path: "node_modules/new.txt" }]);
+    unprunedError = "too_many_entries";
+    await expect(
+      driver.snapshotInventory({
+        sandbox_id: sandboxId,
+        resources,
+        tracked_paths: [],
+        object_format: "sha1",
+        ignore_rules: [{ path: ".gitignore", patterns: ["*.txt"] }],
+      }),
+    ).rejects.toMatchObject({
+      code: "VALIDATION",
+      retryable: false,
+      message: expect.stringContaining("node_modules"),
+      details: { reason: "ignore_pruning_retry_failed", path: "node_modules" },
+    });
+    unprunedError = "changed_during_read";
+    await expect(
+      driver.snapshotInventory({
+        sandbox_id: sandboxId,
+        resources,
+        tracked_paths: [],
+        object_format: "sha1",
+        ignore_rules: [{ path: ".gitignore", patterns: ["*.txt"] }],
+      }),
+    ).rejects.toMatchObject({
+      code: "CONFLICT_VERSION",
+      retryable: true,
+      details: { reason: "sandbox_changed_during_snapshot" },
+    });
+    unprunedError = undefined;
     await driver.updateSnapshot({
       sandbox_id: sandboxId,
       resources,
@@ -210,8 +273,9 @@ describe("DockerExecutionDriver", () => {
       delete_paths: ["old.txt"],
     });
 
-    expect(calls).toHaveLength(2);
-    const [read, install] = calls;
+    expect(calls).toHaveLength(8);
+    const [read, mismatch, retry, , failedRetry, transientMismatch, transientRetry, install] =
+      calls;
     expect(read!.args).toContain("--network=none");
     expect(read!.args).toContain("--read-only");
     expect(read!.args).toContain(
@@ -221,6 +285,21 @@ describe("DockerExecutionDriver", () => {
       action: "inventory",
       tracked_paths: [Buffer.from("src/a.txt").toString("base64")],
       ignore_rules: [{ path: ".gitignore", patterns: ["node_modules/"] }],
+    });
+    expect(JSON.parse(mismatch!.input)).toMatchObject({
+      ignore_rules: [{ path: ".gitignore", patterns: ["*.txt"] }],
+    });
+    expect(JSON.parse(retry!.input)).toMatchObject({
+      unprune_directories: [Buffer.from("node_modules").toString("base64")],
+    });
+    expect(JSON.parse(failedRetry!.input)).toMatchObject({
+      unprune_directories: [Buffer.from("node_modules").toString("base64")],
+    });
+    expect(JSON.parse(transientMismatch!.input)).toMatchObject({
+      ignore_rules: [{ path: ".gitignore", patterns: ["*.txt"] }],
+    });
+    expect(JSON.parse(transientRetry!.input)).toMatchObject({
+      unprune_directories: [Buffer.from("node_modules").toString("base64")],
     });
     expect(install!.args).toContain("--network=none");
     expect(install!.args).not.toContain(

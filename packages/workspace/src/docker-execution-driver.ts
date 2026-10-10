@@ -7,6 +7,7 @@ import {
 } from "@crossover/security";
 import { CrossoverError } from "@crossover/protocol";
 import { normalizePath } from "./path.js";
+import { ignoredPrunedDirectories } from "./ignore.js";
 import type {
   ExecutionDriver,
   SandboxLimits,
@@ -525,7 +526,7 @@ export class DockerExecutionDriver implements ExecutionDriver {
     ignore_rules?: { path: string; patterns: string[] }[];
   }): Promise<SandboxSnapshotEntry[]> {
     this.assertResources(input.sandbox_id, input.resources);
-    const payload = await this.runSnapshotHelper(input.resources, {
+    const request = {
       action: "inventory",
       hash: input.object_format,
       tracked_paths: input.tracked_paths.map((path) =>
@@ -533,8 +534,46 @@ export class DockerExecutionDriver implements ExecutionDriver {
       ),
       ignore_rules: input.ignore_rules ?? [],
       max_bytes: 1024 * 1024 * 1024,
-    });
-    if (!Array.isArray(payload.entries)) throw snapshotUnavailable();
+    };
+    let payload = await this.runSnapshotHelper(input.resources, request);
+    if (!Array.isArray(payload.entries) || !Array.isArray(payload.pruned_directories))
+      throw snapshotUnavailable();
+    const verifiedPrunedDirectories = async (reported: unknown[]) => {
+      const paths = reported.map((path) => {
+        if (typeof path !== "string") throw snapshotUnavailable();
+        return decodeSnapshotPath(path);
+      });
+      let ignored: ReadonlySet<string>;
+      try {
+        ignored = await ignoredPrunedDirectories(input.ignore_rules ?? [], paths);
+      } catch (cause) {
+        throw new CrossoverError(
+          "UNAVAILABLE",
+          "Canonical Git ignore rules could not verify sandbox pruning; retry the request",
+          { cause, retryable: true, details: { reason: "ignore_pruning_verification_failed" } },
+        );
+      }
+      return paths.filter((path) => !ignored.has(path));
+    };
+    let mismatches = await verifiedPrunedDirectories(payload.pruned_directories);
+    if (mismatches.length) {
+      const path = mismatches[0]!;
+      try {
+        payload = await this.runSnapshotHelper(input.resources, {
+          ...request,
+          unprune_directories: mismatches.map((entry) =>
+            Buffer.from(entry, "utf8").toString("base64"),
+          ),
+        });
+        if (!Array.isArray(payload.entries) || !Array.isArray(payload.pruned_directories))
+          throw new Error("invalid_inventory");
+        mismatches = await verifiedPrunedDirectories(payload.pruned_directories);
+        if (mismatches.length) throw new Error(`pruning_mismatch:${mismatches[0]}`);
+      } catch (cause) {
+        if (cause instanceof CrossoverError && cause.retryable) throw cause;
+        throw snapshotPruningRetryFailed(path, cause);
+      }
+    }
     return payload.entries.map((entry: unknown) => {
       if (
         !entry ||
@@ -652,7 +691,12 @@ export class DockerExecutionDriver implements ExecutionDriver {
     resources: SandboxResources,
     input: Record<string, unknown>,
     readOnly = true,
-  ): Promise<{ entries?: unknown[]; error?: string; installed?: boolean }> {
+  ): Promise<{
+    entries?: unknown[];
+    pruned_directories?: unknown[];
+    error?: string;
+    installed?: boolean;
+  }> {
     let stdout = "";
     let outputTooLarge = false;
     const result = await this.invoke(
@@ -700,22 +744,40 @@ export class DockerExecutionDriver implements ExecutionDriver {
     if (!stdout && result.stdout) stdout = result.stdout;
     if (outputTooLarge)
       throw new CrossoverError("VALIDATION", "Sandbox snapshot exceeds the bounded output limit");
-    let payload: { entries?: unknown[]; error?: string; installed?: boolean };
+    let payload: {
+      entries?: unknown[];
+      pruned_directories?: unknown[];
+      error?: string;
+      installed?: boolean;
+    };
     try {
-      payload = JSON.parse(stdout) as { entries?: unknown[]; error?: string; installed?: boolean };
+      payload = JSON.parse(stdout) as {
+        entries?: unknown[];
+        pruned_directories?: unknown[];
+        error?: string;
+        installed?: boolean;
+      };
     } catch {
       throw snapshotUnavailable();
     }
     if (payload.error) {
       if (payload.error === "changed_during_read") throw snapshotChanged();
+      if (payload.error.startsWith("invalid_path_encoding:"))
+        throw new CrossoverError("VALIDATION", "Sandbox contains an unsupported path encoding", {
+          details: {
+            reason: "invalid_path_encoding",
+            path: payload.error.slice("invalid_path_encoding:".length),
+          },
+        });
       if (
         [
           "file_too_large",
           "invalid_path",
-          "invalid_path_encoding",
+          "ignore_rules_too_large",
           "scan_too_large",
           "too_large",
           "too_many_entries",
+          "too_many_pruned_directories",
           "unsupported_file_type",
         ].includes(payload.error)
       ) {
@@ -1191,6 +1253,14 @@ function snapshotUnavailable(): CrossoverError {
     {
       retryable: true,
     },
+  );
+}
+
+function snapshotPruningRetryFailed(path: string, cause: unknown): CrossoverError {
+  return new CrossoverError(
+    "VALIDATION",
+    `Gitignore matcher disagreed for ${path}; unpruned re-inventory failed`,
+    { cause, retryable: false, details: { reason: "ignore_pruning_retry_failed", path } },
   );
 }
 

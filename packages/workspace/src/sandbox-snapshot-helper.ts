@@ -29,6 +29,7 @@ async function sandboxSnapshotHelper(
     hash: "sha1" | "sha256";
     tracked_paths?: string[];
     ignore_rules?: { path: string; patterns: string[] }[];
+    unprune_directories?: string[];
     paths?: { path: string; mode: string; sha: string | null; size: number }[];
     max_bytes?: number;
     max_entries?: number;
@@ -68,6 +69,13 @@ async function sandboxSnapshotHelper(
   try {
     if (input.action === "inventory") {
       const tracked = new Set(input.tracked_paths ?? []);
+      const unpruneDirectories = new Set(input.unprune_directories ?? []);
+      if (unpruneDirectories.size > limits.maxPrunedDirectories) throw new Error("invalid_request");
+      for (const path of unpruneDirectories) {
+        const bytes = Buffer.from(path, "base64");
+        if (bytes.toString("base64") !== path) throw new Error("invalid_request");
+        checkedPath(bytes);
+      }
       const trackedDirectories = new Set<string>();
       for (const path of tracked) {
         const decoded = Buffer.from(path, "base64").toString("utf8");
@@ -127,6 +135,7 @@ async function sandboxSnapshotHelper(
         directory: NodeFsPromises.FileHandle,
         prefix: Buffer,
         ignoredParent = false,
+        unprunedParent = false,
       ): Promise<void> => {
         const beforeDir = await directory.stat({ bigint: true });
         const listing = await fs.opendir(`/proc/self/fd/${directory.fd}`, {
@@ -141,14 +150,15 @@ async function sandboxSnapshotHelper(
           const path = relative.toString("utf8");
           const directoryEntry = dirent.isDirectory();
           const target = childPath(directory, name);
-          let ignored = ignoredParent;
-          if (directoryEntry) {
+          const unpruned = unprunedParent || unpruneDirectories.has(encodedPath);
+          let ignored = unpruned ? false : ignoredParent;
+          if (directoryEntry && !unpruned) {
             ignored ||= isIgnored(path);
             if (prune(ignored, encodedPath)) continue;
           }
           const before = await fs.lstat(target, { bigint: true });
           if (before.isDirectory()) {
-            if (!directoryEntry) {
+            if (!directoryEntry && !unpruned) {
               ignored ||= isIgnored(path);
               if (prune(ignored, encodedPath)) continue;
             }
@@ -159,7 +169,7 @@ async function sandboxSnapshotHelper(
             try {
               const opened = await child.stat({ bigint: true });
               if (!sameStat(before, opened)) throw new Error("changed_during_read");
-              await walk(child, relative, ignoredParent || ignored);
+              await walk(child, relative, unpruned ? false : ignoredParent || ignored, unpruned);
             } finally {
               await child.close();
             }
