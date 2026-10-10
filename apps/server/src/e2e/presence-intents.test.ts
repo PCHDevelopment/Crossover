@@ -279,7 +279,12 @@ describe("presence over the server API (§13.4)", () => {
       const res = await a.cmd("presence.update", { open_files: ["src/auth.ts"] });
       codes.push(res.statusCode);
       if (res.statusCode !== 200) {
-        expect(res.json().error).toMatchObject({ code: "RATE_LIMITED", retryable: true });
+        expect(res.json().error).toMatchObject({
+          code: "RATE_LIMITED",
+          retryable: true,
+          details: { retry_after: 1 },
+        });
+        expect(res.headers["retry-after"]).toBe("1");
         break;
       }
     }

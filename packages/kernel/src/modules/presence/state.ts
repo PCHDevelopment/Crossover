@@ -232,7 +232,7 @@ export function registerPresenceCommands(
       });
       if (expires_at === undefined)
         throw new CrossoverError("RATE_LIMITED", "Too many presence updates", {
-          details: { reason: "presence_rate", retry_after_seconds: 1 },
+          details: { reason: "presence_rate", retry_after: 1 },
         });
       return { response: { expires_at } };
     },
