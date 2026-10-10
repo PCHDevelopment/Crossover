@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -11,10 +11,10 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-async function fileStore(): Promise<FileLogStore> {
+async function fileStore(onError?: (error: unknown, path: string) => void): Promise<FileLogStore> {
   const root = await mkdtemp(join(tmpdir(), "crossover-sandbox-logs-"));
   roots.push(root);
-  return new FileLogStore(root);
+  return new FileLogStore(root, onError);
 }
 
 const metadata = (execId = newId("exec")) => ({
@@ -88,6 +88,27 @@ describe("sandbox output log store", () => {
     expect(received).toHaveLength(2);
     expect(await store.sweepExpired(30 * 24 * 60 * 60 * 1000)).toBe(1);
     expect(await store.get(entry.exec_id)).toBeUndefined();
+  });
+
+  it("continues retention cleanup when one metadata file is corrupt", async () => {
+    const errors: Array<{ error: unknown; path: string }> = [];
+    const store = await fileStore((error, path) => errors.push({ error, path }));
+    const corrupt = metadata();
+    const expired = metadata();
+    await store.create(corrupt);
+    await writeFile(join(store.root, corrupt.exec_id, "metadata.json"), "{");
+    await store.create(expired);
+
+    const removed = await store.sweepExpired(Date.now() + 30 * 24 * 60 * 60 * 1000 - 60_000);
+
+    expect(removed).toBe(1);
+    expect(await store.get(expired.exec_id)).toBeUndefined();
+    expect(await readFile(join(store.root, corrupt.exec_id, "metadata.json"), "utf8")).toBe("{");
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({
+      path: join(store.root, corrupt.exec_id),
+      error: expect.any(SyntaxError),
+    });
   });
 
   it("keeps the in-memory test adapter byte accurate", async () => {

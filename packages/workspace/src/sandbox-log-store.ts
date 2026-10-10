@@ -36,6 +36,7 @@ export interface LogStore {
   append(execId: string, chunk: SandboxOutputChunk): Promise<void>;
   get(execId: string): Promise<SandboxExecLogMetadata | undefined>;
   read(execId: string, afterCursor: number, limit: number): Promise<SandboxOutputChunk[]>;
+  /** The exec runner is the only metadata writer, so implementations need not serialize updates. */
   update(execId: string, patch: Partial<SandboxExecLogMetadata>): Promise<void>;
   sweepExpired(now?: number): Promise<number>;
 }
@@ -82,7 +83,11 @@ function decode(value: string): SandboxOutputChunk {
 
 /** Local durable adapter for development and single-node deployments; S3 can implement LogStore. */
 export class FileLogStore implements LogStore {
-  constructor(readonly root: string) {}
+  constructor(
+    readonly root: string,
+    private readonly onError: (error: unknown, path: string) => void = (error, path) =>
+      console.error(`[sandbox-log-store] retention sweep could not read ${path}`, error),
+  ) {}
 
   private directory(execId: string): string {
     assertExecId(execId);
@@ -167,21 +172,45 @@ export class FileLogStore implements LogStore {
     for (const name of names) {
       if (!isId(name, "exec")) continue;
       const path = this.directory(name);
-      let metadata: SandboxExecLogMetadata | undefined;
+      let createdAt = Number.NaN;
       try {
-        metadata = JSON.parse(
-          await readFile(join(path, "metadata.json"), "utf8"),
-        ) as SandboxExecLogMetadata;
+        const metadata = JSON.parse(await readFile(join(path, "metadata.json"), "utf8")) as {
+          started_at?: unknown;
+        };
+        createdAt = typeof metadata.started_at === "string" ? Date.parse(metadata.started_at) : NaN;
+        if (!Number.isFinite(createdAt)) throw new Error("Invalid sandbox log start time");
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") this.reportSweepError(error, path);
       }
-      const createdAt = metadata ? Date.parse(metadata.started_at) : (await stat(path)).mtimeMs;
+      if (!Number.isFinite(createdAt)) {
+        try {
+          createdAt = (await stat(path)).mtimeMs;
+        } catch (error) {
+          this.reportSweepError(error, path);
+          continue;
+        }
+      }
       if (Number.isFinite(createdAt) && now - createdAt >= RETENTION_MS) {
-        await rm(path, { recursive: true, force: true });
-        removed++;
+        try {
+          await rm(path, { recursive: true, force: true });
+          removed++;
+        } catch (error) {
+          this.reportSweepError(error, path);
+        }
       }
     }
     return removed;
+  }
+
+  private reportSweepError(error: unknown, path: string): void {
+    try {
+      this.onError(error, path);
+    } catch (reportError) {
+      console.error(
+        `[sandbox-log-store] retention sweep error callback failed for ${path}`,
+        reportError,
+      );
+    }
   }
 }
 
