@@ -8,9 +8,13 @@ import {
   RedisEventSubscriber,
   registerInviteCommands,
   registerLeadCommands,
+  registerPresenceCommands,
   registerRoomCommands,
   registerRoomEventsSubscribeCommand,
   type EventSubscriber,
+  type Presence,
+  type PresenceStore,
+  type PresenceSubscriber,
   type RoomInviteSecret,
   type TokenPair,
 } from "@crossover/kernel";
@@ -61,6 +65,36 @@ class ManualSubscriber implements EventSubscriber {
   }
 }
 
+/** What `presence.list` answers in these tests: whatever the test put here. */
+const presenceRecords: PresenceStore & { records: Presence[] } = {
+  records: [],
+  update: async () => undefined,
+  list: async () => presenceRecords.records,
+  close: async () => undefined,
+};
+
+/** Presence updates the test emits by hand; `onSubscribe` runs before the snapshot is read. */
+class ManualPresence implements PresenceSubscriber {
+  handlers = new Set<(record: Presence) => void>();
+  onSubscribe: (emit: (record: Presence) => void) => void = () => {};
+  async subscribe(_roomId: string, handler: (record: Presence) => void) {
+    this.handlers.add(handler);
+    this.onSubscribe(handler);
+    return async () => void this.handlers.delete(handler);
+  }
+  emit(record: Presence) {
+    for (const handler of this.handlers) handler(record);
+  }
+}
+
+const record = (participant_id: string, expires_at: string): Presence => ({
+  participant_id,
+  expires_at,
+  status: "active",
+  open_files: [],
+  cursor: null,
+});
+
 interface Env {
   dispatcher: Dispatcher;
   app: FastifyInstance;
@@ -95,6 +129,7 @@ async function setup(
   registerInviteCommands(dispatcher);
   registerLeadCommands(dispatcher);
   registerRoomEventsSubscribeCommand(dispatcher);
+  registerPresenceCommands(dispatcher, presenceRecords, (path) => path);
   const app = buildGateway({
     dispatcher,
     pool,
@@ -992,5 +1027,48 @@ describe("subscribe: a filter that fails delivers", () => {
     await c.until(() => c.sequences().length >= 5, "all the events");
     expect(c.sequences()).toEqual([1, 2, 3, 4, 5]); // the one whose match threw is among them
     expect(reported).toHaveLength(1);
+  });
+});
+
+describe("presence.subscribe (§13.4)", () => {
+  it("sends the snapshot, then live updates, skipping one the snapshot already covers", async () => {
+    const presence = new ManualPresence();
+    const env = await setup({ presence });
+    presenceRecords.records = [record("part_a", "2026-01-01T00:00:02.000Z")];
+    // Published while the snapshot is read: A's is older than the snapshot's, B's is new.
+    presence.onSubscribe = (emit) => {
+      emit(record("part_a", "2026-01-01T00:00:01.000Z"));
+      emit(record("part_b", "2026-01-01T00:00:03.000Z"));
+    };
+    const c = await ready(env);
+    c.send({ type: "presence.subscribe" });
+    const snapshot = await c.frame("presence.snapshot");
+    expect(snapshot.presence).toEqual([record("part_a", "2026-01-01T00:00:02.000Z")]);
+    await c.frame("presence");
+    presence.emit(record("part_a", "2026-01-01T00:00:04.000Z"));
+    await c.until(() => c.frames.filter((f) => f.type === "presence").length >= 2, "live A");
+    const types = c.frames.map((f) => f.type).filter((t) => t.startsWith("presence"));
+    expect(types).toEqual(["presence.snapshot", "presence", "presence"]);
+    expect(c.frames.filter((f) => f.type === "presence").map((f) => f.record)).toEqual([
+      record("part_b", "2026-01-01T00:00:03.000Z"),
+      record("part_a", "2026-01-01T00:00:04.000Z"),
+    ]);
+
+    c.send({ type: "presence.unsubscribe" });
+    await c.until(() => presence.handlers.size === 0, "unsubscribed");
+  });
+
+  it("a refusal is tagged as presence and leaves the event stream running", async () => {
+    const env = await setup(); // no presence source
+    await invite(env);
+    const c = await ready(env);
+    c.send({ type: "subscribe", after: 0 });
+    await c.frame("subscribed");
+    c.send({ type: "presence.subscribe" });
+    const error = await c.frame("error");
+    expect(error).toMatchObject({ subscription: "presence", error: { code: "NOT_FOUND" } });
+    await invite(env);
+    await c.until(() => c.sequences().length >= 3, "events after the refusal");
+    expect(c.closeCode).toBeUndefined();
   });
 });

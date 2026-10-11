@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist/tsc-node-tests",
+    "emitDeclarationOnly": true,
+    "noEmit": false
+  },
+  "include": ["src/**/*.git.test.ts"],
+  "references": [
+    {
+      "path": "./tsconfig.json"
+    }
+  ]
+}

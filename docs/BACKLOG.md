@@ -1179,7 +1179,11 @@ Login, room list and create, room view with participants, tasks board, Activity 
 
 Deps: T1104, T606 · Migration: —
 
-Editor with live intents, draft flush, live cursors and merge view (§27; demo steps 7, 9 and 10). To be broken down into smaller tasks once T1104 lands.
+Editor with live intents, draft flush, live cursors and merge view (§27; demo steps 7, 9 and 10). Split in Review 6:
+
+- **T1105a · Editor and drafts.** File tree from `workspace.list`; Monaco editor (bundled, no CDN, within the gateway CSP); each open buffer is a draft with its `base_file_revision` and a draft indicator. Flushes (§13.2): 1.5 s idle, 10 s of continuous typing, explicit save, switching files or closing the tab, each as an `EDITOR` ChangeSet. Incoming `workspace.changeset.applied` on an open file (§13.3): a clean buffer is replaced, a dirty one is merged three-way in the browser and rebased if clean, otherwise kept and marked conflicted. The draft logic is a UI-free module with unit tests; the browser merge agrees with `git merge-file` wherever it calls a merge clean.
+- **T1105b · Live intents and cursors.** Agents' edit intents (`presence.list_intents`, §11.4) render as highlighted ranges; human cursors, selections and open files go through the presence channel (§13.4).
+- **T1105c · Merge view.** A flush that comes back as a Conflict opens a three-way merge view (base, mine, theirs); resolving submits a `RESOLUTION` ChangeSet (§11).
 
 ---
 

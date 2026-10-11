@@ -5,6 +5,7 @@ import { createTestDatabase, type TestDatabase } from "@crossover/db/testing";
 import {
   CrossoverClient,
   CrossoverError,
+  type PresenceUpdate,
   type RoomTokens,
   type SdkEvent,
   type WebSocketCtor,
@@ -221,6 +222,41 @@ describe("SDK against a real server", () => {
 });
 
 /** Token renewal (T1106): an expired access token is renewed with the refresh token, once. */
+describe("SDK presence on the subscription (§13.4)", () => {
+  it("delivers a snapshot on each connect and live records in between", async () => {
+    const r = await newRoom();
+    const cursor = { path: "src/a.ts", line: 3, column: 1 };
+    await r.dev.api.presence.update({ open_files: ["src/a.ts"], cursor });
+    const updates: PresenceUpdate[] = [];
+    const sub = r.owner.subscribe({
+      reconnect: { minMs: 20, maxMs: 60 },
+      onPresence: (update) => updates.push(update),
+    });
+    const until = async (done: () => boolean) => {
+      for (let i = 0; i < 100 && !done(); i++) await new Promise((res) => setTimeout(res, 50));
+      expect(done(), JSON.stringify(updates)).toBe(true);
+    };
+    const snapshots = () => updates.filter((u) => "snapshot" in u);
+    await until(() => snapshots().length === 1);
+    expect(snapshots()[0]).toEqual({
+      snapshot: [expect.objectContaining({ participant_id: r.devId, cursor })],
+    });
+
+    await r.dev.api.presence.update({ status: "idle" });
+    await until(() => updates.some((u) => "record" in u));
+    expect(updates.find((u) => "record" in u)).toEqual({
+      record: expect.objectContaining({ participant_id: r.devId, status: "idle", cursor: null }),
+    });
+
+    sockets.at(-1)?.close(); // the network drops: the reconnect brings a fresh snapshot
+    await until(() => snapshots().length === 2);
+    expect(snapshots()[1]).toEqual({
+      snapshot: [expect.objectContaining({ participant_id: r.devId, status: "idle" })],
+    });
+    sub.close();
+  });
+});
+
 describe("SDK token refresh against a real server", () => {
   const expireAccessTokens = (roomId: string) =>
     db.pool.query(

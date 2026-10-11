@@ -696,11 +696,13 @@ When `workspace.changeset.applied` touches a file open in the editor:
 | Clean (no unflushed edits) | Replace content; map cursor and selections through the diff |
 | Dirty | Client runs the same diff3 algorithm (base, buffer, new canonical) in the browser |
 | → merges cleanly | Buffer silently rebased to the new base; cursor mapped |
-| → conflicts | Buffer kept; banner "auth.ts changed underneath you"; the next flush returns a Conflict, which opens Monaco's three-way merge view |
+| → conflicts | Buffer kept; banner "auth.ts changed underneath you"; the next flush returns a Conflict, which opens the merge view |
+
+The merge view is a Monaco diff editor. The file as it is now (theirs) is on the left, read-only, and the result is on the right, editable. The result starts as the browser's three-way merge of the draft's base, the draft and the head. Each region both sides changed starts as the draft's version and can be switched to theirs or to both, and the result can also be edited by hand. Submitting sends a `RESOLUTION` ChangeSet with the `conflict_id`, based on the head shown. If the head moved meanwhile, the view reloads against the new head. "Discard my edits" calls `conflicts.abandon` and the buffer takes the head. A result that still has conflict markers isn't submitted.
 
 ## 13.4 Live presence
 
-- Human cursors, selections and open files are broadcast through the presence channel (Redis, ephemeral, never in the ledger).
+- Human cursors, selections and open files are broadcast through the presence channel (Redis, ephemeral, never in the ledger). `presence.update { status?: active | idle, open_files?: path[] (at most 20), cursor?: { path, line, column, selection? } | null }` replaces the caller's record, which lives 45 s; clients re-send it every 15 s. The cursor's path is one of `open_files`; positions are 1-based; more than 20 updates a second from one participant is `RATE_LIMITED`. Each update is also published on the room's presence channel, apart from its event channel. `presence.list` returns every record as the reader may see it: open files they can't read are left out, and so is a cursor on one; the status always shows (§34.5). Over the WebSocket the same records are a snapshot and live updates (§16.4).
 - Agent edit intents (§11.4) render as highlighted regions in the editor. Each participant has at most one room-scoped intent: `{ paths, ranges?, task_id? }`; ranges are `{ path, start_line, end_line }` with 1-based inclusive line numbers. Set replaces the intent and refreshes its 45-second Redis TTL; clear deletes it. `presence.list_intents` returns active intents with participant ID and expiry. Intents are never written to the event ledger.
 
 ---
@@ -887,6 +889,7 @@ PARTICIPANTS & PRESENCE
   presence.set_intent      paths, ranges?, task_id?
   presence.clear_intent
   presence.list_intents
+  presence.list            everyone's status, open files and cursor, as the reader may see them
 
 CAPABILITIES
   capabilities.list        participant_id
@@ -997,7 +1000,7 @@ Idempotency keys are stored for 24 hours per participant. A duplicate returns th
 
 ## 16.4 Versioning
 
-REST paths are prefixed `/v1/`. WebSocket clients send `hello { protocol_version, client, client_version }`; the server replies with the negotiated version. Events carry `schema_version`. Breaking changes require a new major version with a 6-month overlap. Sandbox output uses the same cursor pattern as room events. A client subscribes with `sandbox.output.subscribe { exec_id, after }` and unsubscribes with `sandbox.output.unsubscribe { exec_id }`. The server replies `sandbox.output.subscribed { exec_id, after, last_sequence }`, then sends `sandbox.output { exec_id, sequence, stream, encoding: "base64", data }` chunks, followed by `sandbox.output.finished { exec_id, sequence, exit_code, duration_ms, reason, truncated }`. A truncation sentinel is `sandbox.output.truncated { exec_id, sequence }`. If a subscriber's 1 MiB buffer fills, the server drops queued output and sends `sandbox.output.resync_required { exec_id, after }`; the client subscribes again from that cursor. One socket may hold up to eight output subscriptions. Output is visible only to the sandbox participant, lead, room owner and admins, subject to the `sandbox.output` capability.
+REST paths are prefixed `/v1/`. WebSocket clients send `hello { protocol_version, client, client_version }`; the server replies with the negotiated version. Events carry `schema_version`. Breaking changes require a new major version with a 6-month overlap. Sandbox output uses the same cursor pattern as room events. A client subscribes with `sandbox.output.subscribe { exec_id, after }` and unsubscribes with `sandbox.output.unsubscribe { exec_id }`. The server replies `sandbox.output.subscribed { exec_id, after, last_sequence }`, then sends `sandbox.output { exec_id, sequence, stream, encoding: "base64", data }` chunks, followed by `sandbox.output.finished { exec_id, sequence, exit_code, duration_ms, reason, truncated }`. A truncation sentinel is `sandbox.output.truncated { exec_id, sequence }`. If a subscriber's 1 MiB buffer fills, the server drops queued output and sends `sandbox.output.resync_required { exec_id, after }`; the client subscribes again from that cursor. One socket may hold up to eight output subscriptions. Output is visible only to the sandbox participant, lead, room owner and admins, subject to the `sandbox.output` capability. Presence (§13.4) is subscribed with `presence.subscribe` and stopped with `presence.unsubscribe`. The server answers `presence.snapshot { presence }` (what `presence.list` returns) and then sends `presence { record }` for each update, filtered for the reader the same way. No message is sent when a record expires; clients drop it after its `expires_at`. A refused presence subscription is an `error` frame with `subscription: "presence"`, and the event stream carries on.
 
 ## 16.5 Provenance on every returned item
 

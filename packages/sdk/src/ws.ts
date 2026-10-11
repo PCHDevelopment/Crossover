@@ -241,6 +241,23 @@ export class RoomSocket {
   }
 }
 
+/** One participant's presence as the subscriber may see it (§13.4). */
+export interface PresenceRecord {
+  participant_id: string;
+  status: "active" | "idle";
+  open_files: string[];
+  cursor: {
+    path: string;
+    line: number;
+    column: number;
+    selection?: { start_line: number; start_column: number; end_line: number; end_column: number };
+  } | null;
+  /** Drop the record after this unless an update replaces it. */
+  expires_at: string;
+}
+
+export type PresenceUpdate = { snapshot: PresenceRecord[] } | { record: PresenceRecord };
+
 export interface SubscribeOptions {
   /** Deliver events with a sequence greater than this (the last one you have). Default 0: from the start. */
   after?: number;
@@ -258,6 +275,12 @@ export interface SubscribeOptions {
   profile?: "relevant" | "all" | "custom";
   types?: string[];
   scopes?: { tasks?: "mine" | "all"; mentions?: boolean };
+  /**
+   * Live presence on the same connection: a `snapshot` each time the stream connects, then each
+   * `record` as it changes. A refusal goes to `onPresenceError` and leaves the events flowing.
+   */
+  onPresence?: (update: PresenceUpdate) => void;
+  onPresenceError?: (error: CrossoverError) => void;
   /** Reconnect waits: first `minMs` (default 100), doubling with jitter up to `maxMs` (default 5000). */
   reconnect?: { minMs?: number; maxMs?: number };
 }
@@ -370,6 +393,13 @@ export class Subscription implements AsyncIterable<SdkEvent> {
                   filtered = profile !== undefined && profile !== "all";
                 }
                 this.options.onState?.("live");
+                if (this.options.onPresence) session.send({ type: "presence.subscribe" });
+                break;
+              case "presence.snapshot":
+                this.options.onPresence?.({ snapshot: frame["presence"] as PresenceRecord[] });
+                break;
+              case "presence":
+                this.options.onPresence?.({ record: frame["record"] as PresenceRecord });
                 break;
               case "event": {
                 const event = frame["event"] as SdkEvent;
@@ -386,6 +416,10 @@ export class Subscription implements AsyncIterable<SdkEvent> {
                 session.close();
                 break;
               case "error": {
+                if (frame["subscription"] === "presence") {
+                  this.options.onPresenceError?.(frameError(frame));
+                  break;
+                }
                 // An error frame is the subscription being refused. If it says to try again (a
                 // budget, an overloaded server) wait as long as it asks and reconnect; otherwise
                 // it ends here.

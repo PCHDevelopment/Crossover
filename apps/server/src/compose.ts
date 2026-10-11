@@ -20,6 +20,7 @@ import {
   LeaseSweeper,
   RedisEventPublisher,
   RedisEventSubscriber,
+  RedisPresenceSubscriber,
   registerRoomEventsSubscribeCommand,
   registerCapabilityCommands,
   registerDecisionCommands,
@@ -42,6 +43,7 @@ import {
   registerParticipantLifecycleCommands,
   registerParticipantManifestCommand,
   registerParticipantRoleCommand,
+  registerPresenceCommands,
   registerPresenceIntentCommands,
   registerRoomCommands,
   registerRoomDigestCommand,
@@ -58,6 +60,7 @@ import {
   type EventPublisher,
   type EventSubscriber,
   RedisEditIntentStore,
+  RedisPresenceStore,
 } from "@crossover/kernel";
 import { CrossoverError } from "@crossover/protocol";
 import { normalizeRoomEgressAllowlist, postWebhook } from "@crossover/security";
@@ -180,6 +183,8 @@ export async function composeServer(
   }
 
   const intentStore = new RedisEditIntentStore(config.redisUrl);
+  const presenceStore = new RedisPresenceStore(config.redisUrl);
+  const presenceSubscriber = new RedisPresenceSubscriber(config.redisUrl);
   const ownBudgets = overrides.budgets ? undefined : new RedisBudgetLimiter(config.redisUrl);
   const budgets = overrides.budgets ?? ownBudgets!;
   const sandboxLogStore = new FileLogStore(join(config.workspaceRoot, ".sandbox-exec-logs"));
@@ -204,6 +209,7 @@ export async function composeServer(
   try {
     if (redis) await redis.ready();
     await intentStore.ready();
+    await presenceStore.ready();
     await ownBudgets?.ready();
     await sweepSandboxLogs(sandboxLogStore);
     sandboxLogSweepTimer = setInterval(
@@ -408,6 +414,7 @@ export async function composeServer(
       config,
       healthQueue,
       intentStore,
+      presenceStore,
       executionService,
       sandboxLogStore,
       sandboxOutputHub,
@@ -462,7 +469,7 @@ export async function composeServer(
         perMinute: config.refreshPerMinute ?? 30,
       },
       ...(config.webRoot ? { staticRoot: config.webRoot } : {}),
-      ws: { subscriber, sandboxOutput },
+      ws: { subscriber, sandboxOutput, presence: presenceSubscriber },
     });
     gitApp = buildInternalGitServer({
       pool,
@@ -490,6 +497,8 @@ export async function composeServer(
         await redis?.close();
         await redisSubscriber?.close();
         await intentStore.close();
+        await presenceStore.close();
+        await presenceSubscriber.close();
         await ownBudgets?.close();
         if (!overrides.pool) await pool.end();
       })());
@@ -508,6 +517,8 @@ export async function composeServer(
     await redis?.close();
     await redisSubscriber?.close();
     await intentStore.close();
+    await presenceStore.close();
+    await presenceSubscriber.close();
     await ownBudgets?.close();
     if (!overrides.pool) await pool.end();
     throw err;
@@ -520,6 +531,7 @@ function registerCommands(
   config: ServerConfig,
   healthQueue: HealthCheckQueue,
   intentStore: RedisEditIntentStore,
+  presenceStore: RedisPresenceStore,
   execution: ExecutionService,
   logs: LogStore,
   outputHub: SandboxOutputHub,
@@ -562,6 +574,7 @@ function registerCommands(
   registerIntegrationCommands(dispatcher, integrationOptions);
   registerWakeSecretCommand(dispatcher, config.wakeWebhookKey);
   registerPresenceIntentCommands(dispatcher, intentStore, normalizePath);
+  registerPresenceCommands(dispatcher, presenceStore, normalizePath);
   registerRoomEventsSubscribeCommand(dispatcher); // the WebSocket `subscribe` frame
 
   // Tasks: create/update, list/get, and the claim → start → block lifecycle.

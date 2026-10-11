@@ -171,3 +171,67 @@ td {
     grid-template-columns: repeat(7, 160px);
   }
 }
+.files {
+  display: grid;
+  grid-template-columns: minmax(160px, 240px) 1fr;
+  gap: 12px;
+}
+.tree {
+  margin: 0;
+  padding-left: 0;
+  list-style: none;
+}
+.tree button[aria-current="true"] {
+  font-weight: 600;
+}
+.editor {
+  height: 480px;
+  border: 1px solid var(--line);
+}
+
+/* Presence (§13.4): one colour per participant, `presence-N` from presence.ts. */
+.presence-0 {
+  --presence: #d1495b;
+}
+.presence-1 {
+  --presence: #00798c;
+}
+.presence-2 {
+  --presence: #edae49;
+}
+.presence-3 {
+  --presence: #66a182;
+}
+.presence-4 {
+  --presence: #8d5fd3;
+}
+.presence-5 {
+  --presence: #e07a1f;
+}
+.presence-6 {
+  --presence: #2e86de;
+}
+.presence-7 {
+  --presence: #c2185b;
+}
+.remote-caret {
+  border-left: 2px solid var(--presence);
+  margin-left: -1px;
+}
+.remote-selection {
+  background: color-mix(in srgb, var(--presence) 25%, transparent);
+}
+.presence-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-left: 4px;
+  border-radius: 50%;
+  background: var(--presence);
+}
+.merge-conflicts {
+  padding-left: 18px;
+}
+.merge-conflicts button[aria-pressed="true"] {
+  font-weight: 600;
+}
