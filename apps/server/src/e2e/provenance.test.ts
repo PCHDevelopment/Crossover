@@ -284,6 +284,7 @@ describe("provenance labels (§16.5)", () => {
       "inbox.list":
         "summaries quote the message or task they are about; labeling them is follow-up work",
       "workspace.read": "file content: the MCP provenance framing is T711",
+      "sandbox.file.read": "file content: the MCP provenance framing is T711",
       "workspace.list": "paths only",
       "workspace.search": "file content: the MCP provenance framing is T711",
       "workspace.diff": "file content: the MCP provenance framing is T711",
@@ -300,6 +301,8 @@ describe("provenance labels (§16.5)", () => {
       "presence.set_intent": "writes the caller's own intent",
       "presence.clear_intent": "writes the caller's own intent",
       "presence.list_intents": "paths announced by participants; no free text",
+      "presence.update": "writes the caller's own presence",
+      "presence.list": "statuses, open files and cursors; no free text",
       "capabilities.list": "platform permission records",
       "integrations.list": "integration configuration metadata; no room content",
       "tasks.heartbeat": "the caller's own lease",

@@ -44,7 +44,13 @@
       "path": "apps/web"
     },
     {
+      "path": "apps/web/tsconfig.node-tests.json"
+    },
+    {
       "path": "plugins/browser"
+    },
+    {
+      "path": "plugins/aws"
     }
   ]
 }

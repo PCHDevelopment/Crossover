@@ -1,4 +1,4 @@
-import { createPool, type Pool } from "@crossover/db";
+import { createPool, withTransaction, type Pool } from "@crossover/db";
 import {
   buildGateway,
   type SandboxOutputMetadata,
@@ -10,14 +10,17 @@ import { IntegrationCredentialBroker } from "./integration-broker.js";
 import { GitHubPullRequestProvider } from "./github-pull-request.js";
 import { registerBrowserTools } from "./browser-plugin.js";
 import { registerGitHubTools } from "./github-plugin.js";
+import { registerAwsTools } from "./aws-plugin.js";
 import {
   Dispatcher,
+  filterReadablePaths,
   RedisBudgetLimiter,
   type BudgetLimiter,
   LeaseRenewer,
   LeaseSweeper,
   RedisEventPublisher,
   RedisEventSubscriber,
+  RedisPresenceSubscriber,
   registerRoomEventsSubscribeCommand,
   registerCapabilityCommands,
   registerDecisionCommands,
@@ -40,6 +43,7 @@ import {
   registerParticipantLifecycleCommands,
   registerParticipantManifestCommand,
   registerParticipantRoleCommand,
+  registerPresenceCommands,
   registerPresenceIntentCommands,
   registerRoomCommands,
   registerRoomDigestCommand,
@@ -51,10 +55,13 @@ import {
   registerTaskLifecycleCommands,
   registerTaskReadCommands,
   type Authorizer,
+  type Principal,
   type EventPublisher,
   type EventSubscriber,
   RedisEditIntentStore,
+  RedisPresenceStore,
 } from "@crossover/kernel";
+import { CrossoverError } from "@crossover/protocol";
 import { normalizeRoomEgressAllowlist, postWebhook } from "@crossover/security";
 import { authorize, tierOf } from "@crossover/policy";
 import { join } from "node:path";
@@ -77,6 +84,8 @@ import {
   publishHealthResult,
   normalizePath,
   registerSandboxStatusCommand,
+  registerSandboxFileCommands,
+  registerSandboxSyncCommand,
   registerSandboxSubmitCommand,
   registerSandboxExecCommands,
   FileLogStore,
@@ -173,6 +182,8 @@ export async function composeServer(
   }
 
   const intentStore = new RedisEditIntentStore(config.redisUrl);
+  const presenceStore = new RedisPresenceStore(config.redisUrl);
+  const presenceSubscriber = new RedisPresenceSubscriber(config.redisUrl);
   const ownBudgets = overrides.budgets ? undefined : new RedisBudgetLimiter(config.redisUrl);
   const budgets = overrides.budgets ?? ownBudgets!;
   const sandboxLogStore = new FileLogStore(join(config.workspaceRoot, ".sandbox-exec-logs"));
@@ -197,6 +208,7 @@ export async function composeServer(
   try {
     if (redis) await redis.ready();
     await intentStore.ready();
+    await presenceStore.ready();
     await ownBudgets?.ready();
     await sweepSandboxLogs(sandboxLogStore);
     sandboxLogSweepTimer = setInterval(
@@ -229,19 +241,56 @@ export async function composeServer(
           : {}),
         gitFetcherImage: config.gitFetcherImage ?? "crossover-git-fetcher:latest",
       });
+    const pathAuthorizer = overrides.authorize ?? authorize;
+    const readableSandboxPaths = async (
+      roomId: string,
+      participantId: string,
+      paths: readonly string[],
+    ): Promise<string[]> =>
+      withTransaction(pool, async (client) => {
+        const { rows } = await client.query<Principal>(
+          `SELECT id AS participant_id, room_id, kind, authority, role FROM participants
+           WHERE id = $1 AND room_id = $2 AND status = 'ACTIVE'`,
+          [participantId, roomId],
+        );
+        const principal = rows[0];
+        if (!principal) return [];
+        return filterReadablePaths(paths, async (path) => {
+          try {
+            await pathAuthorizer(
+              principal,
+              "workspace.read",
+              { room_id: roomId, path },
+              { method: "sandbox.status", params: {}, client },
+            );
+            return true;
+          } catch (error) {
+            if (error instanceof CrossoverError && error.code === "FORBIDDEN") return false;
+            throw error;
+          }
+        });
+      });
     executionService = new ExecutionService(pool, executionDriver, {
       diskEnforcement: config.sandboxDiskEnforcement ?? "soft",
+      readablePaths: readableSandboxPaths,
+      listIntents: (roomId) => intentStore.list(roomId),
     });
     executionService.startSweeper();
 
     const dispatcher = new Dispatcher({
       pool,
-      authorize: overrides.authorize ?? authorize,
+      authorize: pathAuthorizer,
       nodeId: config.nodeId,
       publisher,
       budgets,
       onLeaseAcquire: (roomId) => reconcileRef(pool, roomId),
       ...(overrides.leaseTtlMs !== undefined ? { leaseTtlMs: overrides.leaseTtlMs } : {}),
+    });
+    executionService.setSandboxEventSink(async (roomId, events) => {
+      await dispatcher.runSystem(roomId, "sandbox.canonical_advance", async () => ({
+        result: undefined,
+        events: [...events],
+      }));
     });
     const healthRunner = new DockerHealthRunner({
       allowedImages: config.healthImages,
@@ -286,6 +335,8 @@ export async function composeServer(
       registerGitHubTools(toolRegistry, config.githubPluginImage);
     if (!overrides.tools?.registry && config.browserPluginImage)
       registerBrowserTools(toolRegistry, config.browserPluginImage);
+    if (!overrides.tools?.registry && config.awsPluginImage)
+      registerAwsTools(toolRegistry, config.awsPluginImage);
     kmsOperations = config.integrationKmsKeyId ? new AwsKmsDataKeyOperations() : undefined;
     const integrationSecretStore =
       overrides.integrations?.secretStore ??
@@ -362,6 +413,7 @@ export async function composeServer(
       config,
       healthQueue,
       intentStore,
+      presenceStore,
       executionService,
       sandboxLogStore,
       sandboxOutputHub,
@@ -416,7 +468,7 @@ export async function composeServer(
         perMinute: config.refreshPerMinute ?? 30,
       },
       ...(config.webRoot ? { staticRoot: config.webRoot } : {}),
-      ws: { subscriber, sandboxOutput },
+      ws: { subscriber, sandboxOutput, presence: presenceSubscriber },
     });
     gitApp = buildInternalGitServer({
       pool,
@@ -444,6 +496,8 @@ export async function composeServer(
         await redis?.close();
         await redisSubscriber?.close();
         await intentStore.close();
+        await presenceStore.close();
+        await presenceSubscriber.close();
         await ownBudgets?.close();
         if (!overrides.pool) await pool.end();
       })());
@@ -462,6 +516,8 @@ export async function composeServer(
     await redis?.close();
     await redisSubscriber?.close();
     await intentStore.close();
+    await presenceStore.close();
+    await presenceSubscriber.close();
     await ownBudgets?.close();
     if (!overrides.pool) await pool.end();
     throw err;
@@ -474,6 +530,7 @@ function registerCommands(
   config: ServerConfig,
   healthQueue: HealthCheckQueue,
   intentStore: RedisEditIntentStore,
+  presenceStore: RedisPresenceStore,
   execution: ExecutionService,
   logs: LogStore,
   outputHub: SandboxOutputHub,
@@ -515,6 +572,7 @@ function registerCommands(
   registerIntegrationCommands(dispatcher, integrationOptions);
   registerWakeSecretCommand(dispatcher, config.wakeWebhookKey);
   registerPresenceIntentCommands(dispatcher, intentStore, normalizePath);
+  registerPresenceCommands(dispatcher, presenceStore, normalizePath);
   registerRoomEventsSubscribeCommand(dispatcher); // the WebSocket `subscribe` frame
 
   // Tasks: create/update, list/get, and the claim → start → block lifecycle.
@@ -531,10 +589,14 @@ function registerCommands(
   // apply_changeset plus reads; schedule health for every committed revision.
   const workspaceDeps: WorkspaceCommandDeps = {
     scheduleHealthCheck: (roomId, revision) => healthQueue.enqueue(roomId, revision),
+    scheduleSandboxAdvance: (roomId, revision) =>
+      execution.scheduleCanonicalAdvance(roomId, revision),
     ...(upstream ? { upstream } : {}),
   };
   registerWorkspaceCommands(dispatcher, workspaceDeps);
   registerSandboxStatusCommand(dispatcher, execution);
+  registerSandboxFileCommands(dispatcher, execution);
+  registerSandboxSyncCommand(dispatcher, execution);
   registerSandboxSubmitCommand(dispatcher, execution, workspaceDeps);
   registerSandboxExecCommands(dispatcher, execution, logs, { outputHub });
 }

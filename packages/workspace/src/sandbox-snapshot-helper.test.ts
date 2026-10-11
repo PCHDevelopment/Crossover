@@ -1,6 +1,16 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdtemp,
+  mkdir,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -14,6 +24,7 @@ afterEach(async () => {
 interface HelperResult {
   code: number;
   entries?: { path: string; mode: string; sha: string | null; size: number }[];
+  file?: { path: string; mode: string; size: number; content: string };
   error?: string;
   pruned_directories?: string[];
 }
@@ -64,6 +75,44 @@ const path64 = (path: string) => Buffer.from(path).toString("base64");
 const decodePath = (path: string) => Buffer.from(path, "base64").toString();
 
 describe("sandbox snapshot helper", () => {
+  it("reads one working-copy file without following links or accepting a missing path", async () => {
+    const root = await mkdtemp(join(tmpdir(), "crossover-sandbox-snapshot-"));
+    roots.push(root);
+    await writeFile(join(root, "file.txt"), "working copy\n");
+    await symlink("/etc/passwd", join(root, "link"));
+
+    const read = await runHelper(root, {
+      action: "file_read",
+      path: path64("file.txt"),
+      max_bytes: 1024,
+    });
+    expect(read).toMatchObject({
+      code: 0,
+      file: {
+        path: path64("file.txt"),
+        mode: "100644",
+        size: Buffer.byteLength("working copy\n"),
+        content: Buffer.from("working copy\n").toString("base64"),
+      },
+    });
+    expect(
+      await runHelper(root, { action: "file_read", path: path64("link"), max_bytes: 1024 }),
+    ).toMatchObject({ code: 1, error: "unsupported_file_type" });
+    expect(
+      await runHelper(root, { action: "file_read", path: path64("missing"), max_bytes: 1024 }),
+    ).toMatchObject({ code: 1, error: "path_not_found" });
+    expect(
+      await runHelper(root, {
+        action: "file_read",
+        path: path64("../etc/passwd"),
+        max_bytes: 1024,
+      }),
+    ).toMatchObject({ code: 1, error: "invalid_path" });
+    expect(
+      await runHelper(root, { action: "file_read", path: path64("file.txt"), max_bytes: 2 }),
+    ).toMatchObject({ code: 1, error: "too_large", size: 13, limit: 2 });
+  });
+
   it("reads raw bytes, ignores sandbox Git configuration, and never follows symlinks", async () => {
     const root = await mkdtemp(join(tmpdir(), "crossover-sandbox-snapshot-"));
     roots.push(root);
@@ -187,5 +236,19 @@ describe("sandbox snapshot helper", () => {
     expect(await readFile(outside, "utf8")).toBe("keep me");
     expect((await readFile(join(root, "bin/tool"))).toString("hex")).toBe("0001ff");
     expect(await readdir(join(root, "nested"))).toEqual([]);
+
+    await chmod(join(root, "bin/tool"), 0o755);
+    await runHelper(root, {
+      action: "install",
+      files: [
+        {
+          path: path64("bin/tool"),
+          mode: "100644",
+          content: Buffer.from("edited executable").toString("base64"),
+          preserve_mode: true,
+        },
+      ],
+    });
+    expect((await stat(join(root, "bin/tool"))).mode & 0o777).toBe(0o755);
   });
 });

@@ -70,6 +70,9 @@ export type {
   SandboxWorkspaceHead,
   SandboxSnapshotEntry,
   SandboxSnapshotFile,
+  SandboxWorkingCopyFile,
+  SandboxSyncResponse,
+  SandboxSyncResult,
 } from "./execution.js";
 export { DockerExecutionDriver } from "./docker-execution-driver.js";
 export type {
@@ -77,8 +80,20 @@ export type {
   DockerInvocationOptions,
   DockerInvoker,
 } from "./docker-execution-driver.js";
-export { registerSandboxExecCommands } from "./sandbox-exec.js";
+export {
+  registerSandboxExecCommands,
+  sandboxExecParamsSchema,
+  sandboxExecCancelParamsSchema,
+} from "./sandbox-exec.js";
 export type { SandboxExecCommandDeps } from "./sandbox-exec.js";
+export {
+  registerSandboxFileCommands,
+  SANDBOX_FILE_READ_LIMIT_BYTES,
+  SANDBOX_FILE_WRITE_LIMIT_BYTES,
+  sandboxFileReadParamsSchema,
+  sandboxFileWriteInputSchema,
+  sandboxFileWriteParamsSchema,
+} from "./sandbox-file.js";
 export { FileLogStore, MemoryLogStore, SandboxOutputHub } from "./sandbox-log-store.js";
 export type {
   LogStore,
@@ -91,6 +106,7 @@ export { parsePorcelainStatus, registerSandboxStatusCommand } from "./sandbox-st
 export { sandboxStatusParamsSchema } from "./sandbox-status.js";
 export type { SandboxFileChanges } from "./sandbox-status.js";
 export type { SandboxWorkingCopyStatus } from "./execution.js";
+export { registerSandboxSyncCommand, sandboxSyncParamsSchema } from "./sandbox-sync.js";
 export { changesSubmitParamsSchema, registerSandboxSubmitCommand } from "./sandbox-submit.js";
 export type { SandboxSubmitResponse } from "./sandbox-submit.js";
 export * from "./upstream.js";

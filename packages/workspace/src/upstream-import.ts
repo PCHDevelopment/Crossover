@@ -8,6 +8,7 @@ import { updateCanonicalRef } from "./reconcile.js";
 import { refreshSearchTree } from "./search-tree.js";
 import { suggestHealthCommand } from "./health-suggestion.js";
 import { treeChanges } from "./tree-changes.js";
+import { recordWorkspaceRevision } from "./revision.js";
 import {
   assertPublicHttpsUrl,
   HttpsGitFetcher,
@@ -52,6 +53,7 @@ export interface ImportHooks {
   updateCanonicalRef?: (repo: string, commit: string, expected: string) => Promise<void>;
   refreshSearchTree?: (repo: string, commit: string, previousCommit?: string) => Promise<void>;
   scheduleHealthCheck?: (roomId: string, revision: number) => void;
+  scheduleSandboxAdvance?: (roomId: string, revision: number) => void;
 }
 
 export const refuse = (reason: string, message: string, details: Record<string, unknown> = {}) =>
@@ -366,10 +368,15 @@ async function importUpstream(
         }),
       ],
     );
-    await client.query(
-      `INSERT INTO workspace_revisions (workspace_id, room_id, revision, commit_sha, changeset_id)
-       VALUES ($1, $2, 1, $3, $4)`,
-      [ws.id, room_id, commit, changesetId],
+    await recordWorkspaceRevision(
+      client,
+      { workspace_id: ws.id, room_id, revision: 1, commit_sha: commit, changeset_id: changesetId },
+      {
+        afterCommit: (callback) => ctx.afterCommit(callback),
+        ...(hooks.scheduleSandboxAdvance
+          ? { scheduleSandboxAdvance: hooks.scheduleSandboxAdvance }
+          : {}),
+      },
     );
     for (const { path, blob } of changed) {
       await client.query(

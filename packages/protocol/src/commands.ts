@@ -39,6 +39,7 @@ export const METHODS = {
   "presence.set_intent": { mutating: false },
   "presence.clear_intent": { mutating: false },
   "presence.list_intents": { mutating: false },
+  "presence.list": { mutating: false },
 
   "capabilities.list": { mutating: false },
   "capabilities.grant": { mutating: true },
@@ -86,6 +87,8 @@ export const METHODS = {
   "conflicts.abandon": { mutating: true },
 
   "sandbox.status": { mutating: false },
+  "sandbox.file.read": { mutating: false },
+  "sandbox.file.write": { mutating: true },
   "sandbox.exec": { mutating: true },
   "sandbox.exec.cancel": { mutating: true },
   "sandbox.sync": { mutating: true },
