@@ -1362,3 +1362,266 @@ describe("workspace.apply_changeset — secret scanning (T901)", () => {
     expect(rows[0].summary).toContain("too large to scan");
   });
 });
+
+describe("circuit breakers", () => {
+  const addLead = async (f: Awaited<ReturnType<typeof fixture>>) => {
+    const leadId = newId("part");
+    await f.addParticipant(leadId);
+    await db.pool.query("UPDATE participants SET role = 'LEAD' WHERE id = $1 AND room_id = $2", [
+      leadId,
+      f.room,
+    ]);
+    await db.pool.query("UPDATE rooms SET lead_participant_id = $2 WHERE id = $1", [
+      f.room,
+      leadId,
+    ]);
+    return { id: leadId, dispatch: f.dispatchAs(leadId, "LEAD") };
+  };
+
+  const decide = (
+    dispatch: (input: Parameters<Dispatcher["dispatch"]>[1]) => ReturnType<Dispatcher["dispatch"]>,
+    changesetId: string,
+    decision: "APPROVE" | "REJECT",
+  ) =>
+    dispatch({
+      id: newId("cmd"),
+      method: "workspace.changeset.decide_hold",
+      idempotency_key: newId("cmd"),
+      params: { changeset_id: changesetId, decision },
+    });
+
+  const heldId = async (
+    dispatch: (input: Parameters<Dispatcher["dispatch"]>[1]) => ReturnType<Dispatcher["dispatch"]>,
+    input: ReturnType<Awaited<ReturnType<typeof fixture>>["request"]>,
+    reason: string,
+  ) => {
+    const error = await dispatch(input).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(CrossoverError);
+    expect((error as CrossoverError).code).toBe("CIRCUIT_BREAKER");
+    expect((error as CrossoverError).details?.reasons).toContain(reason);
+    return String((error as CrossoverError).details?.changeset_id);
+  };
+
+  it("holds more than 50 deleted files and commits the hold, inbox, and event with an idempotent error", async () => {
+    const f = await fixture();
+    const lead = await addLead(f);
+    const files = Array.from({ length: 51 }, (_, i) => ({
+      type: "create" as const,
+      path: `delete/file-${i}.txt`,
+      content: "line\n",
+    }));
+    await f.apply(files);
+    const agentId = newId("part");
+    await f.addParticipant(agentId, "AGENT");
+    const dispatchAgent = f.dispatchAs(agentId, "DEVELOPER", "AGENT");
+    const input = f.request(
+      files.map(({ path }) => ({ type: "delete" as const, path })),
+      1,
+    );
+
+    const id = await heldId(dispatchAgent, input, "mass_delete");
+    const replay = await dispatchAgent(input).catch((error: unknown) => error);
+    expect(replay).toBeInstanceOf(CrossoverError);
+    expect((replay as CrossoverError).code).toBe("CIRCUIT_BREAKER");
+    expect((replay as CrossoverError).details?.changeset_id).toBe(id);
+    expect((replay as CrossoverError).details?.reasons).not.toContain("lines_removed");
+    expect((await f.rowsFor("changesets")).find((row) => row.id === id)?.status).toBe("HELD");
+    expect((await f.rowsFor("workspace_revisions")).length).toBe(2);
+    const inbox = await db.pool.query(
+      "SELECT participant_id FROM inbox_items WHERE room_id = $1 AND ref->>'id' = $2",
+      [f.room, id],
+    );
+    expect(inbox.rows.map((row) => row.participant_id).sort()).toEqual([f.actor, lead.id].sort());
+    const events = await f.rowsFor("events");
+    expect(events.map((row) => row.type)).toContain("workspace.changeset.held");
+  });
+
+  it("holds removal of more than 30% of at least 200 base text lines", async () => {
+    const f = await fixture();
+    const lines = Array.from({ length: 300 }, (_, i) => `line ${i}`);
+    const content = lines.join("\n") + "\n";
+    await f.apply([
+      { type: "create", path: "src/large.txt", content },
+      {
+        type: "create",
+        path: "src/binary.bin",
+        content: Buffer.alloc(10_000).toString("base64"),
+        encoding: "base64",
+      },
+    ]);
+    const error = await f
+      .dispatch(
+        f.request(
+          [{ type: "modify", path: "src/large.txt", content: lines.slice(100).join("\n") + "\n" }],
+          1,
+        ),
+      )
+      .catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(CrossoverError);
+    expect((error as CrossoverError).details?.reasons).toContain("lines_removed");
+  });
+
+  it("holds protected paths and returns only readable protected paths", async () => {
+    const f = await fixture();
+    const agentId = newId("part");
+    await f.addParticipant(agentId, "AGENT");
+    const dispatchAgent = f.dispatchAs(agentId, "DEVELOPER", "AGENT");
+    const input = f.request(
+      [{ type: "create", path: ".github/workflows/release.yml", content: "name: release\n" }],
+      0,
+    );
+    const id = await heldId(dispatchAgent, input, "protected_path");
+    const error = await dispatchAgent(input).catch((caught: unknown) => caught);
+    expect((error as CrossoverError).details?.paths).toEqual([".github/workflows/release.yml"]);
+    expect((await f.rowsFor("changesets")).find((row) => row.id === id)?.status).toBe("HELD");
+  });
+
+  it("omits a protected path from the error when the submitter cannot read it", async () => {
+    let submitterId = "";
+    const authorizer: Authorizer = async (principal, action, resource, context) => {
+      if (principal.participant_id === submitterId && action === "workspace.read" && resource.path)
+        throw new CrossoverError("FORBIDDEN", "Path is private");
+      return allowAll(principal, action, resource, context);
+    };
+    const f = await fixture(authorizer);
+    submitterId = newId("part");
+    await f.addParticipant(submitterId, "AGENT");
+    const input = f.request(
+      [{ type: "create", path: ".github/workflows/private.yml", content: "name: private\n" }],
+      0,
+    );
+    const dispatchAgent = f.dispatchAs(submitterId, "DEVELOPER", "AGENT");
+    await heldId(dispatchAgent, input, "protected_path");
+    const error = await dispatchAgent(input).catch((caught: unknown) => caught);
+    expect((error as CrossoverError).details?.paths).toBeUndefined();
+  });
+
+  it("applies an approved hold as the original submitter, then rejects a duplicate decision", async () => {
+    const f = await fixture();
+    const lead = await addLead(f);
+    const agentId = newId("part");
+    await f.addParticipant(agentId, "AGENT");
+    const dispatchAgent = f.dispatchAs(agentId, "DEVELOPER", "AGENT");
+    const input = f.request(
+      [{ type: "create", path: ".github/workflows/release.yml", content: "name: release\n" }],
+      0,
+    );
+    const id = await heldId(dispatchAgent, input, "protected_path");
+
+    const approved = await decide(lead.dispatch, id, "APPROVE");
+    expect(approved.response).toMatchObject({ status: "APPLIED", changeset_id: id });
+    expect((await f.rowsFor("changesets")).find((row) => row.id === id)?.status).toBe("APPLIED");
+    expect((await f.rowsFor("events")).map((row) => row.type)).toContain(
+      "workspace.changeset.hold_decided",
+    );
+    const replay = await dispatchAgent(input).catch((error: unknown) => error);
+    expect(replay).toBeInstanceOf(CrossoverError);
+    expect((replay as CrossoverError).code).toBe("CIRCUIT_BREAKER");
+    expect((replay as CrossoverError).details?.changeset_id).toBe(id);
+    await expect(decide(lead.dispatch, id, "REJECT")).rejects.toMatchObject({
+      code: "CONFLICT_VERSION",
+    });
+  });
+
+  it("sends an approved stale hold through merge and assigns its conflict to the submitter", async () => {
+    const f = await fixture();
+    const lead = await addLead(f);
+    const agentId = newId("part");
+    await f.addParticipant(agentId, "AGENT");
+    await db.pool.query("UPDATE rooms SET settings = $2::jsonb WHERE id = $1", [
+      f.room,
+      JSON.stringify({ protected_paths: [] }),
+    ]);
+    await f.apply([
+      { type: "create", path: ".github/workflows/release.yml", content: "name: base\n" },
+    ]);
+    await db.pool.query("UPDATE rooms SET settings = $2::jsonb WHERE id = $1", [
+      f.room,
+      JSON.stringify({ protected_paths: [".github/workflows/**"] }),
+    ]);
+    const dispatchAgent = f.dispatchAs(agentId, "DEVELOPER", "AGENT");
+    const input = f.request(
+      [{ type: "modify", path: ".github/workflows/release.yml", content: "name: agent\n" }],
+      1,
+    );
+    const id = await heldId(dispatchAgent, input, "protected_path");
+    await db.pool.query("UPDATE rooms SET settings = $2::jsonb WHERE id = $1", [
+      f.room,
+      JSON.stringify({ protected_paths: [] }),
+    ]);
+    await f.apply(
+      [{ type: "modify", path: ".github/workflows/release.yml", content: "name: head\n" }],
+      1,
+    );
+
+    const approved = await decide(lead.dispatch, id, "APPROVE");
+    expect(approved.response).toMatchObject({ status: "CONFLICT", changeset_id: id });
+    const conflict = await db.pool.query(
+      "SELECT submitter_id FROM conflicts WHERE room_id = $1 AND changeset_id = $2",
+      [f.room, id],
+    );
+    expect(conflict.rows[0]?.submitter_id).toBe(agentId);
+  });
+
+  it("rechecks the original submitter's current path grant when approving", async () => {
+    let revoked = false;
+    let submitterId = "";
+    const authorizer: Authorizer = async (principal, action, resource, context) => {
+      if (revoked && principal.participant_id === submitterId && action === "workspace.write")
+        throw new CrossoverError("FORBIDDEN", "Path grant was revoked");
+      return allowAll(principal, action, resource, context);
+    };
+    const f = await fixture(authorizer);
+    const lead = await addLead(f);
+    submitterId = newId("part");
+    await f.addParticipant(submitterId, "AGENT");
+    const dispatchAgent = f.dispatchAs(submitterId, "DEVELOPER", "AGENT");
+    const input = f.request(
+      [{ type: "create", path: ".github/workflows/release.yml", content: "name: release\n" }],
+      0,
+    );
+    const id = await heldId(dispatchAgent, input, "protected_path");
+    revoked = true;
+
+    await expect(decide(lead.dispatch, id, "APPROVE")).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect((await f.rowsFor("changesets")).find((row) => row.id === id)?.status).toBe("HELD");
+  });
+
+  it("counts recent hold rejections toward the agent streak", async () => {
+    const f = await fixture();
+    const lead = await addLead(f);
+    const agentId = newId("part");
+    await f.addParticipant(agentId, "AGENT");
+    const dispatchAgent = f.dispatchAs(agentId, "DEVELOPER", "AGENT");
+    for (let index = 0; index < 6; index += 1) {
+      const input = f.request(
+        [
+          {
+            type: "create",
+            path: `.github/workflows/rejected-${index}.yml`,
+            content: "name: held\n",
+          },
+        ],
+        0,
+      );
+      const id = await heldId(dispatchAgent, input, "protected_path");
+      await decide(lead.dispatch, id, "REJECT");
+    }
+    const seventh = f.request(
+      [{ type: "create", path: "docs/after-streak.txt", content: "still held\n" }],
+      0,
+    );
+    await heldId(dispatchAgent, seventh, "rejection_streak");
+  });
+
+  it("refuses hold decisions from non-leads", async () => {
+    const f = await fixture();
+    const input = f.request(
+      [{ type: "create", path: ".github/workflows/release.yml", content: "name: release\n" }],
+      0,
+    );
+    const id = await heldId(f.dispatch, input, "protected_path");
+    await expect(decide(f.dispatch, id, "APPROVE")).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect((await f.rowsFor("changesets")).find((row) => row.id === id)?.status).toBe("HELD");
+  });
+});

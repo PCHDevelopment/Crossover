@@ -136,6 +136,9 @@ async function fixture(): Promise<Fixture> {
   const mutate = (token: string, method: string, params: Record<string, unknown>) =>
     post(`/v1/rooms/${roomId}/commands`, envelope(method, params), token);
 
+  // This suite probes path visibility on a .pem path; keep it out of T903's protected-path gate.
+  await ok(await mutate(owner, "room.set_protected_paths", { patterns: [] }));
+
   const a = await joinRoom(roomId, owner, "Agent-A");
   const b = await joinRoom(roomId, owner, "Agent-B");
 

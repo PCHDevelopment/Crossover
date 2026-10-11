@@ -18,6 +18,7 @@ export const METHODS = {
   "room.events.subscribe": { mutating: false },
   "room.events.list": { mutating: false },
   "room.set_egress_allowlist": { mutating: true },
+  "room.set_protected_paths": { mutating: true },
   "events.redact": { mutating: true },
   "room.set_lead": { mutating: true },
   "room.transfer_lead": { mutating: true },
@@ -78,6 +79,7 @@ export const METHODS = {
   "workspace.blame": { mutating: false },
   "workspace.apply_changeset": { mutating: true },
   "workspace.changeset.get": { mutating: false },
+  "workspace.changeset.decide_hold": { mutating: true },
   "workspace.health.get": { mutating: false },
 
   "conflicts.list": { mutating: false },

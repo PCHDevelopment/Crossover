@@ -69,6 +69,7 @@ export const CAPABILITIES = {
   "checkpoints.export": { mutating: true },
   "git.import": { mutating: true },
   "git.pull_upstream": { mutating: true },
+  "workspace.decide_hold": { mutating: true },
   "room.transfer_lead": { mutating: true },
 
   // ---- authority powers (§6.2)
@@ -84,6 +85,7 @@ export const CAPABILITIES = {
   "decisions.veto": { mutating: true },
   "budgets.set": { mutating: true },
   "egress.set": { mutating: true },
+  "protected_paths.set": { mutating: true },
   // owner only
   "room.freeze": { mutating: true },
   "room.resume": { mutating: true },
@@ -180,6 +182,7 @@ const LEAD = [
   "checkpoints.export",
   "git.import",
   "git.pull_upstream",
+  "workspace.decide_hold",
   "room.transfer_lead",
   // The commands (T211, T212) enforce the limits: an agent lead can't touch humans, and only
   // a human can un-pause what a human paused (§6.3, §22.1).
@@ -231,6 +234,8 @@ const OWNER_POWERS = [
   "capabilities.grant_tier3",
   "events.redact",
   "integrations.manage",
+  "protected_paths.set",
+  "workspace.decide_hold",
 ] as const satisfies readonly Capability[];
 
 /**

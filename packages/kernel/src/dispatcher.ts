@@ -73,6 +73,7 @@ export interface CommandContext {
     participantId: string,
     action: string,
     resource?: Record<string, unknown>,
+    options?: AuthorizeOptions,
   ): Promise<void>;
   /**
    * Run `callback` once this command's transaction has committed, still on the room's actor
@@ -1136,10 +1137,13 @@ export class Dispatcher {
       idempotency_key: approval.idempotency_key,
       authorize: (a, resource, options) =>
         check(requester, a, resource ?? {}, options?.anyScope ? { perPath: true } : {}),
-      authorizeAs: async (participantId, a, resource) =>
-        check(await this.principalOf(client, room_id, participantId), a, resource ?? {}).catch(
-          (error: unknown) => this.onBehalfOf(error, participantId),
-        ),
+      authorizeAs: async (participantId, a, resource, options) =>
+        check(
+          await this.principalOf(client, room_id, participantId),
+          a,
+          resource ?? {},
+          options?.anyScope ? { perPath: true } : {},
+        ).catch((error: unknown) => this.onBehalfOf(error, participantId)),
       afterCommit: outer.afterCommit,
     };
     const out = await def.execute(ctx, params);
@@ -1363,12 +1367,17 @@ export class Dispatcher {
               ),
             options,
           ),
-        authorizeAs: async (participantId, a, resource) =>
+        authorizeAs: async (participantId, a, resource, options) =>
           this.authorize(
             await this.principalOf(client, room_id, participantId),
             a,
             { ...resource, room_id },
-            { method: envelope.method, params, client },
+            {
+              method: envelope.method,
+              params,
+              client,
+              ...(options?.anyScope ? { perPath: true } : {}),
+            },
           ).catch((error: unknown) => this.onBehalfOf(error, participantId)),
         afterCommit: () => {
           throw new Error(`${envelope.method} is read-only: afterCommit needs a transaction`);
@@ -1645,12 +1654,17 @@ export class Dispatcher {
                       ),
                     options,
                   ),
-                authorizeAs: async (participantId, a, resource) =>
+                authorizeAs: async (participantId, a, resource, options) =>
                   this.authorize(
                     await this.principalOf(client, room_id, participantId),
                     a,
                     { ...resource, room_id },
-                    { method: envelope.method, params, client },
+                    {
+                      method: envelope.method,
+                      params,
+                      client,
+                      ...(options?.anyScope ? { perPath: true } : {}),
+                    },
                   ).catch((error: unknown) => this.onBehalfOf(error, participantId)),
                 afterCommit: (callback) => void afterCommit.push(callback),
               };

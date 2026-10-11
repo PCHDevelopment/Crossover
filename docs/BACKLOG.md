@@ -21,7 +21,7 @@ Conventions are in `docs/ENGINEERING.md`. Section references (§) point to `docs
 | M6 Conflicts and health               | T601–T610   | S2                                                          |
 | M7 Gateway, MCP, end-to-end           | T701–T713   | S1 (T701–T709, T713), S2 (T710), Q1 (T705, T711), O1 (T712) |
 | M8 Git interoperability (§24)         | T801–T807   | S1 (moved from S2 in Review 4)                              |
-| M9 Safety controls (§22–23)           | T901–T906   | S1 (T904–T906), Q1 (T901–T903; moved in Review 6)           |
+| M9 Safety controls (§22–23)           | T901–T906   | S1 (T904–T906), Q1 (T901–T902), S2 (T903)                   |
 | M10 Execution sandboxes (§14)         | T1001–T1008 | S2 (T1007 split into T1007 + T1007b in Review 5)            |
 | M11 Clients (§27, §29)                | T1101–T1106 | S1 (T1102 → Q1)                                             |
 | M12 Plugins (§21.4–21.5)              | T1201–T1206 | S1 (T1201, moved in Review 5), S2 (T1202–T1206)             |
@@ -1013,13 +1013,13 @@ Same scanner on `messages.send/edit` and `memory.put`.
 
 - A message containing a private key block is rejected; a low-confidence match is flagged.
 
-### T903 · Circuit breakers — Q1
+### T903 · Circuit breakers — S2
 
-Deps: T512, T402 · Migration: next free number at merge time (adds `HELD` to the status CHECK; `0021` is taken)
+Deps: T512, T402 · Migration: `0032_circuit_breakers` (adds `HELD`, rejection timestamps, and an index)
 
-Hold a ChangeSet (`CIRCUIT_BREAKER`, status `HELD`) that deletes > 50 files or > 30% of lines, touches protected patterns (default `.github/workflows/**`, `**/*.pem`, `**/.env*`, `infra/prod/**`), or comes from an agent with > 5 rejected/abandoned ChangeSets in 30 min (§22.4). Lead/owner approve or reject via inbox.
+Hold every ChangeSet through the shared apply pipeline (`CIRCUIT_BREAKER`, status `HELD`) when it deletes > 50 files, removes > 30% of tracked text lines from a base with at least 200 lines, touches protected patterns (default `.github/workflows/**`, `**/*.pem`, `**/.env*`, `infra/prod/**`), or comes from an agent with > 5 rejected/abandoned ChangeSets in 30 min (§22.4). Lead/owner approve or reject via inbox; approval rechecks the original submitter's current path grants.
 
-- Each trigger tested; an approved held ChangeSet then applies through the normal pipeline.
+- One test per trigger; approve-then-apply, approve-then-conflict, rejection feeding the streak, and a non-lead decision refusal are tested.
 
 ### T904 · Budgets and rate limits — S1
 

@@ -139,7 +139,8 @@ export function registerWorkspaceConflictActions(dispatcher: Dispatcher): void {
         [conflict.id, ctx.room_id],
       );
       await ctx.client.query(
-        `UPDATE changesets SET status = 'REJECTED', rejection_reason = 'ABANDONED'
+        `UPDATE changesets SET status = 'REJECTED', rejection_reason = 'ABANDONED',
+         rejected_at = clock_timestamp()
          WHERE id = $1 AND room_id = $2`,
         [conflict.changeset_id, ctx.room_id],
       );

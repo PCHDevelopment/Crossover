@@ -21,11 +21,17 @@ afterAll(async () => {
 });
 async function fixture(authorize: Authorizer = allowAll, deps: WorkspaceCommandDeps = {}) {
   const room = newId("room");
+  const actor = newId("part");
   const root = await mkdtemp(join(tmpdir(), "crossover-search-command-"));
   dirs.push(root);
   await db.pool.query(
-    "INSERT INTO rooms (id, slug, name, objective, owner_id) VALUES ($1,$1,'Room','Ship','actor')",
-    [room],
+    "INSERT INTO rooms (id, slug, name, objective, owner_id) VALUES ($1,$1,'Room','Ship',$2)",
+    [room, actor],
+  );
+  await db.pool.query(
+    `INSERT INTO participants (id, room_id, kind, display_name, authority, role, status)
+     VALUES ($1, $2, 'HUMAN', 'Actor', 'OWNER', 'LEAD', 'ACTIVE')`,
+    [actor, room],
   );
   const workspace = await withTransaction(db.pool, (client) =>
     provisionWorkspace(client, room, root),
@@ -37,7 +43,7 @@ async function fixture(authorize: Authorizer = allowAll, deps: WorkspaceCommandD
   registerWorkspaceCommands(dispatcher, deps);
   const principal = {
     room_id: room,
-    participant_id: "actor",
+    participant_id: actor,
     kind: "HUMAN" as const,
     authority: "OWNER" as const,
     role: "LEAD" as const,
@@ -170,19 +176,19 @@ it("caps match counts and Unicode line previews without splitting characters", a
   };
   expect(result.matches).toHaveLength(200);
   expect(result.truncated).toBe(true);
-  await f.apply([{ type: "modify", path: "file", content: "needle" + "😀".repeat(1000) }], 1);
-  const preview = (await f.dispatch("workspace.search", { query: "needle" }))
+  await f.apply([{ type: "create", path: "unicode", content: "unique" + "😀".repeat(1000) }], 1);
+  const preview = (await f.dispatch("workspace.search", { query: "unique" }))
     .response as typeof result;
-  expect(preview.matches[0]!.text).toBe("needle" + "😀".repeat(494));
+  expect(preview.matches[0]!.text).toBe("unique" + "😀".repeat(494));
   expect(preview.matches[0]!.text_truncated).toBe(true);
   expect(preview.truncated).toBe(false);
-  await f.apply([{ type: "modify", path: "file", content: "needle" + "😀".repeat(494) }], 2);
-  const exactPreview = (await f.dispatch("workspace.search", { query: "needle" }))
+  await f.apply([{ type: "modify", path: "unicode", content: "unique" + "😀".repeat(494) }], 2);
+  const exactPreview = (await f.dispatch("workspace.search", { query: "unique" }))
     .response as typeof result;
   expect(exactPreview.matches[0]).not.toHaveProperty("text_truncated");
   expect(exactPreview.truncated).toBe(false);
-  await f.apply([{ type: "modify", path: "file", content: "needle\n".repeat(200) }], 3);
-  const exactMatches = (await f.dispatch("workspace.search", { query: "needle" }))
+  await f.apply([{ type: "modify", path: "unicode", content: "unique\n".repeat(200) }], 3);
+  const exactMatches = (await f.dispatch("workspace.search", { query: "unique" }))
     .response as typeof result;
   expect(exactMatches.matches).toHaveLength(200);
   expect(exactMatches.truncated).toBe(false);

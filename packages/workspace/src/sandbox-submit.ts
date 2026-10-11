@@ -72,7 +72,11 @@ export function registerSandboxSubmitCommand(
     execute: async (
       ctx,
       params,
-    ): Promise<{ response: SandboxSubmitResponse; events?: EmittedEvent[] }> => {
+    ): Promise<{
+      response: SandboxSubmitResponse;
+      events?: EmittedEvent[];
+      committedError?: CrossoverError;
+    }> => {
       const prepared = ctx.prepared as PreparedSandboxSubmit | undefined;
       if (!prepared) throw new CrossoverError("UNAVAILABLE", "Sandbox snapshot was not prepared");
       const { rows } = await ctx.client.query<{ base_revision: string | null }>(
@@ -208,6 +212,7 @@ export function registerSandboxSubmitCommand(
           sandbox_advance: sandboxAdvance,
         },
         ...(result.events ? { events: result.events } : {}),
+        ...(result.committedError ? { committedError: result.committedError } : {}),
       };
     },
   });
