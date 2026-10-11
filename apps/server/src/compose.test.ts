@@ -11,6 +11,8 @@ import {
   type SandboxExecOutcome,
   type SandboxExecProcess,
   type SandboxLimits,
+  SANDBOX_FILE_READ_LIMIT_BYTES,
+  SANDBOX_FILE_WRITE_LIMIT_BYTES,
 } from "@crossover/workspace";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { composeServer, type ComposeOverrides, type CrossoverServer } from "./compose.js";
@@ -47,6 +49,8 @@ class RecordingExecutionDriver implements ExecutionDriver {
   failSnapshotUpdate = false;
   finishExec: ((outcome: SandboxExecOutcome) => void) | undefined;
   snapshotInventoryPause: { started: () => void; wait: Promise<void> } | undefined;
+  snapshotUpdatePause: { started: () => void; wait: Promise<void> } | undefined;
+  readonly commands: string[] = [];
 
   async create({ sandbox_id }: { sandbox_id: string; limits: SandboxLimits }) {
     this.working.set(sandbox_id, this.working.get(sandbox_id) ?? new Map());
@@ -54,6 +58,13 @@ class RecordingExecutionDriver implements ExecutionDriver {
   }
   async status(_input: Parameters<ExecutionDriver["status"]>[0]) {
     return { modified: [], added: [], deleted: [], truncated: false };
+  }
+  async readFile(input: Parameters<NonNullable<ExecutionDriver["readFile"]>>[0]) {
+    const file = this.working.get(input.sandbox_id)?.get(input.path);
+    if (!file) throw new CrossoverError("NOT_FOUND", "test sandbox path not found");
+    if (file.mode === "120000")
+      throw new CrossoverError("VALIDATION", "test driver does not follow sandbox symlinks");
+    return { mode: file.mode, content: Buffer.from(file.content) };
   }
   async materialize(
     _input: Parameters<NonNullable<ExecutionDriver["materialize"]>>[0],
@@ -100,6 +111,12 @@ class RecordingExecutionDriver implements ExecutionDriver {
   async updateSnapshot(
     input: Parameters<NonNullable<ExecutionDriver["updateSnapshot"]>>[0],
   ): Promise<void> {
+    const pause = this.snapshotUpdatePause;
+    if (pause) {
+      this.snapshotUpdatePause = undefined;
+      pause.started();
+      await pause.wait;
+    }
     if (this.failSnapshotUpdate) {
       this.failSnapshotUpdate = false;
       throw new Error("injected snapshot update failure");
@@ -110,7 +127,10 @@ class RecordingExecutionDriver implements ExecutionDriver {
       files.set(file.path, { mode: file.mode, content: Buffer.from(file.content) });
     this.working.set(input.sandbox_id, files);
   }
-  async exec(): Promise<SandboxExecProcess> {
+  async exec(
+    input: Parameters<NonNullable<ExecutionDriver["exec"]>>[0],
+  ): Promise<SandboxExecProcess> {
+    this.commands.push(input.command);
     let finish!: (outcome: SandboxExecOutcome) => void;
     const finished = new Promise<SandboxExecOutcome>((resolve) => (finish = resolve));
     this.finishExec = finish;
@@ -175,6 +195,41 @@ const post = (app: App, url: string, body: unknown, token?: string) =>
     },
     payload: JSON.stringify(body),
   });
+
+async function callMcpTool(
+  app: App,
+  token: string,
+  name: string,
+  args: Record<string, unknown> = {},
+) {
+  const response = await app.inject({
+    method: "POST",
+    url: "/mcp",
+    headers: {
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+      authorization: `Bearer ${token}`,
+    },
+    payload: JSON.stringify({
+      jsonrpc: "2.0",
+      id: `tool-${++n}`,
+      method: "tools/call",
+      params: { name, arguments: args },
+    }),
+  });
+  expect(response.statusCode, response.body).toBe(200);
+  const data = response.body
+    .split(/\r?\n/)
+    .find((line) => line.startsWith("data:"))
+    ?.slice("data:".length)
+    .trim();
+  const message = JSON.parse(data ?? response.body) as {
+    result?: { isError?: boolean; content?: { text?: string }[] };
+    error?: unknown;
+  };
+  expect(message.error).toBeUndefined();
+  return message.result!;
+}
 
 async function ok(res: Awaited<ReturnType<typeof post>>, status = 200) {
   expect(res.statusCode, res.body).toBe(status);
@@ -1501,6 +1556,328 @@ describe("composeServer", () => {
     expect(res.statusCode).toBe(200);
     expect(res.body).toContain("tasks_create");
     expect(res.body).toContain("tasks_heartbeat");
+    expect(res.body).toContain("sandbox_read_file");
+    expect(res.body).toContain("sandbox_write_file");
+    expect(res.body).toContain("sandbox_sync");
+  });
+
+  it("supports a sandbox coding flow through MCP before and after submission", async () => {
+    const driver = new RecordingExecutionDriver();
+    const { server } = await start({}, new RecordingPublisher(), { executionDriver: driver });
+    const { roomId, agent, cmd } = await walkthrough(server.app, false);
+    const token = agent.tokens.access_token as string;
+
+    const initialStatus = await callMcpTool(server.app, token, "sandbox_status");
+    expect(initialStatus.isError).toBeFalsy();
+    expect(JSON.parse(initialStatus.content![0]!.text!)).toMatchObject({ added: [] });
+
+    const written = await callMcpTool(server.app, token, "sandbox_write_file", {
+      path: "src/hello.ts",
+      content: "export const hello = 'world';\n",
+    });
+    expect(written.isError).toBeFalsy();
+    expect(JSON.parse(written.content![0]!.text!)).toMatchObject({
+      path: "src/hello.ts",
+      written_bytes: Buffer.byteLength("export const hello = 'world';\n"),
+    });
+
+    const read = await callMcpTool(server.app, token, "sandbox_read_file", {
+      path: "src/hello.ts",
+    });
+    expect(read.isError, JSON.stringify(read)).toBeFalsy();
+    expect(JSON.parse(read.content![0]!.text!)).toMatchObject({
+      content: "export const hello = 'world';\n",
+      encoding: "utf8",
+    });
+    const localStatus = await callMcpTool(server.app, token, "sandbox_status");
+    expect(JSON.parse(localStatus.content![0]!.text!)).toMatchObject({
+      added: ["src/hello.ts"],
+    });
+    const binary = Buffer.from([0, 1, 0xff, 10]);
+    await callMcpTool(server.app, token, "sandbox_write_file", {
+      path: "assets/data.bin",
+      content: binary.toString("base64"),
+      encoding: "base64",
+    });
+    const binaryRead = await callMcpTool(server.app, token, "sandbox_read_file", {
+      path: "assets/data.bin",
+    });
+    expect(JSON.parse(binaryRead.content![0]!.text!)).toMatchObject({
+      content: binary.toString("base64"),
+      encoding: "base64",
+    });
+    expect(
+      (await cmd(envelope("workspace.read", { path: "src/hello.ts" }), token)).statusCode,
+    ).toBe(404);
+
+    const exec = await callMcpTool(server.app, token, "sandbox_exec", {
+      command: "pnpm test",
+      timeout_s: 60,
+    });
+    expect(exec.isError).toBeFalsy();
+    expect(JSON.parse(exec.content![0]!.text!)).toMatchObject({ exec_id: expect.any(String) });
+    await server.dispatcher.actors.get(roomId).idle();
+    expect(driver.commands).toContain("pnpm test");
+    driver.finishExec?.({ exit_code: 0, duration_ms: 1, reason: "exit" });
+    await server.dispatcher.actors.get(roomId).idle();
+
+    const submitted = await callMcpTool(server.app, token, "submit_changes", {
+      message: "Add hello file",
+    });
+    expect(submitted.isError).toBeFalsy();
+    expect(JSON.parse(submitted.content![0]!.text!)).toMatchObject({
+      status: "APPLIED",
+      applied_revision: 1,
+    });
+    await server.dispatcher.actors.get(roomId).idle();
+
+    const synced = await callMcpTool(server.app, token, "sandbox_sync");
+    expect(synced.isError).toBeFalsy();
+    expect(JSON.parse(synced.content![0]!.text!)).toMatchObject({ synced_to: 1 });
+    const canonical = await ok(
+      await cmd(envelope("workspace.read", { path: "src/hello.ts" }), token),
+    );
+    expect(canonical.response.content).toBe("export const hello = 'world';\n");
+    const canonicalBinary = await ok(
+      await cmd(envelope("workspace.read", { path: "assets/data.bin" }), token),
+    );
+    expect(canonicalBinary.response).toMatchObject({
+      content: binary.toString("base64"),
+      encoding: "base64",
+    });
+
+    await callMcpTool(server.app, token, "sandbox_write_file", {
+      path: "src/hello.ts",
+      content: "export const hello = 'local';\n",
+    });
+    const competing = await ok(
+      await cmd(
+        envelope("workspace.apply_changeset", {
+          source: "API",
+          message: "Change hello in canonical workspace",
+          base_workspace_revision: 1,
+          operations: [
+            {
+              type: "modify",
+              path: "src/hello.ts",
+              content: "export const hello = 'canonical';\n",
+            },
+          ],
+        }),
+        token,
+      ),
+    );
+    expect(competing.response).toMatchObject({ status: "APPLIED", applied_revision: 2 });
+    await server.dispatcher.actors.get(roomId).idle();
+
+    const behind = await callMcpTool(server.app, token, "sandbox_status");
+    expect(JSON.parse(behind.content![0]!.text!)).toMatchObject({ behind_by: 1 });
+    const conflict = await callMcpTool(server.app, token, "sandbox_sync");
+    expect(conflict.isError).toBeFalsy();
+    expect(JSON.parse(conflict.content![0]!.text!)).toMatchObject({
+      synced_to: 2,
+      conflicted_paths: ["src/hello.ts"],
+    });
+    const conflictedFile = await callMcpTool(server.app, token, "sandbox_read_file", {
+      path: "src/hello.ts",
+    });
+    expect(JSON.parse(conflictedFile.content![0]!.text!).content).toContain("<<<<<<<");
+
+    const resolution = "export const hello = 'resolved';\n";
+    await callMcpTool(server.app, token, "sandbox_write_file", {
+      path: "src/hello.ts",
+      content: resolution,
+    });
+    const resolved = await callMcpTool(server.app, token, "submit_changes", {
+      message: "Resolve the hello conflict",
+    });
+    expect(resolved.isError).toBeFalsy();
+    expect(JSON.parse(resolved.content![0]!.text!)).toMatchObject({
+      status: "APPLIED",
+      applied_revision: 3,
+    });
+    await server.dispatcher.actors.get(roomId).idle();
+    const finalSync = await callMcpTool(server.app, token, "sandbox_sync");
+    expect(JSON.parse(finalSync.content![0]!.text!)).toMatchObject({ synced_to: 3 });
+    const finalFile = await ok(
+      await cmd(envelope("workspace.read", { path: "src/hello.ts" }), token),
+    );
+    expect(finalFile.response.content).toBe(resolution);
+  });
+
+  it("moves sandbox file writes off the room actor", async () => {
+    const driver = new RecordingExecutionDriver();
+    const { server } = await start({}, new RecordingPublisher(), { executionDriver: driver });
+    const { roomId, agent, cmd } = await walkthrough(server.app, false);
+    await server.dispatcher.actors.get(roomId).idle();
+
+    let markWriteStarted!: () => void;
+    const writeStarted = new Promise<void>((resolve) => {
+      markWriteStarted = resolve;
+    });
+    let releaseWrite!: () => void;
+    const writeWait = new Promise<void>((resolve) => {
+      releaseWrite = resolve;
+    });
+    driver.snapshotUpdatePause = { started: markWriteStarted, wait: writeWait };
+
+    const writing = cmd(
+      envelope("sandbox.file.write", { path: "paused.txt", content: "prepared write" }),
+      agent.tokens.access_token,
+    );
+    try {
+      await writeStarted;
+      const messageSent = await Promise.race([
+        cmd(
+          envelope("messages.send", { body: "While the sandbox write is preparing" }),
+          agent.tokens.access_token,
+        ).then((response) => {
+          expect(response.statusCode, response.body).toBe(200);
+          return "sent" as const;
+        }),
+        new Promise<"blocked">((resolve) => setTimeout(() => resolve("blocked"), 2_000)),
+      ]);
+      expect(messageSent).toBe("sent");
+    } finally {
+      releaseWrite();
+    }
+
+    const result = await ok(await writing);
+    expect(result.response).toEqual({ path: "paused.txt", written_bytes: 14 });
+    const sandbox = await server.execution.get(roomId, agent.participant_id as string);
+    expect(driver.working.get(sandbox!.id)?.get("paused.txt")?.content.toString()).toBe(
+      "prepared write",
+    );
+  });
+
+  it("enforces practical sandbox file read and write size limits", async () => {
+    const driver = new RecordingExecutionDriver();
+    const { server } = await start({}, new RecordingPublisher(), { executionDriver: driver });
+    const { roomId, agent, cmd } = await walkthrough(server.app, false);
+    const token = agent.tokens.access_token as string;
+
+    const exactWrite = Buffer.alloc(SANDBOX_FILE_WRITE_LIMIT_BYTES, 0x77).toString("base64");
+    const written = await cmd(
+      envelope("sandbox.file.write", {
+        path: "limits/write.txt",
+        content: exactWrite,
+        encoding: "base64",
+      }),
+      token,
+    );
+    expect(written.statusCode, written.body).toBe(200);
+    expect(written.json().response).toEqual({
+      path: "limits/write.txt",
+      written_bytes: SANDBOX_FILE_WRITE_LIMIT_BYTES,
+    });
+
+    const oversizedWrite = await cmd(
+      envelope("sandbox.file.write", {
+        path: "limits/oversized-write.txt",
+        content: Buffer.alloc(SANDBOX_FILE_WRITE_LIMIT_BYTES + 1, 0x77).toString("base64"),
+        encoding: "base64",
+      }),
+      token,
+    );
+    expect(oversizedWrite.statusCode).toBe(400);
+    expect(oversizedWrite.json().error).toMatchObject({
+      code: "VALIDATION",
+      details: {
+        reason: "file_too_large",
+        size: SANDBOX_FILE_WRITE_LIMIT_BYTES + 1,
+        limit: SANDBOX_FILE_WRITE_LIMIT_BYTES,
+      },
+    });
+
+    const sandbox = await server.execution.ensure(roomId, agent.participant_id as string);
+    const files = driver.working.get(sandbox.id)!;
+    files.set("limits/read.txt", {
+      mode: "100644",
+      content: Buffer.alloc(SANDBOX_FILE_READ_LIMIT_BYTES, 0x72),
+    });
+    files.set("limits/oversized-read.txt", {
+      mode: "100644",
+      content: Buffer.alloc(SANDBOX_FILE_READ_LIMIT_BYTES + 1, 0x72),
+    });
+
+    const readAtLimit = await cmd(
+      envelope("sandbox.file.read", { path: "limits/read.txt" }),
+      token,
+    );
+    expect(readAtLimit.statusCode).toBe(200);
+    expect(readAtLimit.json().response).toMatchObject({
+      path: "limits/read.txt",
+      encoding: "utf8",
+      size: SANDBOX_FILE_READ_LIMIT_BYTES,
+    });
+    expect(readAtLimit.json().response.content).toHaveLength(SANDBOX_FILE_READ_LIMIT_BYTES);
+
+    const oversizedRead = await cmd(
+      envelope("sandbox.file.read", { path: "limits/oversized-read.txt" }),
+      token,
+    );
+    expect(oversizedRead.statusCode).toBe(400);
+    expect(oversizedRead.json().error).toMatchObject({
+      code: "VALIDATION",
+      details: {
+        reason: "file_too_large",
+        size: SANDBOX_FILE_READ_LIMIT_BYTES + 1,
+        limit: SANDBOX_FILE_READ_LIMIT_BYTES,
+      },
+    });
+  });
+
+  it("uses path-scoped workspace permissions for sandbox file tools", async () => {
+    const driver = new RecordingExecutionDriver();
+    const { server } = await start({}, new RecordingPublisher(), { executionDriver: driver });
+    const { roomId, owner, agent, cmd } = await walkthrough(server.app, false);
+    const agentId = agent.participant_id as string;
+    const sandbox = await server.execution.ensure(roomId, agentId);
+    driver.working.get(sandbox.id)!.set("private/secret.txt", {
+      mode: "100644",
+      content: Buffer.from("private sandbox content"),
+    });
+    await ok(
+      await cmd(
+        envelope("capabilities.revoke", {
+          participant_id: agentId,
+          capability: "workspace.read:private/**",
+        }),
+        owner.tokens.access_token,
+      ),
+    );
+    await ok(
+      await cmd(
+        envelope("capabilities.revoke", {
+          participant_id: agentId,
+          capability: "workspace.write:private/**",
+        }),
+        owner.tokens.access_token,
+      ),
+    );
+
+    const read = await callMcpTool(
+      server.app,
+      agent.tokens.access_token as string,
+      "sandbox_read_file",
+      {
+        path: "private/secret.txt",
+      },
+    );
+    expect(read.isError).toBe(true);
+    const write = await callMcpTool(
+      server.app,
+      agent.tokens.access_token as string,
+      "sandbox_write_file",
+      {
+        path: "private/secret.txt",
+        content: "unauthorized replacement",
+      },
+    );
+    expect(write.isError).toBe(true);
+    expect(driver.working.get(sandbox.id)!.get("private/secret.txt")?.content.toString()).toBe(
+      "private sandbox content",
+    );
   });
 
   it("serves room.digest over HTTP: counts per type since a sequence, identical on repeat", async () => {

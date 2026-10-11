@@ -284,6 +284,7 @@ describe("provenance labels (§16.5)", () => {
       "inbox.list":
         "summaries quote the message or task they are about; labeling them is follow-up work",
       "workspace.read": "file content: the MCP provenance framing is T711",
+      "sandbox.file.read": "file content: the MCP provenance framing is T711",
       "workspace.list": "paths only",
       "workspace.search": "file content: the MCP provenance framing is T711",
       "workspace.diff": "file content: the MCP provenance framing is T711",

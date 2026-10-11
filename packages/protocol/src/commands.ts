@@ -87,6 +87,8 @@ export const METHODS = {
   "conflicts.abandon": { mutating: true },
 
   "sandbox.status": { mutating: false },
+  "sandbox.file.read": { mutating: false },
+  "sandbox.file.write": { mutating: true },
   "sandbox.exec": { mutating: true },
   "sandbox.exec.cancel": { mutating: true },
   "sandbox.sync": { mutating: true },
