@@ -256,7 +256,8 @@ it("caps diff output and lets paths narrow it", async () => {
       })
     ).response,
   ).toMatchObject({ diff: expect.stringContaining("+a\n") });
-});
+  // Three 1.8 MB files diffed three times: about 2 s alone, over 5 s on a busy CI runner.
+}, 20_000);
 
 it("validates ranges, revisions, paths, pagination and path authorization", async () => {
   const f = await fixture();
