@@ -70,6 +70,8 @@ METHODS: dict[str, bool] = {
     "room.transfer_lead": True,
     "sandbox.exec": True,
     "sandbox.exec.cancel": True,
+    "sandbox.file.read": False,
+    "sandbox.file.write": True,
     "sandbox.reset": True,
     "sandbox.status": False,
     "sandbox.sync": True,

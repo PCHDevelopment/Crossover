@@ -88,6 +88,11 @@ export interface SandboxSnapshotFile extends SandboxSnapshotEntry {
   content: Buffer;
 }
 
+export interface SandboxWorkingCopyFile {
+  mode: string;
+  content: Buffer;
+}
+
 export interface ExecutionDriver {
   /**
    * Every operation is repeatable by sandbox ID: create adopts deterministic existing resources;
@@ -108,6 +113,13 @@ export interface ExecutionDriver {
     workspace: SandboxWorkspaceHead;
   }): Promise<void>;
   status(input: { sandbox_id: string; resources: SandboxResources }): Promise<SandboxFileChanges>;
+  /** Read one regular file from the working copy without following symlinks. */
+  readFile?(input: {
+    sandbox_id: string;
+    resources: SandboxResources;
+    path: string;
+    max_bytes: number;
+  }): Promise<SandboxWorkingCopyFile>;
   /** Hash tracked files and enumerate paths without consulting any sandbox Git metadata. */
   snapshotInventory?(input: {
     sandbox_id: string;
@@ -128,7 +140,9 @@ export interface ExecutionDriver {
   updateSnapshot?(input: {
     sandbox_id: string;
     resources: SandboxResources;
-    files: readonly Pick<SandboxSnapshotFile, "path" | "mode" | "content">[];
+    files: readonly (Pick<SandboxSnapshotFile, "path" | "mode" | "content"> & {
+      preserve_mode?: boolean;
+    })[];
     delete_paths: readonly string[];
   }): Promise<void>;
   exec?(input: {
@@ -1156,6 +1170,77 @@ export class ExecutionService {
       behind_by: Math.max(0, workspace.revision - sandbox.base_revision),
       ...changes,
     };
+  }
+
+  /** Read a single file from the caller's live working copy without following symlinks. */
+  async readWorkingCopyFile(
+    roomId: string,
+    participantId: string,
+    path: string,
+    maxBytes: number,
+  ): Promise<SandboxWorkingCopyFile> {
+    return this.withSandboxLock(roomId, participantId, async (sandbox) => {
+      if (!sandbox.volume_ref || !sandbox.container_ref)
+        throw new CrossoverError("NOT_FOUND", "Sandbox workspace resources are unavailable");
+      if (!this.driver.readFile)
+        throw new CrossoverError(
+          "UNAVAILABLE",
+          "Sandbox file reads are not supported by this driver",
+        );
+      try {
+        const file = await this.driver.readFile({
+          sandbox_id: sandbox.id,
+          resources: { volume_ref: sandbox.volume_ref, container_ref: sandbox.container_ref },
+          path,
+          max_bytes: maxBytes,
+        });
+        if (file.content.length > maxBytes)
+          throw new CrossoverError("VALIDATION", "Sandbox file exceeds the read limit", {
+            details: { reason: "file_too_large", size: file.content.length, limit: maxBytes },
+          });
+        return file;
+      } catch (cause) {
+        if (cause instanceof CrossoverError) throw cause;
+        throw new CrossoverError(
+          "UNAVAILABLE",
+          "Sandbox file could not be read; retry the request",
+          { cause },
+        );
+      }
+    });
+  }
+
+  /** Replace one regular file using the snapshot installer's no-follow path handling. */
+  async writeWorkingCopyFile(
+    roomId: string,
+    participantId: string,
+    path: string,
+    content: Buffer,
+  ): Promise<void> {
+    await this.withSandboxLock(roomId, participantId, async (sandbox) => {
+      if (!sandbox.volume_ref || !sandbox.container_ref)
+        throw new CrossoverError("NOT_FOUND", "Sandbox workspace resources are unavailable");
+      if (!this.driver.updateSnapshot)
+        throw new CrossoverError(
+          "UNAVAILABLE",
+          "Sandbox file writes are not supported by this driver",
+        );
+      try {
+        await this.driver.updateSnapshot({
+          sandbox_id: sandbox.id,
+          resources: { volume_ref: sandbox.volume_ref, container_ref: sandbox.container_ref },
+          files: [{ path, mode: "100644", content, preserve_mode: true }],
+          delete_paths: [],
+        });
+      } catch (cause) {
+        if (cause instanceof CrossoverError) throw cause;
+        throw new CrossoverError(
+          "UNAVAILABLE",
+          "Sandbox file could not be written; retry the request",
+          { cause },
+        );
+      }
+    });
   }
 
   private async workspaceRevision(
