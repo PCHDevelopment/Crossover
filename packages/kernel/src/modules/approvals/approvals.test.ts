@@ -18,6 +18,9 @@ let n = 0;
 beforeAll(async () => {
   db = await createTestDatabase();
   pool = db.pool;
+  await pool.query(
+    "CREATE TABLE approval_committed_effects (id serial PRIMARY KEY, room_id text, tag text)",
+  );
 });
 afterAll(async () => {
   await db.drop();
@@ -208,6 +211,65 @@ describe("approval gates (§22.2, T905)", () => {
     expect(await s.messages()).toEqual(["once"]);
     // The same key with other content is the usual key-reuse error.
     await failsWith(s.send(s.dev, "different", key), "VALIDATION");
+  });
+
+  it("returns an approved command's committed error to the approver and replays it to the requester", async () => {
+    const s = await setup();
+    let executions = 0;
+    s.d.registerCommand({
+      method: "tasks.claim",
+      action: "messages.send",
+      mutating: true,
+      params: z.strictObject({ body: z.string() }),
+      execute: async (ctx, params) => {
+        executions++;
+        await ctx.client.query(
+          "INSERT INTO approval_committed_effects (room_id, tag) VALUES ($1, $2)",
+          [ctx.room_id, params.body],
+        );
+        return {
+          response: { accepted: false },
+          events: [{ type: "message.sent", payload: { body: params.body, i: 0 } }],
+          committedError: new CrossoverError("CIRCUIT_BREAKER", "ChangeSet held", {
+            details: { changeset_id: "cs_held", reasons: ["protected_path"] },
+          }),
+        };
+      },
+    });
+    await s.gate(s.dev);
+    const key = "held-request-key";
+    const request = () => s.d.dispatch(s.dev, envelope("tasks.claim", { body: "held" }, key));
+    const queued = await request().catch((error: unknown) => error);
+    expect(queued).toMatchObject({ code: "APPROVAL_REQUIRED" });
+    const approvalId = (queued as CrossoverError).details?.["approval_id"] as string;
+
+    const approved = await s.decide(s.owner, approvalId).catch((error: unknown) => error);
+    expect(approved).toMatchObject({
+      code: "CIRCUIT_BREAKER",
+      message: "ChangeSet held",
+      details: { changeset_id: "cs_held", reasons: ["protected_path"] },
+    });
+    expect(executions).toBe(1);
+    const effects = await pool.query(
+      "SELECT tag FROM approval_committed_effects WHERE room_id = $1",
+      [s.room],
+    );
+    expect(effects.rows).toEqual([{ tag: "held" }]);
+    const approval = await pool.query("SELECT status FROM approvals WHERE id = $1", [approvalId]);
+    expect(approval.rows[0]).toEqual({ status: "APPROVED" });
+
+    const retry = await request().catch((error: unknown) => error);
+    expect(retry).toMatchObject({
+      code: "CIRCUIT_BREAKER",
+      message: "ChangeSet held",
+      details: { changeset_id: "cs_held", reasons: ["protected_path"] },
+    });
+    expect(executions).toBe(1);
+    const events = await pool.query(
+      "SELECT sequence FROM events WHERE room_id = $1 AND type = 'message.sent'",
+      [s.room],
+    );
+    expect(events.rowCount).toBe(1);
   });
 
   it("a retry long after the approval, with the gate still on, doesn't open a second approval or run again", async () => {

@@ -301,6 +301,10 @@ export interface DispatchResult<R = unknown> {
   one_time?: unknown;
 }
 
+type DispatchResultWithCommittedError = DispatchResult & {
+  committed_error?: ErrorBody["error"];
+};
+
 type StoredCommandResult = {
   response: unknown;
   events: RoomEvent[];
@@ -988,7 +992,11 @@ export class Dispatcher {
     // (approved earlier, the gate still on) would be queued again: replay its stored result.
     const { rows: used } = await this.pool.query<{
       request_hash: string;
-      response: { response: unknown; events: RoomEvent[] } | null;
+      response: {
+        response: unknown;
+        events: RoomEvent[];
+        committed_error?: ErrorBody["error"];
+      } | null;
     }>(
       `SELECT request_hash, response FROM idempotency_keys
        WHERE participant_id = $1 AND idempotency_key = $2
@@ -1006,12 +1014,13 @@ export class Dispatcher {
         ),
       };
     }
-    const stored = used[0]?.response ? [{ response: used[0].response }] : [];
-    if (stored[0]) {
+    const stored = used[0]?.response;
+    if (stored) {
+      if (stored.committed_error) return { error: errorFromBody(stored.committed_error) };
       return {
         replay: {
-          response: stored[0].response.response,
-          events: stored[0].response.events ?? [],
+          response: stored.response,
+          events: stored.events ?? [],
           replayed: true,
         },
       };
@@ -1587,9 +1596,9 @@ export class Dispatcher {
       const lifted = await this.gateLifted(principal, envelope, def);
       const afterCommit: (() => void | Promise<void>)[] = [];
       let oneTime: unknown;
-      let result: DispatchResult;
+      let result: DispatchResultWithCommittedError;
       try {
-        result = await withTransaction(this.pool, async (client): Promise<DispatchResult> => {
+        result = await withTransaction(this.pool, async (client) => {
           // Authorize before the idempotency lookup: a principal who is no longer allowed
           // must not be able to read a stored response, and FORBIDDEN is never cached.
           await this.authorize(
@@ -1671,12 +1680,13 @@ export class Dispatcher {
               };
             },
           );
-          return {
+          const result: DispatchResultWithCommittedError = {
             response: stored.response,
             events: stored.events,
             replayed: !ran,
             ...(stored.committed_error ? { committed_error: stored.committed_error } : {}),
-          } as DispatchResult & { committed_error?: ErrorBody["error"] };
+          };
+          return result;
         });
       } catch (err) {
         // Our token is no good any more (takeover or expiry): re-acquire on the next command.
@@ -1704,8 +1714,7 @@ export class Dispatcher {
       }
 
       await this.afterCommitWork(room_id, envelope, afterCommit, result);
-      const committedError = (result as DispatchResult & { committed_error?: ErrorBody["error"] })
-        .committed_error;
+      const committedError = result.committed_error;
       if (committedError) throw errorFromBody(committedError);
       // The one-time secret rides back to this caller only; it is not part of `stored`.
       return oneTime === undefined || result.replayed ? result : { ...result, one_time: oneTime };
