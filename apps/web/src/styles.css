@@ -229,3 +229,9 @@ td {
   border-radius: 50%;
   background: var(--presence);
 }
+.merge-conflicts {
+  padding-left: 18px;
+}
+.merge-conflicts button[aria-pressed="true"] {
+  font-weight: 600;
+}

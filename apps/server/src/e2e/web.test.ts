@@ -470,7 +470,7 @@ describe.skipIf(!executablePath && !inCi)("web app in a browser", () => {
     await page.getByTestId("tab-files").click();
     await page.getByTestId("tree-dir").click();
     await page.locator('[data-path="src/o.txt"]').click();
-    const lines = page.locator(".monaco-editor .view-lines");
+    const lines = page.locator('[data-testid="editor"] .view-lines');
     await expect.poll(async () => lines.textContent()).toContain("three");
 
     // Peter edits line 2; before his draft flushes, someone else rewrites the same line.
@@ -500,9 +500,124 @@ describe.skipIf(!executablePath && !inCi)("web app in a browser", () => {
       .toEqual(["API APPLIED", "API APPLIED", "EDITOR CONFLICT"]);
     const now = await api.workspace.read<{ content: string }>({ path: "src/o.txt" });
     expect(now.response.content).toBe("one\ntwo-theirs\nthree");
-    // Peter's edit is still in his buffer, and the banner still says so.
-    expect(await lines.textContent()).toContain("two-mine");
-    expect(await page.getByTestId("conflict-banner").count()).toBe(1);
+    // Peter's edit isn't lost: the Conflict opens the merge view with it (T1105c).
+    await page.getByTestId("merge-view").waitFor();
+    await expect
+      .poll(async () =>
+        page
+          .locator('[data-testid="merge-editor"] .modified .view-lines[role="presentation"]')
+          .textContent(),
+      )
+      .toContain("two-mine");
+    expect(problems).toEqual([]);
+  }, 120_000);
+
+  it("the merge view (T1105c): a flush that conflicts opens it; a resolution is applied and closes the conflict; discarding abandons it", async () => {
+    const page: Page = await browser!.newPage();
+    const problems: string[] = [];
+    page.on("pageerror", (e) => problems.push(`pageerror: ${e.message}`));
+    page.on("console", (m) => {
+      if (m.type() === "error") problems.push(`console: ${m.text()} @ ${m.location().url}`);
+    });
+    await page.goto(baseUrl);
+    await page.getByTestId("login-name").fill("Peter");
+    await page.getByTestId("login-submit").click();
+    await page.getByTestId("room-name").fill("Merge room");
+    await page.getByTestId("room-objective").fill("Resolve conflicts");
+    await page.getByTestId("room-create").click();
+    await page.getByTestId("room-title").waitFor();
+    const roomId = /\/rooms\/([^/]+)/.exec(new URL(page.url()).pathname)![1]!;
+    const client = new CrossoverClient({ baseUrl });
+    const login = await client.devLogin({ subject: "Peter", display_name: "Peter" });
+    const api = client.room(
+      roomId,
+      (await client.roomSession(login.session_token, roomId)).tokens.access_token,
+    ).api;
+    await api.workspace.apply_changeset({
+      source: "API",
+      message: "Seed",
+      base_workspace_revision: 0,
+      operations: [{ type: "create", path: "src/m.txt", content: "one\ntwo\nthree" }],
+    });
+    const file = async () =>
+      (
+        await api.workspace.read<{
+          content: string;
+          workspace_revision: number;
+          file_revision: number;
+        }>({ path: "src/m.txt" })
+      ).response;
+    const changeLineTwo = async (to: string) => {
+      const now = await file();
+      await api.workspace.apply_changeset({
+        source: "API",
+        message: "Theirs",
+        base_workspace_revision: now.workspace_revision,
+        base_file_revisions: { "src/m.txt": now.file_revision },
+        operations: [
+          {
+            type: "modify",
+            path: "src/m.txt",
+            content: now.content
+              .split("\n")
+              .map((l, i) => (i === 1 ? to : l))
+              .join("\n"),
+          },
+        ],
+      });
+    };
+    const conflictStatuses = async () =>
+      (
+        await db.pool.query("SELECT status FROM conflicts WHERE room_id = $1 ORDER BY created_at", [
+          roomId,
+        ])
+      ).rows.map((r) => r.status);
+
+    await page.getByTestId("tab-files").click();
+    await page.getByTestId("tree-dir").click();
+    await page.locator('[data-path="src/m.txt"]').click();
+    const lines = page.locator('[data-testid="editor"] .view-lines');
+    await expect.poll(async () => lines.textContent()).toContain("three");
+
+    // Peter rewrites line 2 while someone else does too: the edits can't be merged in, the
+    // banner says so, and saving sends the flush that comes back as a Conflict.
+    const editLineTwo = async (text: string) => {
+      await lines.click();
+      await page.keyboard.press("Control+Home");
+      await page.keyboard.press("ArrowDown");
+      await page.keyboard.press("End");
+      await page.keyboard.type(text);
+    };
+    await editLineTwo("-mine");
+    await changeLineTwo("two-theirs");
+    await page.getByTestId("conflict-banner").waitFor();
+    await page.keyboard.press("Control+s");
+    await page.getByTestId("merge-view").waitFor();
+    expect(await page.getByTestId("merge-conflict").count()).toBe(1);
+    const result = page.locator(
+      '[data-testid="merge-editor"] .modified .view-lines[role="presentation"]',
+    );
+    await expect.poll(async () => result.textContent()).toContain("two-mine");
+    await page.getByTestId("take-both").click();
+    await expect.poll(async () => result.textContent()).toContain("two-theirs");
+    await page.getByTestId("merge-submit").click();
+    await page.getByTestId("merge-view").waitFor({ state: "detached" });
+    expect((await file()).content).toBe("one\ntwo-mine\ntwo-theirs\nthree");
+    expect(await conflictStatuses()).toEqual(["RESOLVED"]);
+    await expect.poll(async () => lines.textContent()).toContain("two-theirs");
+    expect(await page.getByTestId("draft-indicator").count()).toBe(0);
+
+    // Again, and this time Peter discards his edits: the conflict is abandoned, the head stays.
+    await editLineTwo("!");
+    await changeLineTwo("TWO");
+    await page.getByTestId("conflict-banner").waitFor();
+    await page.keyboard.press("Control+s");
+    await page.getByTestId("merge-view").waitFor();
+    await page.getByTestId("merge-discard").click();
+    await page.getByTestId("merge-view").waitFor({ state: "detached" });
+    expect(await conflictStatuses()).toEqual(["RESOLVED", "ABANDONED"]);
+    expect((await file()).content).toBe("one\nTWO\ntwo-theirs\nthree");
+    await expect.poll(async () => lines.textContent()).toContain("TWO");
     expect(problems).toEqual([]);
   }, 120_000);
 });

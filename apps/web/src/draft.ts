@@ -31,6 +31,8 @@ export interface Draft {
   lastEditAt?: number;
   /** Someone else's change couldn't be merged in: the next flush is expected to be a Conflict. */
   conflicted?: boolean;
+  /** The flush came back as this Conflict: resolve it in the merge view (T1105c). */
+  conflictId?: string;
 }
 
 export const openDraft = (
@@ -95,10 +97,17 @@ export function flushParams(draft: Draft) {
  * sent.
  */
 export function flushed(draft: Draft, sent: string, revision: number, workspace: number): Draft {
-  const { firstEditAt: _first, lastEditAt: _last, conflicted: _conflicted, ...rest } = draft;
+  const {
+    firstEditAt: _first,
+    lastEditAt: _last,
+    conflicted: _conflicted,
+    conflictId: _conflictId,
+    ...rest
+  } = draft;
   void _first;
   void _last;
   void _conflicted;
+  void _conflictId;
   const next: Draft = { ...rest, base: sent, baseRevision: revision, baseWorkspace: workspace };
   // Still typing: those edits are a new draft starting now (`lastEditAt` keeps the idle timer).
   return draft.text === sent || draft.lastEditAt === undefined
@@ -197,6 +206,68 @@ function commonLines(a: readonly string[], b: readonly string[]): Match[] {
   return matches.reverse();
 }
 
+/** A stretch of the merged file: settled lines, or a region both sides changed differently. */
+export type MergeRegion =
+  | { kind: "merged"; lines: string[] }
+  | { kind: "conflict"; base: string[]; ours: string[]; theirs: string[] };
+
+/**
+ * Merge `ours` and `theirs`, both edited from `base`, region by region: lines one side changed
+ * (or both changed the same way) are merged; a region both changed differently is a conflict
+ * that keeps all three versions. `undefined` past {@link MAX_MERGE_LINES}.
+ */
+export function mergeRegions(
+  base: string,
+  ours: string,
+  theirs: string,
+): MergeRegion[] | undefined {
+  const o = base.split("\n");
+  const a = ours.split("\n");
+  const b = theirs.split("\n");
+  if (Math.max(o.length, a.length, b.length) > MAX_MERGE_LINES) return undefined;
+
+  // Base lines kept, unchanged, by each side: base index → that side's index.
+  const inA = new Map(commonLines(o, a));
+  const inB = new Map(commonLines(o, b));
+  const regions: MergeRegion[] = [];
+  const merged = (lines: string[]) => {
+    if (lines.length === 0) return;
+    const last = regions.at(-1);
+    if (last?.kind === "merged") last.lines.push(...lines);
+    else regions.push({ kind: "merged", lines: [...lines] });
+  };
+  let oi = 0;
+  let ai = 0;
+  let bi = 0;
+  const chunk = (oEnd: number, aEnd: number, bEnd: number) => {
+    const oChunk = o.slice(oi, oEnd);
+    const aChunk = a.slice(ai, aEnd);
+    const bChunk = b.slice(bi, bEnd);
+    const same = (x: string[], y: string[]) =>
+      x.length === y.length && x.every((line, i) => line === y[i]);
+    if (same(aChunk, oChunk)) merged(bChunk);
+    else if (same(bChunk, oChunk) || same(aChunk, bChunk)) merged(aChunk);
+    else regions.push({ kind: "conflict", base: oChunk, ours: aChunk, theirs: bChunk });
+    oi = oEnd;
+    ai = aEnd;
+    bi = bEnd;
+  };
+  // Stable lines: kept by both sides. Between two stable lines, each side's chunk is merged.
+  for (let index = 0; index < o.length; index++) {
+    const aIndex = inA.get(index);
+    const bIndex = inB.get(index);
+    if (aIndex === undefined || bIndex === undefined) continue;
+    if (aIndex < ai || bIndex < bi) continue;
+    chunk(index, aIndex, bIndex);
+    merged([o[index]!]);
+    oi = index + 1;
+    ai = aIndex + 1;
+    bi = bIndex + 1;
+  }
+  chunk(o.length, a.length, b.length);
+  return regions;
+}
+
 /**
  * Merge `ours` and `theirs`, both edited from `base`. Clean when every region that both sides
  * changed was changed the same way; otherwise not clean (the caller keeps `ours` and reports a
@@ -210,44 +281,32 @@ export function merge3(
   if (ours === theirs) return { clean: true, text: ours };
   if (ours === base) return { clean: true, text: theirs };
   if (theirs === base) return { clean: true, text: ours };
-  const o = base.split("\n");
-  const a = ours.split("\n");
-  const b = theirs.split("\n");
-  if (Math.max(o.length, a.length, b.length) > MAX_MERGE_LINES) return { clean: false };
-
-  // Base lines kept, unchanged, by each side: base index → that side's index.
-  const inA = new Map(commonLines(o, a));
-  const inB = new Map(commonLines(o, b));
-  const out: string[] = [];
-  let oi = 0;
-  let ai = 0;
-  let bi = 0;
-  const flushChunk = (oEnd: number, aEnd: number, bEnd: number): boolean => {
-    const oChunk = o.slice(oi, oEnd);
-    const aChunk = a.slice(ai, aEnd);
-    const bChunk = b.slice(bi, bEnd);
-    const same = (x: string[], y: string[]) =>
-      x.length === y.length && x.every((line, i) => line === y[i]);
-    if (same(aChunk, oChunk)) out.push(...bChunk);
-    else if (same(bChunk, oChunk) || same(aChunk, bChunk)) out.push(...aChunk);
-    else return false; // both changed this region differently
-    oi = oEnd;
-    ai = aEnd;
-    bi = bEnd;
-    return true;
+  const regions = mergeRegions(base, ours, theirs);
+  if (!regions || regions.some((r) => r.kind === "conflict")) return { clean: false };
+  return {
+    clean: true,
+    text: regions.flatMap((r) => (r.kind === "merged" ? r.lines : [])).join("\n"),
   };
-  // Stable lines: kept by both sides. Between two stable lines, each side's chunk is merged.
-  for (let index = 0; index < o.length; index++) {
-    const aIndex = inA.get(index);
-    const bIndex = inB.get(index);
-    if (aIndex === undefined || bIndex === undefined) continue;
-    if (aIndex < ai || bIndex < bi) continue;
-    if (!flushChunk(index, aIndex, bIndex)) return { clean: false };
-    out.push(o[index]!);
-    oi = index + 1;
-    ai = aIndex + 1;
-    bi = bIndex + 1;
+}
+
+/** How one conflict region is resolved in the merge view. */
+export type Choice = "ours" | "theirs" | "both";
+
+/** The file with each conflict taken as chosen (`ours` where nothing is chosen). */
+export function resolveRegions(
+  regions: readonly MergeRegion[],
+  choices: readonly Choice[],
+): string {
+  const out: string[] = [];
+  let n = 0;
+  for (const region of regions) {
+    if (region.kind === "merged") {
+      out.push(...region.lines);
+      continue;
+    }
+    const choice = choices[n++] ?? "ours";
+    if (choice !== "theirs") out.push(...region.ours);
+    if (choice !== "ours") out.push(...region.theirs);
   }
-  if (!flushChunk(o.length, a.length, b.length)) return { clean: false };
-  return { clean: true, text: out.join("\n") };
+  return out.join("\n");
 }
