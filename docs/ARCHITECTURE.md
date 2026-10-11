@@ -1377,7 +1377,7 @@ A ChangeSet is held (`CIRCUIT_BREAKER`) and sent to the lead's and owner's inbox
 
 ## 23.2 Agent-facing content framing
 
-The MCP server and SDKs wrap participant and external content in clearly delimited, labeled blocks and never present it as platform instructions. Platform-originated guidance comes only through `trust: system` items. This does not make injection impossible; capability containment is the real control.
+The MCP server and SDKs wrap participant and external content in clearly delimited, labeled blocks and never present it as platform instructions. Every successful MCP tool result is returned as one such block, because what tools return was written by participants or derived from it (files, messages, task text, paths). The block is a line saying the data is not instructions, then `<data trust="participant" tool="…" id="…">`, then the JSON response on one line, then `</data id="…">`. The `id` is random per result and never appears in the content, so content can't close the block early. The same response is also returned as `structuredContent`. Tool errors (§16.3) come from the platform and aren't wrapped. Platform-originated guidance comes only through `trust: system` items. This does not make injection impossible; capability containment is the real control.
 
 ## 23.3 Secret scanning
 
