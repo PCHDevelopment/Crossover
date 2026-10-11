@@ -307,11 +307,11 @@ export function registerApprovalCommands(dispatcher: Dispatcher): void {
       };
       let events: EmittedEvent[] = [];
       let executed: unknown;
+      let inner: CommandResult<unknown> | undefined;
       const runsNow = p.decision === "approve" && dispatcher.runsOnApproval(approval.method);
       if (runsNow) {
         // Run it under the requester's own idempotency key, so that key now stands for this
         // result: a retry of the original request replays it instead of running it again.
-        let inner: CommandResult<unknown> | undefined;
         const stored = await withIdempotency(
           ctx.client,
           approval.requester_id,
@@ -319,7 +319,13 @@ export function registerApprovalCommands(dispatcher: Dispatcher): void {
           approval.idempotency_hash,
           async () => {
             inner = await dispatcher.runApproved(ctx, approval);
-            return { response: inner.response ?? null, events: [] };
+            return {
+              response: inner.response ?? null,
+              events: [],
+              ...(inner.committedError
+                ? { committed_error: inner.committedError.toErrorBody().error }
+                : {}),
+            };
           },
         );
         executed = stored.response;
@@ -357,6 +363,7 @@ export function registerApprovalCommands(dispatcher: Dispatcher): void {
           ...(executed === undefined ? {} : { result: executed }),
         },
         events: [decided, ...events],
+        ...(inner?.committedError ? { committedError: inner.committedError } : {}),
       };
     },
   });

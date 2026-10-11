@@ -12,6 +12,7 @@ import {
   isMethodName,
   METHODS,
   newId,
+  type ErrorBody,
   type CommandEnvelope,
   type EventType,
   type RoomEvent,
@@ -141,6 +142,8 @@ export interface AnonymousCommandDefinition<S extends z.ZodType, R> {
 export interface CommandResult<R> {
   /** Returned to the caller; stored with the idempotency key, so it must be plain JSON data. */
   response: R;
+  /** Commit the response and events but return this error to the caller (T903). */
+  committedError?: CrossoverError;
   /** Appended to the room's ledger in the same transaction. Not allowed for reads. */
   events?: EmittedEvent[];
   /**
@@ -296,6 +299,19 @@ export interface DispatchResult<R = unknown> {
   replayed: boolean;
   /** See `CommandResult.oneTime`. Present only on the first execution of a command. */
   one_time?: unknown;
+}
+
+type StoredCommandResult = {
+  response: unknown;
+  events: RoomEvent[];
+  committed_error?: ErrorBody["error"];
+};
+
+function errorFromBody(error: ErrorBody["error"]): CrossoverError {
+  return new CrossoverError(error.code, error.message, {
+    retryable: error.retryable,
+    ...(error.details === undefined ? {} : { details: error.details }),
+  });
 }
 
 export interface DispatcherOptions {
@@ -642,6 +658,12 @@ export class Dispatcher {
             afterCommit: (callback) => void afterCommit.push(callback),
           };
           const out = await def.execute(ctx, params);
+          if (out.committedError) {
+            throw new CrossoverError(
+              "VALIDATION",
+              `${envelope.method} cannot return a committed error`,
+            );
+          }
           if (out.afterCommit) afterCommit.push(out.afterCommit);
           // The room row exists now, so its lease can be taken (and seen by appendEvents)
           // inside this transaction.
@@ -736,6 +758,9 @@ export class Dispatcher {
             afterCommit: (callback) => void afterCommit.push(callback),
           };
           const out = await def.execute(ctx, params);
+          if (out.committedError) {
+            throw new CrossoverError("VALIDATION", `${method} cannot return a committed error`);
+          }
           if (out.afterCommit) afterCommit.push(out.afterCommit);
           oneTime = out.oneTime;
           const emitted: NewEvent[] = (out.events ?? []).map((e) => {
@@ -1341,6 +1366,12 @@ export class Dispatcher {
         },
       };
       const out = await def.execute(ctx, params);
+      if (out.committedError) {
+        throw new CrossoverError(
+          "VALIDATION",
+          `${envelope.method} cannot return a committed error`,
+        );
+      }
       if (out.events && out.events.length > 0) {
         throw new Error(`${envelope.method} is read-only but emitted events`);
       }
@@ -1574,7 +1605,7 @@ export class Dispatcher {
           );
 
           let ran = false;
-          const stored = await withIdempotency(
+          const stored = await withIdempotency<StoredCommandResult>(
             client,
             principal.participant_id,
             key,
@@ -1615,6 +1646,12 @@ export class Dispatcher {
                 afterCommit: (callback) => void afterCommit.push(callback),
               };
               const out = await def.execute(ctx, params);
+              if (out.committedError && out.oneTime !== undefined) {
+                throw new CrossoverError(
+                  "VALIDATION",
+                  `${envelope.method} cannot return both a committed error and a one-time result`,
+                );
+              }
               if (out.afterCommit) afterCommit.push(out.afterCommit);
               oneTime = out.oneTime;
               const emitted: NewEvent[] = (out.events ?? []).map((e) => ({
@@ -1625,10 +1662,21 @@ export class Dispatcher {
                 ...(e.schema_version !== undefined ? { schema_version: e.schema_version } : {}),
               }));
               const events = await appendEvents(client, room_id, emitted, token);
-              return { response: out.response, events };
+              return {
+                response: out.response,
+                events,
+                ...(out.committedError
+                  ? { committed_error: out.committedError.toErrorBody().error }
+                  : {}),
+              };
             },
           );
-          return { response: stored.response, events: stored.events, replayed: !ran };
+          return {
+            response: stored.response,
+            events: stored.events,
+            replayed: !ran,
+            ...(stored.committed_error ? { committed_error: stored.committed_error } : {}),
+          } as DispatchResult & { committed_error?: ErrorBody["error"] };
         });
       } catch (err) {
         // Our token is no good any more (takeover or expiry): re-acquire on the next command.
@@ -1656,6 +1704,9 @@ export class Dispatcher {
       }
 
       await this.afterCommitWork(room_id, envelope, afterCommit, result);
+      const committedError = (result as DispatchResult & { committed_error?: ErrorBody["error"] })
+        .committed_error;
+      if (committedError) throw errorFromBody(committedError);
       // The one-time secret rides back to this caller only; it is not part of `stored`.
       return oneTime === undefined || result.replayed ? result : { ...result, one_time: oneTime };
     });
