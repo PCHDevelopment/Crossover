@@ -339,6 +339,38 @@ describe("egress visibility conformance (§34.5)", () => {
     expect((await list(f.owner))[0]!.paths).toEqual([SECRET]);
   });
 
+  it("presence: a reader denied a path never sees it among someone's open files or under their cursor", async () => {
+    const f = await fixture();
+    const update = (params: Record<string, unknown>) =>
+      post(`/v1/rooms/${f.roomId}/commands`, envelope("presence.update", params, false), f.a.token);
+    const list = async (token: string) =>
+      (await ok(await f.command(token, "presence.list"))).response.presence as {
+        participant_id: string;
+        open_files: string[];
+        cursor: { path: string } | null;
+      }[];
+    await ok(
+      await update({
+        open_files: [SECRET, "docs/readme.md"],
+        cursor: { path: SECRET, line: 1, column: 1 },
+      }),
+    );
+    const asB = await list(f.b.token);
+    expect(JSON.stringify(asB)).not.toContain(SECRET);
+    expect(asB).toEqual([
+      expect.objectContaining({
+        participant_id: f.a.id,
+        open_files: ["docs/readme.md"],
+        cursor: null,
+      }),
+    ]);
+    // Control: the owner sees the secret path and the cursor on it.
+    expect((await list(f.owner))[0]).toMatchObject({
+      open_files: [SECRET, "docs/readme.md"],
+      cursor: { path: SECRET },
+    });
+  });
+
   it("sandbox event paths and intents are redacted for a scoped bystander", async () => {
     const f = await fixture();
     await server.dispatcher.runSystem(f.roomId, "egress.sandbox_visibility", async () => ({

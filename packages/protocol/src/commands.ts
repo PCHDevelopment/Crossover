@@ -39,6 +39,7 @@ export const METHODS = {
   "presence.set_intent": { mutating: false },
   "presence.clear_intent": { mutating: false },
   "presence.list_intents": { mutating: false },
+  "presence.list": { mutating: false },
 
   "capabilities.list": { mutating: false },
   "capabilities.grant": { mutating: true },
