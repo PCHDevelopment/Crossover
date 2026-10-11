@@ -171,3 +171,20 @@ td {
     grid-template-columns: repeat(7, 160px);
   }
 }
+.files {
+  display: grid;
+  grid-template-columns: minmax(160px, 240px) 1fr;
+  gap: 12px;
+}
+.tree {
+  margin: 0;
+  padding-left: 0;
+  list-style: none;
+}
+.tree button[aria-current="true"] {
+  font-weight: 600;
+}
+.editor {
+  height: 480px;
+  border: 1px solid var(--line);
+}

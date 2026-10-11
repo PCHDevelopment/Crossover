@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { RoomClient, SdkEvent } from "@crossover/sdk";
 import { isUnauthenticated } from "./App.js";
 import {
@@ -11,10 +11,13 @@ import {
 } from "./model.js";
 import { openRoom, type OpenRoom } from "./session.js";
 
+// Monaco is large: it loads with the Files tab, not with the room.
+const FilesView = lazy(() => import("./FilesView.js"));
+
 const FEED_LIMIT = 200;
 const BACKLOG = 50;
 
-type Tab = "overview" | "tasks" | "activity";
+type Tab = "overview" | "tasks" | "activity" | "files";
 
 const message = (error: unknown): string =>
   error instanceof Error ? error.message : "Something went wrong";
@@ -35,6 +38,11 @@ export function RoomView(props: {
   const [tab, setTab] = useState<Tab>("overview");
   const [notice, setNotice] = useState<string>();
   const roomRef = useRef<RoomClient>(undefined);
+  const listeners = useRef(new Set<(event: SdkEvent) => void>());
+  const onEvent = useCallback((listener: (event: SdkEvent) => void) => {
+    listeners.current.add(listener);
+    return () => void listeners.current.delete(listener);
+  }, []);
 
   // Enter the room.
   useEffect(() => {
@@ -97,6 +105,7 @@ export function RoomView(props: {
         onEvent: (event) => {
           setFeed((f) => [event, ...f].slice(0, FEED_LIMIT));
           if (affectsState(event.type)) refreshSoon();
+          for (const listener of listeners.current) listener(event);
         },
         onError: (err) => setError(message(err)),
       });
@@ -155,7 +164,7 @@ export function RoomView(props: {
         </span>
       </p>
       <nav className="tabs" role="tablist">
-        {(["overview", "tasks", "activity"] as const).map((t) => (
+        {(["overview", "tasks", "activity", "files"] as const).map((t) => (
           <button
             key={t}
             role="tab"
@@ -240,6 +249,11 @@ export function RoomView(props: {
             ))}
           </div>
         </section>
+      )}
+      {tab === "files" && (
+        <Suspense fallback={<p className="muted">Loading editor…</p>}>
+          <FilesView room={open.room} onEvent={onEvent} />
+        </Suspense>
       )}
       {tab === "activity" && (
         <section aria-label="Activity">
