@@ -432,6 +432,23 @@ describe("secret scanning on messages (T902)", () => {
     }
   });
 
+  it("a body at the 32 KiB limit with the key on its last lines is still caught", async () => {
+    const s = await setup();
+    const filler = "Status update, nothing secret here.\n";
+    const room = MAX_BODY_BYTES - Buffer.byteLength(PRIVATE_KEY);
+    const head = filler.repeat(Math.floor(room / filler.length));
+    const body = head + "x".repeat(room - head.length) + PRIVATE_KEY;
+    expect(Buffer.byteLength(body)).toBe(MAX_BODY_BYTES);
+    const err = await rejects(send(s, s.a, { body }), "VALIDATION");
+    const findings = (err.details as { findings: Array<Record<string, unknown>> }).findings;
+    expect(findings).toEqual([
+      expect.objectContaining({
+        rule: "private_key_block",
+        line: body.split("\n").length - 2,
+      }),
+    ]);
+  });
+
   it("messages.edit rejects a new body that gains a private-key block", async () => {
     const s = await setup();
     const m = (await send(s, s.a, { body: "before" })).response as MessageView;

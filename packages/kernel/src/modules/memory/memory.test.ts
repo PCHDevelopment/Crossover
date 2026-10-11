@@ -327,3 +327,45 @@ describe("secret scanning on memory (T902)", () => {
     }
   });
 });
+
+describe("secret scanning at the memory value limit (T902)", () => {
+  const PRIVATE_KEY = [
+    "-----BEGIN PRIVATE KEY-----",
+    "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7",
+    "-----END PRIVATE KEY-----",
+  ].join("\n");
+  const fill = (unit: string) =>
+    unit.repeat(Math.floor(MAX_MEMORY_VALUE_BYTES / Buffer.byteLength(unit)));
+
+  it("a 64 KiB value with the key at its end is rejected", async () => {
+    const s = await setup();
+    const head = fill("notes ").slice(0, MAX_MEMORY_VALUE_BYTES - PRIVATE_KEY.length - 1);
+    const value = `${head}\n${PRIVATE_KEY}`;
+    expect(Buffer.byteLength(value)).toBe(MAX_MEMORY_VALUE_BYTES);
+    const err = await rejects(put(s, s.dev, { key: "big/notes", value }), "VALIDATION");
+    expect(err.details).toMatchObject({
+      reason: "secret_detected",
+      findings: [expect.objectContaining({ rule: "private_key_block", line: 2 })],
+    });
+  });
+
+  it("a worst-case 64 KiB value is scanned in under 250 ms", async () => {
+    const s = await setup();
+    // Inputs that make line- and token-based rules do the most work: unterminated key headers,
+    // assignments with no value, and one unbroken high-entropy token.
+    const cases = {
+      unterminated_headers: fill("-----BEGIN PRIVATE KEY-----\n"),
+      empty_assignments: fill("api_key = \n"),
+      one_long_token: fill("aB3dE5gH7jK9mN1p"),
+    };
+    for (const [name, value] of Object.entries(cases)) {
+      expect(Buffer.byteLength(value), name).toBeLessThanOrEqual(MAX_MEMORY_VALUE_BYTES);
+      const started = performance.now();
+      await put(s, s.dev, { key: `worst/${name.replaceAll("_", "-")}`, value }).catch(
+        () => undefined,
+      );
+      const elapsed = performance.now() - started;
+      expect(elapsed, `${name}: ${elapsed.toFixed(0)} ms`).toBeLessThan(250);
+    }
+  });
+});
