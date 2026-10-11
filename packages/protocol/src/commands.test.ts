@@ -58,7 +58,8 @@ const CATALOG = `
   conflicts.list / conflicts.get
   conflicts.escalate / conflicts.abandon
 
-  sandbox.status / sandbox.exec / sandbox.exec.cancel
+  sandbox.status / sandbox.file.read / sandbox.file.write
+  sandbox.exec / sandbox.exec.cancel
   sandbox.sync / sandbox.reset
   changes.submit / changes.diff
 
@@ -111,6 +112,7 @@ const READ_ONLY = [
   "conflicts.list",
   "conflicts.get",
   "sandbox.status",
+  "sandbox.file.read",
   "changes.diff",
   "memory.list",
   "memory.get",
@@ -138,7 +140,7 @@ const valid = (extra: Record<string, unknown> = {}) => ({
 
 describe("METHODS", () => {
   it("contains every §16.1 method plus room.create, and nothing else", () => {
-    expect(catalog).toHaveLength(95);
+    expect(catalog).toHaveLength(97);
     expect([...METHOD_NAMES].sort()).toEqual([...catalog].sort());
   });
 
@@ -149,7 +151,7 @@ describe("METHODS", () => {
   it("marks exactly the documented methods read-only", () => {
     const readOnly = METHOD_NAMES.filter((m) => !isMutatingMethod(m));
     expect([...readOnly].sort()).toEqual([...READ_ONLY].sort());
-    expect(Object.keys(METHODS).length - readOnly.length).toBe(57);
+    expect(Object.keys(METHODS).length - readOnly.length).toBe(58);
   });
 
   it("isMutatingMethod takes any string and is false for unknown methods", () => {
