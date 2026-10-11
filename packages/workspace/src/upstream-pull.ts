@@ -116,6 +116,11 @@ export async function advanceUpstreamAfterResolution(
 export type PullResponse =
   | { status: "UP_TO_DATE"; upstream: UpstreamRow }
   | (Extract<ApplyResponse, { status: "APPLIED" }> & { upstream: UpstreamRow })
+  | (Extract<ApplyResponse, { status: "HELD" }> & {
+      upstream: UpstreamRow;
+      parts: number;
+      applied_parts: number;
+    })
   | (Extract<ApplyResponse, { status: "CONFLICT" }> & {
       upstream: UpstreamRow;
       /** How many ChangeSets the pull was split into, and how many of them applied before this one conflicted. */
@@ -441,6 +446,7 @@ export function registerGitPullUpstream(dispatcher: Dispatcher, deps: WorkspaceC
           return {
             response: { ...out.response, upstream, parts, applied_parts: i },
             events,
+            ...(out.committedError ? { committedError: out.committedError } : {}),
           };
         }
       }

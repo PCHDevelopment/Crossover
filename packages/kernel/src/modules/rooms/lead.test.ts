@@ -443,4 +443,28 @@ describe("ctx.authorizeAs", () => {
     await ask("part_nope", "tasks.read");
     expect(results).toEqual(["allowed", "FORBIDDEN", "NOT_FOUND", "NOT_FOUND"]);
   });
+
+  it("passes anyScope as a per-path check for the other participant", async () => {
+    const perPath: boolean[] = [];
+    const r = await setup(async (_principal, _action, _resource, context) => {
+      perPath.push(context.perPath === true);
+    });
+    r.d.registerCommand({
+      method: "tasks.create",
+      mutating: true,
+      params: z.object({}),
+      execute: async (ctx) => {
+        await ctx.authorizeAs(
+          r.agent.participant_id,
+          "workspace.write",
+          { path: "docs/readme.md" },
+          { anyScope: true },
+        );
+        return { response: {} };
+      },
+    });
+
+    await run(r, r.owner, "tasks.create");
+    expect(perPath).toEqual([false, true]);
+  });
 });

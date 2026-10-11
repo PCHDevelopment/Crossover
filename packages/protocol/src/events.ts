@@ -7,6 +7,7 @@ export const EVENT_TYPES = [
   "room.resumed",
   "room.archived",
   "room.egress_allowlist_changed",
+  "room.protected_paths_changed",
   "lead.changed",
   "lead.transfer_offered",
 
@@ -54,6 +55,8 @@ export const EVENT_TYPES = [
 
   "workspace.changeset.applied",
   "workspace.changeset.rejected",
+  "workspace.changeset.held",
+  "workspace.changeset.hold_decided",
   "workspace.conflict.created",
   "workspace.conflict.escalated",
   "workspace.conflict.resolved",

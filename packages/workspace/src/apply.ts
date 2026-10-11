@@ -29,6 +29,12 @@ import {
   registerGitPullUpstream,
   setUpstreamRef,
 } from "./upstream-pull.js";
+import {
+  assessCircuitBreaker,
+  DEFAULT_PROTECTED_PATHS,
+  type CircuitBreakerReason,
+} from "./circuit-breaker.js";
+import { z } from "zod";
 
 export interface WorkspaceCommandDeps {
   /** Failure is reported after commit; startup reconcileRef restores the DB-authoritative head. */
@@ -49,6 +55,7 @@ export interface WorkspaceCommandDeps {
 
 export type ApplyResponse =
   | { status: "APPLIED"; changeset_id: string; applied_revision: number }
+  | { status: "HELD"; changeset_id: string }
   | {
       status: "CONFLICT";
       changeset_id: string;
@@ -59,6 +66,49 @@ export type ApplyResponse =
 
 export type ConflictResponse =
   ClassifiedConflict | { path: null; kind: ClassifiedConflict["kind"]; reason: "unauthorized" };
+
+const decideHoldParams = z.strictObject({
+  changeset_id: z.string().min(1),
+  decision: z.enum(["APPROVE", "REJECT"]),
+  reason: z
+    .string()
+    .max(500)
+    .refine((value) => !value.includes("\0"), "Text contains NUL")
+    .optional(),
+});
+
+interface HeldChangeSetRow {
+  id: string;
+  actor_id: string;
+  source: ChangesetParams["source"];
+  task_id: string | null;
+  conflict_id: string | null;
+  message: string;
+  base_workspace_revision: string;
+  base_file_revisions: Record<string, number>;
+  payload: unknown;
+  status: string;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function protectedPatterns(settingsValue: unknown): readonly string[] {
+  const value = asRecord(settingsValue).protected_paths;
+  if (value === undefined || value === null) return DEFAULT_PROTECTED_PATHS;
+  if (
+    Array.isArray(value) &&
+    value.length <= 100 &&
+    value.every(
+      (pattern) => typeof pattern === "string" && pattern.length > 0 && pattern.length <= 512,
+    )
+  )
+    return value;
+  return DEFAULT_PROTECTED_PATHS;
+}
 
 /** Register §10.3 application; all state and events share the dispatcher transaction. */
 export function registerWorkspaceCommands(
@@ -73,6 +123,109 @@ export function registerWorkspaceCommands(
     mutating: true,
     params: changesetParamsSchema,
     execute: (ctx, params) => apply(ctx, params, deps),
+  });
+  dispatcher.registerCommand({
+    method: "workspace.changeset.decide_hold",
+    action: "workspace.decide_hold",
+    mutating: true,
+    params: decideHoldParams,
+    execute: async (
+      ctx,
+      params,
+    ): Promise<CommandResult<ApplyResponse | { changeset_id: string; status: "REJECTED" }>> => {
+      if (ctx.principal.authority !== "OWNER" && ctx.principal.role !== "LEAD")
+        throw new CrossoverError("FORBIDDEN", "Only the lead or owner may decide a held ChangeSet");
+      const { rows } = await ctx.client.query<
+        HeldChangeSetRow & {
+          owner_id: string;
+          lead_participant_id: string | null;
+        }
+      >(
+        `SELECT cs.id, cs.actor_id, cs.source, cs.task_id, cs.conflict_id, cs.message,
+                cs.base_workspace_revision, cs.base_file_revisions, cs.payload, cs.status,
+                r.owner_id, r.lead_participant_id
+         FROM changesets cs JOIN rooms r ON r.id = cs.room_id
+         WHERE cs.id = $1 AND cs.room_id = $2
+         FOR UPDATE OF cs`,
+        [params.changeset_id, ctx.room_id],
+      );
+      const held = rows[0];
+      if (!held) throw new CrossoverError("NOT_FOUND", "Held ChangeSet not found");
+      if (held.status !== "HELD")
+        throw new CrossoverError("CONFLICT_VERSION", "ChangeSet hold was already decided", {
+          details: { status: held.status },
+        });
+
+      const payload = asRecord(held.payload);
+      const holdInfo = asRecord(payload.circuit_breaker);
+      const originalSubmitterId =
+        typeof holdInfo.submitter_id === "string" ? holdInfo.submitter_id : held.actor_id;
+      if (params.decision === "REJECT") {
+        await ctx.client.query(
+          `UPDATE changesets
+             SET status = 'REJECTED', rejection_reason = 'CIRCUIT_BREAKER',
+                 rejected_at = clock_timestamp(),
+                 payload = payload || jsonb_build_object('hold_decision', $3::jsonb)
+           WHERE id = $1 AND room_id = $2`,
+          [
+            held.id,
+            ctx.room_id,
+            JSON.stringify({
+              decision: params.decision,
+              decided_by: ctx.principal.participant_id,
+              reason: params.reason ?? null,
+            }),
+          ],
+        );
+        return {
+          response: { changeset_id: held.id, status: "REJECTED" as const },
+          events: [
+            {
+              type: "workspace.changeset.hold_decided",
+              payload: {
+                changeset_id: held.id,
+                decision: params.decision,
+                submitter_id: originalSubmitterId,
+                ...(params.reason ? { reason: params.reason } : {}),
+              },
+            },
+          ],
+        };
+      }
+
+      const paramsToApply = changesetParamsSchema.parse({
+        source: held.source,
+        message: held.message,
+        base_workspace_revision: Number(held.base_workspace_revision),
+        base_file_revisions: held.base_file_revisions,
+        operations: payload.operations,
+        ...(held.task_id ? { task_id: held.task_id } : {}),
+        ...(held.conflict_id ? { conflict_id: held.conflict_id } : {}),
+      });
+      const result = await apply(ctx, paramsToApply, deps, {
+        actorId: held.actor_id,
+        submitterId: originalSubmitterId,
+        authorizeAsId: originalSubmitterId,
+        reuseChangesetId: held.id,
+        skipCircuitBreaker: true,
+      });
+      return {
+        ...result,
+        events: [
+          {
+            type: "workspace.changeset.hold_decided",
+            payload: {
+              changeset_id: held.id,
+              decision: params.decision,
+              status: result.response.status,
+              submitter_id: originalSubmitterId,
+              ...(params.reason ? { reason: params.reason } : {}),
+            },
+          },
+          ...(result.events ?? []),
+        ],
+      };
+    },
   });
   registerWorkspaceReads(dispatcher);
   registerWorkspaceHistory(dispatcher);
@@ -96,6 +249,14 @@ export function registerWorkspaceCommands(
 export interface ApplyExtras {
   /** Recorded as the actor of the ChangeSet and its file revisions, instead of the caller. */
   actorId?: string;
+  /** The participant who submitted a held ChangeSet when a lead or owner resumes it. */
+  submitterId?: string;
+  /** Recheck write permissions as the original submitter when resuming a held ChangeSet. */
+  authorizeAsId?: string;
+  /** Reuse a durable HELD row while running the ordinary apply pipeline. */
+  reuseChangesetId?: string;
+  /** Recheck the normal pipeline while skipping only a second breaker evaluation. */
+  skipCircuitBreaker?: boolean;
   /** Stored in the ChangeSet's payload beside the operations. */
   payload?: Record<string, unknown>;
   /** Optional source-specific work computed from an applied commit, still inside this transaction. */
@@ -372,6 +533,11 @@ export async function apply(
   extras: ApplyExtras = {},
 ): Promise<CommandResult<ApplyResponse>> {
   const actorId = extras.actorId ?? ctx.principal.participant_id;
+  const submitterId = extras.submitterId ?? ctx.principal.participant_id;
+  const authorizeWrite = (path: string) =>
+    extras.authorizeAsId
+      ? ctx.authorizeAs(extras.authorizeAsId, "workspace.write", { path }, { anyScope: true })
+      : ctx.authorize("workspace.write", { path });
   const { client, room_id } = ctx;
   const operations = params.operations.map((op): Operation =>
     op.type === "rename"
@@ -387,7 +553,7 @@ export async function apply(
   const touched = new Set(
     operations.flatMap((op) => (op.type === "rename" ? [op.from, op.to] : [op.path])),
   );
-  for (const path of touched) await ctx.authorize("workspace.write", { path });
+  for (const path of touched) await authorizeWrite(path);
   // Step 2: secret scan (§23.3, T901). The base commit and repo path are read
   // WITHOUT the workspace lock, so a slow scan (a large file, a long identifier
   // run) does not hold the FOR UPDATE lock and block other writers. The base
@@ -508,27 +674,127 @@ export async function apply(
   const revision = Number(head.revision) + 1;
   if (!Number.isSafeInteger(revision))
     throw new CrossoverError("VALIDATION", "Workspace revision limit reached");
-  const id = newId("cs");
-  await client.query(
-    `INSERT INTO changesets (id, workspace_id, room_id, actor_id, idempotency_key, source,
-     task_id, conflict_id, message, base_workspace_revision, base_file_revisions, payload)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
-    [
-      id,
-      ws.id,
-      room_id,
-      actorId,
-      ctx.idempotency_key,
-      params.source,
-      params.task_id ?? null,
-      params.conflict_id ?? null,
-      params.message,
-      params.base_workspace_revision,
-      JSON.stringify(params.base_file_revisions),
-      JSON.stringify({ operations, ...extras.payload }),
-    ],
-  );
+  const id = extras.reuseChangesetId ?? newId("cs");
+  if (extras.reuseChangesetId) {
+    const resumed = await client.query(
+      `UPDATE changesets SET status = 'PENDING'
+       WHERE id = $1 AND room_id = $2 AND status = 'HELD'`,
+      [id, room_id],
+    );
+    if (resumed.rowCount !== 1)
+      throw new CrossoverError("CONFLICT_VERSION", "ChangeSet hold was already decided");
+  } else {
+    await client.query(
+      `INSERT INTO changesets (id, workspace_id, room_id, actor_id, idempotency_key, source,
+       task_id, conflict_id, message, base_workspace_revision, base_file_revisions, payload)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+      [
+        id,
+        ws.id,
+        room_id,
+        actorId,
+        ctx.idempotency_key,
+        params.source,
+        params.task_id ?? null,
+        params.conflict_id ?? null,
+        params.message,
+        params.base_workspace_revision,
+        JSON.stringify(params.base_file_revisions),
+        JSON.stringify({ operations, ...extras.payload }),
+      ],
+    );
+  }
   const candidate = await materialize(ws.repo_path, base.commit_sha, operations);
+  if (!extras.skipCircuitBreaker) {
+    const { rows: roomRows } = await client.query<{
+      settings: unknown;
+      owner_id: string;
+      lead_participant_id: string | null;
+    }>("SELECT settings, owner_id, lead_participant_id FROM rooms WHERE id = $1", [room_id]);
+    const room = roomRows[0];
+    if (!room) throw new CrossoverError("NOT_FOUND", "Room not found");
+    let rejectedRecently = false;
+    if (ctx.principal.kind === "AGENT" && actorId !== UPSTREAM_ACTOR) {
+      const { rows } = await client.query<{ count: string }>(
+        `SELECT count(*) AS count FROM changesets
+         WHERE room_id = $1 AND actor_id = $2 AND status = 'REJECTED'
+           AND rejection_reason IS DISTINCT FROM 'SUPERSEDED'
+           AND rejected_at >= clock_timestamp() - interval '30 minutes'`,
+        [room_id, actorId],
+      );
+      rejectedRecently = Number(rows[0]?.count ?? 0) > 5;
+    }
+    const assessment = await assessCircuitBreaker({
+      repoPath: ws.repo_path,
+      baseCommit: base.commit_sha,
+      candidateTree: candidate,
+      touchedPaths: [...touched],
+      protectedPatterns: protectedPatterns(room.settings),
+      rejectedRecently,
+    });
+    if (assessment.reasons.length > 0) {
+      const reasons: CircuitBreakerReason[] = assessment.reasons;
+      await client.query(
+        `UPDATE changesets SET status = 'HELD',
+           payload = payload || jsonb_build_object('circuit_breaker', $3::jsonb)
+         WHERE id = $1 AND room_id = $2`,
+        [
+          id,
+          room_id,
+          JSON.stringify({
+            reasons,
+            submitter_id: submitterId,
+            submitter_kind: ctx.principal.kind,
+          }),
+        ],
+      );
+      const recipients = new Set([room.owner_id, room.lead_participant_id].filter(Boolean));
+      for (const recipient of recipients) {
+        await deliverInbox(client, room_id, recipient!, {
+          kind: "APPROVAL",
+          ref: { kind: "changeset", id },
+          summary: `ChangeSet ${id} was held for review (${reasons.join(", ")}).`,
+          author_id: "system",
+        });
+      }
+      const visiblePaths: string[] = [];
+      for (const path of assessment.protected_paths) {
+        try {
+          if (extras.authorizeAsId)
+            await ctx.authorizeAs(
+              extras.authorizeAsId,
+              "workspace.read",
+              { path },
+              { anyScope: true },
+            );
+          else await ctx.authorize("workspace.read", { path });
+          visiblePaths.push(path);
+        } catch (error) {
+          if (!(error instanceof CrossoverError) || error.code !== "FORBIDDEN") throw error;
+        }
+      }
+      return {
+        response: { status: "HELD", changeset_id: id },
+        committedError: new CrossoverError("CIRCUIT_BREAKER", "ChangeSet held for review", {
+          details: {
+            changeset_id: id,
+            reasons,
+            ...(visiblePaths.length > 0 ? { paths: visiblePaths } : {}),
+          },
+        }),
+        events: [
+          {
+            type: "circuit_breaker.tripped",
+            payload: { changeset_id: id, actor_id: actorId, reasons },
+          },
+          {
+            type: "workspace.changeset.held",
+            payload: { changeset_id: id, actor_id: actorId, reasons },
+          },
+        ],
+      };
+    }
+  }
   let result = await (deps.merge ?? merge)(
     ws.repo_path,
     base.commit_sha,
@@ -575,7 +841,7 @@ export async function apply(
         ...conflict.messages.flatMap((message) => message.paths),
       ])) {
         try {
-          await ctx.authorize("workspace.write", { path });
+          await authorizeWrite(path);
         } catch (error) {
           if (!(error instanceof CrossoverError) || error.code !== "FORBIDDEN") throw error;
           authorized = false;
@@ -656,7 +922,7 @@ export async function apply(
           ws.id,
           room_id,
           id,
-          ctx.principal.participant_id,
+          submitterId,
           params.base_workspace_revision,
           head.revision,
           JSON.stringify(classified),
@@ -690,7 +956,7 @@ export async function apply(
               payload: {
                 conflict_id: conflictId,
                 changeset_id: id,
-                submitter_id: ctx.principal.participant_id,
+                submitter_id: submitterId,
                 file_count: classified.length,
                 kinds: classified.map(({ kind }) => kind),
                 counterparty_count: counterpartyChangesets.length,
@@ -701,8 +967,7 @@ export async function apply(
   }
   const changedFiles = await treeChanges(ws.repo_path, head.commit_sha, result.tree);
   // Git may carry a stale edit through a head-side rename to a new path.
-  for (const { path } of changedFiles)
-    if (!touched.has(path)) await ctx.authorize("workspace.write", { path });
+  for (const { path } of changedFiles) if (!touched.has(path)) await authorizeWrite(path);
   const options = { gitDir: ws.repo_path, timeoutMs: 10_000 };
   const commit = (
     await git(["commit-tree", result.tree, "-p", head.commit_sha], {
@@ -812,7 +1077,7 @@ export async function apply(
         payload: {
           changeset_id: id,
           applied_revision: revision,
-          author_id: ctx.principal.participant_id,
+          author_id: submitterId,
         },
       },
       ...(synced

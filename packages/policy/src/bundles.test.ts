@@ -92,6 +92,7 @@ const EXPECTED: Record<(typeof ROLES)[number], Capability[]> = {
     "checkpoints.export",
     "git.import",
     "git.pull_upstream",
+    "workspace.decide_hold",
     "room.transfer_lead",
     // within the §6.3 / §22.1 limits, which the commands enforce
     "participants.pause",
@@ -146,9 +147,14 @@ describe("role bundles (§6.1)", () => {
   });
 
   it("no role bundle holds an authority power, except documented shared capabilities", () => {
-    // Leads may pause, resume and set roles (T211/T212 enforce the §6.3 limits). Shared
-    // role/authority capabilities are conflicts.abandon and sandbox.output.
-    const leadOnly = ["participants.pause", "participants.resume", "participants.set_role"];
+    // Leads may pause, resume, set roles and decide holds. Shared role/authority capabilities
+    // are conflicts.abandon and sandbox.output.
+    const leadOnly = [
+      "participants.pause",
+      "participants.resume",
+      "participants.set_role",
+      "workspace.decide_hold",
+    ];
     const powers = new Set([...AUTHORITY_POWERS.OWNER, ...AUTHORITY_POWERS.ADMIN]);
     for (const role of ROLES) {
       for (const c of ROLE_BUNDLES[role]) {
@@ -195,7 +201,9 @@ describe("authority powers (§6.2)", () => {
     "capabilities.grant_tier3",
     "events.redact",
     "integrations.manage",
+    "protected_paths.set",
   ];
+  const SHARED_LEAD_OWNER_POWERS = ["workspace.decide_hold"];
 
   it("members have none", () => {
     expect([...AUTHORITY_POWERS.MEMBER]).toEqual([]);
@@ -209,8 +217,17 @@ describe("authority powers (§6.2)", () => {
 
   it("owners have the admin powers plus owner authority capabilities", () => {
     expect([...AUTHORITY_POWERS.OWNER].sort()).toEqual(
-      [...ADMIN, ...OWNER_AUTHORITY_CAPABILITIES].sort(),
+      [...ADMIN, ...OWNER_AUTHORITY_CAPABILITIES, ...SHARED_LEAD_OWNER_POWERS].sort(),
     );
+  });
+
+  it("only leads and owners can decide held ChangeSets; admins alone cannot", () => {
+    expect(ROLE_BUNDLES.LEAD.has("workspace.decide_hold")).toBe(true);
+    expect(effectiveCapabilities("DEVELOPER", "OWNER").has("workspace.decide_hold")).toBe(true);
+    expect(effectiveCapabilities("DEVELOPER", "ADMIN").has("workspace.decide_hold")).toBe(false);
+    expect(effectiveCapabilities("DEVELOPER", "MEMBER").has("workspace.decide_hold")).toBe(false);
+    expect(effectiveCapabilities("DEVELOPER", "OWNER").has("protected_paths.set")).toBe(true);
+    expect(effectiveCapabilities("DEVELOPER", "ADMIN").has("protected_paths.set")).toBe(false);
   });
 
   it("owners can import, pull and checkpoint whatever their role (§24); admins and members only through the lead role", () => {

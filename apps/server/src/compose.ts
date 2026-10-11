@@ -50,6 +50,7 @@ import {
   registerEventsRedactCommand,
   registerRoomEventsCommand,
   registerRoomLifecycleCommands,
+  registerRoomProtectedPathsCommand,
   registerTaskCommands,
   registerTaskHeartbeat,
   registerTaskLifecycleCommands,
@@ -543,6 +544,7 @@ function registerCommands(
       await provisionWorkspace(client, room_id, config.workspaceRoot);
     },
   });
+  registerRoomProtectedPathsCommand(dispatcher);
   registerInviteCommands(dispatcher);
   registerJoinCommand(dispatcher);
   registerCapabilityCommands(dispatcher);

@@ -253,7 +253,7 @@ Room
 
 | Role | Count | Default capability bundle |
 |---|---|---|
-| Lead | Exactly 1 | Developer bundle + task assign/cancel/reopen, conflict resolve, decision decide, review, checkpoint create |
+| Lead | Exactly 1 | Developer bundle + task assign/cancel/reopen, conflict resolve, decision decide, review, checkpoint create, decide held ChangeSets (§22.4) |
 | Developer | 0..n | messages, tasks (claim/update own), workspace read/write, conflict abandon (submitter only), memory read/write, sandbox exec, decisions propose |
 | Reviewer | 0..n | Read everything, messages, tasks review, conflict abandon (submitter only), decisions propose, memory write |
 | Observer | 0..n | Read everything except sandbox output (Owner/Admin authority can view it); no mutations other than presence |
@@ -272,6 +272,8 @@ The owner (and admins, except where noted) can:
 - override any lead decision (veto, §7.3),
 - abandon any workspace conflict as room owner, regardless of project role (§11.3),
 - set budgets and the sandbox egress allowlist,
+- decide held ChangeSets as room owner; admins alone cannot (§22.4),
+- set protected workspace paths (§22.4; owner only),
 - redact events (§19.6),
 - read non-secret integration configuration (admins only),
 - connect and disconnect room integrations (owner only).
@@ -871,6 +873,7 @@ ROOM
   room.events.subscribe    filters (§17.1), after=sequence
   room.events.list         after, limit, types?
   room.set_egress_allowlist hosts (owner/admin; exact hosts or *.suffix, max 100; §14.7)
+  room.set_protected_paths patterns (owner only; max 100; §22.4)
   events.redact            sequence, reason (owner only; §19.6)
   room.set_lead            owner/admin
   room.transfer_lead / room.accept_lead
@@ -915,6 +918,7 @@ WORKSPACE
   workspace.diff / workspace.history / workspace.blame
   workspace.apply_changeset
   workspace.changeset.get  status of a submitted ChangeSet
+  workspace.changeset.decide_hold {changeset_id, decision, reason?}  lead or owner (§22.4)
   workspace.health.get     latest health per revision
 
 CONFLICTS
@@ -1180,7 +1184,7 @@ If the node crashes between steps 2 and 3, the new owner reconciles on startup b
 
 ```text
 room.created / room.paused / room.resumed / room.archived
-room.egress_allowlist_changed
+room.egress_allowlist_changed / room.protected_paths_changed
 lead.changed / lead.transfer_offered
 
 participant.invited / participant.joined / participant.left
@@ -1201,6 +1205,7 @@ decision.withdrawn / decision.vetoed / decision.superseded
 memory.updated / memory.deleted
 
 workspace.changeset.applied / workspace.changeset.rejected
+workspace.changeset.held / workspace.changeset.hold_decided
 workspace.conflict.created / workspace.conflict.escalated
 workspace.conflict.resolved / workspace.conflict.abandoned
 workspace.health
@@ -1349,11 +1354,15 @@ Budgets apply to agents (humans have none) and are counted per participant in fi
 
 ## 22.4 Circuit breakers
 
-A ChangeSet is held (`CIRCUIT_BREAKER`) and sent to the lead's and owner's inbox for approval when it:
+A ChangeSet is held (`CIRCUIT_BREAKER`, status `HELD`) and sent to the lead's and owner's inbox for approval when it:
 
-- deletes more than 50 files, or removes more than 30% of the lines in the repository,
-- modifies files matching protected patterns the owner configured (default: `.github/workflows/**`, `**/*.pem`, `**/.env*`, `infra/prod/**`),
-- comes from an agent that has had more than 5 ChangeSets rejected or abandoned in the last 30 minutes.
+- deletes more than 50 files, or removes more than 30% of the text lines in the `base_workspace_revision` tree. The denominator is all lines in tracked text files (binary files are excluded); the numerator is deleted-file lines plus lines removed by modifications. The percentage rule is skipped when the base has fewer than 200 lines.
+- touches a path matching the owner-configured `rooms.settings.protected_paths` glob array (maximum 100 patterns). When absent, the defaults are `.github/workflows/**`, `**/*.pem`, `**/.env*`, and `infra/prod/**`; an empty array disables protected-path checks.
+- comes from an agent with more than 5 ChangeSets rejected or abandoned during the previous 30 minutes.
+
+The original ChangeSet payload is retained without advancing the canonical workspace. The submission returns `CIRCUIT_BREAKER` with `{changeset_id, reasons, paths?}`; `paths` contains only protected paths the submitter may read. The lead and owner receive `APPROVAL` inbox items. `workspace.changeset.decide_hold {changeset_id, decision: APPROVE | REJECT, reason?}` lets the lead or owner decide; an admin alone cannot. Approval reruns the original payload through the apply pipeline as its submitter, rechecking current authorization and every other validation. It skips only the breaker check, and may apply or create a conflict. Rejection marks the ChangeSet `REJECTED` and contributes to the submitter's rejection streak. Repeating a decision returns `CONFLICT_VERSION`.
+
+`room.set_protected_paths {patterns}` is owner-only and emits `room.protected_paths_changed`.
 
 ---
 
