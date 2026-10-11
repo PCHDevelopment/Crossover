@@ -303,6 +303,48 @@ describe("dispatch: mutating commands", () => {
 });
 
 describe("dispatch: idempotency", () => {
+  it("commits side effects with a durable error and replays the same error without re-running", async () => {
+    const room = await newRoom();
+    const d = dispatcher();
+    let executions = 0;
+    d.registerCommand({
+      method: "messages.send",
+      mutating: true,
+      params: z.object({ body: z.string() }),
+      execute: async (ctx, params) => {
+        executions += 1;
+        await ctx.client.query("INSERT INTO side_effects (room_id, tag) VALUES ($1, $2)", [
+          room,
+          params.body,
+        ]);
+        return {
+          response: { accepted: false },
+          events: [{ type: "message.sent", payload: { body: params.body, i: 0 } }],
+          committedError: new CrossoverError("CIRCUIT_BREAKER", "Held", {
+            details: { changeset_id: "cs_1", reasons: ["protected_path"] },
+          }),
+        };
+      },
+    });
+    const input = envelope("messages.send", { body: "held" }, nextKey());
+
+    const first = await d.dispatch(principal(room), input).catch((error: unknown) => error);
+    expect(first).toMatchObject({
+      code: "CIRCUIT_BREAKER",
+      message: "Held",
+      details: { changeset_id: "cs_1", reasons: ["protected_path"] },
+    });
+    const replay = await d.dispatch(principal(room), input).catch((error: unknown) => error);
+    expect(replay).toMatchObject({
+      code: "CIRCUIT_BREAKER",
+      message: "Held",
+      details: { changeset_id: "cs_1", reasons: ["protected_path"] },
+    });
+    expect(executions).toBe(1);
+    expect(await effects(room)).toEqual(["held"]);
+    expect(await lastSeq(room)).toBe(1);
+  });
+
   it("a duplicate returns the original result without running execute again", async () => {
     const room = await newRoom();
     const d = dispatcher();
