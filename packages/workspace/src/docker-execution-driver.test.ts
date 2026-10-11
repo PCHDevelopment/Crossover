@@ -372,6 +372,75 @@ describe("DockerExecutionDriver", () => {
     });
   });
 
+  it("reads one file through the bounded read-only snapshot helper", async () => {
+    const sandboxId = newId("sandbox");
+    const encodedPath = Buffer.from("src/hello.ts").toString("base64");
+    const bytes = Buffer.from("export const hello = 'world';\n");
+    let invocation: readonly string[] = [];
+    let request = "";
+    const driver = new DockerExecutionDriver({
+      image: "node:test-image",
+      invoke: async (args, options) => {
+        invocation = args;
+        request = String(options?.input ?? "");
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            file: {
+              path: encodedPath,
+              mode: "100644",
+              size: bytes.length,
+              content: bytes.toString("base64"),
+            },
+          }),
+          stderr: "",
+        };
+      },
+    });
+    const suffix = sandboxId.toLowerCase();
+    const resources = {
+      volume_ref: `crossover-sbx-${suffix}`,
+      container_ref: `crossover-sbx-${suffix}`,
+    };
+
+    await expect(
+      driver.readFile({ sandbox_id: sandboxId, resources, path: "src/hello.ts", max_bytes: 1024 }),
+    ).resolves.toEqual({ mode: "100644", content: bytes });
+    expect(JSON.parse(request)).toMatchObject({
+      action: "file_read",
+      path: encodedPath,
+      max_bytes: 1024,
+    });
+    expect(invocation).toContain("--network=none");
+    expect(invocation).toContain("--read-only");
+    expect(invocation).toContain(
+      `type=volume,source=${resources.volume_ref},target=/workspace,readonly,volume-nocopy`,
+    );
+  });
+
+  it("reports the actual size and limit when a bounded file read is too large", async () => {
+    const sandboxId = newId("sandbox");
+    const suffix = sandboxId.toLowerCase();
+    const resources = {
+      volume_ref: `crossover-sbx-${suffix}`,
+      container_ref: `crossover-sbx-${suffix}`,
+    };
+    const driver = new DockerExecutionDriver({
+      invoke: async () => ({
+        code: 0,
+        stdout: JSON.stringify({ error: "too_large", size: 1025, limit: 1024 }),
+        stderr: "",
+      }),
+    });
+
+    await expect(
+      driver.readFile({ sandbox_id: sandboxId, resources, path: "large.bin", max_bytes: 1024 }),
+    ).rejects.toMatchObject({
+      code: "VALIDATION",
+      details: { reason: "file_too_large", size: 1025, limit: 1024 },
+    });
+  });
+
   it("streams status beyond 8 MiB and stops at the entry limit", async () => {
     const root = await mkdtemp(join(tmpdir(), "crossover-status-stream-test-"));
     const fakeDocker = join(root, "docker.mjs");
