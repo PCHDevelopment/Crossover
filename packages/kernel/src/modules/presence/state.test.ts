@@ -1,7 +1,13 @@
 import { Redis } from "ioredis";
 import { newId } from "@crossover/protocol";
 import { afterAll, describe, expect, it } from "vitest";
-import { presenceChannel, presenceFor, RedisPresenceStore, type Presence } from "./state.js";
+import {
+  presenceChannel,
+  presenceFor,
+  RedisPresenceStore,
+  RedisPresenceSubscriber,
+  type Presence,
+} from "./state.js";
 
 const redisUrl = process.env["REDIS_URL"] ?? "redis://localhost:6379";
 const stores: RedisPresenceStore[] = [];
@@ -52,6 +58,30 @@ describe("presence store (§13.4)", () => {
       expect(await got).toEqual({ ...value, participant_id: "p_a", expires_at });
     } finally {
       sub.disconnect();
+    }
+  });
+
+  it("a subscriber gets each room's updates, drops what isn't a record, and stops when asked", async () => {
+    const s = await store();
+    const sub = new RedisPresenceSubscriber(redisUrl);
+    const room = newId("room");
+    const got: Presence[] = [];
+    try {
+      const stop = await sub.subscribe(room, (record) => got.push(record));
+      const raw = new Redis(redisUrl);
+      await raw.publish(presenceChannel(room), "not json");
+      await raw.publish(presenceChannel(room), JSON.stringify({ participant_id: "p_x" }));
+      raw.disconnect();
+      await s.update(newId("room"), "p_other_room", value);
+      const expires_at = await s.update(room, "p_a", value);
+      await expect.poll(() => got.length).toBe(1);
+      expect(got[0]).toEqual({ ...value, participant_id: "p_a", expires_at });
+      await stop();
+      await s.update(room, "p_a", { ...value, status: "idle" });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(got).toHaveLength(1);
+    } finally {
+      await sub.close();
     }
   });
 

@@ -4,6 +4,8 @@ export { TransportError, type FetchLike, type RetryOptions } from "./http.js";
 export {
   RoomSocket,
   Subscription,
+  type PresenceRecord,
+  type PresenceUpdate,
   type SubscribeOptions,
   type WebSocketCtor,
   type WebSocketLike,

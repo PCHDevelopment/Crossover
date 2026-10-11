@@ -2,6 +2,7 @@ import { Redis, type RedisOptions } from "ioredis";
 import { CrossoverError } from "@crossover/protocol";
 import { z } from "zod";
 import type { CommandContext, Dispatcher } from "../../dispatcher.js";
+import { RedisRoomFanout } from "../../publisher.js";
 
 /** A presence record lives this long unless refreshed; clients re-send every 15 s (§21). */
 export const PRESENCE_TTL_MS = 45_000;
@@ -124,6 +125,30 @@ export class RedisPresenceStore implements PresenceStore {
   async close(): Promise<void> {
     if (this.ownsClient) this.redis.disconnect();
   }
+}
+
+/** Receives a room's presence updates as they are published (best effort, like events). */
+export interface PresenceSubscriber {
+  subscribe(roomId: string, handler: (record: Presence) => void): Promise<() => Promise<void>>;
+}
+
+/** Presence updates from Redis, one subscriber connection per node. */
+export class RedisPresenceSubscriber
+  extends RedisRoomFanout<Presence>
+  implements PresenceSubscriber
+{
+  constructor(url: string, options: RedisOptions = {}) {
+    super(url, presenceChannel, parsePresence, options);
+  }
+}
+
+function parsePresence(raw: string): Presence | undefined {
+  const record = JSON.parse(raw) as Partial<Presence> | null;
+  return typeof record?.participant_id === "string" &&
+    typeof record.expires_at === "string" &&
+    Array.isArray(record.open_files)
+    ? (record as Presence)
+    : undefined;
 }
 
 /**

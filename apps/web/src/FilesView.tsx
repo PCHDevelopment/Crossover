@@ -11,12 +11,24 @@ import {
   type Draft,
 } from "./draft.js";
 import { monaco } from "./monaco.js";
+import {
+  colorOf,
+  cursorsOn,
+  PresenceSender,
+  viewersByPath,
+  type OwnPresence,
+  type PresenceMap,
+} from "./presence.js";
 
 /**
  * The Files tab (§13, T1105a): a tree from `workspace.list`, a Monaco editor, and one draft per
  * opened file. Drafts flush as `EDITOR` ChangeSets on the §13.2 timers, on Ctrl/Cmd+S, when
  * switching files and when the tab is hidden; someone else's ChangeSet on an open file replaces,
  * rebases or flags the buffer (§13.3). Conflicts get a banner; the merge view is T1105c.
+ *
+ * Presence (§13.4, T1105b): this tab reports its open files and cursor, and everyone else's
+ * cursors and selections on the open file are drawn in their colour, named on hover; the tree
+ * marks the files others have open.
  */
 
 interface Entry {
@@ -44,8 +56,11 @@ const name = (path: string) => path.slice(path.lastIndexOf("/") + 1);
 export default function FilesView(props: {
   room: RoomClient;
   onEvent: (listener: (event: SdkEvent) => void) => () => void;
+  presence: PresenceMap;
+  selfId: string;
+  nameOf: (participantId: string) => string;
 }) {
-  const { room, onEvent } = props;
+  const { room, onEvent, presence, selfId, nameOf } = props;
   const [dirs, setDirs] = useState(new Map<string, Entry[]>());
   const [expanded, setExpanded] = useState(new Set<string>([""]));
   const [current, setCurrent] = useState<string>();
@@ -61,6 +76,42 @@ export default function FilesView(props: {
   const requested = useRef(new Set<string>());
   const loaded = useRef(new Set<string>());
   const applying = useRef(false);
+  const sender = useRef<PresenceSender>(undefined);
+  const remote = useRef<monaco.editor.IEditorDecorationsCollection>(undefined);
+
+  /** Tell the room which files are open here and where the cursor is. */
+  const report = useCallback(() => {
+    const ed = editor.current;
+    const path = ed?.getModel()?.uri.path.slice(1);
+    const selection = ed?.getSelection();
+    const value: OwnPresence = {
+      status: "active",
+      // The file in front last: it is the one kept if more than the limit are open.
+      open_files: [
+        ...[...models.current.keys()].filter((p) => p !== path),
+        ...(path ? [path] : []),
+      ],
+      cursor:
+        path && selection
+          ? {
+              path,
+              line: selection.positionLineNumber,
+              column: selection.positionColumn,
+              ...(selection.isEmpty()
+                ? {}
+                : {
+                    selection: {
+                      start_line: selection.startLineNumber,
+                      start_column: selection.startColumn,
+                      end_line: selection.endLineNumber,
+                      end_column: selection.endColumn,
+                    },
+                  }),
+            }
+          : null,
+    };
+    sender.current?.set(value);
+  }, []);
 
   const setDraft = useCallback((draft: Draft) => {
     drafts.current.set(draft.path, draft);
@@ -166,6 +217,10 @@ export default function FilesView(props: {
       minimap: { enabled: false },
     });
     editor.current = created;
+    remote.current = created.createDecorationsCollection();
+    const own = new PresenceSender((value) => room.api.presence.update(value));
+    sender.current = own;
+    created.onDidChangeCursorSelection(report);
     created.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
       const path = created.getModel()?.uri.path.slice(1);
       if (path) void flush(path);
@@ -179,6 +234,7 @@ export default function FilesView(props: {
     const ownedModels = models.current;
     const ownedTimers = timers.current;
     return () => {
+      own.stop({ status: "active", open_files: [], cursor: null });
       flushAll();
       document.removeEventListener("visibilitychange", hidden);
       window.removeEventListener("pagehide", flushAll);
@@ -187,7 +243,38 @@ export default function FilesView(props: {
       for (const model of ownedModels.values()) model.dispose();
       ownedModels.clear();
     };
-  }, [flush, flushAll, list]);
+  }, [flush, flushAll, list, room, report]);
+
+  // Everyone else's cursor and selection on the file in front.
+  useEffect(() => {
+    if (!current) {
+      remote.current?.clear();
+      return;
+    }
+    const decorations: monaco.editor.IModelDeltaDecoration[] = [];
+    for (const c of cursorsOn(presence, current, selfId, nameOf)) {
+      const hoverMessage = { value: c.name };
+      decorations.push({
+        range: new monaco.Range(c.line, c.column, c.line, c.column),
+        options: {
+          beforeContentClassName: `remote-caret presence-${c.color}`,
+          hoverMessage,
+          stickiness: monaco.editor.TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges,
+        },
+      });
+      if (c.selection)
+        decorations.push({
+          range: new monaco.Range(
+            c.selection.start_line,
+            c.selection.start_column,
+            c.selection.end_line,
+            c.selection.end_column,
+          ),
+          options: { className: `remote-selection presence-${c.color}`, hoverMessage },
+        });
+    }
+    remote.current?.set(decorations);
+  }, [presence, current, selfId, nameOf]);
 
   // Someone's ChangeSet landed: re-read every open file, one event at a time.
   useEffect(() => {
@@ -250,6 +337,7 @@ export default function FilesView(props: {
     }
     editor.current?.setModel(model);
     setCurrent(path);
+    report();
   };
 
   const toggle = (dir: string) => {
@@ -262,6 +350,7 @@ export default function FilesView(props: {
     setExpanded(next);
   };
 
+  const viewers = viewersByPath(presence, selfId);
   const tree = (dir: string, depth: number): ReactNode =>
     (dirs.get(dir) ?? []).map((entry) => {
       const draft = drafts.current.get(entry.path);
@@ -284,6 +373,14 @@ export default function FilesView(props: {
             >
               {name(entry.path)}
               {draft && isDirty(draft) && <span title="Unsaved draft"> ●</span>}
+              {(viewers.get(entry.path) ?? []).map((id) => (
+                <span
+                  key={id}
+                  className={`presence-dot presence-${colorOf(id)}`}
+                  data-testid="file-viewer"
+                  title={`${nameOf(id)} has this open`}
+                />
+              ))}
             </button>
           ) : (
             <span className="muted">{name(entry.path)}</span>

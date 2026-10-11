@@ -10,6 +10,7 @@ import {
   type Task,
 } from "./model.js";
 import { openRoom, type OpenRoom } from "./session.js";
+import { applyPresence, livePresence, type PresenceMap } from "./presence.js";
 
 // Monaco is large: it loads with the Files tab, not with the room.
 const FilesView = lazy(() => import("./FilesView.js"));
@@ -37,6 +38,7 @@ export function RoomView(props: {
   const [live, setLive] = useState<string>("connecting");
   const [tab, setTab] = useState<Tab>("overview");
   const [notice, setNotice] = useState<string>();
+  const [presence, setPresence] = useState<PresenceMap>(new Map());
   const roomRef = useRef<RoomClient>(undefined);
   const listeners = useRef(new Set<(event: SdkEvent) => void>());
   const onEvent = useCallback((listener: (event: SdkEvent) => void) => {
@@ -108,11 +110,15 @@ export function RoomView(props: {
           for (const listener of listeners.current) listener(event);
         },
         onError: (err) => setError(message(err)),
+        onPresence: (update) => setPresence((p) => applyPresence(p, update)),
       });
     })();
+    // Records aren't announced when they expire: drop them as their time passes.
+    const expiry = setInterval(() => setPresence((p) => livePresence(p, Date.now())), 5_000);
     return () => {
       closed = true;
       clearTimeout(timer);
+      clearInterval(expiry);
       sub?.close();
     };
   }, [open, reload]);
@@ -252,7 +258,13 @@ export function RoomView(props: {
       )}
       {tab === "files" && (
         <Suspense fallback={<p className="muted">Loading editor…</p>}>
-          <FilesView room={open.room} onEvent={onEvent} />
+          <FilesView
+            room={open.room}
+            onEvent={onEvent}
+            presence={presence}
+            selfId={me.participant_id}
+            nameOf={names}
+          />
         </Suspense>
       )}
       {tab === "activity" && (

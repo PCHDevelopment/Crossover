@@ -356,6 +356,90 @@ describe.skipIf(!executablePath && !inCi)("web app in a browser", () => {
     expect(problems.filter((p) => !p.includes("status of 403"))).toEqual([]);
   }, 120_000);
 
+  it("presence (T1105b): someone else's cursor, selection and open file show in the editor, and this tab's cursor reaches the room", async () => {
+    const page: Page = await browser!.newPage();
+    const problems: string[] = [];
+    page.on("pageerror", (e) => problems.push(`pageerror: ${e.message}`));
+    page.on("console", (m) => {
+      if (m.type() === "error") problems.push(`console: ${m.text()} @ ${m.location().url}`);
+    });
+    await page.goto(baseUrl);
+    await page.getByTestId("login-name").fill("Peter");
+    await page.getByTestId("login-submit").click();
+    await page.getByTestId("room-name").fill("Presence room");
+    await page.getByTestId("room-objective").fill("See each other");
+    await page.getByTestId("room-create").click();
+    await page.getByTestId("room-title").waitFor();
+    const roomId = /\/rooms\/([^/]+)/.exec(new URL(page.url()).pathname)![1]!;
+
+    const client = new CrossoverClient({ baseUrl });
+    const login = await client.devLogin({ subject: "Peter", display_name: "Peter" });
+    const owner = client.room(
+      roomId,
+      (await client.roomSession(login.session_token, roomId)).tokens.access_token,
+    );
+    await owner.api.workspace.apply_changeset({
+      source: "API",
+      message: "Seed",
+      base_workspace_revision: 0,
+      operations: [{ type: "create", path: "src/notes.txt", content: "one\ntwo\nthree\n" }],
+    });
+    const invite = await owner.api.room.invite<unknown>({ role: "DEVELOPER" });
+    const joined = await client.join(roomId, {
+      token: (invite.one_time as { token: string }).token,
+      manifest: manifest("Pair"),
+    });
+    const pair = client.room(roomId, joined.tokens.access_token);
+    const pairId = (joined as unknown as { participant_id: string }).participant_id;
+
+    await page.getByTestId("tab-files").click();
+    await page.getByTestId("tree-dir").click();
+    await page.locator('[data-path="src/notes.txt"]').click();
+    const lines = page.locator(".monaco-editor .view-lines");
+    await expect.poll(async () => lines.textContent()).toContain("three");
+
+    // Pair opens the same file and selects part of line 2.
+    await pair.api.presence.update({
+      open_files: ["src/notes.txt"],
+      cursor: {
+        path: "src/notes.txt",
+        line: 2,
+        column: 3,
+        selection: { start_line: 2, start_column: 1, end_line: 2, end_column: 3 },
+      },
+    });
+    await page.locator(".remote-caret").waitFor();
+    await page.locator(".remote-selection").first().waitFor();
+    expect(
+      await page
+        .locator('[data-path="src/notes.txt"] [data-testid="file-viewer"]')
+        .getAttribute("title"),
+    ).toBe("Pair has this open");
+
+    // Peter puts the cursor on line 3: Pair sees it in presence.
+    await lines.click();
+    await page.keyboard.press("Control+End");
+    const peter = async () =>
+      (
+        await pair.api.presence.list<{
+          presence: { participant_id: string; cursor: { path: string; line: number } | null }[];
+        }>()
+      ).response.presence.find((p) => p.participant_id !== pairId);
+    await expect
+      .poll(async () => (await peter())?.cursor)
+      .toMatchObject({ path: "src/notes.txt", line: 4 });
+
+    // Pair closes the file: the caret and the tree marker go.
+    await pair.api.presence.update({ open_files: [] });
+    await page.locator(".remote-caret").waitFor({ state: "detached" });
+    await page.locator('[data-testid="file-viewer"]').waitFor({ state: "detached" });
+
+    // Leaving the Files tab tells the room no files are open here.
+    await page.getByTestId("tab-overview").click();
+    await expect.poll(async () => (await peter())?.cursor ?? null).toBeNull();
+    expect(problems).toEqual([]);
+  }, 120_000);
+
   it("the editor never overwrites someone else's change: a save after an overlapping change comes back as a Conflict", async () => {
     const page: Page = await browser!.newPage();
     const problems: string[] = [];
