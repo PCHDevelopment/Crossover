@@ -156,6 +156,12 @@ describe.skipIf(!executablePath && !inCi)("web app in a browser", () => {
   it("login, create a room, agents join and a lead is appointed, tasks appear on the board, a denial shows in Activity, pause and resume work", async () => {
     const page: Page = await browser!.newPage();
     const problems: string[] = [];
+    const confirmationMessages: string[] = [];
+    let acceptDialogs = true;
+    page.on("dialog", (dialog) => {
+      confirmationMessages.push(dialog.message());
+      void (acceptDialogs ? dialog.accept() : dialog.dismiss());
+    });
     page.on("pageerror", (e) => problems.push(`pageerror: ${e.message}`));
     page.on("console", (m) => {
       if (m.type() === "error") problems.push(`console: ${m.text()} @ ${m.location().url}`);
@@ -232,10 +238,12 @@ describe.skipIf(!executablePath && !inCi)("web app in a browser", () => {
     await page.getByTestId("tab-setup").click();
     await expect.poll(async () => page.getByTestId("invite-token").count()).toBe(0);
 
-    const joinAgent = async (name: string, token?: string) => {
-      const invite = token
-        ? undefined
-        : await owner.api.room.invite<{ role: string }>({ role: "DEVELOPER" });
+    const joinAgent = async (
+      name: string,
+      token?: string,
+      role: "DEVELOPER" | "OBSERVER" = "DEVELOPER",
+    ) => {
+      const invite = token ? undefined : await owner.api.room.invite<{ role: string }>({ role });
       const joined = await client.join(roomId, {
         token: token ?? (invite!.one_time as { token: string }).token,
         manifest: manifest(name),
@@ -325,6 +333,84 @@ describe.skipIf(!executablePath && !inCi)("web app in a browser", () => {
     await expect
       .poll(async () => row.getByTestId("participant-status").textContent())
       .toBe("ACTIVE");
+
+    // T1404: governance controls are owner-only and use existing room commands.
+    const guestLogin = await client.devLogin({ subject: "RoomGuest", display_name: "RoomGuest" });
+    const guestUser = await db.pool.query<{ id: string }>(
+      "SELECT id FROM users WHERE provider = 'dev' AND provider_subject = $1",
+      ["RoomGuest"],
+    );
+    const guestId = `part_web_guest_${process.pid}`;
+    await db.pool.query(
+      `INSERT INTO participants (id, room_id, kind, display_name, authority, role, status, user_id, joined_at)
+       VALUES ($1, $2, 'HUMAN', 'RoomGuest', 'MEMBER', 'OBSERVER', 'ACTIVE', $3, clock_timestamp())`,
+      [guestId, roomId, guestUser.rows[0]!.id],
+    );
+    const guestRoom = client.room(
+      roomId,
+      (await client.roomSession(guestLogin.session_token, roomId)).tokens.access_token,
+    );
+    await expect(guestRoom.api.room.freeze({})).rejects.toMatchObject({ code: "FORBIDDEN" });
+    const guestPage = await browser!.newPage();
+    await guestPage.goto(baseUrl);
+    await guestPage.evaluate(
+      (token) => sessionStorage.setItem("crossover.session", token),
+      guestLogin.session_token,
+    );
+    await guestPage.goto(`${baseUrl}/rooms/${roomId}`);
+    await guestPage.getByTestId("room-title").waitFor();
+    await expect.poll(() => guestPage.getByTestId("tab-owner-controls").count()).toBe(0);
+
+    const observer = await joinAgent("ObserverAgent", undefined, "OBSERVER");
+    await page.getByTestId("tab-owner-controls").click();
+    await page.getByTestId("owner-controls").waitFor();
+
+    await page.getByTestId("egress-hosts").fill("registry.acme.test\n*.packages.example");
+    await page.getByTestId("save-egress").click();
+    await expect
+      .poll(() => page.getByTestId("owner-controls-notice").textContent())
+      .toContain("complete");
+    await owner.api.room.set_egress_allowlist({ hosts: ["live.example"] });
+    await expect.poll(() => page.getByTestId("egress-hosts").inputValue()).toBe("live.example");
+    await page.getByTestId("protected-paths").fill("infra/release/**\n.github/workflows/**");
+    await page.getByTestId("save-protected-paths").click();
+    await expect
+      .poll(() => page.getByTestId("owner-controls-notice").textContent())
+      .toContain("complete");
+    const settings = (
+      await owner.api.room.get_state<{
+        sections: { room: { settings: Record<string, unknown> } };
+      }>({ view: "summary" })
+    ).response.sections.room.settings;
+    expect(settings["egress_allowlist"]).toEqual(["live.example"]);
+    expect(settings["protected_paths"]).toEqual([".github/workflows/**", "infra/release/**"]);
+
+    const observerRow = page.getByTestId("owner-participant").filter({ hasText: "ObserverAgent" });
+    acceptDialogs = false;
+    await observerRow.getByTestId("remove-participant").click();
+    await expect.poll(() => observerRow.count()).toBe(1);
+    acceptDialogs = true;
+    await observerRow.getByTestId("remove-participant").click();
+    await expect.poll(() => observerRow.count()).toBe(0);
+    const removed = await db.pool.query<{ status: string }>(
+      "SELECT status FROM participants WHERE id = $1",
+      [observer.id],
+    );
+    expect(removed.rows[0]?.status).toBe("REMOVED");
+
+    await page.getByTestId("freeze-room").click();
+    await expect.poll(() => page.getByTestId("owner-room-status").textContent()).toBe("PAUSED");
+    await page.getByTestId("resume-room").click();
+    await expect.poll(() => page.getByTestId("owner-room-status").textContent()).toBe("ACTIVE");
+    expect(confirmationMessages).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("registry.acme.test, *.packages.example"),
+        expect.stringContaining("infra/release/**, .github/workflows/**"),
+        expect.stringContaining("ObserverAgent"),
+        expect.stringContaining("Project Alpha"),
+      ]),
+    );
+    await guestPage.close();
 
     expect(problems).toEqual([]);
     await page.getByTestId("sign-out").click();
