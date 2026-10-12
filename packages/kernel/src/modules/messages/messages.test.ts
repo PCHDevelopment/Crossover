@@ -371,3 +371,93 @@ describe("messages.list", () => {
     ]);
   });
 });
+
+describe("secret scanning on messages (T902)", () => {
+  // A real private-key block (high confidence) and a high-entropy assignment
+  // (low confidence). Neither value may ever appear in an error, event, or
+  // inbox summary — only the rule, position and fingerprint.
+  const PRIVATE_KEY = [
+    "-----BEGIN PRIVATE KEY-----",
+    "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7",
+    "-----END PRIVATE KEY-----",
+  ].join("\n");
+  const LOW_ENTROPY = "api_key = aB3dE5gH7jK9mN1pQ3rS5tU7vW9xY2zA";
+
+  it("messages.send rejects a private-key block with secret_detected; the value is in no error, event, inbox or row", async () => {
+    const s = await setup();
+    const err = await rejects(send(s, s.a, { body: PRIVATE_KEY }), "VALIDATION");
+    expect(err.details).toMatchObject({ reason: "secret_detected" });
+    const findings = (err.details as { findings: Array<Record<string, unknown>> }).findings;
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({
+      rule: "private_key_block",
+      confidence: "high",
+      location: { kind: "message", field: "body" },
+    });
+    // The matched value appears nowhere: not in the error, not in any event,
+    // not in any inbox summary, and no message row was written.
+    const serialized = JSON.stringify({ err, findings });
+    expect(serialized).not.toContain("MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7");
+    const { rows: msgs } = await pool.query("SELECT * FROM messages WHERE room_id = $1", [s.room]);
+    expect(msgs).toHaveLength(0);
+    const { rows: inbox } = await pool.query("SELECT summary FROM inbox_items WHERE room_id = $1", [
+      s.room,
+    ]);
+    for (const r of inbox)
+      expect(r.summary).not.toContain("MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7");
+  });
+
+  it("messages.send flags a low-confidence match: SECRET_SCAN to author and owner, location only in the summary", async () => {
+    const s = await setup();
+    // The room owner must be a real participant for the inbox FK; use s.b (not
+    // the author s.a) so the author and owner are two distinct recipients.
+    await pool.query("UPDATE rooms SET owner_id = $2 WHERE id = $1", [s.room, s.b.participant_id]);
+    const out = await send(s, s.a, { body: LOW_ENTROPY });
+    const m = out.response as MessageView;
+    expect(m.body).toBe(LOW_ENTROPY); // flagged, not rejected
+    const { rows } = await pool.query(
+      `SELECT participant_id, summary FROM inbox_items
+       WHERE room_id = $1 AND kind = 'SECRET_SCAN' ORDER BY participant_id`,
+      [s.room],
+    );
+    // The author (s.a) and the room owner (s.b) each get one item.
+    expect(rows.map((r) => r.participant_id).sort()).toEqual(
+      [s.a.participant_id, s.b.participant_id].sort(),
+    );
+    for (const r of rows) {
+      expect(r.summary).toContain(`message ${m.id}`);
+      expect(r.summary).toContain("line 1");
+      expect(r.summary).toContain("high_entropy_assignment");
+      expect(r.summary).not.toContain("aB3dE5gH7jK9mN1pQ3rS5tU7vW9xY2zA");
+    }
+  });
+
+  it("a body at the 32 KiB limit with the key on its last lines is still caught", async () => {
+    const s = await setup();
+    const filler = "Status update, nothing secret here.\n";
+    const room = MAX_BODY_BYTES - Buffer.byteLength(PRIVATE_KEY);
+    const head = filler.repeat(Math.floor(room / filler.length));
+    const body = head + "x".repeat(room - head.length) + PRIVATE_KEY;
+    expect(Buffer.byteLength(body)).toBe(MAX_BODY_BYTES);
+    const err = await rejects(send(s, s.a, { body }), "VALIDATION");
+    const findings = (err.details as { findings: Array<Record<string, unknown>> }).findings;
+    expect(findings).toEqual([
+      expect.objectContaining({
+        rule: "private_key_block",
+        line: body.split("\n").length - 2,
+      }),
+    ]);
+  });
+
+  it("messages.edit rejects a new body that gains a private-key block", async () => {
+    const s = await setup();
+    const m = (await send(s, s.a, { body: "before" })).response as MessageView;
+    const err = await rejects(
+      s.d.dispatch(s.a, cmd("messages.edit", { message_id: m.id, body: `now: ${PRIVATE_KEY}` })),
+      "VALIDATION",
+    );
+    expect(err.details).toMatchObject({ reason: "secret_detected" });
+    const { rows } = await pool.query("SELECT body FROM messages WHERE id = $1", [m.id]);
+    expect(rows[0].body).toBe("before"); // unchanged
+  });
+});

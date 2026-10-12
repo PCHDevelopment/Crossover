@@ -262,3 +262,110 @@ describe("memory.put", () => {
     await rejects(put(s, s.dev, { content_type: "text/plain" }), "VALIDATION");
   });
 });
+
+describe("secret scanning on memory (T902)", () => {
+  const PRIVATE_KEY = [
+    "-----BEGIN PRIVATE KEY-----",
+    "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7",
+    "-----END PRIVATE KEY-----",
+  ].join("\n");
+  const LOW_ENTROPY = "api_key = aB3dE5gH7jK9mN1pQ3rS5tU7vW9xY2zA";
+
+  it("memory.put rejects a private-key block with secret_detected; the value is in no error, event, inbox or row", async () => {
+    const s = await setup();
+    const err = await rejects(
+      put(s, s.dev, { key: "secrets/deploy", value: PRIVATE_KEY }),
+      "VALIDATION",
+    );
+    expect(err.details).toMatchObject({ reason: "secret_detected" });
+    const findings = (err.details as { findings: Array<Record<string, unknown>> }).findings;
+    expect(findings[0]).toMatchObject({
+      rule: "private_key_block",
+      confidence: "high",
+      location: { kind: "memory", key: "secrets/deploy" },
+    });
+    // The matched value appears nowhere: not in the error, not in any inbox
+    // summary, and no memory revision was written.
+    expect(JSON.stringify({ err, findings })).not.toContain(
+      "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7",
+    );
+    const { rows: revs } = await pool.query(
+      "SELECT value FROM memory_revisions WHERE room_id = $1 AND key = $2",
+      [s.room, "secrets/deploy"],
+    );
+    expect(revs).toHaveLength(0);
+    const { rows: inbox } = await pool.query("SELECT summary FROM inbox_items WHERE room_id = $1", [
+      s.room,
+    ]);
+    for (const r of inbox)
+      expect(r.summary).not.toContain("MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7");
+  });
+
+  it("memory.put flags a low-confidence match: SECRET_SCAN to author and owner, location only in the summary", async () => {
+    const s = await setup();
+    // The room owner must be a real participant for the inbox FK; use s.dev2
+    // (not the author s.dev) so the author and owner are two distinct recipients.
+    await pool.query("UPDATE rooms SET owner_id = $2 WHERE id = $1", [
+      s.room,
+      s.dev2.participant_id,
+    ]);
+    const out = await put(s, s.dev, { key: "creds/api", value: LOW_ENTROPY });
+    expect((out.response as MemoryEntryView).value).toBe(LOW_ENTROPY); // flagged, not rejected
+    const { rows } = await pool.query(
+      `SELECT participant_id, summary FROM inbox_items
+       WHERE room_id = $1 AND kind = 'SECRET_SCAN' ORDER BY participant_id`,
+      [s.room],
+    );
+    expect(rows.map((r) => r.participant_id).sort()).toEqual(
+      [s.dev.participant_id, s.dev2.participant_id].sort(),
+    );
+    for (const r of rows) {
+      expect(r.summary).toContain("memory key creds/api");
+      expect(r.summary).toContain("line 1");
+      expect(r.summary).toContain("high_entropy_assignment");
+      expect(r.summary).not.toContain("aB3dE5gH7jK9mN1pQ3rS5tU7vW9xY2zA");
+    }
+  });
+});
+
+describe("secret scanning at the memory value limit (T902)", () => {
+  const PRIVATE_KEY = [
+    "-----BEGIN PRIVATE KEY-----",
+    "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7",
+    "-----END PRIVATE KEY-----",
+  ].join("\n");
+  const fill = (unit: string) =>
+    unit.repeat(Math.floor(MAX_MEMORY_VALUE_BYTES / Buffer.byteLength(unit)));
+
+  it("a 64 KiB value with the key at its end is rejected", async () => {
+    const s = await setup();
+    const head = fill("notes ").slice(0, MAX_MEMORY_VALUE_BYTES - PRIVATE_KEY.length - 1);
+    const value = `${head}\n${PRIVATE_KEY}`;
+    expect(Buffer.byteLength(value)).toBe(MAX_MEMORY_VALUE_BYTES);
+    const err = await rejects(put(s, s.dev, { key: "big/notes", value }), "VALIDATION");
+    expect(err.details).toMatchObject({
+      reason: "secret_detected",
+      findings: [expect.objectContaining({ rule: "private_key_block", line: 2 })],
+    });
+  });
+
+  it("a worst-case 64 KiB value is scanned in under 250 ms", async () => {
+    const s = await setup();
+    // Inputs that make line- and token-based rules do the most work: unterminated key headers,
+    // assignments with no value, and one unbroken high-entropy token.
+    const cases = {
+      unterminated_headers: fill("-----BEGIN PRIVATE KEY-----\n"),
+      empty_assignments: fill("api_key = \n"),
+      one_long_token: fill("aB3dE5gH7jK9mN1p"),
+    };
+    for (const [name, value] of Object.entries(cases)) {
+      expect(Buffer.byteLength(value), name).toBeLessThanOrEqual(MAX_MEMORY_VALUE_BYTES);
+      const started = performance.now();
+      await put(s, s.dev, { key: `worst/${name.replaceAll("_", "-")}`, value }).catch(
+        () => undefined,
+      );
+      const elapsed = performance.now() - started;
+      expect(elapsed, `${name}: ${elapsed.toFixed(0)} ms`).toBeLessThan(250);
+    }
+  });
+});
