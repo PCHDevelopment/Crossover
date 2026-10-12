@@ -26,7 +26,7 @@ Conventions are in `docs/ENGINEERING.md`. Section references (§) point to `docs
 | M11 Clients (§27, §29)                | T1101–T1106 | S1 (T1102 → Q1)                                             |
 | M12 Plugins (§21.4–21.5)              | T1201–T1206 | S1 (T1201, moved in Review 5), S2 (T1202–T1206)             |
 | M13 Lessons from building (§34)       | T1301–T1303 | S1                                                          |
-| M14 Demo-ready web app (Review 7)     | T1401–T1408 | S2 (T1401–T1408; T1402 moved from Q1)                       |
+| M14 Demo-ready web app (Review 7)     | T1401–T1409 | S2 (T1401–T1409; T1402 moved from Q1)                       |
 
 **Start here:** S1 → T101, T105, T114 (independent). S2 → T501, T505 (only need the scaffold).
 
@@ -1433,5 +1433,20 @@ Tests:
 
 - A member or observer is `FORBIDDEN`; an image outside the allowlist is rejected; a null command turns health gating off.
 - In the browser: import, accept the suggestion, apply a ChangeSet, see a health run start.
+
+Must merge before T1406.
+
+### T1409 · Live inbox delivery event — S2
+
+`deliverInbox` is called from 11 modules (tasks, approvals, messages, leases, manifests, secret scan, workspace apply, conflicts, health) and emits nothing, so an open inbox only updates on reload.
+
+- Emit `inbox.delivered` from `deliverInbox` itself, with payload `{ recipient_id, item_id, kind }` only. No summary and no ref, so nothing private enters the shared event stream.
+- Add it to the event list and the ARCHITECTURE events section.
+- The web reloads `inbox.list` only when `recipient_id` is the viewer.
+
+Tests:
+
+- One test per producer family shows the event fires.
+- In the browser, a non-health item (for example `ASSIGNMENT`) appears in the open inbox without a reload.
 
 Must merge before T1406.
