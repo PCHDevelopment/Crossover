@@ -449,6 +449,37 @@ describe("secret scanning on messages (T902)", () => {
     ]);
   });
 
+  it("editing a message that still has the same low-confidence match doesn't flag it again until the first flag is acknowledged", async () => {
+    const s = await setup();
+    await pool.query("UPDATE rooms SET owner_id = $2 WHERE id = $1", [s.room, s.b.participant_id]);
+    const m = (await send(s, s.a, { body: LOW_ENTROPY })).response as MessageView;
+    const flags = async () =>
+      (
+        await pool.query(
+          "SELECT count(*)::int AS n FROM inbox_items WHERE room_id = $1 AND kind = 'SECRET_SCAN'",
+          [s.room],
+        )
+      ).rows[0].n as number;
+    expect(await flags()).toBe(2); // author and owner
+
+    // A typo fix elsewhere in the body: the same match on the same line, so nothing new.
+    await s.d.dispatch(
+      s.a,
+      cmd("messages.edit", { message_id: m.id, body: `${LOW_ENTROPY} # staging` }),
+    );
+    expect(await flags()).toBe(2);
+
+    // Once both have acknowledged the flag, a later edit that still has it raises it again.
+    await pool.query("UPDATE inbox_items SET acked_at = clock_timestamp() WHERE room_id = $1", [
+      s.room,
+    ]);
+    await s.d.dispatch(
+      s.a,
+      cmd("messages.edit", { message_id: m.id, body: `${LOW_ENTROPY} # prod` }),
+    );
+    expect(await flags()).toBe(4);
+  });
+
   it("messages.edit rejects a new body that gains a private-key block", async () => {
     const s = await setup();
     const m = (await send(s, s.a, { body: "before" })).response as MessageView;
