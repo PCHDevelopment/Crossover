@@ -1,0 +1,358 @@
+import { useEffect, useState, type FormEvent } from "react";
+import type { RoomClient, SdkEvent } from "@crossover/sdk";
+import type { Participant } from "./model.js";
+
+interface ImportResponse {
+  applied_revision: number;
+  file_count: number;
+  suggested_health_command: {
+    command: string;
+    source: string;
+    reason: string;
+    needs: string;
+  } | null;
+  upstream: { url: string; branch: string; last_synced_sha: string };
+}
+
+interface InviteResponse {
+  invite_id: string;
+  role: InviteRole;
+  expires_at: string;
+}
+
+type InviteRole = "DEVELOPER" | "REVIEWER" | "OBSERVER";
+type EventListener = (listener: (event: SdkEvent) => void) => () => void;
+
+export function RoomSetupView(props: {
+  room: RoomClient;
+  roomId: string;
+  participants: Participant[];
+  leadParticipantId: string | null;
+  mayImport: boolean;
+  mayInvite: boolean;
+  mayAppointLead: boolean;
+  onEvent: EventListener;
+}) {
+  const {
+    room,
+    roomId,
+    participants,
+    leadParticipantId,
+    mayImport,
+    mayInvite,
+    mayAppointLead,
+    onEvent,
+  } = props;
+  const [repositoryUrl, setRepositoryUrl] = useState("");
+  const [branch, setBranch] = useState("main");
+  const [importBusy, setImportBusy] = useState(false);
+  const [importStatus, setImportStatus] = useState<string>();
+  const [importError, setImportError] = useState<string>();
+  const [imported, setImported] = useState<ImportResponse>();
+  const [inviteRole, setInviteRole] = useState<InviteRole>("DEVELOPER");
+  const [inviteBusy, setInviteBusy] = useState(false);
+  const [inviteError, setInviteError] = useState<string>();
+  const [inviteToken, setInviteToken] = useState<string>();
+  const [inviteExpiresAt, setInviteExpiresAt] = useState<string>();
+  const [copied, setCopied] = useState(false);
+  const [leadParticipant, setLeadParticipant] = useState("");
+  const [leadBusy, setLeadBusy] = useState(false);
+  const [leadNotice, setLeadNotice] = useState<string>();
+  const [leadError, setLeadError] = useState<string>();
+
+  useEffect(
+    () =>
+      onEvent((event) => {
+        if (event.type === "workspace.changeset.applied" && event.actor_id === "system:upstream") {
+          setImportStatus("Repository files applied; waiting for the sync confirmation…");
+        } else if (
+          event.type === "workspace.upstream_synced" &&
+          event.payload["imported"] === true
+        ) {
+          const revision = event.payload["last_synced_room_revision"];
+          setImportStatus(
+            typeof revision === "number"
+              ? `Repository import synced at revision ${revision}.`
+              : "Repository import synced.",
+          );
+        }
+      }),
+    [onEvent],
+  );
+
+  const importRepository = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setImportBusy(true);
+    setImportError(undefined);
+    setImported(undefined);
+    setImportStatus("Fetching repository…");
+    try {
+      const result = await room.api.git.import<ImportResponse>({
+        url: repositoryUrl.trim(),
+        branch: branch.trim(),
+      });
+      setImported(result.response);
+      setImportStatus((current) =>
+        current?.startsWith("Repository import synced")
+          ? current
+          : `Imported ${result.response.file_count} files at revision ${result.response.applied_revision}.`,
+      );
+    } catch (error) {
+      setImportStatus(undefined);
+      setImportError(error instanceof Error ? error.message : "Repository import failed");
+    } finally {
+      setImportBusy(false);
+    }
+  };
+
+  const createInvite = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setInviteBusy(true);
+    setInviteError(undefined);
+    setInviteToken(undefined);
+    setInviteExpiresAt(undefined);
+    setCopied(false);
+    try {
+      const result = await room.api.room.invite<InviteResponse>({ role: inviteRole });
+      const token = (result.one_time as { token?: unknown } | undefined)?.token;
+      if (typeof token !== "string" || token.length === 0) {
+        throw new Error(
+          "The one-time invite token is unavailable. Create another invite; tokens cannot be retrieved later.",
+        );
+      }
+      setInviteToken(token);
+      setInviteExpiresAt(result.response.expires_at);
+    } catch (error) {
+      setInviteError(error instanceof Error ? error.message : "Invite creation failed");
+    } finally {
+      setInviteBusy(false);
+    }
+  };
+
+  const copyInvite = async () => {
+    if (!inviteToken) return;
+    try {
+      await navigator.clipboard.writeText(inviteToken);
+      setCopied(true);
+      setInviteError(undefined);
+    } catch {
+      setCopied(false);
+      setInviteError("Clipboard access failed. Select and copy the token manually.");
+    }
+  };
+
+  const hideInvite = () => {
+    setInviteToken(undefined);
+    setInviteExpiresAt(undefined);
+    setCopied(false);
+  };
+
+  const appointLead = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!leadParticipant) return;
+    setLeadBusy(true);
+    setLeadError(undefined);
+    setLeadNotice(undefined);
+    try {
+      await room.api.room.set_lead({ participant_id: leadParticipant });
+      const selected = participants.find((participant) => participant.id === leadParticipant);
+      setLeadNotice(`${selected?.display_name ?? "Participant"} is now the lead.`);
+      setLeadParticipant("");
+    } catch (error) {
+      setLeadError(error instanceof Error ? error.message : "Lead appointment failed");
+    } finally {
+      setLeadBusy(false);
+    }
+  };
+
+  const candidates = participants.filter(
+    (participant) => participant.status === "ACTIVE" && participant.id !== leadParticipantId,
+  );
+  const cliJoinExample = `read -r -s -p "Invite token: " CROSSOVER_INVITE_TOKEN
+printf '\\n' >&2
+printf '%s\\n' "$CROSSOVER_INVITE_TOKEN" | room join ${roomId} --invite-token-stdin --manifest agent.json
+unset CROSSOVER_INVITE_TOKEN`;
+  const typescriptJoinExample = `const token = process.env.CROSSOVER_INVITE_TOKEN;
+if (!token) throw new Error("CROSSOVER_INVITE_TOKEN is required");
+const joined = await client.join("${roomId}", { token, manifest });`;
+  const pythonJoinExample = `joined = await client.join(
+    "${roomId}", token=os.environ["CROSSOVER_INVITE_TOKEN"], manifest=manifest
+)`;
+  const mcpAccessTokenPlaceholder = "${CROSSOVER_ROOM_ACCESS_TOKEN}";
+  const mcpConfigExample = `{
+  "mcpServers": {
+    "crossover": {
+      "url": "${window.location.origin}/mcp",
+      "headers": {
+        "Authorization": "Bearer ${mcpAccessTokenPlaceholder}"
+      }
+    }
+  }
+}`;
+
+  return (
+    <section aria-label="Project setup" data-testid="project-setup">
+      <h2>Project setup</h2>
+      {mayImport && (
+        <section className="delivery-section" aria-label="Repository import">
+          <h3>Import a repository</h3>
+          <p className="muted">
+            Import a public GitHub repository into this room’s empty workspace.
+          </p>
+          <form onSubmit={(event) => void importRepository(event)}>
+            <label>
+              Repository HTTPS URL
+              <input
+                data-testid="import-url"
+                type="url"
+                value={repositoryUrl}
+                onChange={(event) => setRepositoryUrl(event.target.value)}
+                placeholder="https://github.com/owner/repository"
+                required
+              />
+            </label>
+            <label>
+              Branch
+              <input
+                data-testid="import-branch"
+                value={branch}
+                onChange={(event) => setBranch(event.target.value)}
+                maxLength={200}
+                required
+              />
+            </label>
+            <button data-testid="import-submit" disabled={importBusy}>
+              {importBusy ? "Importing…" : "Import repository"}
+            </button>
+          </form>
+          {importStatus && (
+            <p role="status" aria-live="polite" data-testid="import-status">
+              {importStatus}
+            </p>
+          )}
+          {importError && (
+            <p role="alert" className="error" data-testid="import-error">
+              {importError}
+            </p>
+          )}
+          {imported?.suggested_health_command && (
+            <p data-testid="health-command-suggestion">
+              Suggested health command (not applied):{" "}
+              <code>{imported.suggested_health_command.command}</code>
+              <span className="muted"> — {imported.suggested_health_command.reason}</span>
+            </p>
+          )}
+        </section>
+      )}
+
+      {mayInvite && (
+        <section className="delivery-section" aria-label="Invitations">
+          <h3>Invite a human or agent</h3>
+          <p className="muted">The one-time token can be used once with the selected room role.</p>
+          <form onSubmit={(event) => void createInvite(event)}>
+            <label>
+              Room role
+              <select
+                data-testid="invite-role"
+                value={inviteRole}
+                onChange={(event) => setInviteRole(event.target.value as InviteRole)}
+              >
+                <option value="DEVELOPER">Developer</option>
+                <option value="REVIEWER">Reviewer</option>
+                <option value="OBSERVER">Observer</option>
+              </select>
+            </label>
+            <button data-testid="invite-create" disabled={inviteBusy}>
+              {inviteBusy ? "Creating invite…" : "Create invite"}
+            </button>
+          </form>
+          {inviteToken && (
+            <div className="delivery-card" data-testid="invite-once">
+              <label>
+                One-time invite token
+                <input data-testid="invite-token" value={inviteToken} readOnly />
+              </label>
+              {inviteExpiresAt && (
+                <p className="muted">Expires {new Date(inviteExpiresAt).toLocaleString()}.</p>
+              )}
+              <div className="delivery-actions">
+                <button data-testid="invite-copy" type="button" onClick={() => void copyInvite()}>
+                  {copied ? "Copied" : "Copy token"}
+                </button>
+                <button data-testid="invite-hide" type="button" onClick={hideInvite}>
+                  Hide token
+                </button>
+              </div>
+              <p className="muted">
+                It is not recorded in Activity and will disappear when you leave Setup.
+              </p>
+              <details data-testid="invite-join-examples">
+                <summary>Join examples</summary>
+                <p className="muted">
+                  The CLI or SDK consumes the invite token. MCP connects afterward with the room
+                  access token returned by joining. That token lasts one hour; use the CLI’s stored
+                  room credentials or refresh it instead of pasting a static token into MCP config.
+                </p>
+                <h4>Go CLI</h4>
+                <pre>{cliJoinExample}</pre>
+                <h4>TypeScript SDK</h4>
+                <pre>{typescriptJoinExample}</pre>
+                <h4>Python SDK</h4>
+                <pre>{pythonJoinExample}</pre>
+                <h4>MCP client</h4>
+                <pre>{mcpConfigExample}</pre>
+              </details>
+            </div>
+          )}
+          {inviteError && (
+            <p role="alert" className="error" data-testid="invite-error">
+              {inviteError}
+            </p>
+          )}
+        </section>
+      )}
+
+      {mayAppointLead && (
+        <section className="delivery-section" aria-label="Lead appointment">
+          <h3>Appoint a lead</h3>
+          <p className="muted">
+            The selected active participant becomes the room’s lead immediately.
+          </p>
+          <form onSubmit={(event) => void appointLead(event)}>
+            <label>
+              Active participant
+              <select
+                data-testid="lead-participant"
+                value={leadParticipant}
+                onChange={(event) => setLeadParticipant(event.target.value)}
+                required
+              >
+                <option value="" disabled>
+                  Select a participant
+                </option>
+                {candidates.map((participant) => (
+                  <option key={participant.id} value={participant.id}>
+                    {participant.display_name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button data-testid="appoint-lead" disabled={leadBusy || candidates.length === 0}>
+              {leadBusy ? "Appointing…" : "Appoint lead"}
+            </button>
+          </form>
+          {leadNotice && (
+            <p role="status" data-testid="lead-status">
+              {leadNotice}
+            </p>
+          )}
+          {leadError && (
+            <p role="alert" className="error" data-testid="lead-error">
+              {leadError}
+            </p>
+          )}
+        </section>
+      )}
+    </section>
+  );
+}
