@@ -22,11 +22,20 @@ import {
 // Monaco is large: it loads with the Files tab, not with the room.
 const FilesView = lazy(() => import("./FilesView.js"));
 const ChangesView = lazy(() => import("./ChangesView.js"));
+const TaskReviewView = lazy(() => import("./TaskReviewView.js"));
 
 const FEED_LIMIT = 200;
 const BACKLOG = 50;
 
-type Tab = "overview" | "tasks" | "activity" | "files" | "changes";
+type Tab = "overview" | "tasks" | "activity" | "files" | "changes" | "delivery";
+const TABS: { id: Tab; label: string }[] = [
+  { id: "overview", label: "Overview" },
+  { id: "tasks", label: "Tasks" },
+  { id: "activity", label: "Activity" },
+  { id: "files", label: "Files" },
+  { id: "changes", label: "Changes" },
+  { id: "delivery", label: "Review" },
+];
 
 const message = (error: unknown): string =>
   error instanceof Error ? error.message : "Something went wrong";
@@ -189,15 +198,15 @@ export function RoomView(props: {
         </span>
       </p>
       <nav className="tabs" role="tablist">
-        {(["overview", "tasks", "activity", "files", "changes"] as const).map((t) => (
+        {TABS.map(({ id, label }) => (
           <button
-            key={t}
+            key={id}
             role="tab"
-            aria-selected={tab === t}
-            data-testid={`tab-${t}`}
-            onClick={() => setTab(t)}
+            aria-selected={tab === id}
+            data-testid={`tab-${id}`}
+            onClick={() => setTab(id)}
           >
-            {t[0]!.toUpperCase() + t.slice(1)}
+            {label}
           </button>
         ))}
       </nav>
@@ -296,6 +305,18 @@ export function RoomView(props: {
             mayDecideHolds={me.authority === "OWNER" || me.role === "LEAD"}
             mayManageConflicts={me.authority === "OWNER" || me.role === "LEAD"}
             nameOf={names}
+            onEvent={onEvent}
+          />
+        </Suspense>
+      )}
+      {tab === "delivery" && (
+        <Suspense fallback={<p className="muted">Loading review and export…</p>}>
+          <TaskReviewView
+            room={open.room}
+            participantId={me.participant_id}
+            mayManageTasks={
+              me.authority === "OWNER" || me.authority === "ADMIN" || me.role === "LEAD"
+            }
             onEvent={onEvent}
           />
         </Suspense>
