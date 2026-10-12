@@ -19,6 +19,7 @@ export const METHODS = {
   "room.events.list": { mutating: false },
   "room.set_egress_allowlist": { mutating: true },
   "room.set_protected_paths": { mutating: true },
+  "room.set_health": { mutating: true },
   "events.redact": { mutating: true },
   "room.set_lead": { mutating: true },
   "room.transfer_lead": { mutating: true },

@@ -874,6 +874,7 @@ ROOM
   room.events.list         after, limit, types?
   room.set_egress_allowlist hosts (owner/admin; exact hosts or *.suffix, max 100; §14.7)
   room.set_protected_paths patterns (owner only; max 100; §22.4)
+  room.set_health {health_command, health_image?} (lead/owner; null clears the command or resets the image to the server default; image must be in HEALTH_IMAGES; §12.1)
   events.redact            sequence, reason (owner only; §19.6)
   room.set_lead            owner/admin
   room.transfer_lead / room.accept_lead
@@ -1193,7 +1194,7 @@ If the node crashes between steps 2 and 3, the new owner reconciles on startup b
 
 ```text
 room.created / room.paused / room.resumed / room.archived
-room.egress_allowlist_changed / room.protected_paths_changed
+room.egress_allowlist_changed / room.protected_paths_changed / room.health_settings_changed
 lead.changed / lead.transfer_offered
 
 participant.invited / participant.joined / participant.left

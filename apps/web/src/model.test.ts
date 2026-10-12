@@ -62,6 +62,7 @@ describe("affectsState", () => {
       "participant.joined",
       "task.created",
       "room.paused",
+      "room.health_settings_changed",
       "lead.changed",
       "capability.granted",
     ])

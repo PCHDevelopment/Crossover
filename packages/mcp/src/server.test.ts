@@ -13,6 +13,7 @@ import {
   registerMemoryCommands,
   registerMessageCommands,
   registerRoomDigestCommand,
+  registerRoomHealthSettingsCommand,
   registerTaskCommands,
   registerTaskHeartbeat,
   registerTaskLifecycleCommands,
@@ -33,6 +34,7 @@ import {
   memoryPutParams,
   messagesSendParams,
   roomDigestParams,
+  roomSetHealthParams,
   type Dispatcher as KernelDispatcher,
   registerInviteCommands,
   registerJoinCommand,
@@ -100,6 +102,10 @@ const manifest = {
 async function setup(tools?: Parameters<typeof registerMcp>[1]["tools"]) {
   const dispatcher = new Dispatcher({ pool, authorize, nodeId: `node-${++n}` });
   registerRoomCommands(dispatcher);
+  registerRoomHealthSettingsCommand(dispatcher, {
+    allowedImages: ["node:22-bookworm-slim", "python:3.13"],
+    defaultImage: "node:22-bookworm-slim",
+  });
   registerInviteCommands(dispatcher);
   registerJoinCommand(dispatcher);
   registerCapabilityCommands(dispatcher);
@@ -470,6 +476,31 @@ describe("MCP server (T707)", () => {
     expect(caps).toMatchObject({ participant_id: s.agentId, role: "DEVELOPER" });
   });
 
+  it("exposes health settings through MCP with the same lead/owner policy", async () => {
+    const s = await setup();
+    const agent = await connect(s.url, s.agent.access_token);
+    const denied = await agent.callTool({
+      name: "room_set_health",
+      arguments: { health_command: "npm test" },
+    });
+    expect(denied.isError).toBe(true);
+    expect(structured(denied)).toMatchObject({
+      error: { code: "FORBIDDEN", details: { missing_capability: "health.set" } },
+    });
+
+    const owner = await connect(s.url, s.owner.access_token);
+    const saved = await owner.callTool({
+      name: "room_set_health",
+      arguments: { health_command: "npm test", health_image: "python:3.13" },
+    });
+    expect(saved.isError).toBeFalsy();
+    expect(structured(saved)).toMatchObject({
+      health_command: "npm test",
+      health_image: "python:3.13",
+      changed: true,
+    });
+  });
+
   it("reports a command error as a tool error carrying the §16.3 body", async () => {
     const s = await setup();
     const client = await connect(s.url, s.agent.access_token);
@@ -716,6 +747,9 @@ describe("MCP collaboration tools (T709)", () => {
     expect(by["decisions.decide"]).toBe(decisionsDecideParams.shape);
     expect(by["inbox.ack"]).toBe(inboxAckParams.shape);
     expect(by["room.digest"]).toBe(roomDigestParams.shape);
+    expect(BASE_TOOLS.find((tool) => tool.method === "room.set_health")?.input).toBe(
+      roomSetHealthParams.shape,
+    );
   });
 
   it("advertise derived JSON schemas, with idempotency keys only on the ones that write", async () => {

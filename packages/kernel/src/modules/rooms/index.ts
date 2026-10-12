@@ -1,6 +1,7 @@
 export * from "./create.js";
 export * from "./egress.js";
 export * from "./protected-paths.js";
+export * from "./health-settings.js";
 export * from "./state.js";
 export * from "./lead.js";
 export * from "./lifecycle.js";
