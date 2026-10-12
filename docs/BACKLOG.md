@@ -27,6 +27,7 @@ Conventions are in `docs/ENGINEERING.md`. Section references (§) point to `docs
 | M12 Plugins (§21.4–21.5)              | T1201–T1206 | S1 (T1201, moved in Review 5), S2 (T1202–T1206)             |
 | M13 Lessons from building (§34)       | T1301–T1303 | S1                                                          |
 | M14 Demo-ready web app (Review 7)     | T1401–T1416 | S2 (T1401–T1416; T1402 moved from Q1)                       |
+| M15 MVP scope gaps (§29, Review 10)   | T1501–T1509 | S2 (T1501–T1502 assigned; rest unassigned)                  |
 
 **Start here:** S1 → T101, T105, T114 (independent). S2 → T501, T505 (only need the scaffold).
 
@@ -1528,3 +1529,43 @@ Decide before any non-demo deployment:
 - (b) amend §4.1 to allow a single-host mode with stated limits.
 
 Until then the compose file must label itself demo or development only.
+
+## M15 MVP scope gaps (§29, Review 10)
+
+A §29 check against main at b34f994 found the backend nearly complete. These are the gaps, ranked. One task per PR, 400 non-test lines max.
+
+### T1501 · MCP tools for plugins, edit intents, history and blame — S2
+
+MCP is the primary agent interface (§29), yet MCP agents cannot reach the GitHub, Browser or AWS plugins or publish edit intents. Add MCP tools that map existing commands: `tools_list`, `tools_invoke`, `presence_set_intent`, `presence_clear_intent`, `workspace_history`, `workspace_blame`. Same provenance framing and capability checks as the existing tools. Done when `packages/mcp` tests cover each tool, including a denied call, and the §30 demo's step 7 runs through MCP instead of the SDK.
+
+### T1502 · Message channel in the web app — S2
+
+The collaboration panel has no channel: nothing in `apps/web` calls `messages.*`. Add a channel view: list with live updates, send, @mentions and references to tasks, decisions and files, rendered with provenance. Done when a browser e2e test sends a message with a mention and the mentioned agent receives it in its inbox.
+
+### T1503 · Human sign-in with GitHub or Google OAuth — unassigned
+
+Only `POST /v1/auth/dev-login` exists. Add OAuth (§15.3) behind configuration, with the session token in an HttpOnly cookie, and keep dev-login for development only. Required before any non-demo deployment.
+
+### T1504 · Budget configuration — unassigned
+
+Budgets are enforced, but nothing sets `rooms.settings.budgets` or `participants.budgets`. Add an owner command and an owner-controls section, plus the sandbox-compute budget (§22).
+
+### T1505 · Terminal tab — unassigned
+
+§27 Terminal tab: the human's own sandbox via `sandbox.exec`, and read-only views of agents' sandbox output via `sandbox.output.subscribe`.
+
+### T1506 · Room export bundle and archive button — unassigned
+
+§5 export bundle (git bundle, `events.jsonl`, `memory.json`, `tasks.json`, `decisions.json`), plus an archive button in owner controls.
+
+### T1507 · Web UI completeness — unassigned
+
+Decision veto and withdraw; task create, assign and claim; memory write; one-click conflict escalate; health and revision badge in the header; upstream-pull button.
+
+### T1508 · Go CLI breadth — unassigned
+
+Messages, inbox, sandbox and the `room mcp` stdio shim.
+
+### T1509 · OPA-WASM behind `authorize()` — unassigned
+
+D9 fidelity with no functional change. Last.
