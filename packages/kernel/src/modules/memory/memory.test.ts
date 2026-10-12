@@ -349,7 +349,7 @@ describe("secret scanning at the memory value limit (T902)", () => {
     });
   });
 
-  it("a worst-case 64 KiB value is scanned in under 250 ms", async () => {
+  it("keeps worst-case 64 KiB secret scanning within the ReDoS CPU budget", async () => {
     const s = await setup();
     // Inputs that make line- and token-based rules do the most work: unterminated key headers,
     // assignments with no value, and one unbroken high-entropy token.
@@ -360,12 +360,16 @@ describe("secret scanning at the memory value limit (T902)", () => {
     };
     for (const [name, value] of Object.entries(cases)) {
       expect(Buffer.byteLength(value), name).toBeLessThanOrEqual(MAX_MEMORY_VALUE_BYTES);
-      const started = performance.now();
+      // Measure CPU rather than wall time: database waits and shared-runner scheduling are noise,
+      // while catastrophic regex backtracking consumes CPU. A full second leaves headroom for
+      // ordinary load and still catches pathological scans.
+      const started = process.cpuUsage();
       await put(s, s.dev, { key: `worst/${name.replaceAll("_", "-")}`, value }).catch(
         () => undefined,
       );
-      const elapsed = performance.now() - started;
-      expect(elapsed, `${name}: ${elapsed.toFixed(0)} ms`).toBeLessThan(250);
+      const elapsed = process.cpuUsage(started);
+      const elapsedMs = (elapsed.user + elapsed.system) / 1_000;
+      expect(elapsedMs, `${name}: ${elapsedMs.toFixed(0)} ms CPU`).toBeLessThan(1_000);
     }
   });
 });
