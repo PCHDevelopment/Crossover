@@ -267,6 +267,47 @@ describe("LeaseRenewer", () => {
     }
   });
 
+  it("stop() does not wait behind actor work, and close() still releases the lease", async () => {
+    const room = await newRoom();
+    const { leases, actors } = node(60_000);
+    const token = await leases.ensure(room);
+    const renew = vi.spyOn(leases, "renew");
+    const actor = actors.get(room);
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const started = new Promise<void>((resolve) => (entered = resolve));
+    const blocker = actor.submit(async () => {
+      entered();
+      await gate;
+    });
+    await started;
+
+    const renewer = new LeaseRenewer({ leases, actors });
+    const ticking = renewer.tick();
+    expect(actor.pending).toBe(2);
+
+    try {
+      const stoppedPromptly = await Promise.race([
+        renewer.stop().then(() => true),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 100)),
+      ]);
+      expect(stoppedPromptly).toBe(true);
+
+      await renewer.close();
+      expect(leases.heldRooms()).toEqual([]);
+      const taken = await acquireLease(pool, room, "other");
+      expect(taken!.fencing_token).toBe(token + 1);
+    } finally {
+      release();
+      await Promise.all([blocker, ticking]);
+      await renewer.close();
+    }
+
+    expect(renew).not.toHaveBeenCalled();
+    expect((await getLease(pool, room))!.node_id).toBe("other");
+  });
+
   it("rejects a nonsensical interval", () => {
     const { leases, actors } = node();
     expect(() => new LeaseRenewer({ leases, actors, intervalMs: 0 })).toThrow(TypeError);
