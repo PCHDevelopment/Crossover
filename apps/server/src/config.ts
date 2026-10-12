@@ -2,7 +2,11 @@ import { isIP } from "node:net";
 import { hostname } from "node:os";
 import { resolve } from "node:path";
 import { z } from "zod";
-import { DEFAULT_HEALTH_IMAGE, type DiskEnforcementMode } from "@crossover/workspace";
+import {
+  DEFAULT_GIT_INTERNAL_NETWORK,
+  DEFAULT_HEALTH_IMAGE,
+  type DiskEnforcementMode,
+} from "@crossover/workspace";
 
 const flag = z
   .enum(["true", "false", "1", "0"])
@@ -108,6 +112,12 @@ const envSchema = z.object({
     .regex(/^[A-Za-z0-9][A-Za-z0-9._/:+-]{0,254}@sha256:[a-f0-9]{64}$/)
     .optional(),
   GIT_INTERNAL_HOST: z.string().trim().min(1).optional(),
+  /** Docker network shared by the server's private Git listener and one-shot fetchers. */
+  GIT_INTERNAL_NETWORK: z
+    .string()
+    .trim()
+    .regex(/^[a-z0-9][a-z0-9_.-]{0,127}$/)
+    .default(DEFAULT_GIT_INTERNAL_NETWORK),
   GIT_INTERNAL_PORT: z.coerce.number().int().min(1).max(65_535).default(8081),
   GIT_INTERNAL_CONTAINER: z
     .string()
@@ -167,6 +177,8 @@ export interface ServerConfig {
   gitInternalPort?: number;
   /** Trusted server container connected to crossover-git for one-shot fetchers. */
   gitInternalContainer?: string;
+  /** Docker network shared by the server's private Git listener and one-shot fetchers. */
+  gitInternalNetwork?: string;
   /** HMAC key accepted only by the internal Git listener. */
   gitInternalTokenSecret?: string;
   gitFetcherImage?: string;
@@ -322,6 +334,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     ...(e.BROWSER_PLUGIN_IMAGE ? { browserPluginImage: e.BROWSER_PLUGIN_IMAGE } : {}),
     ...(e.AWS_PLUGIN_IMAGE ? { awsPluginImage: e.AWS_PLUGIN_IMAGE } : {}),
     ...(e.GIT_INTERNAL_HOST ? { gitInternalHost: e.GIT_INTERNAL_HOST } : {}),
+    gitInternalNetwork: e.GIT_INTERNAL_NETWORK,
     gitInternalPort: e.GIT_INTERNAL_PORT,
     ...(e.GIT_INTERNAL_CONTAINER ? { gitInternalContainer: e.GIT_INTERNAL_CONTAINER } : {}),
     ...(e.GIT_INTERNAL_TOKEN_SECRET ? { gitInternalTokenSecret: e.GIT_INTERNAL_TOKEN_SECRET } : {}),

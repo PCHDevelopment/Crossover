@@ -78,7 +78,7 @@ export type {
   SandboxSyncResponse,
   SandboxSyncResult,
 } from "./execution.js";
-export { DockerExecutionDriver } from "./docker-execution-driver.js";
+export { DEFAULT_GIT_INTERNAL_NETWORK, DockerExecutionDriver } from "./docker-execution-driver.js";
 export type {
   DockerExecutionDriverOptions,
   DockerInvocationOptions,

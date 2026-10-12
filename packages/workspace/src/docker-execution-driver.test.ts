@@ -80,7 +80,7 @@ describe("DockerExecutionDriver", () => {
     }
   });
 
-  it("runs the fetcher on crossover-git with a short-lived token and hardening", async () => {
+  it("runs the fetcher on the configured Git network with a short-lived token and hardening", async () => {
     const calls: Array<{ args: string[]; timeoutMs?: number; env?: NodeJS.ProcessEnv }> = [];
     const secret = "a sufficiently long internal Git signing secret";
     let networkExists = false;
@@ -99,11 +99,11 @@ describe("DockerExecutionDriver", () => {
               stdout: `true|${JSON.stringify(serverConnected ? { endpoint: { Name: "crossover-server" } } : {})}`,
               stderr: "",
             }
-          : { code: 1, stdout: "", stderr: "Error: no such network: crossover-git" };
+          : { code: 1, stdout: "", stderr: "Error: no such network: private-git" };
       }
       if (args[0] === "network" && args[1] === "create") {
         networkExists = true;
-        return { code: 0, stdout: "crossover-git", stderr: "" };
+        return { code: 0, stdout: "private-git", stderr: "" };
       }
       if (args[0] === "network" && args[1] === "connect") {
         serverConnected = true;
@@ -117,6 +117,7 @@ describe("DockerExecutionDriver", () => {
     const driver = new DockerExecutionDriver({
       invoke,
       gitInternalContainer: "crossover-server",
+      gitInternalNetwork: "private-git",
       gitInternalPort: 8081,
       gitInternalTokenSecret: secret,
       gitFetcherImage: "crossover-git-fetcher:test",
@@ -141,8 +142,8 @@ describe("DockerExecutionDriver", () => {
     const connect = calls.find(({ args }) => args[0] === "network" && args[1] === "connect")!;
     const runArgs = run.args;
     const credential = run.env?.GIT_CONFIG_VALUE_0?.split("Bearer ")[1];
-    expect(connect.args).toEqual(["network", "connect", "crossover-git", "crossover-server"]);
-    expect(runArgs).toContain("--network=crossover-git");
+    expect(connect.args).toEqual(["network", "connect", "private-git", "crossover-server"]);
+    expect(runArgs).toContain("--network=private-git");
     expect(runArgs).toContain("--read-only");
     expect(runArgs).toContain("GIT_CONFIG_VALUE_0");
     expect(runArgs.some((arg) => arg.includes(credential!))).toBe(false);

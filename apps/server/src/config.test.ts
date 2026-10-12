@@ -120,12 +120,14 @@ describe("internal Git listener configuration", () => {
   it("uses a private default address and port and accepts the paired fetcher settings", () => {
     expect(loadConfig(env)).toMatchObject({
       gitInternalPort: 8081,
+      gitInternalNetwork: "crossover-git",
       gitFetcherImage: "crossover-git-fetcher:latest",
     });
     expect(
       loadConfig({
         ...env,
         GIT_INTERNAL_HOST: "172.30.0.2",
+        GIT_INTERNAL_NETWORK: "private-git",
         GIT_INTERNAL_PORT: "8082",
         GIT_INTERNAL_CONTAINER: "crossover-server",
         GIT_INTERNAL_TOKEN_SECRET: "0123456789abcdef0123456789abcdef",
@@ -133,11 +135,18 @@ describe("internal Git listener configuration", () => {
       }),
     ).toMatchObject({
       gitInternalHost: "172.30.0.2",
+      gitInternalNetwork: "private-git",
       gitInternalPort: 8082,
       gitInternalContainer: "crossover-server",
       gitInternalTokenSecret: "0123456789abcdef0123456789abcdef",
       gitFetcherImage: "crossover-git-fetcher:test",
     });
+  });
+
+  it("validates the configured private Git network name", () => {
+    expect(() => loadConfig({ ...env, GIT_INTERNAL_NETWORK: "Private Git" })).toThrow(
+      /GIT_INTERNAL_NETWORK/,
+    );
   });
 
   it("requires a server container and signing key as a pair", () => {
