@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "CONFLICT_VERSION",
+    "message": "stale task",
+    "retryable": false,
+    "details": { "current": { "version": 5 } }
+  }
+}
