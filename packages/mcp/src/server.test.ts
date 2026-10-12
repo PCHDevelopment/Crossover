@@ -54,7 +54,15 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { frameToolResult, registerMcp } from "./server.js";
 import { BASE_TOOLS, COLLABORATION_TOOLS, MCP_TOOLS, TASK_TOOLS } from "./tools.js";
-import { provisionWorkspace, registerWorkspaceCommands } from "@crossover/workspace";
+import {
+  conflictsActionParamsSchema,
+  conflictsGetParamsSchema,
+  conflictsListParamsSchema,
+  provisionWorkspace,
+  registerWorkspaceCommands,
+  registerWorkspaceConflictActions,
+  registerWorkspaceConflictReads,
+} from "@crossover/workspace";
 
 /**
  * A tool result's body: a success's response (its text is framed, T711, so read
@@ -726,6 +734,8 @@ describe("MCP collaboration tools (T709)", () => {
     registerDecisionCommands(d);
     registerDecisionDecideCommands(d);
     registerRoomDigestCommand(d);
+    registerWorkspaceConflictReads(d);
+    registerWorkspaceConflictActions(d);
     expect(methods.length).toBeGreaterThanOrEqual(18);
     expect(COLLABORATION_TOOLS.map((t) => t.method).sort()).toEqual([...methods].sort());
     expect(new Set(MCP_TOOLS.map((t) => t.name)).size).toBe(MCP_TOOLS.length);
@@ -747,6 +757,10 @@ describe("MCP collaboration tools (T709)", () => {
     expect(by["decisions.decide"]).toBe(decisionsDecideParams.shape);
     expect(by["inbox.ack"]).toBe(inboxAckParams.shape);
     expect(by["room.digest"]).toBe(roomDigestParams.shape);
+    expect(by["conflicts.list"]).toBe(conflictsListParamsSchema.shape);
+    expect(by["conflicts.get"]).toBe(conflictsGetParamsSchema.shape);
+    expect(by["conflicts.escalate"]).toBe(conflictsActionParamsSchema.shape);
+    expect(by["conflicts.abandon"]).toBe(conflictsActionParamsSchema.shape);
     expect(BASE_TOOLS.find((tool) => tool.method === "room.set_health")?.input).toBe(
       roomSetHealthParams.shape,
     );
@@ -763,6 +777,17 @@ describe("MCP collaboration tools (T709)", () => {
     expect(Object.keys(put.inputSchema.properties!)).toContain("idempotency_key");
     const get = tools.find((t) => t.name === "memory_get")!;
     expect(Object.keys(get.inputSchema.properties!)).toEqual(["key"]);
+    const conflictsGet = tools.find((t) => t.name === "conflicts_get")!;
+    expect(Object.keys(conflictsGet.inputSchema.properties!)).toEqual(["conflict_id"]);
+
+    const agent = await connect(s.url, s.agent.access_token);
+    expect((await call(agent, "conflicts_list")).body).toMatchObject({
+      conflicts: [],
+      next_cursor: null,
+    });
+    const missing = await call(agent, "conflicts_get", { conflict_id: "conf_missing" });
+    expect(missing.isError).toBe(true);
+    expect(missing.body.error.code).toBe("NOT_FOUND");
   });
 
   it("run a collaboration through the dispatcher, as the agent (messages, inbox, memory, decisions, digest)", async () => {
