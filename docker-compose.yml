@@ -41,6 +41,8 @@ services:
       HOST: 0.0.0.0
       PORT: 8080
       DEV_LOGIN: "true"
+      # This service is the explicitly labelled development/demo stack, never production.
+      DEV_LOGIN_ALLOW_PRODUCTION: "true"
       SANDBOX_DISK_ENFORCEMENT: soft
       GIT_INTERNAL_HOST: crossover-server
       GIT_INTERNAL_CONTAINER: crossover-server

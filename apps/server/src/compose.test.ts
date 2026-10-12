@@ -175,6 +175,7 @@ function config(extra: Partial<ServerConfig> = {}): ServerConfig {
     port: 0,
     nodeId: `node-${++n}`,
     devLogin: true,
+    secureCookies: false,
     healthImages: ["node:22-bookworm-slim"],
     ...extra,
   };
@@ -312,6 +313,31 @@ async function walkthrough(app: App, withAppliedChange = true) {
 }
 
 describe("composeServer", () => {
+  it("does not accept an HttpOnly browser cookie as MCP agent authorization", async () => {
+    const { server } = await start();
+    const login = await server.app.inject({
+      method: "POST",
+      url: "/v1/auth/dev-login",
+      headers: { "content-type": "application/json" },
+      payload: JSON.stringify({ subject: "mcp-cookie-" + ++n, display_name: "Peter" }),
+    });
+    expect(login.statusCode).toBe(200);
+    const token = (login.json() as { session_token: string }).session_token;
+    const cookie = `crossover_session=${token}`;
+    const response = await server.app.inject({
+      method: "POST",
+      url: "/mcp",
+      headers: {
+        cookie: (cookie ?? "").split(";")[0]!,
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+      },
+      payload: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }),
+    });
+    expect(response.statusCode).toBe(401);
+    expect(response.json()).toMatchObject({ error: { code: "UNAUTHENTICATED" } });
+  });
+
   it("logs internal gateway failures with the route pattern and without request secrets", async () => {
     const internalError = new Error("injected internal gateway failure");
     const { server } = await start();
@@ -2263,6 +2289,47 @@ describe("loadConfig", () => {
     expect(loadConfig({ ...env, DEV_LOGIN: "true" }).devLogin).toBe(true);
     expect(loadConfig({ ...env, DEV_LOGIN: "0" }).devLogin).toBe(false);
     expect(() => loadConfig({ ...env, DEV_LOGIN: "yes" })).toThrow(/DEV_LOGIN/);
+  });
+
+  it("requires an explicit override before enabling dev login in production", () => {
+    const production = {
+      ...env,
+      NODE_ENV: "production",
+      SANDBOX_DISK_ENFORCEMENT: "soft",
+      INTEGRATION_KMS_KEY_ID: "alias/crossover-test",
+      DEV_LOGIN: "true",
+    };
+    expect(() => loadConfig(production)).toThrow(/DEV_LOGIN is forbidden in production/);
+    expect(loadConfig({ ...production, DEV_LOGIN_ALLOW_PRODUCTION: "true" })).toMatchObject({
+      devLogin: true,
+      secureCookies: true,
+    });
+  });
+
+  it("configures OAuth only with a complete provider and a safe public origin", () => {
+    expect(() => loadConfig({ ...env, GITHUB_OAUTH_CLIENT_ID: "id" })).toThrow(
+      /set both GitHub OAuth credentials and OAUTH_PUBLIC_BASE_URL together/,
+    );
+    expect(() =>
+      loadConfig({ ...env, GITHUB_OAUTH_CLIENT_ID: "id", GITHUB_OAUTH_CLIENT_SECRET: "secret" }),
+    ).toThrow(/set both GitHub OAuth credentials and OAUTH_PUBLIC_BASE_URL together/);
+    expect(() => loadConfig({ ...env, OAUTH_PUBLIC_BASE_URL: "http://example.com" })).toThrow(
+      /must use HTTPS except for localhost development/,
+    );
+    expect(
+      loadConfig({
+        ...env,
+        GITHUB_OAUTH_CLIENT_ID: "id",
+        GITHUB_OAUTH_CLIENT_SECRET: "secret",
+        OAUTH_PUBLIC_BASE_URL: "http://localhost:8080",
+      }),
+    ).toMatchObject({
+      secureCookies: false,
+      oauth: { publicBaseUrl: "http://localhost:8080", github: { clientId: "id" } },
+    });
+    expect(() => loadConfig({ ...env, OAUTH_PUBLIC_BASE_URL: "https://example.com/path" })).toThrow(
+      /must be an origin without a path/,
+    );
   });
 
   it("parses the operator health image allowlist", () => {

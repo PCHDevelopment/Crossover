@@ -1,11 +1,13 @@
 import { createPool, withTransaction, type Pool } from "@crossover/db";
 import {
   buildGateway,
+  RedisOAuthStateStore,
   type SandboxOutputMetadata,
   type SandboxOutputSource,
 } from "@crossover/gateway";
 import { MCP_TOOLS, registerMcp } from "@crossover/mcp";
 import { buildInternalGitServer } from "./internal-git.js";
+import { githubOAuthProvider } from "./github-oauth.js";
 import { IntegrationCredentialBroker } from "./integration-broker.js";
 import { GitHubPullRequestProvider } from "./github-pull-request.js";
 import { registerBrowserTools } from "./browser-plugin.js";
@@ -167,6 +169,7 @@ export async function composeServer(
   let pluginRunner: DockerToolRunner | undefined;
   let kmsOperations: AwsKmsDataKeyOperations | undefined;
   let gitApp: ReturnType<typeof buildInternalGitServer> | undefined;
+  const oauthStateStore = config.oauth ? new RedisOAuthStateStore(config.redisUrl) : undefined;
   let healthInstallSweepTimer: NodeJS.Timeout | undefined;
   let sandboxLogSweepTimer: NodeJS.Timeout | undefined;
   if (overrides.publisher) {
@@ -212,6 +215,7 @@ export async function composeServer(
 
   try {
     if (redis) await redis.ready();
+    await oauthStateStore?.ready();
     await intentStore.ready();
     await presenceStore.ready();
     await ownBudgets?.ready();
@@ -492,6 +496,15 @@ export async function composeServer(
         );
       },
       devLogin: config.devLogin,
+      secureCookies: config.secureCookies,
+      oauth:
+        config.oauth && oauthStateStore
+          ? {
+              publicBaseUrl: config.oauth.publicBaseUrl,
+              stateStore: oauthStateStore,
+              providers: { github: githubOAuthProvider(config.oauth.github) },
+            }
+          : undefined,
       trustProxy: config.trustProxy && config.trustProxy.length > 0 ? config.trustProxy : false,
       refreshLimit: {
         limiter: {
@@ -548,6 +561,7 @@ export async function composeServer(
         await presenceStore.close();
         await presenceSubscriber.close();
         await ownBudgets?.close();
+        await oauthStateStore?.close();
         if (!overrides.pool) await pool.end();
       })());
 
@@ -569,6 +583,7 @@ export async function composeServer(
     await presenceStore.close();
     await presenceSubscriber.close();
     await ownBudgets?.close();
+    await oauthStateStore?.close();
     if (!overrides.pool) await pool.end();
     throw err;
   }

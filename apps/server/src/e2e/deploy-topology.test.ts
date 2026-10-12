@@ -61,14 +61,50 @@ async function requestJson<T>(
   return JSON.parse(text) as T;
 }
 
-async function ensureGitNetwork(): Promise<void> {
+async function ensureGitNetwork(): Promise<string> {
   try {
     await docker(["network", "create", "--internal", "--label", "crossover.git=true", GIT_NETWORK]);
   } catch {
     // The shared network may already exist; its required internal setting is checked below.
   }
-  const internal = await docker(["network", "inspect", "--format", "{{.Internal}}", GIT_NETWORK]);
-  if (internal !== "true") throw new Error(`${GIT_NETWORK} exists but is not internal`);
+  const [network] = JSON.parse(await docker(["network", "inspect", GIT_NETWORK])) as Array<{
+    Internal: boolean;
+    IPAM: {
+      Config: Array<{
+        Subnet: string;
+        Gateway?: string;
+        AuxiliaryAddresses?: Record<string, string>;
+      }>;
+    };
+    Containers?: Record<string, { IPv4Address?: string }>;
+  }>;
+  if (!network?.Internal) throw new Error(`${GIT_NETWORK} exists but is not internal`);
+
+  const subnet = network.IPAM.Config.find((config) =>
+    /^\d+\.\d+\.\d+\.\d+\/\d+$/.test(config.Subnet),
+  );
+  if (!subnet) throw new Error(`${GIT_NETWORK} has no IPv4 subnet`);
+  const [address, prefixText] = subnet.Subnet.split("/");
+  const octets = address!.split(".").map(Number);
+  const prefix = Number(prefixText);
+  if (prefix < 1 || prefix > 30 || octets.some((octet) => octet < 0 || octet > 255))
+    throw new Error(`${GIT_NETWORK} has an unsupported IPv4 subnet: ${subnet.Subnet}`);
+  const addressNumber = octets.reduce((value, octet) => value * 256 + octet, 0);
+  const size = 2 ** (32 - prefix);
+  const firstHost = Math.floor(addressNumber / size) * size + 1;
+  const lastHost = firstHost + size - 3;
+  const occupied = new Set([
+    subnet.Gateway,
+    ...Object.values(subnet.AuxiliaryAddresses ?? {}),
+    ...Object.values(network.Containers ?? {}).map(
+      (container) => container.IPv4Address?.split("/")[0],
+    ),
+  ]);
+  for (let candidate = lastHost; candidate >= firstHost; candidate -= 1) {
+    const ip = [24, 16, 8, 0].map((shift) => Math.floor(candidate / 2 ** shift) % 256).join(".");
+    if (!occupied.has(ip)) return ip;
+  }
+  throw new Error(`${GIT_NETWORK} has no free IPv4 address`);
 }
 
 async function waitFor<T>(label: string, read: () => Promise<T>, ready: (value: T) => boolean) {
@@ -92,7 +128,7 @@ describe.skipIf(!image)("deployed server topology", () => {
     db = await createTestDatabase();
     workspaceRoot = await mkdtemp(join(tmpdir(), "crossover-deploy-topology-"));
     await chmod(workspaceRoot, 0o777);
-    await ensureGitNetwork();
+    const gitInternalHost = await ensureGitNetwork();
     containerName = `crossover-deploy-${process.pid}-${randomBytes(4).toString("hex")}`;
     const dbUrl = new URL(process.env["DATABASE_URL"]!);
     dbUrl.hostname = "host.docker.internal";
@@ -111,6 +147,8 @@ describe.skipIf(!image)("deployed server topology", () => {
       "crossover.test.deploy-topology=true",
       "--network",
       GIT_NETWORK,
+      "--ip",
+      gitInternalHost,
       "--publish",
       "127.0.0.1::8080",
       "--add-host",
@@ -134,11 +172,13 @@ describe.skipIf(!image)("deployed server topology", () => {
       "--env",
       "DEV_LOGIN=true",
       "--env",
+      "DEV_LOGIN_ALLOW_PRODUCTION=true", // explicit opt-in for this disposable topology fixture
+      "--env",
       "INTEGRATION_KMS_KEY_ID=alias/crossover-deploy-topology-test",
       "--env",
       "SANDBOX_DISK_ENFORCEMENT=soft",
       "--env",
-      `GIT_INTERNAL_HOST=${containerName}`,
+      `GIT_INTERNAL_HOST=${gitInternalHost}`,
       "--env",
       `GIT_INTERNAL_CONTAINER=${containerName}`,
       "--env",
