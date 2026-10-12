@@ -40,6 +40,7 @@ export default function MergeView(props: {
   const { room, path, conflictId, base, mine, onResolved, onDiscarded } = props;
   const host = useRef<HTMLDivElement>(null);
   const diff = useRef<monaco.editor.IStandaloneDiffEditor>(undefined);
+  const pendingModelDisposals = useRef(new Set<monaco.editor.ITextModel>());
   const [head, setHead] = useState<Head>();
   const [regions, setRegions] = useState<MergeRegion[]>();
   const [choices, setChoices] = useState<Choice[]>([]);
@@ -69,11 +70,20 @@ export default function MergeView(props: {
       minimap: { enabled: false },
     });
     diff.current = created;
+    const disposePendingModels = created.onDidUpdateDiff(() => {
+      if (!created.getModel() || created.getLineChanges() === null) return;
+      for (const model of pendingModelDisposals.current) model.dispose();
+      pendingModelDisposals.current.clear();
+    });
     return () => {
+      disposePendingModels.dispose();
       const model = created.getModel();
+      created.setModel(null);
       created.dispose();
       model?.original.dispose();
       model?.modified.dispose();
+      for (const pending of pendingModelDisposals.current) pending.dispose();
+      pendingModelDisposals.current.clear();
     };
   }, []);
 
@@ -87,12 +97,15 @@ export default function MergeView(props: {
       current.modified.setValue(result);
       return;
     }
-    editor.setModel({
+    const next = {
       original: monaco.editor.createModel(head.content, undefined),
       modified: monaco.editor.createModel(result, undefined),
-    });
-    current?.original.dispose();
-    current?.modified.dispose();
+    };
+    if (current) {
+      pendingModelDisposals.current.add(current.original);
+      pendingModelDisposals.current.add(current.modified);
+    }
+    editor.setModel(next);
   }, [head, regions, choices]);
 
   const choose = (index: number, choice: Choice) =>

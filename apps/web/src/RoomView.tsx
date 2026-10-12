@@ -21,11 +21,12 @@ import {
 
 // Monaco is large: it loads with the Files tab, not with the room.
 const FilesView = lazy(() => import("./FilesView.js"));
+const ChangesView = lazy(() => import("./ChangesView.js"));
 
 const FEED_LIMIT = 200;
 const BACKLOG = 50;
 
-type Tab = "overview" | "tasks" | "activity" | "files";
+type Tab = "overview" | "tasks" | "activity" | "files" | "changes";
 
 const message = (error: unknown): string =>
   error instanceof Error ? error.message : "Something went wrong";
@@ -188,7 +189,7 @@ export function RoomView(props: {
         </span>
       </p>
       <nav className="tabs" role="tablist">
-        {(["overview", "tasks", "activity", "files"] as const).map((t) => (
+        {(["overview", "tasks", "activity", "files", "changes"] as const).map((t) => (
           <button
             key={t}
             role="tab"
@@ -284,6 +285,18 @@ export function RoomView(props: {
             selfId={me.participant_id}
             nameOf={names}
             purposeOf={purposeOf}
+          />
+        </Suspense>
+      )}
+      {tab === "changes" && (
+        <Suspense fallback={<p className="muted">Loading changes…</p>}>
+          <ChangesView
+            room={open.room}
+            participantId={me.participant_id}
+            mayDecideHolds={me.authority === "OWNER" || me.role === "LEAD"}
+            mayManageConflicts={me.authority === "OWNER" || me.role === "LEAD"}
+            nameOf={names}
+            onEvent={onEvent}
           />
         </Suspense>
       )}

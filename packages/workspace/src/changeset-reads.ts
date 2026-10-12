@@ -177,15 +177,13 @@ export function registerWorkspaceChangesetReads(dispatcher: Dispatcher): void {
         throw new CrossoverError("NOT_FOUND", "ChangeSet path not found");
       if (row.status !== "APPLIED") {
         const { rows: roomRows } = await ctx.client.query<{
-          owner_id: string;
           lead_participant_id: string | null;
-        }>("SELECT owner_id, lead_participant_id FROM rooms WHERE id = $1", [ctx.room_id]);
+        }>("SELECT lead_participant_id FROM rooms WHERE id = $1", [ctx.room_id]);
         const room = roomRows[0];
         const mayReadCandidate =
           row.actor_id === ctx.principal.participant_id ||
           ctx.principal.authority === "ADMIN" ||
           ctx.principal.authority === "OWNER" ||
-          room?.owner_id === ctx.principal.participant_id ||
           room?.lead_participant_id === ctx.principal.participant_id;
         if (!mayReadCandidate)
           throw new CrossoverError(
