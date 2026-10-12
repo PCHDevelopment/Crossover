@@ -864,9 +864,12 @@ export function registerWebDecisionsAndInbox(fixture: WebFixture): void {
       .toBe(true);
 
     await agent.api.messages.send({ body: "I see it and will review the login flow." });
+    const agentReply = page
+      .getByTestId("room-message")
+      .filter({ hasText: "I see it and will review the login flow." });
     await expect
-      .poll(() => page.getByTestId("message-list").textContent())
-      .toContain("I see it and will review the login flow.");
+      .poll(() => agentReply.textContent())
+      .toContain("From Message agent · trust: participant");
     expect(problems).toEqual([]);
     await page.close();
   }, 60_000);
