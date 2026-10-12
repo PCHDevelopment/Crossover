@@ -1,11 +1,12 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { createTestDatabase, type TestDatabase } from "@crossover/db/testing";
 import { CrossoverClient, type RoomClient } from "@crossover/sdk";
+import { git, type UpstreamFetcher } from "@crossover/workspace";
 import { chromium, type Browser, type Page } from "playwright-core";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { composeServer, type CrossoverServer } from "../compose.js";
@@ -25,6 +26,34 @@ let dir: string;
 let server: CrossoverServer;
 let baseUrl: string;
 let browser: Browser | undefined;
+let upstreamDir: string;
+let remoteRepo: string;
+
+const gitIdentity = {
+  GIT_AUTHOR_NAME: "Crossover E2E",
+  GIT_AUTHOR_EMAIL: "e2e@example.com",
+  GIT_COMMITTER_NAME: "Crossover E2E",
+  GIT_COMMITTER_EMAIL: "e2e@example.com",
+};
+const runGit = (cwd: string, args: string[]) =>
+  git(args, { cwd, timeoutMs: 30_000, env: gitIdentity });
+
+const upstreamFetcher: UpstreamFetcher = {
+  async fetch() {
+    const cloneDir = await mkdtemp(join(tmpdir(), "crossover-web-upstream-"));
+    const repo = join(cloneDir, "repo.git");
+    await runGit(cloneDir, ["clone", "-q", "--bare", upstreamDir, repo]);
+    const sha = (
+      await git(["rev-parse", "HEAD"], { gitDir: repo, timeoutMs: 10_000 })
+    ).stdout.trim();
+    return {
+      repo,
+      ref: "HEAD",
+      sha,
+      cleanup: () => rm(cloneDir, { recursive: true, force: true }),
+    };
+  },
+};
 
 /** A Chromium to drive: Playwright's own install, or the one the environment provides. */
 function chromiumPath(): string | undefined {
@@ -48,6 +77,16 @@ beforeAll(async () => {
   }
   db = await createTestDatabase();
   dir = await mkdtemp(join(tmpdir(), "crossover-web-e2e-"));
+  upstreamDir = join(dir, "upstream");
+  await mkdir(upstreamDir, { recursive: true });
+  await runGit(upstreamDir, ["init", "-q", "-b", "main"]);
+  await writeFile(join(upstreamDir, "README.md"), "# Browser acceptance fixture\n");
+  await runGit(upstreamDir, ["add", "README.md"]);
+  await runGit(upstreamDir, ["commit", "-q", "-m", "Initial"]);
+  const remoteParent = join(dir, "remote");
+  await mkdir(remoteParent);
+  await runGit(remoteParent, ["init", "-q", "--bare", "-b", "main", "widgets.git"]);
+  remoteRepo = join(remoteParent, "widgets.git");
   const webRoot = join(dir, "web");
   await execFileAsync(
     "pnpm",
@@ -68,7 +107,26 @@ beforeAll(async () => {
     healthImages: ["node:22-bookworm-slim"],
     webRoot,
   };
-  server = await composeServer(config, { pool: db.pool });
+  server = await composeServer(config, {
+    pool: db.pool,
+    upstream: {
+      fetcher: upstreamFetcher,
+      resolve: async () => ["93.184.216.34"],
+      pusher: {
+        async push(request) {
+          await git(
+            ["push", "--porcelain", remoteRepo, `${request.commit}:refs/heads/${request.branch}`],
+            { gitDir: request.repo, timeoutMs: 30_000 },
+          );
+        },
+      },
+      pullRequests: {
+        async create() {
+          return { url: "https://github.com/acme/widgets/pull/42", number: 42 };
+        },
+      },
+    },
+  });
   baseUrl = await server.app.listen({ port: 0, host: "127.0.0.1" });
   browser = await chromium.launch({ executablePath, args: ["--no-sandbox"] });
 }, 180_000);
@@ -245,6 +303,7 @@ describe.skipIf(!executablePath && !inCi)("web app in a browser", () => {
     );
     const ownerId = (await db.pool.query("SELECT owner_id FROM rooms WHERE id = $1", [roomId]))
       .rows[0].owner_id as string;
+    await owner.api.git.import({ url: "https://github.com/acme/widgets", branch: "main" });
     const invite = await owner.api.room.invite<unknown>({ role: "DEVELOPER" });
     const joined = await client.join(roomId, {
       token: (invite.one_time as { token: string }).token,
@@ -300,6 +359,25 @@ describe.skipIf(!executablePath && !inCi)("web app in a browser", () => {
         return page.response.tasks.some((item) => item.id === task.id);
       })
       .toBe(true);
+
+    await page.getByTestId("checkpoint-message").fill("T1405 reviewed");
+    await page.getByTestId("create-checkpoint").click();
+    await expect
+      .poll(async () => page.getByTestId("checkpoint-list").textContent())
+      .toContain("T1405 reviewed");
+    await owner.api.capabilities.grant({
+      participant_id: ownerId,
+      capability: "github.create_pull_request:acme/widgets",
+    });
+    await page.getByTestId("export-open-pull-request").check();
+    await page.getByTestId("pull-request-title").fill("T1405 acceptance");
+    await page.getByTestId("export-checkpoint").click();
+    await expect
+      .poll(async () => page.getByTestId("export-pull-request-link").getAttribute("href"))
+      .toBe("https://github.com/acme/widgets/pull/42");
+    await expect
+      .poll(async () => page.getByTestId("export-result").textContent())
+      .toContain("Exported to");
 
     expect(problems).toEqual([]);
     await page.close();

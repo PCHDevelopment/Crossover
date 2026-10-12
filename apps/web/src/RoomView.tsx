@@ -23,6 +23,7 @@ import {
 const FilesView = lazy(() => import("./FilesView.js"));
 const ChangesView = lazy(() => import("./ChangesView.js"));
 const TaskReviewView = lazy(() => import("./TaskReviewView.js"));
+const CheckpointExportView = lazy(() => import("./CheckpointExportView.js"));
 
 const FEED_LIMIT = 200;
 const BACKLOG = 50;
@@ -34,7 +35,7 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "activity", label: "Activity" },
   { id: "files", label: "Files" },
   { id: "changes", label: "Changes" },
-  { id: "delivery", label: "Review" },
+  { id: "delivery", label: "Review & export" },
 ];
 
 const message = (error: unknown): string =>
@@ -311,14 +312,22 @@ export function RoomView(props: {
       )}
       {tab === "delivery" && (
         <Suspense fallback={<p className="muted">Loading review and export…</p>}>
-          <TaskReviewView
-            room={open.room}
-            participantId={me.participant_id}
-            mayManageTasks={
-              me.authority === "OWNER" || me.authority === "ADMIN" || me.role === "LEAD"
-            }
-            onEvent={onEvent}
-          />
+          <>
+            <TaskReviewView
+              room={open.room}
+              participantId={me.participant_id}
+              mayManageTasks={
+                me.authority === "OWNER" || me.authority === "ADMIN" || me.role === "LEAD"
+              }
+              onEvent={onEvent}
+            />
+            <CheckpointExportView
+              room={open.room}
+              mayManageDelivery={me.authority === "OWNER" || me.role === "LEAD"}
+              nameOf={names}
+              onEvent={onEvent}
+            />
+          </>
         </Suspense>
       )}
       {tab === "activity" && (
