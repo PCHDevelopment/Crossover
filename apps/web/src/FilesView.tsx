@@ -15,8 +15,10 @@ import { monaco } from "./monaco.js";
 import {
   colorOf,
   cursorsOn,
+  intentRangesOn,
   PresenceSender,
   viewersByPath,
+  type IntentMap,
   type OwnPresence,
   type PresenceMap,
 } from "./presence.js";
@@ -59,10 +61,12 @@ export default function FilesView(props: {
   room: RoomClient;
   onEvent: (listener: (event: SdkEvent) => void) => () => void;
   presence: PresenceMap;
+  intents: IntentMap;
   selfId: string;
   nameOf: (participantId: string) => string;
+  purposeOf: (taskId: string) => string | undefined;
 }) {
-  const { room, onEvent, presence, selfId, nameOf } = props;
+  const { room, onEvent, presence, intents, selfId, nameOf, purposeOf } = props;
   const [dirs, setDirs] = useState(new Map<string, Entry[]>());
   const [expanded, setExpanded] = useState(new Set<string>([""]));
   const [current, setCurrent] = useState<string>();
@@ -82,6 +86,7 @@ export default function FilesView(props: {
   const applying = useRef(false);
   const sender = useRef<PresenceSender>(undefined);
   const remote = useRef<monaco.editor.IEditorDecorationsCollection>(undefined);
+  const remoteIntents = useRef<monaco.editor.IEditorDecorationsCollection>(undefined);
 
   /** Tell the room which files are open here and where the cursor is. */
   const report = useCallback(() => {
@@ -227,6 +232,7 @@ export default function FilesView(props: {
     });
     editor.current = created;
     remote.current = created.createDecorationsCollection();
+    remoteIntents.current = created.createDecorationsCollection();
     const own = new PresenceSender((value) => room.api.presence.update(value));
     sender.current = own;
     created.onDidChangeCursorSelection(report);
@@ -249,6 +255,8 @@ export default function FilesView(props: {
       window.removeEventListener("pagehide", flushAll);
       for (const timer of ownedTimers.values()) clearTimeout(timer);
       created.dispose();
+      remoteIntents.current = undefined;
+      remote.current = undefined;
       for (const model of ownedModels.values()) model.dispose();
       ownedModels.clear();
     };
@@ -284,6 +292,35 @@ export default function FilesView(props: {
     }
     remote.current?.set(decorations);
   }, [presence, current, selfId, nameOf]);
+
+  // Agent edit ranges are overlays: they label work without changing the viewer's buffer.
+  useEffect(() => {
+    if (!current) {
+      remoteIntents.current?.clear();
+      return;
+    }
+    const model = editor.current?.getModel();
+    if (!model) {
+      remoteIntents.current?.clear();
+      return;
+    }
+    const lineCount = model.getLineCount();
+    const decorations: monaco.editor.IModelDeltaDecoration[] = [];
+    for (const intent of intentRangesOn(intents, current, selfId, nameOf, purposeOf)) {
+      const startLine = Math.min(intent.start_line, lineCount);
+      const endLine = Math.min(intent.end_line, lineCount);
+      decorations.push({
+        range: new monaco.Range(startLine, 1, endLine, 1),
+        options: {
+          isWholeLine: true,
+          className: `remote-intent presence-${intent.color}`,
+          hoverMessage: { value: intent.label },
+          stickiness: monaco.editor.TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges,
+        },
+      });
+    }
+    remoteIntents.current?.set(decorations);
+  }, [intents, current, selfId, nameOf, purposeOf]);
 
   // Someone's ChangeSet landed: re-read every open file, one event at a time.
   useEffect(() => {
@@ -407,6 +444,7 @@ export default function FilesView(props: {
 
   const draft = current ? drafts.current.get(current) : undefined;
   const merge = merging && merging === current ? draft : undefined;
+  const activeIntents = current ? intentRangesOn(intents, current, selfId, nameOf, purposeOf) : [];
   return (
     <section aria-label="Files" className="files">
       <ul className="tree" data-testid="file-tree">
@@ -438,6 +476,20 @@ export default function FilesView(props: {
           <p role="alert" className="error" data-testid="files-notice">
             {notice}
           </p>
+        )}
+        {activeIntents.length > 0 && (
+          <ul className="edit-intents" aria-label="Agent edit intents" data-testid="edit-intents">
+            {activeIntents.map((intent, index) => (
+              <li
+                key={`${intent.participant_id}:${intent.start_line}:${intent.end_line}:${index}`}
+                data-testid="edit-intent"
+                title={intent.label}
+              >
+                <span className={`presence-dot presence-${intent.color}`} />
+                {intent.label} · lines {intent.start_line}–{intent.end_line}
+              </li>
+            ))}
+          </ul>
         )}
         {merge?.conflictId && (
           <MergeView

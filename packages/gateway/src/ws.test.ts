@@ -11,6 +11,8 @@ import {
   registerPresenceCommands,
   registerRoomCommands,
   registerRoomEventsSubscribeCommand,
+  type EditIntent,
+  type EditIntentSubscriber,
   type EventSubscriber,
   type Presence,
   type PresenceStore,
@@ -22,6 +24,7 @@ import { authorize } from "@crossover/policy";
 import { newId, type RoomEvent } from "@crossover/protocol";
 import type { FastifyInstance } from "fastify";
 import WebSocket from "ws";
+import { z } from "zod";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildGateway } from "./server.js";
 import type {
@@ -84,6 +87,20 @@ class ManualPresence implements PresenceSubscriber {
   }
   emit(record: Presence) {
     for (const handler of this.handlers) handler(record);
+  }
+}
+
+/** Intent changes carry no paths; the connection reloads the reader-filtered list. */
+class ManualIntents implements EditIntentSubscriber {
+  handlers = new Set<() => void>();
+  onSubscribe: () => void = () => {};
+  async subscribe(_roomId: string, handler: () => void) {
+    this.handlers.add(handler);
+    this.onSubscribe();
+    return async () => void this.handlers.delete(handler);
+  }
+  emit() {
+    for (const handler of this.handlers) handler();
   }
 }
 
@@ -1070,5 +1087,45 @@ describe("presence.subscribe (§13.4)", () => {
     await invite(env);
     await c.until(() => c.sequences().length >= 3, "events after the refusal");
     expect(c.closeCode).toBeUndefined();
+  });
+
+  it("sends intent snapshots on subscribe and after set and clear invalidations", async () => {
+    const intents = new ManualIntents();
+    const env = await setup({ presence: new ManualPresence(), intents });
+    let current: EditIntent[] = [];
+    env.dispatcher.registerCommand({
+      method: "presence.list_intents",
+      action: "room.read",
+      mutating: false,
+      view: "participant",
+      params: z.strictObject({}),
+      execute: async () => ({ response: { intents: current } }),
+    });
+    const c = await ready(env);
+    c.send({ type: "presence.subscribe" });
+    await c.frame("presence.snapshot");
+    expect(await c.frame("presence.intents.snapshot")).toMatchObject({ intents: [] });
+
+    current = [
+      {
+        participant_id: "p_agent",
+        paths: ["src/a.ts"],
+        ranges: [{ path: "src/a.ts", start_line: 4, end_line: 6 }],
+        task_id: "task_a",
+        expires_at: "2026-01-01T00:00:45.000Z",
+      },
+    ];
+    const afterInitial = c.frames.length;
+    intents.emit();
+    const added = await c.frame("presence.intents.snapshot", afterInitial);
+    expect(added.intents).toEqual(current);
+
+    current = [];
+    const afterAdded = c.frames.length;
+    intents.emit();
+    const cleared = await c.frame("presence.intents.snapshot", afterAdded);
+    expect(cleared.intents).toEqual([]);
+    c.send({ type: "presence.unsubscribe" });
+    await c.until(() => intents.handlers.size === 0, "intent unsubscribe");
   });
 });

@@ -21,6 +21,7 @@ import {
   RedisEventPublisher,
   RedisEventSubscriber,
   RedisPresenceSubscriber,
+  RedisEditIntentSubscriber,
   registerRoomEventsSubscribeCommand,
   registerCapabilityCommands,
   registerDecisionCommands,
@@ -183,6 +184,7 @@ export async function composeServer(
   }
 
   const intentStore = new RedisEditIntentStore(config.redisUrl);
+  const intentSubscriber = new RedisEditIntentSubscriber(config.redisUrl);
   const presenceStore = new RedisPresenceStore(config.redisUrl);
   const presenceSubscriber = new RedisPresenceSubscriber(config.redisUrl);
   const ownBudgets = overrides.budgets ? undefined : new RedisBudgetLimiter(config.redisUrl);
@@ -469,7 +471,7 @@ export async function composeServer(
         perMinute: config.refreshPerMinute ?? 30,
       },
       ...(config.webRoot ? { staticRoot: config.webRoot } : {}),
-      ws: { subscriber, sandboxOutput, presence: presenceSubscriber },
+      ws: { subscriber, sandboxOutput, presence: presenceSubscriber, intents: intentSubscriber },
     });
     gitApp = buildInternalGitServer({
       pool,
@@ -497,6 +499,7 @@ export async function composeServer(
         await redis?.close();
         await redisSubscriber?.close();
         await intentStore.close();
+        await intentSubscriber.close();
         await presenceStore.close();
         await presenceSubscriber.close();
         await ownBudgets?.close();
@@ -517,6 +520,7 @@ export async function composeServer(
     await redis?.close();
     await redisSubscriber?.close();
     await intentStore.close();
+    await intentSubscriber.close();
     await presenceStore.close();
     await presenceSubscriber.close();
     await ownBudgets?.close();

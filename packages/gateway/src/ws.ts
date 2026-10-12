@@ -7,6 +7,8 @@ import {
   type Presence,
   presenceFor,
   type PresenceSubscriber,
+  type EditIntent,
+  type EditIntentSubscriber,
   redactEventFor,
   type Principal,
   type SubscriptionFilter,
@@ -77,6 +79,8 @@ export interface WebSocketOptions {
   maxSandboxOutputBufferedBytes?: number;
   /** Live presence (§13.4, Redis), for `presence.subscribe`. */
   presence?: PresenceSubscriber;
+  /** Intent invalidations; each update is reloaded through the ACL-filtered list command. */
+  intents?: EditIntentSubscriber;
 }
 
 /** Close codes (4000-range, application defined). */
@@ -118,6 +122,10 @@ interface PresenceStream {
   out: Promise<void>;
   /** The latest update per participant that arrived before the snapshot was sent. */
   pending: Map<string, Presence> | undefined;
+  /** Intent invalidations that arrived while the initial snapshot was loading. */
+  intentsPending: boolean;
+  intentsSyncing: boolean;
+  intentsRefreshQueued: boolean;
   /** `workspace.read` answers per path; forgotten when the token is re-checked. */
   readable: Map<string, boolean>;
   unsubscribe: () => Promise<void>;
@@ -152,7 +160,9 @@ function sandboxUpdateBytes(update: SandboxOutputUpdate): number {
  * - `presence.subscribe`: authorized as `presence.list` (§13.4); the server sends
  *   `presence.snapshot { presence }` and then each update as `presence { record }`, every record
  *   as this participant may see it (open files they can't read and a cursor on one are left out).
- *   Nothing is sent when a record expires: clients drop a record once its `expires_at` passes.
+ *   If intent fanout is available, it also sends `presence.intents.snapshot { intents }` on
+ *   connect and after each set/clear. The list command filters unreadable paths. Nothing is sent
+ *   when a record or intent expires: clients drop it once its `expires_at` passes.
  *   A refusal is an `error` frame with `subscription: "presence"`, which leaves the event stream
  *   alone. `presence.unsubscribe` stops it.
  *
@@ -440,6 +450,9 @@ class Connection {
     const stream: PresenceStream = {
       out: Promise.resolve(),
       pending: new Map(),
+      intentsPending: false,
+      intentsSyncing: this.o.intents !== undefined,
+      intentsRefreshQueued: false,
       readable: new Map(),
       unsubscribe: async () => undefined,
     };
@@ -448,14 +461,33 @@ class Connection {
     stream.unsubscribe = await this.o.presence.subscribe(this.roomId, (record) =>
       this.onPresence(stream, record),
     );
+    if (this.o.intents) {
+      const stop = await this.o.intents.subscribe(this.roomId, () => this.onIntentChange(stream));
+      const stopPresence = stream.unsubscribe;
+      stream.unsubscribe = async () => {
+        await Promise.all([stopPresence(), stop()]);
+      };
+    }
     let snapshot: Presence[];
+    let intentSnapshot: EditIntent[] | undefined;
     try {
-      const listed = await this.o.dispatcher.dispatch(this.principal!, {
-        id: newId("cmd"),
-        method: "presence.list",
-        params: {},
-      });
+      const [listed, listedIntents] = await Promise.all([
+        this.o.dispatcher.dispatch(this.principal!, {
+          id: newId("cmd"),
+          method: "presence.list",
+          params: {},
+        }),
+        this.o.intents
+          ? this.o.dispatcher.dispatch(this.principal!, {
+              id: newId("cmd"),
+              method: "presence.list_intents",
+              params: {},
+            })
+          : undefined,
+      ]);
       snapshot = (listed.response as { presence: Presence[] }).presence;
+      if (listedIntents)
+        intentSnapshot = (listedIntents.response as { intents: EditIntent[] }).intents;
     } catch (error) {
       if (this.presenceStream === stream) await this.stopPresence();
       this.send({ type: "error", subscription: "presence", error: toHttpError(error).body.error });
@@ -463,6 +495,11 @@ class Connection {
     }
     if (this.presenceStream !== stream || this.closed) return;
     this.send({ type: "presence.snapshot", presence: snapshot });
+    if (intentSnapshot) {
+      this.send({ type: "presence.intents.snapshot", intents: intentSnapshot });
+      stream.intentsSyncing = false;
+      if (stream.intentsPending) this.queueIntentSnapshot(stream);
+    }
     const listed = new Map(snapshot.map((record) => [record.participant_id, record.expires_at]));
     const pending = stream.pending!;
     stream.pending = undefined;
@@ -471,6 +508,39 @@ class Connection {
       // An update the snapshot already includes (or that it superseded) isn't sent again.
       if (known === undefined || known < record.expires_at) this.sendPresence(stream, record);
     }
+  }
+
+  private onIntentChange(stream: PresenceStream): void {
+    if (this.presenceStream !== stream || this.closed) return;
+    stream.intentsPending = true;
+    if (!stream.intentsSyncing) this.queueIntentSnapshot(stream);
+  }
+
+  /** Coalesce invalidations and always reload through the reader-filtered command. */
+  private queueIntentSnapshot(stream: PresenceStream): void {
+    if (stream.intentsRefreshQueued || stream.intentsSyncing) return;
+    stream.intentsRefreshQueued = true;
+    stream.out = stream.out
+      .then(async () => {
+        while (stream.intentsPending && this.presenceStream === stream && !this.closed) {
+          stream.intentsPending = false;
+          const listed = await this.o.dispatcher.dispatch(this.principal!, {
+            id: newId("cmd"),
+            method: "presence.list_intents",
+            params: {},
+          });
+          if (this.presenceStream !== stream || this.closed) return;
+          this.send({
+            type: "presence.intents.snapshot",
+            intents: (listed.response as { intents: EditIntent[] }).intents,
+          });
+        }
+      })
+      .catch((error: unknown) => this.o.onInternalError?.(error))
+      .finally(() => {
+        stream.intentsRefreshQueued = false;
+        if (stream.intentsPending && !stream.intentsSyncing) this.queueIntentSnapshot(stream);
+      });
   }
 
   private onPresence(stream: PresenceStream, record: Presence): void {

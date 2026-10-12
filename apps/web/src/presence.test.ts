@@ -1,6 +1,7 @@
-import type { PresenceRecord } from "@crossover/sdk";
+import type { PresenceIntent, PresenceRecord } from "@crossover/sdk";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  applyIntentSnapshot,
   applyPresence,
   colorOf,
   cursorsOn,
@@ -10,7 +11,10 @@ import {
   PRESENCE_COLORS,
   PresenceSender,
   RETRY_MS,
+  intentRangesOn,
+  liveIntents,
   viewersByPath,
+  type IntentMap,
   type OwnPresence,
 } from "./presence.js";
 
@@ -137,5 +141,72 @@ describe("PresenceSender", () => {
     await vi.advanceTimersByTimeAsync(RETRY_MS);
     expect(sent).toEqual([{ status: "active", open_files: files.slice(5), cursor: null }]);
     sender.stop();
+  });
+});
+
+const intent = (
+  participant_id: string,
+  expires_at: string,
+  task_id: string | null = null,
+): PresenceIntent => ({
+  participant_id,
+  paths: ["src/notes.txt"],
+  ranges: [{ path: "src/notes.txt", start_line: 2, end_line: 4 }],
+  task_id,
+  expires_at,
+});
+
+describe("live editor intents", () => {
+  it("replaces the snapshot and drops expired intents locally", () => {
+    const active = intent("pair", "2026-10-12T12:00:00.000Z");
+    const expired = intent("old", "2026-10-12T11:59:59.000Z");
+    const snapshot = applyIntentSnapshot([active, expired]);
+
+    expect(liveIntents(snapshot, Date.parse("2026-10-12T11:59:59.500Z"))).toEqual(
+      new Map([["pair", active]]),
+    );
+    const fresh = applyIntentSnapshot([active]);
+    expect(liveIntents(fresh, Date.parse("2026-10-12T11:00:00Z"))).toBe(fresh);
+  });
+
+  it("labels another participant's ranges with their task and stable color", () => {
+    const intents: IntentMap = applyIntentSnapshot([intent("pair", "2026-10-12T12:00:00Z", "t1")]);
+
+    expect(
+      intentRangesOn(
+        intents,
+        "src/notes.txt",
+        "self",
+        () => "Pair",
+        () => "Edit notes",
+      ),
+    ).toEqual([
+      {
+        participant_id: "pair",
+        name: "Pair",
+        color: colorOf("pair"),
+        start_line: 2,
+        end_line: 4,
+        label: "Pair · Edit notes",
+      },
+    ]);
+    expect(
+      intentRangesOn(
+        intents,
+        "src/other.txt",
+        "self",
+        () => "Pair",
+        () => "Edit notes",
+      ),
+    ).toEqual([]);
+    expect(
+      intentRangesOn(
+        intents,
+        "src/notes.txt",
+        "pair",
+        () => "Pair",
+        () => "Edit notes",
+      ),
+    ).toEqual([]);
   });
 });

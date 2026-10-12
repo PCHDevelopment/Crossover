@@ -2,6 +2,7 @@ import { Redis, type RedisOptions } from "ioredis";
 import { CrossoverError } from "@crossover/protocol";
 import { z } from "zod";
 import type { Dispatcher, CommandContext } from "../../dispatcher.js";
+import { RedisRoomFanout } from "../../publisher.js";
 import { filterReadablePaths } from "./readable-paths.js";
 
 export const EDIT_INTENT_TTL_MS = 45_000;
@@ -28,6 +29,11 @@ export interface EditIntentStore {
   clear(roomId: string, participantId: string): Promise<void>;
   list(roomId: string): Promise<EditIntent[]>;
   close(): Promise<void>;
+}
+
+/** A room-level invalidation; subscribers reload through `presence.list_intents` for ACL filtering. */
+export interface EditIntentSubscriber {
+  subscribe(roomId: string, handler: () => void): Promise<() => Promise<void>>;
 }
 
 /** Ephemeral, room-scoped Redis state for edit intents (§11.4, §19.3). */
@@ -76,12 +82,20 @@ export class RedisEditIntentStore implements EditIntentStore {
   async set(roomId: string, participantId: string, intent: EditIntentValue): Promise<string> {
     const expiresAt = new Date(Date.now() + this.ttlMs).toISOString();
     const value: EditIntent = { ...intent, participant_id: participantId, expires_at: expiresAt };
-    await this.redis.set(intentKey(roomId, participantId), JSON.stringify(value), "PX", this.ttlMs);
+    await this.redis
+      .multi()
+      .set(intentKey(roomId, participantId), JSON.stringify(value), "PX", this.ttlMs)
+      .publish(editIntentChannel(roomId), "changed")
+      .exec();
     return expiresAt;
   }
 
   async clear(roomId: string, participantId: string): Promise<void> {
-    await this.redis.del(intentKey(roomId, participantId));
+    await this.redis
+      .multi()
+      .del(intentKey(roomId, participantId))
+      .publish(editIntentChannel(roomId), "changed")
+      .exec();
   }
 
   async list(roomId: string): Promise<EditIntent[]> {
@@ -115,6 +129,20 @@ export class RedisEditIntentStore implements EditIntentStore {
 
   async close(): Promise<void> {
     if (this.ownsClient) this.redis.disconnect();
+  }
+}
+
+/** Invalidation-only channel: intent paths are re-read through the reader-filtered command. */
+export const editIntentChannel = (roomId: string): string =>
+  `presence:intent:live:${encodeURIComponent(roomId)}`;
+
+/** Best-effort room fanout for intent changes, separate from the durable event stream. */
+export class RedisEditIntentSubscriber
+  extends RedisRoomFanout<true>
+  implements EditIntentSubscriber
+{
+  constructor(url: string, options: RedisOptions = {}) {
+    super(url, editIntentChannel, (raw) => (raw === "changed" ? true : undefined), options);
   }
 }
 

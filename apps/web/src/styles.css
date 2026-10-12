@@ -221,6 +221,10 @@ td {
 .remote-selection {
   background: color-mix(in srgb, var(--presence) 25%, transparent);
 }
+.remote-intent {
+  background: color-mix(in srgb, var(--presence) 12%, transparent);
+  box-shadow: inset 2px 0 var(--presence);
+}
 .presence-dot {
   display: inline-block;
   width: 8px;
@@ -228,6 +232,19 @@ td {
   margin-left: 4px;
   border-radius: 50%;
   background: var(--presence);
+}
+.edit-intents {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin: 0 0 8px;
+  padding: 0;
+  list-style: none;
+  color: var(--muted);
+  font-size: 12px;
+}
+.edit-intents .presence-dot {
+  margin: 0 5px 0 0;
 }
 .merge-conflicts {
   padding-left: 18px;

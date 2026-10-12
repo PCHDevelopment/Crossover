@@ -356,7 +356,7 @@ describe.skipIf(!executablePath && !inCi)("web app in a browser", () => {
     expect(problems.filter((p) => !p.includes("status of 403"))).toEqual([]);
   }, 120_000);
 
-  it("presence (T1105b): someone else's cursor, selection and open file show in the editor, and this tab's cursor reaches the room", async () => {
+  it("presence and edit intents (T1105b): live cursors and ranges show in the editor", async () => {
     const page: Page = await browser!.newPage();
     const problems: string[] = [];
     page.on("pageerror", (e) => problems.push(`pageerror: ${e.message}`));
@@ -416,6 +416,20 @@ describe.skipIf(!executablePath && !inCi)("web app in a browser", () => {
         .getAttribute("title"),
     ).toBe("Pair has this open");
 
+    const task = await owner.api.tasks.create<{ id: string }>({
+      title: "Update notes",
+      requirements: ["Review the second paragraph"],
+    });
+    await pair.api.presence.set_intent({
+      paths: ["src/notes.txt"],
+      ranges: [{ path: "src/notes.txt", start_line: 2, end_line: 3 }],
+      task_id: task.response.id,
+    });
+    await expect
+      .poll(async () => page.getByTestId("edit-intent").textContent())
+      .toContain("Pair · Update notes");
+    await page.locator(".remote-intent").first().waitFor();
+
     // Peter puts the cursor on line 3: Pair sees it in presence.
     await lines.click();
     await page.keyboard.press("Control+End");
@@ -428,6 +442,11 @@ describe.skipIf(!executablePath && !inCi)("web app in a browser", () => {
     await expect
       .poll(async () => (await peter())?.cursor)
       .toMatchObject({ path: "src/notes.txt", line: 4 });
+
+    // Clearing the ephemeral intent updates the existing presence subscription.
+    await pair.api.presence.clear_intent({});
+    await expect.poll(() => page.getByTestId("edit-intents").count()).toBe(0);
+    await expect.poll(() => page.locator(".remote-intent").count()).toBe(0);
 
     // Pair closes the file: the caret and the tree marker go.
     await pair.api.presence.update({ open_files: [] });
