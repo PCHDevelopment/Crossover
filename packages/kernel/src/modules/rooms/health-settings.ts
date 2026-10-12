@@ -2,11 +2,17 @@ import { CrossoverError } from "@crossover/protocol";
 import { z } from "zod";
 import type { Dispatcher } from "../../dispatcher.js";
 
-const HEALTH_COMMAND_MAX_LENGTH = 4096;
+const HEALTH_COMMAND_MAX_LENGTH = 2000;
 const HEALTH_IMAGE_MAX_LENGTH = 255;
 
 export const roomSetHealthParams = z.strictObject({
-  health_command: z.string().trim().min(1).max(HEALTH_COMMAND_MAX_LENGTH).nullable(),
+  health_command: z
+    .string()
+    .max(HEALTH_COMMAND_MAX_LENGTH)
+    .refine((value) => !/\p{Cc}/u.test(value), "must not contain control characters")
+    .refine((value) => value.trim().length > 0, "must not be blank")
+    .transform((value) => value.trim())
+    .nullable(),
   health_image: z.string().min(1).max(HEALTH_IMAGE_MAX_LENGTH).nullable().optional(),
 });
 

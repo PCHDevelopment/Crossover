@@ -168,4 +168,21 @@ describe("room.set_health", () => {
     ).rows[0]!.settings;
     expect(settings).toEqual({ keep: true });
   });
+
+  it("rejects overlong commands and control characters before storing them", async () => {
+    const room = await fixture();
+    for (const health_command of ["x".repeat(2001), "npm test\n", "npm\ttest"]) {
+      await expect(run(room, room.owner, { health_command })).rejects.toMatchObject({
+        code: "VALIDATION",
+      });
+    }
+
+    const settings = (
+      await pool.query<{ settings: Record<string, unknown> }>(
+        "SELECT settings FROM rooms WHERE id = $1",
+        [room.roomId],
+      )
+    ).rows[0]!.settings;
+    expect(settings).toEqual({ keep: true });
+  });
 });
