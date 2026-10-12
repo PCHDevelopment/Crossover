@@ -28,6 +28,12 @@ const envSchema = z.object({
   NODE_ID: z.string().min(1).max(200).optional(),
   /** Serve `POST /v1/auth/dev-login`. Development only; off unless set. */
   DEV_LOGIN: flag,
+  /** Explicitly permit the no-credential development login when NODE_ENV=production. */
+  DEV_LOGIN_ALLOW_PRODUCTION: flag,
+  /** Public origin used for exact OAuth callback URLs; required with OAuth credentials. */
+  OAUTH_PUBLIC_BASE_URL: z.string().url().optional(),
+  GITHUB_OAUTH_CLIENT_ID: z.string().trim().min(1).max(200).optional(),
+  GITHUB_OAUTH_CLIENT_SECRET: z.string().min(1).max(4096).optional(),
   /** Reverse proxies in front of the server (comma-separated addresses or CIDRs): the client address is the first `X-Forwarded-For` hop that is not one of them. Default: none. */
   TRUST_PROXY: z
     .string()
@@ -123,6 +129,11 @@ export interface ServerConfig {
   port: number;
   nodeId: string;
   devLogin: boolean;
+  secureCookies?: boolean;
+  oauth?: {
+    publicBaseUrl: string;
+    github: { clientId: string; clientSecret: string };
+  };
   trustProxy?: string[];
   refreshPerMinute?: number;
   /** Directory of the built web app, served next to the API. */
@@ -174,6 +185,28 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     throw new Error(`Invalid server configuration:\n  ${problems.join("\n  ")}`);
   }
   const e = parsed.data;
+  const invalidConfig = (message: string): never => {
+    throw new Error(`Invalid server configuration:\n  ${message}`);
+  };
+  if (env.NODE_ENV === "production" && e.DEV_LOGIN && !e.DEV_LOGIN_ALLOW_PRODUCTION) {
+    invalidConfig("DEV_LOGIN is forbidden in production unless DEV_LOGIN_ALLOW_PRODUCTION=true");
+  }
+  const hasClientId = Boolean(e.GITHUB_OAUTH_CLIENT_ID);
+  const hasClientSecret = Boolean(e.GITHUB_OAUTH_CLIENT_SECRET);
+  if (hasClientId !== hasClientSecret || (hasClientId && !e.OAUTH_PUBLIC_BASE_URL)) {
+    invalidConfig("set both GitHub OAuth credentials and OAUTH_PUBLIC_BASE_URL together");
+  }
+  if (e.OAUTH_PUBLIC_BASE_URL) {
+    const base = new URL(e.OAUTH_PUBLIC_BASE_URL);
+    if (base.pathname !== "/" || base.search || base.hash || base.username || base.password) {
+      invalidConfig("OAUTH_PUBLIC_BASE_URL must be an origin without a path, query or fragment");
+    }
+    const localHttp =
+      base.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(base.hostname);
+    if ((env.NODE_ENV === "production" || !localHttp) && base.protocol !== "https:") {
+      invalidConfig("OAUTH_PUBLIC_BASE_URL must use HTTPS except for localhost development");
+    }
+  }
   const sandboxDiskEnforcement =
     e.SANDBOX_DISK_ENFORCEMENT ?? (env.NODE_ENV === "production" ? "hard" : "soft");
   const sandboxVolumeOptions = parseVolumeOptions(e.SANDBOX_VOLUME_OPTS);
@@ -242,6 +275,18 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     port: e.PORT,
     nodeId: e.NODE_ID ?? `${hostname()}-${process.pid}`,
     devLogin: e.DEV_LOGIN,
+    secureCookies: env.NODE_ENV === "production",
+    ...(e.GITHUB_OAUTH_CLIENT_ID && e.GITHUB_OAUTH_CLIENT_SECRET && e.OAUTH_PUBLIC_BASE_URL
+      ? {
+          oauth: {
+            publicBaseUrl: new URL(e.OAUTH_PUBLIC_BASE_URL).origin,
+            github: {
+              clientId: e.GITHUB_OAUTH_CLIENT_ID,
+              clientSecret: e.GITHUB_OAUTH_CLIENT_SECRET,
+            },
+          },
+        }
+      : {}),
     trustProxy: e.TRUST_PROXY,
     refreshPerMinute: e.REFRESH_PER_MINUTE,
     ...(e.WEB_ROOT ? { webRoot: resolve(e.WEB_ROOT) } : {}),

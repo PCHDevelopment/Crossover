@@ -171,6 +171,9 @@ importers:
       fastify:
         specifier: ^5.12.5
         version: 5.12.5
+      ioredis:
+        specifier: ^6.0.0
+        version: 6.0.0
       ws:
         specifier: ^8.22.0
         version: 8.22.0

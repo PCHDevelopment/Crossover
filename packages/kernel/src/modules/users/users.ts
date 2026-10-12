@@ -88,3 +88,13 @@ export async function revokeUserSessions(db: Db, userId: string): Promise<number
   );
   return rowCount ?? 0;
 }
+
+/** Revoke one opaque platform session token, for signing out the current browser. */
+export async function revokeUserSession(db: Db, token: string): Promise<boolean> {
+  if (!token.startsWith(USER_SESSION_PREFIX)) return false;
+  const { rowCount } = await db.query(
+    "UPDATE user_sessions SET revoked_at = clock_timestamp() WHERE token_hash = $1 AND revoked_at IS NULL",
+    [hashToken(token)],
+  );
+  return rowCount === 1;
+}

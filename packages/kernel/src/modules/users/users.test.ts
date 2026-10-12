@@ -7,6 +7,7 @@ import {
   authenticateUser,
   createUserSession,
   findOrCreateUser,
+  revokeUserSession,
   revokeUserSessions,
   USER_SESSION_TTL_MS,
 } from "./users.js";
@@ -121,6 +122,16 @@ describe("user sessions", () => {
     const keep = await createUserSession(pool, b.id);
     await revokeUserSessions(pool, a.id);
     expect((await authenticateUser(pool, keep.session_token)).user_id).toBe(b.id);
+  });
+
+  it("revokes only the presented user session", async () => {
+    const user = await findOrCreateUser(pool, identity());
+    const current = await createUserSession(pool, user.id);
+    const other = await createUserSession(pool, user.id);
+    expect(await revokeUserSession(pool, current.session_token)).toBe(true);
+    expect(await revokeUserSession(pool, current.session_token)).toBe(false);
+    await rejectsUnauthenticated(authenticateUser(pool, current.session_token));
+    expect((await authenticateUser(pool, other.session_token)).user_id).toBe(user.id);
   });
 });
 

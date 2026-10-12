@@ -18,6 +18,7 @@ import type { FastifyInstance } from "fastify";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { HTTP_STATUS, toHttpError } from "./errors.js";
+import type { OAuthProvider, OAuthState, OAuthStateStore } from "./oauth.js";
 import { buildGateway, clientKey } from "./server.js";
 
 let db: TestDatabase;
@@ -456,6 +457,141 @@ describe("platform users (T216)", () => {
       authorization: `Bearer ${session.session_token}`,
     });
     errorShape(res.json(), "NOT_FOUND", 404, res);
+  });
+});
+
+describe("browser OAuth sessions", () => {
+  it("uses one-use state, sets an HttpOnly cookie, and authenticates only same-origin human routes", async () => {
+    const values = new Map<string, OAuthState>();
+    const stateStore: OAuthStateStore = {
+      async save(state, value) {
+        values.set(state, value);
+      },
+      async consume(state) {
+        const value = values.get(state);
+        values.delete(state);
+        return value;
+      },
+      async ready() {},
+      async close() {},
+    };
+    const provider: OAuthProvider = {
+      name: "github",
+      authorizationUrl: (input) => {
+        const url = new URL("https://identity.example/authorize");
+        url.searchParams.set("state", input.state);
+        url.searchParams.set("challenge", input.challenge);
+        return url.toString();
+      },
+      identity: vi.fn(async () => ({
+        provider: "github",
+        subject: "987654321",
+        display_name: "GitHub User",
+      })),
+    };
+    const baseUrl = "https://crossover.test";
+    const s = await setup(undefined, false, {
+      secureCookies: true,
+      oauth: {
+        publicBaseUrl: baseUrl,
+        stateStore,
+        providers: { github: provider, secondary: { ...provider, name: "secondary" } },
+      },
+    });
+    expect((await s.app.inject({ method: "GET", url: "/v1/auth/oauth/toString" })).statusCode).toBe(
+      404,
+    );
+    const start = await s.app.inject({ method: "GET", url: "/v1/auth/oauth/github" });
+    const authorization = new URL(start.headers.location!);
+    const state = authorization.searchParams.get("state")!;
+    const stateCookie = "crossover_oauth_state_" + state;
+    expect(start.statusCode).toBe(302);
+    expect(authorization.searchParams.get("challenge")).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(start.headers["cache-control"]).toBe("no-store");
+    const startHeaders = start.headers["set-cookie"];
+    const startCookies = Array.isArray(startHeaders) ? startHeaders : [startHeaders];
+    expect(startCookies).toContain(
+      stateCookie + "=1; Path=/; Max-Age=600; HttpOnly; SameSite=Lax; Secure",
+    );
+
+    const callback = await s.app.inject({
+      method: "GET",
+      url: "/v1/auth/oauth/github/callback?state=" + state + "&code=one-time-code",
+      headers: { cookie: stateCookie + "=1" },
+    });
+    expect(callback.statusCode).toBe(303);
+    expect(callback.headers.location).toBe(baseUrl + "/");
+    expect(callback.headers["cache-control"]).toBe("no-store");
+    expect(callback.body).not.toContain("session_token");
+    const callbackHeaders = callback.headers["set-cookie"];
+    const cookieHeaders = Array.isArray(callbackHeaders) ? callbackHeaders : [callbackHeaders];
+    const sessionCookie = cookieHeaders.find((value) => value?.startsWith("crossover_session="));
+    expect(sessionCookie).toMatch(/; Path=\/; Max-Age=\d+; HttpOnly; SameSite=Lax; Secure$/);
+    expect(cookieHeaders).toContain(
+      stateCookie +
+        "=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; SameSite=Lax; Secure",
+    );
+    expect(provider.identity).toHaveBeenCalledWith(
+      expect.objectContaining({
+        redirectUri: baseUrl + "/v1/auth/oauth/github/callback",
+        code: "one-time-code",
+        verifier: expect.any(String),
+      }),
+    );
+    const tokenMatch = /crossover_session=([^;]+)/.exec(sessionCookie ?? "");
+    expect(tokenMatch).not.toBeNull();
+    const token = tokenMatch![1]!;
+    expect(token).toMatch(/^us_/);
+    const cookie = "crossover_session=" + token;
+
+    expect(
+      (await s.app.inject({ method: "GET", url: "/v1/rooms", headers: { cookie } })).statusCode,
+    ).toBe(200);
+    const blocked = await post(
+      s,
+      "/v1/commands",
+      envelope("room.create", { slug: "oauth-blocked-" + ++n, name: "n", objective: "o" }),
+      { cookie },
+    );
+    errorShape(blocked.json(), "FORBIDDEN", 403, blocked);
+    const crossOrigin = await post(
+      s,
+      "/v1/commands",
+      envelope("room.create", { slug: "oauth-cross-origin-" + ++n, name: "n", objective: "o" }),
+      { cookie, origin: "https://attacker.example" },
+    );
+    errorShape(crossOrigin.json(), "FORBIDDEN", 403, crossOrigin);
+    const created = await post(
+      s,
+      "/v1/commands",
+      envelope("room.create", { slug: "oauth-created-" + ++n, name: "n", objective: "o" }),
+      { cookie, origin: baseUrl },
+    );
+    expect(created.statusCode).toBe(200);
+    const roomId = (created.json().response as { room: { id: string } }).room.id;
+    const roomSession = await post(
+      s,
+      "/v1/rooms/" + roomId + "/session",
+      {},
+      { cookie, origin: baseUrl },
+    );
+    expect(roomSession.statusCode).toBe(200);
+
+    const replay = await s.app.inject({
+      method: "GET",
+      url: "/v1/auth/oauth/github/callback?state=" + state + "&code=one-time-code",
+      headers: { cookie: stateCookie + "=1" },
+    });
+    expect(replay.statusCode).toBe(303);
+    expect(replay.headers.location).toBe(baseUrl + "/?auth=failed");
+    expect(replay.headers["set-cookie"]).toContain(stateCookie + "=; Path=/; Max-Age=0");
+
+    const logout = await post(s, "/v1/auth/logout", {}, { cookie, origin: baseUrl });
+    expect(logout.json()).toEqual({ ok: true });
+    expect(logout.headers["set-cookie"]).toContain("crossover_session=; Path=/; Max-Age=0");
+    expect(
+      (await s.app.inject({ method: "GET", url: "/v1/rooms", headers: { cookie } })).statusCode,
+    ).toBe(401);
   });
 });
 
