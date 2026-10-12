@@ -26,7 +26,7 @@ Conventions are in `docs/ENGINEERING.md`. Section references (§) point to `docs
 | M11 Clients (§27, §29)                | T1101–T1106 | S1 (T1102 → Q1)                                             |
 | M12 Plugins (§21.4–21.5)              | T1201–T1206 | S1 (T1201, moved in Review 5), S2 (T1202–T1206)             |
 | M13 Lessons from building (§34)       | T1301–T1303 | S1                                                          |
-| M14 Demo-ready web app (Review 7)     | T1401–T1409 | S2 (T1401–T1409; T1402 moved from Q1)                       |
+| M14 Demo-ready web app (Review 7)     | T1401–T1410 | S2 (T1401–T1410; T1402 moved from Q1)                       |
 
 **Start here:** S1 → T101, T105, T114 (independent). S2 → T501, T505 (only need the scaffold).
 
@@ -1450,3 +1450,12 @@ Tests:
 - In the browser, a non-health item (for example `ASSIGNMENT`) appears in the open inbox without a reload.
 
 Must merge before T1406.
+
+### T1410 · Demo-path gaps found mapping T1406 — S2
+
+Mapping the 17 §30 steps onto product actions on main 9f2d160 found two actions with no product path:
+
+- **Step 12 (lead resolves an escalated conflict).** The lead is an MCP agent, but MCP exposes no conflict tools. ARCHITECTURE §15 lists conflicts among the MCP room tools. Add `conflicts_list`, `conflicts_get`, `conflicts_escalate` and `conflicts_abandon` to `COLLABORATION_TOOLS`, wrapping the existing commands, and extend the `server.test.ts` parity test.
+- **Step 4 (Peter takes the Developer role).** `apps/web` never calls `participants.set_role`. Add a role change to Owner controls for any participant, including the owner, with a confirmation that names the participant and the new role. Use the existing command only.
+
+Two small PRs. Both must merge before T1406.
