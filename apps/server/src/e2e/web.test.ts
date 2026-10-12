@@ -1,4 +1,4 @@
-import { describe } from "vitest";
+import { describe, it } from "vitest";
 import {
   registerWebCollaborationStart,
   registerWebDecisionsAndInbox,
@@ -12,6 +12,9 @@ import { registerWebWorkspaceTests } from "./web-workspace.js";
 const fixture = registerWebFixture();
 
 describe.skipIf(!fixture.executablePath && !fixture.inCi)("web app in a browser", () => {
+  it("T1406 harness: rejects an invalid token through the real Git listener bridge", async () => {
+    await fixture.assertBadGitTokenRejected();
+  });
   registerWebCollaborationStart(fixture);
   registerWebOwnerRoleChanges(fixture);
   registerWebTaskReview(fixture);
