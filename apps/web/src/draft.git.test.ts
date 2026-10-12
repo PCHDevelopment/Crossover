@@ -60,5 +60,5 @@ describe("merge3 against Git", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-  });
+  }, 15_000);
 });

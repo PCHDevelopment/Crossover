@@ -32,6 +32,7 @@ export type PluginDockerInvoker = (
 
 const SWEEP_OUTPUT_LIMIT = 256 * 1024;
 const SWEEP_TIMEOUT_MS = 10_000;
+const NETWORK_RETRY_DELAY_MS = 250;
 
 /** Removes only runner-labelled Docker resources that have exceeded the bounded run lifetime. */
 export class PluginResourceSweeper {
@@ -65,8 +66,12 @@ export class PluginResourceSweeper {
   }
 
   private runAndWarn(): void {
-    void this.sweepNow().catch(() => {
-      process.emitWarning("Could not sweep stale plugin Docker resources", "PluginRunnerWarning");
+    void this.sweepNow().catch((error: unknown) => {
+      const detail = error instanceof Error ? `: ${error.message}` : "";
+      process.emitWarning(
+        `Could not sweep stale plugin Docker resources${detail}`,
+        "PluginRunnerWarning",
+      );
     });
   }
 
@@ -103,19 +108,29 @@ export class PluginResourceSweeper {
       [kind, "inspect", "--format", template, ...ids],
       sweepOptions(),
     );
-    if (inspected.code !== 0) throw new Error("Docker resource inspection failed");
-
-    const stale: string[] = [];
-    for (const line of inspected.stdout.split(/\r?\n/)) {
-      const [createdLabel, createdDate, id] = line.split("\t");
-      if (!id || !/^[a-f0-9]{12,64}$/i.test(id)) continue;
-      const labeledTime = createdLabel ? Number(createdLabel) : Number.NaN;
-      const createdAt = Number.isSafeInteger(labeledTime)
-        ? labeledTime
-        : Date.parse(createdDate ?? "");
-      if (Number.isFinite(createdAt) && createdAt <= cutoff) stale.push(id);
+    if (inspected.code !== 0) {
+      if (!isMissingDockerResource(inspected.stderr))
+        throw new Error("Docker resource inspection failed");
+      // Another sweeper may remove one listed ID during the batch inspect. Inspect individually
+      // so that missing IDs don't prevent this pass from cleaning the remaining stale resources.
+      const individual = await Promise.all(
+        ids.map(async (id) => {
+          const result = await this.invoke(
+            this.dockerBinary,
+            [kind, "inspect", "--format", template, id],
+            sweepOptions(),
+          );
+          if (result.code !== 0) {
+            if (isMissingDockerResource(result.stderr)) return [];
+            throw new Error("Docker resource inspection failed");
+          }
+          return staleResourceIds(result.stdout, cutoff);
+        }),
+      );
+      return individual.flat();
     }
-    return stale;
+
+    return staleResourceIds(inspected.stdout, cutoff);
   }
 
   private async remove(kind: "container" | "network", id: string, force: boolean): Promise<void> {
@@ -124,9 +139,24 @@ export class PluginResourceSweeper {
         ? ["container", "rm", ...(force ? ["--force"] : []), id]
         : ["network", "rm", id];
     const result = await this.invoke(this.dockerBinary, args, sweepOptions());
-    if (result.code !== 0 && !isMissingDockerResource(result.stderr))
-      throw new Error(`Docker ${kind} cleanup failed`);
+    if (isSuccessfulCleanup(result)) return;
+    if (kind === "network" && hasActiveDockerNetworkEndpoints(result.stderr)) {
+      // A concurrent container removal may still be completing after reporting "already in
+      // progress". Let Docker finish detaching endpoints before the single network retry.
+      await new Promise((resolve) => setTimeout(resolve, NETWORK_RETRY_DELAY_MS));
+      const retry = await this.invoke(this.dockerBinary, args, sweepOptions());
+      if (isSuccessfulCleanup(retry)) return;
+    }
+    throw new Error(`Docker ${kind} cleanup failed`);
   }
+}
+
+function isSuccessfulCleanup(result: PluginDockerResult): boolean {
+  return (
+    result.code === 0 ||
+    isMissingDockerResource(result.stderr) ||
+    isDockerRemovalInProgress(result.stderr)
+  );
 }
 
 export function isMissingDockerResource(stderr: string): boolean {
@@ -136,6 +166,28 @@ export function isMissingDockerResource(stderr: string): boolean {
     message.includes("no such network") ||
     message.includes("not found")
   );
+}
+
+function isDockerRemovalInProgress(stderr: string): boolean {
+  return stderr.toLowerCase().includes("already in progress");
+}
+
+function hasActiveDockerNetworkEndpoints(stderr: string): boolean {
+  return stderr.toLowerCase().includes("has active endpoints");
+}
+
+function staleResourceIds(output: string, cutoff: number): string[] {
+  const stale: string[] = [];
+  for (const line of output.split(/\r?\n/)) {
+    const [createdLabel, createdDate, id] = line.split("\t");
+    if (!id || !/^[a-f0-9]{12,64}$/i.test(id)) continue;
+    const labeledTime = createdLabel ? Number(createdLabel) : Number.NaN;
+    const createdAt = Number.isSafeInteger(labeledTime)
+      ? labeledTime
+      : Date.parse(createdDate ?? "");
+    if (Number.isFinite(createdAt) && createdAt <= cutoff) stale.push(id);
+  }
+  return stale;
 }
 
 function sweepOptions(): PluginDockerOptions {
