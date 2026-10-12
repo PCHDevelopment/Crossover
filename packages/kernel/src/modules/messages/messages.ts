@@ -10,7 +10,7 @@ import {
   type Provenance,
 } from "../provenance.js";
 import { checkLoopProtection } from "./loop.js";
-import type { Dispatcher } from "../../dispatcher.js";
+import type { Dispatcher, EmittedEvent } from "../../dispatcher.js";
 
 export const MAX_BODY_BYTES = 32 * 1024;
 export const MAX_MENTIONS = 50;
@@ -149,13 +149,21 @@ export function registerMessageCommands(dispatcher: Dispatcher): void {
         }
       }
       const messageId = newId("msg");
+      const inboxEvents: EmittedEvent[] = [...(loop.inboxEvents ?? [])];
       // T902: a high-confidence secret in the body rejects; a low-confidence
       // match is flagged to the author and the room owner.
-      await scanTextForSecrets(ctx.client, ctx.room_id, ctx.principal.participant_id, p.body, {
-        kind: "message",
-        field: "body",
-        id: messageId,
-      });
+      await scanTextForSecrets(
+        ctx.client,
+        ctx.room_id,
+        ctx.principal.participant_id,
+        p.body,
+        {
+          kind: "message",
+          field: "body",
+          id: messageId,
+        },
+        inboxEvents,
+      );
       const { rows } = await ctx.client.query<MessageRow>(
         `INSERT INTO messages (id, room_id, author_id, body, mentions, refs, reply_to)
          VALUES ($1, $2, $3, $4, $5::text[], $6::jsonb, $7)
@@ -186,18 +194,25 @@ export function registerMessageCommands(dispatcher: Dispatcher): void {
       // Each mentioned participant (not the author mentioning themselves) gets it in their inbox.
       for (const who of mentions) {
         if (who === ctx.principal.participant_id) continue;
-        await deliverInbox(ctx.client, ctx.room_id, who, {
-          kind: "MENTION",
-          ref: { kind: "message", id: message.id },
-          summary: p.body.slice(0, 200),
-          author_id: ctx.principal.participant_id, // the message text is theirs
-        });
+        await deliverInbox(
+          ctx.client,
+          ctx.room_id,
+          who,
+          {
+            kind: "MENTION",
+            ref: { kind: "message", id: message.id },
+            summary: p.body.slice(0, 200),
+            author_id: ctx.principal.participant_id, // the message text is theirs
+          },
+          inboxEvents,
+        );
       }
       return {
         response: labelMessage(message, principalKinds(ctx.principal)),
         events: [
           { type: "message.sent" as const, payload: { message } },
           ...(loop.detected ? [loop.detected.event] : []),
+          ...inboxEvents,
         ],
       };
     },
@@ -226,11 +241,19 @@ export function registerMessageCommands(dispatcher: Dispatcher): void {
       }
       // T902: scan the whole new body; a high-confidence secret can't already
       // be in the old one (it would have been blocked on send/edit).
-      await scanTextForSecrets(ctx.client, ctx.room_id, ctx.principal.participant_id, p.body, {
-        kind: "message",
-        field: "body",
-        id: p.message_id,
-      });
+      const inboxEvents: EmittedEvent[] = [];
+      await scanTextForSecrets(
+        ctx.client,
+        ctx.room_id,
+        ctx.principal.participant_id,
+        p.body,
+        {
+          kind: "message",
+          field: "body",
+          id: p.message_id,
+        },
+        inboxEvents,
+      );
       const { rows } = await ctx.client.query<MessageRow>(
         `UPDATE messages SET body = $3, edited_at = clock_timestamp()
          WHERE id = $1 AND room_id = $2 RETURNING ${COLUMNS}`,
@@ -249,6 +272,7 @@ export function registerMessageCommands(dispatcher: Dispatcher): void {
               mentions: message.mentions,
             },
           },
+          ...inboxEvents,
         ],
       };
     },

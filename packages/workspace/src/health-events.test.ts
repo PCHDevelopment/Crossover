@@ -189,7 +189,12 @@ describe("workspace health events and reads", () => {
     }>("SELECT actor_id, type, payload FROM events WHERE room_id = $1 ORDER BY sequence", [
       f.roomId,
     ]);
-    expect(events).toHaveLength(2);
+    expect(events.map((event) => event.type)).toEqual([
+      "workspace.health",
+      "workspace.health",
+      "inbox.delivered",
+      "inbox.delivered",
+    ]);
     expect(events[1]).toMatchObject({
       actor_id: "system",
       type: "workspace.health",
@@ -230,6 +235,13 @@ describe("workspace health events and reads", () => {
     );
     expect(inbox).toHaveLength(2);
     expect(inbox.every((row) => row.kind === "HEALTH_RED")).toBe(true);
+    const { rows: notifications } = await db.pool.query<{
+      payload: { recipient_id: string; item_id: string; kind: string };
+    }>("SELECT payload FROM events WHERE room_id = $1 AND type = 'inbox.delivered'", [f.roomId]);
+    expect(notifications.map((row) => row.payload.recipient_id).sort()).toEqual(
+      [f.authors[1], f.authors[2]].sort(),
+    );
+    expect(notifications.every((row) => row.payload.kind === "HEALTH_RED")).toBe(true);
   });
 
   it("records no health event or suspect notification while the room is frozen", async () => {

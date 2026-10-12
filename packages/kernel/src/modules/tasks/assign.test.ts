@@ -130,6 +130,15 @@ describe("tasks.assign", () => {
           version: 2,
         },
       });
+      expect(out.events[1]).toMatchObject({
+        type: "inbox.delivered",
+        actor_id: "system",
+        payload: {
+          recipient_id: s.human.participant_id,
+          item_id: expect.stringMatching(/^inbox_/),
+          kind: "ASSIGNMENT",
+        },
+      });
     }
   });
 

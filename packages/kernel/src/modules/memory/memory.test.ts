@@ -319,6 +319,11 @@ describe("secret scanning on memory (T902)", () => {
     expect(rows.map((r) => r.participant_id).sort()).toEqual(
       [s.dev.participant_id, s.dev2.participant_id].sort(),
     );
+    const notifications = out.events.filter((event) => event.type === "inbox.delivered");
+    expect(notifications.map((event) => event.payload["recipient_id"]).sort()).toEqual(
+      [s.dev.participant_id, s.dev2.participant_id].sort(),
+    );
+    expect(notifications.every((event) => event.payload["kind"] === "SECRET_SCAN")).toBe(true);
     for (const r of rows) {
       expect(r.summary).toContain("memory key creds/api");
       expect(r.summary).toContain("line 1");

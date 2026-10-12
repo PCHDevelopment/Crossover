@@ -1,6 +1,6 @@
 import { CrossoverError, newId } from "@crossover/protocol";
 import { z } from "zod";
-import type { CommandContext, Dispatcher } from "../../dispatcher.js";
+import type { CommandContext, Dispatcher, EmittedEvent } from "../../dispatcher.js";
 import { currentLeadId, deliverInbox } from "../inbox/inbox.js";
 import { loadActor, manages } from "./create-update.js";
 import { evidenceSchema, missingEvidence, validateEvidence } from "./evidence.js";
@@ -118,12 +118,18 @@ export function registerTaskLifecycleCommands(
       });
       // Being handed work is news; assigning it to yourself is not.
       if (p.participant_id !== ctx.principal.participant_id) {
-        await deliverInbox(ctx.client, ctx.room_id, p.participant_id, {
-          kind: "ASSIGNMENT",
-          ref: { kind: "task", id: task.id },
-          summary: `Assigned to you: ${task.title}`,
-          author_id: task.created_by, // the title is the task creator's
-        });
+        await deliverInbox(
+          ctx.client,
+          ctx.room_id,
+          p.participant_id,
+          {
+            kind: "ASSIGNMENT",
+            ref: { kind: "task", id: task.id },
+            summary: `Assigned to you: ${task.title}`,
+            author_id: task.created_by, // the title is the task creator's
+          },
+          taken.events,
+        );
       }
       return taken;
     },
@@ -241,9 +247,12 @@ export function registerTaskLifecycleCommands(
           { details: { missing_evidence: missing, requirements: task.requirements.length } },
         );
       }
+      const inboxEvents: EmittedEvent[] = [];
       const reviewer =
-        to === "REVIEW" ? await requestReview(ctx, task, actor.id, missing.length) : null;
-      return transition(ctx, task, to, {
+        to === "REVIEW"
+          ? await requestReview(ctx, task, actor.id, missing.length, inboxEvents)
+          : null;
+      const transitioned = await transition(ctx, task, to, {
         eventType: "task.submitted",
         set: "lease_expires_at = NULL, evidence = $5::jsonb",
         values: [JSON.stringify(evidence)],
@@ -256,6 +265,7 @@ export function registerTaskLifecycleCommands(
           missing_evidence: missing,
         },
       });
+      return { ...transitioned, events: [...transitioned.events, ...inboxEvents] };
     },
   });
 
@@ -536,6 +546,7 @@ async function requestReview(
   task: TaskRow,
   submitterId: string,
   missingCount: number,
+  events: EmittedEvent[],
 ): Promise<string | null> {
   let recipient: string | null = null;
   if (task.reviewer_id) {
@@ -547,14 +558,20 @@ async function requestReview(
   }
   recipient ??= await currentLeadId(ctx.client, ctx.room_id);
   if (recipient === null || recipient === submitterId) return recipient;
-  await deliverInbox(ctx.client, ctx.room_id, recipient, {
-    kind: "REVIEW_REQUEST",
-    ref: { kind: "task", id: task.id },
-    summary:
-      missingCount === 0
-        ? `Review requested: ${task.title}`
-        : `Review requested: ${task.title} (${missingCount} of ${task.requirements.length} requirements have no evidence)`,
-    author_id: task.created_by, // the title is the task creator's
-  });
+  await deliverInbox(
+    ctx.client,
+    ctx.room_id,
+    recipient,
+    {
+      kind: "REVIEW_REQUEST",
+      ref: { kind: "task", id: task.id },
+      summary:
+        missingCount === 0
+          ? `Review requested: ${task.title}`
+          : `Review requested: ${task.title} (${missingCount} of ${task.requirements.length} requirements have no evidence)`,
+      author_id: task.created_by, // the title is the task creator's
+    },
+    events,
+  );
   return recipient;
 }

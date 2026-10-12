@@ -140,7 +140,7 @@ export default function CollaborationView(props: {
 
   useEffect(() => {
     const unsubscribe = onEvent((event) => {
-      if (event.type === "workspace.health") {
+      if (event.type === "inbox.delivered" && event.payload["recipient_id"] === selfId) {
         void loadInbox().catch((error: unknown) => setNotice(message(error)));
       }
       if (event.type.startsWith("decision.")) {
@@ -167,6 +167,7 @@ export default function CollaborationView(props: {
     };
   }, [
     loadInbox,
+    selfId,
     loadDecision,
     loadDecisions,
     loadMemory,

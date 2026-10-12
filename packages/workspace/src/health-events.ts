@@ -1,5 +1,5 @@
 import type { Pool } from "@crossover/db";
-import type { Dispatcher } from "@crossover/kernel";
+import type { Dispatcher, EmittedEvent } from "@crossover/kernel";
 import { deliverInbox, hasLiveDeny } from "@crossover/kernel";
 import { CrossoverError } from "@crossover/protocol";
 import { z } from "zod";
@@ -50,6 +50,7 @@ export async function publishHealthResult(
       if (result.status === "RED") payload.last_green_revision = lastGreenRevision;
 
       let inboxCount = 0;
+      const inboxEvents: (EmittedEvent & { actor_id: string })[] = [];
       const suspectIds: string[] = [];
       if (result.status === "RED") {
         const { rows: suspects } = await client.query<{ author_id: string }>(
@@ -65,12 +66,18 @@ export async function publishHealthResult(
           [roomId, current.workspace_id, revision, lastGreenRevision],
         );
         for (const { author_id } of suspects) {
-          await deliverInbox(client, roomId, author_id, {
-            kind: "HEALTH_RED",
-            ref: { kind: "health_run", id: runId },
-            summary: `Health check failed at workspace revision ${revision}; your ChangeSet is in the suspect range.`,
-            author_id: "system",
-          });
+          await deliverInbox(
+            client,
+            roomId,
+            author_id,
+            {
+              kind: "HEALTH_RED",
+              ref: { kind: "health_run", id: runId },
+              summary: `Health check failed at workspace revision ${revision}; your ChangeSet is in the suspect range.`,
+              author_id: "system",
+            },
+            inboxEvents,
+          );
           inboxCount += 1;
           suspectIds.push(author_id);
         }
@@ -80,7 +87,7 @@ export async function publishHealthResult(
 
       return {
         result: { inboxCount, lastGreenRevision },
-        events: [{ type: "workspace.health", actor_id: "system", payload }],
+        events: [{ type: "workspace.health", actor_id: "system", payload }, ...inboxEvents],
       };
     },
     // A frozen room records no new health events (the run itself stays in health_runs).

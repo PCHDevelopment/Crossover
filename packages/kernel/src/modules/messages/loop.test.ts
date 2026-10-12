@@ -115,7 +115,18 @@ describe("loop protection (§17.6)", () => {
     await chat(s, [s.a, s.b], LOOP_MESSAGE_LIMIT);
     expect(await loopEvents(s)).toEqual([]);
     const out = await say(s, s.a, "the 21st");
-    expect(out.events.map((e) => e.type)).toEqual(["message.sent", "loop.detected"]);
+    expect(out.events.map((e) => e.type)).toEqual([
+      "message.sent",
+      "loop.detected",
+      "inbox.delivered",
+      "inbox.delivered",
+    ]);
+    expect(out.events.slice(2).map((e) => e.payload)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ recipient_id: s.lead.participant_id, kind: "LOOP_DETECTED" }),
+        expect.objectContaining({ recipient_id: s.owner.participant_id, kind: "LOOP_DETECTED" }),
+      ]),
+    );
     const [ev] = await loopEvents(s);
     expect(ev!.actor_id).toBe("system");
     expect(ev!.payload).toMatchObject({
@@ -266,7 +277,12 @@ describe("loop protection (§17.6)", () => {
     await chat(s, [s.a], LOOP_MESSAGE_LIMIT + 5);
     expect(await loopEvents(s)).toEqual([]);
     const out = await say(s, s.b, "mind if I join?");
-    expect(out.events.map((e) => e.type)).toEqual(["message.sent", "loop.detected"]);
+    expect(out.events.map((e) => e.type)).toEqual([
+      "message.sent",
+      "loop.detected",
+      "inbox.delivered",
+      "inbox.delivered",
+    ]);
     const [ev] = await loopEvents(s);
     expect(ev!.payload).toMatchObject({
       participants: [s.a.participant_id, s.b.participant_id].sort(),
@@ -308,7 +324,12 @@ describe("loop protection (§17.6)", () => {
       })),
     }));
     const out = await say(s, s.a, "the 21st");
-    expect(out.events.map((e) => e.type)).toEqual(["message.sent", "loop.detected"]);
+    expect(out.events.map((e) => e.type)).toEqual([
+      "message.sent",
+      "loop.detected",
+      "inbox.delivered",
+      "inbox.delivered",
+    ]);
   });
 
   it("a second loop after a reset is detected and announced again", async () => {

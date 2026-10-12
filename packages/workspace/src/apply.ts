@@ -619,6 +619,7 @@ export async function apply(
   const head = headRow.rows[0];
   const base = baseRow.rows[0];
   if (!head || !base) throw new CrossoverError("VALIDATION", "Unknown workspace revision");
+  const inboxEvents: EmittedEvent[] = [];
   let resolution:
     | {
         conflictId: string;
@@ -751,13 +752,20 @@ export async function apply(
         ],
       );
       const recipients = new Set([room.owner_id, room.lead_participant_id].filter(Boolean));
+      const heldInboxEvents: EmittedEvent[] = [];
       for (const recipient of recipients) {
-        await deliverInbox(client, room_id, recipient!, {
-          kind: "APPROVAL",
-          ref: { kind: "changeset", id },
-          summary: `ChangeSet ${id} was held for review (${reasons.join(", ")}).`,
-          author_id: "system",
-        });
+        await deliverInbox(
+          client,
+          room_id,
+          recipient!,
+          {
+            kind: "APPROVAL",
+            ref: { kind: "changeset", id },
+            summary: `ChangeSet ${id} was held for review (${reasons.join(", ")}).`,
+            author_id: "system",
+          },
+          heldInboxEvents,
+        );
       }
       const visiblePaths: string[] = [];
       for (const path of assessment.protected_paths) {
@@ -793,6 +801,7 @@ export async function apply(
             type: "workspace.changeset.held",
             payload: { changeset_id: id, actor_id: actorId, reasons },
           },
+          ...heldInboxEvents,
         ],
       };
     }
@@ -912,6 +921,7 @@ export async function apply(
             lead_participant_id: resolution.leadParticipantId,
           },
           "attempts",
+          inboxEvents,
         );
       }
     } else {
@@ -950,7 +960,7 @@ export async function apply(
       },
       events: resolution
         ? escalationEvent
-          ? [escalationEvent]
+          ? [escalationEvent, ...inboxEvents]
           : []
         : [
             {
@@ -1025,12 +1035,18 @@ export async function apply(
     const shown = toFlag.slice(0, MAX_FINDINGS_PER_CHANGESET);
     const omitted = toFlag.length - shown.length;
     for (const recipient of recipients) {
-      await deliverInbox(client, room_id, recipient, {
-        kind: "SECRET_SCAN",
-        ref: { kind: "changeset", id },
-        summary: secretScanSummary(shown, omitted),
-        author_id: "system",
-      });
+      await deliverInbox(
+        client,
+        room_id,
+        recipient,
+        {
+          kind: "SECRET_SCAN",
+          ref: { kind: "changeset", id },
+          summary: secretScanSummary(shown, omitted),
+          author_id: "system",
+        },
+        inboxEvents,
+      );
     }
   }
   if (resolution) {
@@ -1100,6 +1116,7 @@ export async function apply(
           ]
         : []),
       ...(completion?.events ?? []),
+      ...inboxEvents,
     ],
   };
 }

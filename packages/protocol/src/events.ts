@@ -26,6 +26,7 @@ export const EVENT_TYPES = [
   "capability.denied",
   "approval.requested",
   "approval.decided",
+  "inbox.delivered",
 
   "message.sent",
   "message.edited",
