@@ -19,6 +19,7 @@ const errorText = (error: unknown): string =>
 
 export function OwnerControlsView(props: {
   room: RoomClient;
+  roomName: string;
   participants: Participant[];
   selfId: string;
   leadParticipantId: string | null;
@@ -26,7 +27,16 @@ export function OwnerControlsView(props: {
   settings: Settings;
   onRefresh: () => Promise<void>;
 }) {
-  const { room, participants, selfId, leadParticipantId, roomStatus, settings, onRefresh } = props;
+  const {
+    room,
+    roomName,
+    participants,
+    selfId,
+    leadParticipantId,
+    roomStatus,
+    settings,
+    onRefresh,
+  } = props;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -71,25 +81,34 @@ export function OwnerControlsView(props: {
 
   const submitEgress = (event: FormEvent) => {
     event.preventDefault();
-    if (!window.confirm("Replace the room’s extra egress host allowlist?")) return;
+    const hosts = lines(egress);
+    if (
+      !window.confirm(
+        `Replace ${roomName}’s extra egress host allowlist with ${hosts.length ? hosts.join(", ") : "no extra hosts"}?`,
+      )
+    )
+      return;
     void perform("Save egress allowlist", async () => {
-      await room.api.room.set_egress_allowlist({ hosts: lines(egress) });
+      await room.api.room.set_egress_allowlist({ hosts });
     });
   };
 
   const submitProtectedPaths = (event: FormEvent) => {
     event.preventDefault();
+    const patterns = lines(protectedPaths);
     if (
-      !window.confirm("Replace the protected path patterns? An empty list disables these checks.")
+      !window.confirm(
+        `Replace ${roomName}’s protected path patterns with ${patterns.length ? patterns.join(", ") : "no protected paths"}?`,
+      )
     )
       return;
     void perform("Save protected paths", async () => {
-      await room.api.room.set_protected_paths({ patterns: lines(protectedPaths) });
+      await room.api.room.set_protected_paths({ patterns });
     });
   };
 
   const freeze = () => {
-    if (!window.confirm("Freeze this room? Active agent work will stop until it is resumed."))
+    if (!window.confirm(`Freeze ${roomName}? Active agent work will stop until it is resumed.`))
       return;
     void perform("Freeze room", async () => {
       await room.api.room.freeze({});

@@ -319,6 +319,7 @@ export function RoomView(props: {
         <Suspense fallback={<p className="muted">Loading owner controls…</p>}>
           <OwnerControlsView
             room={open.room}
+            roomName={room.name}
             participants={participants}
             selfId={me.participant_id}
             leadParticipantId={room.lead_participant_id}

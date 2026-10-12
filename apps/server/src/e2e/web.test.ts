@@ -156,8 +156,12 @@ describe.skipIf(!executablePath && !inCi)("web app in a browser", () => {
   it("login, create a room, agents join and a lead is appointed, tasks appear on the board, a denial shows in Activity, pause and resume work", async () => {
     const page: Page = await browser!.newPage();
     const problems: string[] = [];
+    const confirmationMessages: string[] = [];
     let acceptDialogs = true;
-    page.on("dialog", (dialog) => void (acceptDialogs ? dialog.accept() : dialog.dismiss()));
+    page.on("dialog", (dialog) => {
+      confirmationMessages.push(dialog.message());
+      void (acceptDialogs ? dialog.accept() : dialog.dismiss());
+    });
     page.on("pageerror", (e) => problems.push(`pageerror: ${e.message}`));
     page.on("console", (m) => {
       if (m.type() === "error") problems.push(`console: ${m.text()} @ ${m.location().url}`);
@@ -342,6 +346,11 @@ describe.skipIf(!executablePath && !inCi)("web app in a browser", () => {
        VALUES ($1, $2, 'HUMAN', 'RoomGuest', 'MEMBER', 'OBSERVER', 'ACTIVE', $3, clock_timestamp())`,
       [guestId, roomId, guestUser.rows[0]!.id],
     );
+    const guestRoom = client.room(
+      roomId,
+      (await client.roomSession(guestLogin.session_token, roomId)).tokens.access_token,
+    );
+    await expect(guestRoom.api.room.freeze({})).rejects.toMatchObject({ code: "FORBIDDEN" });
     const guestPage = await browser!.newPage();
     await guestPage.goto(baseUrl);
     await guestPage.evaluate(
@@ -361,6 +370,8 @@ describe.skipIf(!executablePath && !inCi)("web app in a browser", () => {
     await expect
       .poll(() => page.getByTestId("owner-controls-notice").textContent())
       .toContain("complete");
+    await owner.api.room.set_egress_allowlist({ hosts: ["live.example"] });
+    await expect.poll(() => page.getByTestId("egress-hosts").inputValue()).toBe("live.example");
     await page.getByTestId("protected-paths").fill("infra/release/**\n.github/workflows/**");
     await page.getByTestId("save-protected-paths").click();
     await expect
@@ -371,7 +382,7 @@ describe.skipIf(!executablePath && !inCi)("web app in a browser", () => {
         sections: { room: { settings: Record<string, unknown> } };
       }>({ view: "summary" })
     ).response.sections.room.settings;
-    expect(settings["egress_allowlist"]).toEqual(["*.packages.example", "registry.acme.test"]);
+    expect(settings["egress_allowlist"]).toEqual(["live.example"]);
     expect(settings["protected_paths"]).toEqual([".github/workflows/**", "infra/release/**"]);
 
     const observerRow = page.getByTestId("owner-participant").filter({ hasText: "ObserverAgent" });
@@ -391,6 +402,14 @@ describe.skipIf(!executablePath && !inCi)("web app in a browser", () => {
     await expect.poll(() => page.getByTestId("owner-room-status").textContent()).toBe("PAUSED");
     await page.getByTestId("resume-room").click();
     await expect.poll(() => page.getByTestId("owner-room-status").textContent()).toBe("ACTIVE");
+    expect(confirmationMessages).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("registry.acme.test, *.packages.example"),
+        expect.stringContaining("infra/release/**, .github/workflows/**"),
+        expect.stringContaining("ObserverAgent"),
+        expect.stringContaining("Project Alpha"),
+      ]),
+    );
     await guestPage.close();
 
     expect(problems).toEqual([]);
