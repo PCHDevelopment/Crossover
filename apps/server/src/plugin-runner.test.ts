@@ -10,7 +10,11 @@ import {
   resolveAwsRegionalHosts,
   type PluginDockerInvoker,
 } from "./plugin-runner.js";
-import { PLUGIN_SWEEP_INTERVAL_MS, PluginResourceSweeper } from "./plugin-runner-docker.js";
+import {
+  PLUGIN_RESOURCE_MAX_AGE_MS,
+  PLUGIN_SWEEP_INTERVAL_MS,
+  PluginResourceSweeper,
+} from "./plugin-runner-docker.js";
 
 const SECRET = "plugin-proxy-secret-with-at-least-32-bytes";
 const TOKEN = "short-lived-provider-token";
@@ -524,5 +528,98 @@ describe("DockerToolRunner", () => {
       await sweeper.stop();
       vi.useRealTimers();
     }
+  });
+
+  it("tolerates concurrent container removal and retries an active network after the container pass", async () => {
+    const containerId = "a".repeat(12);
+    const networkId = "b".repeat(12);
+    const calls: string[][] = [];
+    let networkRemovalAttempts = 0;
+    const invoke: PluginDockerInvoker = async (_binary, args) => {
+      calls.push([...args]);
+      if (args[0] === "container" && args[1] === "ls") {
+        return { code: 0, stdout: `${containerId}\n`, stderr: "" };
+      }
+      if (args[0] === "network" && args[1] === "ls") {
+        return { code: 0, stdout: `${networkId}\n`, stderr: "" };
+      }
+      if (args[1] === "inspect") {
+        const id = args.at(-1);
+        return { code: 0, stdout: `0\t\t${id}\n`, stderr: "" };
+      }
+      if (args[0] === "container" && args[1] === "rm") {
+        return {
+          code: 1,
+          stdout: "",
+          stderr: `Error response from daemon: removal of container ${containerId} is already in progress`,
+        };
+      }
+      if (args[0] === "network" && args[1] === "rm") {
+        networkRemovalAttempts++;
+        return networkRemovalAttempts === 1
+          ? {
+              code: 1,
+              stdout: "",
+              stderr: `Error response from daemon: network ${networkId} has active endpoints`,
+            }
+          : { code: 0, stdout: `${networkId}\n`, stderr: "" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    const sweeper = new PluginResourceSweeper("docker", invoke);
+
+    await sweeper.sweepNow(PLUGIN_RESOURCE_MAX_AGE_MS + 1);
+
+    const removalCalls = calls.filter(
+      (args) =>
+        (args[0] === "container" && args[1] === "rm") ||
+        (args[0] === "network" && args[1] === "rm"),
+    );
+    expect(removalCalls).toEqual([
+      ["container", "rm", "--force", containerId],
+      ["network", "rm", networkId],
+      ["network", "rm", networkId],
+    ]);
+    expect(networkRemovalAttempts).toBe(2);
+  });
+
+  it("continues inspecting stale IDs when another sweep removes one during batch inspection", async () => {
+    const removedId = "c".repeat(12);
+    const staleId = "d".repeat(12);
+    const calls: string[][] = [];
+    const invoke: PluginDockerInvoker = async (_binary, args) => {
+      calls.push([...args]);
+      if (args[0] === "container" && args[1] === "ls") {
+        return { code: 0, stdout: `${removedId}\n${staleId}\n`, stderr: "" };
+      }
+      if (args[0] === "network" && args[1] === "ls") {
+        return { code: 0, stdout: "", stderr: "" };
+      }
+      if (args[0] === "container" && args[1] === "inspect") {
+        if (args.length > 5) {
+          return {
+            code: 1,
+            stdout: "",
+            stderr: `Error response from daemon: No such container: ${removedId}`,
+          };
+        }
+        const id = args.at(-1);
+        if (id === removedId) {
+          return {
+            code: 1,
+            stdout: "",
+            stderr: `Error response from daemon: No such container: ${removedId}`,
+          };
+        }
+        return { code: 0, stdout: `0\t\t${id}\n`, stderr: "" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    const sweeper = new PluginResourceSweeper("docker", invoke);
+
+    await sweeper.sweepNow(PLUGIN_RESOURCE_MAX_AGE_MS + 1);
+
+    expect(calls).toContainEqual(["container", "rm", "--force", staleId]);
+    expect(calls).not.toContainEqual(["container", "rm", "--force", removedId]);
   });
 });
