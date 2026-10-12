@@ -110,6 +110,14 @@ button.link {
   padding: 8px 0;
   border-bottom: 1px solid var(--line);
 }
+.change-detail pre {
+  overflow: auto;
+  max-height: 420px;
+  padding: 8px;
+  background: var(--bg);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .tabs {
   display: flex;
   gap: 8px;
