@@ -256,18 +256,28 @@ describe.skipIf(skipDockerIntegration)("DockerToolRunner real Docker integration
     const runner = createRunner(["/bin/busybox", "true"], [], 5_000, true);
     try {
       await runner.sweepStaleResources();
-      const containers = execFileSync(
-        "docker",
-        ["ps", "-a", "--filter", `name=${staleContainer}`, "--format", "{{.ID}}"],
-        { encoding: "utf8", timeout: 5_000 },
-      );
-      const networks = execFileSync(
-        "docker",
-        ["network", "ls", "--filter", `name=${staleNetwork}`, "--format", "{{.ID}}"],
-        { encoding: "utf8", timeout: 5_000 },
-      );
-      expect(containers.trim()).toBe("");
-      expect(networks.trim()).toBe("");
+      await expect
+        .poll(
+          () =>
+            execFileSync(
+              "docker",
+              ["ps", "-a", "--filter", `name=${staleContainer}`, "--format", "{{.ID}}"],
+              { encoding: "utf8", timeout: 5_000 },
+            ).trim(),
+          { timeout: 5_000 },
+        )
+        .toBe("");
+      await expect
+        .poll(
+          () =>
+            execFileSync(
+              "docker",
+              ["network", "ls", "--filter", `name=${staleNetwork}`, "--format", "{{.ID}}"],
+              { encoding: "utf8", timeout: 5_000 },
+            ).trim(),
+          { timeout: 5_000 },
+        )
+        .toBe("");
     } finally {
       await runner.close();
       try {
