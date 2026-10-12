@@ -859,6 +859,64 @@ describe("DockerExecutionDriver", () => {
     );
   });
 
+  it("accepts an existing local volume with null options in soft mode", async () => {
+    const driver = new DockerExecutionDriver({
+      invoke: async (args) => {
+        if (args[0] === "volume" && args[1] === "inspect")
+          return { code: 0, stdout: "local|null", stderr: "" };
+        return missingResources(args);
+      },
+    });
+
+    await expect(
+      driver.create({
+        sandbox_id: newId("sandbox"),
+        room_id: newId("room"),
+        participant_id: newId("part"),
+        limits: { disk_enforcement: "soft" },
+      }),
+    ).resolves.toMatchObject({ volume_ref: expect.any(String), container_ref: expect.any(String) });
+  });
+
+  it("rejects an existing local volume with null options when hard options are required", async () => {
+    const driver = new DockerExecutionDriver({
+      ...hardOptions,
+      invoke: async (args) => {
+        if (args[0] === "volume" && args[1] === "inspect")
+          return { code: 0, stdout: "local|null", stderr: "" };
+        return missingResources(args);
+      },
+    });
+
+    await expect(
+      driver.create({
+        sandbox_id: newId("sandbox"),
+        room_id: newId("room"),
+        participant_id: newId("part"),
+        limits: { disk_enforcement: "hard" },
+      }),
+    ).rejects.toThrow("does not match SANDBOX_VOLUME_DRIVER and SANDBOX_VOLUME_OPTS");
+  });
+
+  it("rejects array-valued Docker volume options", async () => {
+    const driver = new DockerExecutionDriver({
+      invoke: async (args) => {
+        if (args[0] === "volume" && args[1] === "inspect")
+          return { code: 0, stdout: "local|[]", stderr: "" };
+        return missingResources(args);
+      },
+    });
+
+    await expect(
+      driver.create({
+        sandbox_id: newId("sandbox"),
+        room_id: newId("room"),
+        participant_id: newId("part"),
+        limits: { disk_enforcement: "soft" },
+      }),
+    ).rejects.toThrow("ERROR: Docker returned invalid volume inspection data");
+  });
+
   it("fails closed with clear errors when Docker rejects either hard quota", async () => {
     const input = {
       sandbox_id: newId("sandbox"),
