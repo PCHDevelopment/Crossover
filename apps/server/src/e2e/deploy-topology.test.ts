@@ -134,6 +134,8 @@ describe.skipIf(!image)("deployed server topology", () => {
       "--env",
       "DEV_LOGIN=true",
       "--env",
+      "DEV_LOGIN_ALLOW_PRODUCTION=true", // explicit opt-in for this disposable topology fixture
+      "--env",
       "INTEGRATION_KMS_KEY_ID=alias/crossover-deploy-topology-test",
       "--env",
       "SANDBOX_DISK_ENFORCEMENT=soft",
