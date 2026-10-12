@@ -12,6 +12,7 @@ import { treeChanges } from "./tree-changes.js";
 import { updateCanonicalRef } from "./reconcile.js";
 import { UPSTREAM_ACTOR } from "./upstream-import.js";
 import { registerWorkspaceReads } from "./reads.js";
+import { registerWorkspaceChangesetReads } from "./changeset-reads.js";
 import { registerWorkspaceHistory } from "./history.js";
 import { registerWorkspaceBlame } from "./blame.js";
 import { registerWorkspaceSearch } from "./search.js";
@@ -228,6 +229,7 @@ export function registerWorkspaceCommands(
     },
   });
   registerWorkspaceReads(dispatcher);
+  registerWorkspaceChangesetReads(dispatcher);
   registerWorkspaceHistory(dispatcher);
   registerWorkspaceBlame(dispatcher);
   registerWorkspaceSearch(dispatcher);
