@@ -13,6 +13,7 @@ const HEALTH_STEP_TIMEOUT_MS = 150_000;
 interface DemoParticipant {
   id: string;
   room: RoomClient;
+  tokens: RoomTokens;
 }
 
 interface RoomEvent {
@@ -186,6 +187,7 @@ function registerWebDemoFlow(fixture: WebFixture): void {
     page.setDefaultNavigationTimeout(STEP_TIMEOUT_MS);
     const problems: string[] = [];
     let mcp: McpClient | undefined;
+    let agentAMcp: McpClient | undefined;
     page.on("dialog", (dialog) => void dialog.accept());
     page.on("pageerror", (error) => problems.push(`pageerror: ${error.message}`));
     page.on("console", (entry) => {
@@ -271,6 +273,7 @@ function registerWebDemoFlow(fixture: WebFixture): void {
         return {
           id: joined.participant_id as string,
           room: client.room(roomId, joined.tokens),
+          tokens: joined.tokens,
         };
       };
       let architect: DemoParticipant;
@@ -291,7 +294,11 @@ function registerWebDemoFlow(fixture: WebFixture): void {
           tokens: RoomTokens;
         };
         if (!response.ok) throw new Error(`HTTP room join failed with ${response.status}`);
-        architect = { id: body.participant_id, room: client.room(roomId, body.tokens) };
+        architect = {
+          id: body.participant_id,
+          room: client.room(roomId, body.tokens),
+          tokens: body.tokens,
+        };
         agentA = await joinWithSdk("AgentA", inviteTokens[1]!);
         agentB = await joinWithSdk("AgentB", inviteTokens[2]!);
         agentC = await joinWithSdk("AgentC", inviteTokens[3]!);
@@ -301,6 +308,14 @@ function registerWebDemoFlow(fixture: WebFixture): void {
           new StreamableHTTPClientTransport(new URL(`${fixture.baseUrl}/mcp`), {
             requestInit: {
               headers: { Authorization: `Bearer ${body.tokens.access_token}` },
+            },
+          }) as never,
+        );
+        agentAMcp = new McpClient({ name: "crossover-t1501-demo-agent-a", version: "1.0.0" });
+        await agentAMcp.connect(
+          new StreamableHTTPClientTransport(new URL(`${fixture.baseUrl}/mcp`), {
+            requestInit: {
+              headers: { Authorization: `Bearer ${agentA.tokens.access_token}` },
             },
           }) as never,
         );
@@ -466,7 +481,7 @@ function registerWebDemoFlow(fixture: WebFixture): void {
           open_files: ["src/auth.js"],
           cursor: { path: "src/auth.js", line: 40, column: 1 },
         });
-        await agentA.room.api.presence.set_intent({
+        await callMcp(agentAMcp!, "presence_set_intent", {
           paths: ["src/auth.js"],
           ranges: [{ path: "src/auth.js", start_line: 40, end_line: 62 }],
           task_id: tasks[0]!.id,
@@ -933,6 +948,7 @@ function registerWebDemoFlow(fixture: WebFixture): void {
       if (canceledSdkRequests > 0)
         console.warn(`[web-e2e] canceled ${canceledSdkRequests} in-flight SDK request(s)`);
       await mcp?.close().catch(() => undefined);
+      await agentAMcp?.close().catch(() => undefined);
       await page.close();
     }
   }, 600_000);

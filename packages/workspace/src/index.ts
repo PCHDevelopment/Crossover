@@ -37,7 +37,8 @@ export {
 export type { ConflictEscalationSweeperOptions } from "./conflict-escalation-sweeper.js";
 export { workspaceReadParamsSchema, workspaceListParamsSchema } from "./reads.js";
 export { workspaceSearchParamsSchema } from "./search.js";
-export { workspaceDiffParamsSchema } from "./history.js";
+export { workspaceDiffParamsSchema, workspaceHistoryParamsSchema } from "./history.js";
+export { workspaceBlameParamsSchema } from "./blame.js";
 export { updateCanonicalRef, reconcileRef } from "./reconcile.js";
 export {
   DEFAULT_HEALTH_LOCKFILE_PATHS,

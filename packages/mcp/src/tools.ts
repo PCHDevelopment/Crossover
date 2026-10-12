@@ -6,6 +6,7 @@ import {
   decisionsProposeParams,
   decisionsVetoParams,
   decisionsWithdrawParams,
+  createPresenceIntentParamsSchemas,
   inboxAckParams,
   inboxListParams,
   memoryDeleteParams,
@@ -19,6 +20,8 @@ import {
   roomDigestParams,
   roomSetHealthParams,
   taskVersionParams,
+  toolsInvokeParams,
+  toolsListParams,
   tasksAssignParams,
   tasksBlockParams,
   tasksCreateParams,
@@ -34,6 +37,8 @@ import {
   changesetInputSchema,
   healthGetParamsSchema,
   workspaceDiffParamsSchema,
+  workspaceHistoryParamsSchema,
+  workspaceBlameParamsSchema,
   workspaceListParamsSchema,
   workspaceReadParamsSchema,
   workspaceSearchParamsSchema,
@@ -46,6 +51,7 @@ import {
   sandboxFileWriteInputSchema,
   sandboxStatusParamsSchema,
   sandboxSyncParamsSchema,
+  normalizePath,
 } from "@crossover/workspace";
 import { z } from "zod";
 
@@ -63,9 +69,13 @@ export interface McpToolDefinition {
   /** Tool arguments. They become the command's `params` unless `toParams` says otherwise. */
   input: z.ZodRawShape;
   toParams?: (args: Record<string, unknown>) => Record<string, unknown>;
+  /** Trust label for the result frame; defaults to participant data. */
+  trust?: "participant" | "external";
   /** Mutating tools also accept an optional `idempotency_key`, so a retry can be made safe. */
   mutating: boolean;
 }
+
+const presenceIntentParams = createPresenceIntentParamsSchemas(normalizePath);
 
 /** The skeleton's tools; the task and collaboration tools (T708, T709) add theirs. */
 export const BASE_TOOLS: readonly McpToolDefinition[] = [
@@ -131,6 +141,21 @@ export const WORKSPACE_TOOLS: readonly McpToolDefinition[] = [
     description: "Show changes between committed canonical workspace revisions.",
     method: "workspace.diff",
     input: workspaceDiffParamsSchema.shape,
+    mutating: false,
+  },
+  {
+    name: "workspace_history",
+    description: "Show committed workspace revisions, optionally for one path.",
+    method: "workspace.history",
+    input: workspaceHistoryParamsSchema.shape,
+    mutating: false,
+  },
+  {
+    name: "workspace_blame",
+    description:
+      "Attribute lines in a committed workspace file to the ChangeSet that last changed them.",
+    method: "workspace.blame",
+    input: workspaceBlameParamsSchema.shape,
     mutating: false,
   },
   {
@@ -318,7 +343,33 @@ const tool = (
   description: string,
   input: z.ZodRawShape,
   mutating: boolean,
-): McpToolDefinition => ({ name, method, description, input, mutating });
+  trust?: McpToolDefinition["trust"],
+): McpToolDefinition => ({
+  name,
+  method,
+  description,
+  input,
+  mutating,
+  ...(trust ? { trust } : {}),
+});
+
+/** Edit-intent commands are ephemeral presence updates; they still use the normal dispatcher. */
+export const PRESENCE_TOOLS: readonly McpToolDefinition[] = [
+  tool(
+    "presence_set_intent",
+    "presence.set_intent",
+    "Publish the paths and optional line ranges you intend to edit, with an optional task association.",
+    presenceIntentParams.set.shape,
+    false,
+  ),
+  tool(
+    "presence_clear_intent",
+    "presence.clear_intent",
+    "Clear your current edit intent.",
+    presenceIntentParams.clear.shape,
+    false,
+  ),
+];
 
 /**
  * Collaboration tools (T709): messages, inbox, memory, decisions and the digest. As with the
@@ -476,10 +527,31 @@ export const COLLABORATION_TOOLS: readonly McpToolDefinition[] = [
   ),
 ];
 
+/** Plugin tools use the existing registry and its per-tool capability checks. */
+export const PLUGIN_TOOLS: readonly McpToolDefinition[] = [
+  tool(
+    "tools_list",
+    "tools.list",
+    "List plugin tools available to you and the capabilities they require.",
+    toolsListParams.shape,
+    false,
+  ),
+  tool(
+    "tools_invoke",
+    "tools.invoke",
+    "Invoke a plugin tool by name with its declared arguments.",
+    toolsInvokeParams.shape,
+    true,
+    "external",
+  ),
+];
+
 export const MCP_TOOLS: readonly McpToolDefinition[] = [
   ...BASE_TOOLS,
   ...TASK_TOOLS,
   ...COLLABORATION_TOOLS,
   ...WORKSPACE_TOOLS,
   ...SANDBOX_TOOLS,
+  ...PRESENCE_TOOLS,
+  ...PLUGIN_TOOLS,
 ];
