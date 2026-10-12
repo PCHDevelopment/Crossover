@@ -10,23 +10,23 @@ Conventions are in `docs/ENGINEERING.md`. Section references (§) point to `docs
 
 ## Ownership at a glance
 
-| Milestone                             | Tasks       | Owner                                                                            |
-| ------------------------------------- | ----------- | -------------------------------------------------------------------------------- |
-| M0 Foundation                         | T000        | O1                                                                               |
-| M1 Persistence, ledger, commands      | T101–T118   | S1                                                                               |
-| M2 Rooms, participants, auth, policy  | T201–T215   | S1                                                                               |
-| M3 Tasks                              | T301–T312   | S1                                                                               |
-| M4 Messages, inbox, decisions, memory | T401–T412   | S1 (moved from S2 for T404–T409, T411–T412 in Review 3)                          |
-| M5 Workspace engine                   | T501–T520   | S2                                                                               |
-| M6 Conflicts and health               | T601–T610   | S2                                                                               |
-| M7 Gateway, MCP, end-to-end           | T701–T713   | S1 (T701–T709, T713), S2 (T710), Q1 (T705, T711), O1 (T712)                      |
-| M8 Git interoperability (§24)         | T801–T807   | S1 (moved from S2 in Review 4)                                                   |
-| M9 Safety controls (§22–23)           | T901–T906   | S1 (T904–T906), Q1 (T901–T902), S2 (T903)                                        |
-| M10 Execution sandboxes (§14)         | T1001–T1008 | S2 (T1007 split into T1007 + T1007b in Review 5)                                 |
-| M11 Clients (§27, §29)                | T1101–T1106 | S1 (T1102 → Q1)                                                                  |
-| M12 Plugins (§21.4–21.5)              | T1201–T1206 | S1 (T1201, moved in Review 5), S2 (T1202–T1206)                                  |
-| M13 Lessons from building (§34)       | T1301–T1303 | S1                                                                               |
-| M14 Demo-ready web app (Review 7)     | T1401–T1407 | S2 (T1403, T1405), Q1 (T1402, T1407), S1 or next free (T1401, T1404), O1 (T1406) |
+| Milestone                             | Tasks       | Owner                                                                      |
+| ------------------------------------- | ----------- | -------------------------------------------------------------------------- |
+| M0 Foundation                         | T000        | O1                                                                         |
+| M1 Persistence, ledger, commands      | T101–T118   | S1                                                                         |
+| M2 Rooms, participants, auth, policy  | T201–T215   | S1                                                                         |
+| M3 Tasks                              | T301–T312   | S1                                                                         |
+| M4 Messages, inbox, decisions, memory | T401–T412   | S1 (moved from S2 for T404–T409, T411–T412 in Review 3)                    |
+| M5 Workspace engine                   | T501–T520   | S2                                                                         |
+| M6 Conflicts and health               | T601–T610   | S2                                                                         |
+| M7 Gateway, MCP, end-to-end           | T701–T713   | S1 (T701–T709, T713), S2 (T710), Q1 (T705, T711), O1 (T712)                |
+| M8 Git interoperability (§24)         | T801–T807   | S1 (moved from S2 in Review 4)                                             |
+| M9 Safety controls (§22–23)           | T901–T906   | S1 (T904–T906), Q1 (T901–T902), S2 (T903)                                  |
+| M10 Execution sandboxes (§14)         | T1001–T1008 | S2 (T1007 split into T1007 + T1007b in Review 5)                           |
+| M11 Clients (§27, §29)                | T1101–T1106 | S1 (T1102 → Q1)                                                            |
+| M12 Plugins (§21.4–21.5)              | T1201–T1206 | S1 (T1201, moved in Review 5), S2 (T1202–T1206)                            |
+| M13 Lessons from building (§34)       | T1301–T1303 | S1                                                                         |
+| M14 Demo-ready web app (Review 7)     | T1401–T1407 | S2 (T1401, T1403, T1405, T1407), Q1 (T1402), next free (T1404), O1 (T1406) |
 
 **Start here:** S1 → T101, T105, T114 (independent). S2 → T501, T505 (only need the scaffold).
 
@@ -1314,15 +1314,15 @@ When `vendor`, `model`, `client` or `client_version` changes, the platform store
 
 Added in Review 7. The backend covers every §30 step, but most steps have no UI. Each task below uses only the public API through `@crossover/sdk`. It adds a browser test for its demo steps in `apps/server/src/e2e/web.test.ts`, or a sibling file, and keeps within the gateway CSP. No new kernel commands without an O1-approved contract in the room.
 
-### T1401 · Invites, appoint lead and repository import — S1 (or next free)
+### T1401 · Invites, appoint lead and repository import — S2
 
 Deps: T1104 · Migration: —
 
 §30 steps 2–4.
 
 - **Import:** the owner imports a GitHub repository (`git.import`) from the room view, with progress shown from events and the suggested health command offered.
-- **Invites:** the owner creates an invite (`room.invite`) for a human or an agent. The UI shows the one-time link once, with a copy button, and never shows it again.
-- **Lead:** the owner appoints a lead (`room.set_lead`); the appointee accepts (`room.accept_lead`).
+- **Invites:** the owner creates an invite (`room.invite`) for an agent. The UI shows the raw one-time join token once (no URL wrapper; agents join with a manifest over MCP, the SDK or the CLI), with copy-ready snippets that read it from stdin or the environment, and forgets it when closed.
+- **Lead:** the owner appoints a lead (`room.set_lead`); it takes effect immediately (§5); `room.accept_lead` belongs only to a lead's own `transfer_lead`.
 
 Tests:
 
@@ -1401,7 +1401,7 @@ Deps: — (grows with T1401–T1405) · Migration: —
 
 One browser test walks all 17 steps of §30 in order against a real `apps/server`, with the SDK playing the agents. Steps whose UI hasn't merged are marked pending in a single list at the top of the file, and each M14 PR removes its steps from that list. M14 is done when the list is empty and the test passes in CI.
 
-### T1407 · WebSocket liveness — Q1
+### T1407 · WebSocket liveness — S2
 
 Deps: T703, T1101, T1102 · Migration: —
 
