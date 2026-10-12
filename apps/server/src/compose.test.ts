@@ -18,6 +18,20 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { composeServer, type ComposeOverrides, type CrossoverServer } from "./compose.js";
 import { loadConfig, type ServerConfig } from "./config.js";
 
+/**
+ * A tool result's body: a success's response (its text is framed, T711, so read
+ * `structuredContent`), or an error's §16.3 body (errors aren't framed).
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- tool responses are loosely typed JSON
+const structured = (result: unknown): any => {
+  const r = result as {
+    isError?: boolean;
+    structuredContent?: unknown;
+    content?: { text: string }[];
+  };
+  return r.isError ? JSON.parse(r.content![0]!.text) : r.structuredContent;
+};
+
 let db: TestDatabase;
 let root: string;
 const servers: CrossoverServer[] = [];
@@ -1569,14 +1583,14 @@ describe("composeServer", () => {
 
     const initialStatus = await callMcpTool(server.app, token, "sandbox_status");
     expect(initialStatus.isError).toBeFalsy();
-    expect(JSON.parse(initialStatus.content![0]!.text!)).toMatchObject({ added: [] });
+    expect(structured(initialStatus)).toMatchObject({ added: [] });
 
     const written = await callMcpTool(server.app, token, "sandbox_write_file", {
       path: "src/hello.ts",
       content: "export const hello = 'world';\n",
     });
     expect(written.isError).toBeFalsy();
-    expect(JSON.parse(written.content![0]!.text!)).toMatchObject({
+    expect(structured(written)).toMatchObject({
       path: "src/hello.ts",
       written_bytes: Buffer.byteLength("export const hello = 'world';\n"),
     });
@@ -1585,12 +1599,12 @@ describe("composeServer", () => {
       path: "src/hello.ts",
     });
     expect(read.isError, JSON.stringify(read)).toBeFalsy();
-    expect(JSON.parse(read.content![0]!.text!)).toMatchObject({
+    expect(structured(read)).toMatchObject({
       content: "export const hello = 'world';\n",
       encoding: "utf8",
     });
     const localStatus = await callMcpTool(server.app, token, "sandbox_status");
-    expect(JSON.parse(localStatus.content![0]!.text!)).toMatchObject({
+    expect(structured(localStatus)).toMatchObject({
       added: ["src/hello.ts"],
     });
     const binary = Buffer.from([0, 1, 0xff, 10]);
@@ -1602,7 +1616,7 @@ describe("composeServer", () => {
     const binaryRead = await callMcpTool(server.app, token, "sandbox_read_file", {
       path: "assets/data.bin",
     });
-    expect(JSON.parse(binaryRead.content![0]!.text!)).toMatchObject({
+    expect(structured(binaryRead)).toMatchObject({
       content: binary.toString("base64"),
       encoding: "base64",
     });
@@ -1615,7 +1629,7 @@ describe("composeServer", () => {
       timeout_s: 60,
     });
     expect(exec.isError).toBeFalsy();
-    expect(JSON.parse(exec.content![0]!.text!)).toMatchObject({ exec_id: expect.any(String) });
+    expect(structured(exec)).toMatchObject({ exec_id: expect.any(String) });
     await server.dispatcher.actors.get(roomId).idle();
     expect(driver.commands).toContain("pnpm test");
     driver.finishExec?.({ exit_code: 0, duration_ms: 1, reason: "exit" });
@@ -1625,7 +1639,7 @@ describe("composeServer", () => {
       message: "Add hello file",
     });
     expect(submitted.isError).toBeFalsy();
-    expect(JSON.parse(submitted.content![0]!.text!)).toMatchObject({
+    expect(structured(submitted)).toMatchObject({
       status: "APPLIED",
       applied_revision: 1,
     });
@@ -1633,7 +1647,7 @@ describe("composeServer", () => {
 
     const synced = await callMcpTool(server.app, token, "sandbox_sync");
     expect(synced.isError).toBeFalsy();
-    expect(JSON.parse(synced.content![0]!.text!)).toMatchObject({ synced_to: 1 });
+    expect(structured(synced)).toMatchObject({ synced_to: 1 });
     const canonical = await ok(
       await cmd(envelope("workspace.read", { path: "src/hello.ts" }), token),
     );
@@ -1671,17 +1685,17 @@ describe("composeServer", () => {
     await server.dispatcher.actors.get(roomId).idle();
 
     const behind = await callMcpTool(server.app, token, "sandbox_status");
-    expect(JSON.parse(behind.content![0]!.text!)).toMatchObject({ behind_by: 1 });
+    expect(structured(behind)).toMatchObject({ behind_by: 1 });
     const conflict = await callMcpTool(server.app, token, "sandbox_sync");
     expect(conflict.isError).toBeFalsy();
-    expect(JSON.parse(conflict.content![0]!.text!)).toMatchObject({
+    expect(structured(conflict)).toMatchObject({
       synced_to: 2,
       conflicted_paths: ["src/hello.ts"],
     });
     const conflictedFile = await callMcpTool(server.app, token, "sandbox_read_file", {
       path: "src/hello.ts",
     });
-    expect(JSON.parse(conflictedFile.content![0]!.text!).content).toContain("<<<<<<<");
+    expect(structured(conflictedFile).content).toContain("<<<<<<<");
 
     const resolution = "export const hello = 'resolved';\n";
     await callMcpTool(server.app, token, "sandbox_write_file", {
@@ -1692,13 +1706,13 @@ describe("composeServer", () => {
       message: "Resolve the hello conflict",
     });
     expect(resolved.isError).toBeFalsy();
-    expect(JSON.parse(resolved.content![0]!.text!)).toMatchObject({
+    expect(structured(resolved)).toMatchObject({
       status: "APPLIED",
       applied_revision: 3,
     });
     await server.dispatcher.actors.get(roomId).idle();
     const finalSync = await callMcpTool(server.app, token, "sandbox_sync");
-    expect(JSON.parse(finalSync.content![0]!.text!)).toMatchObject({ synced_to: 3 });
+    expect(structured(finalSync)).toMatchObject({ synced_to: 3 });
     const finalFile = await ok(
       await cmd(envelope("workspace.read", { path: "src/hello.ts" }), token),
     );

@@ -867,6 +867,8 @@ Deps: T703 · Migration: —
 
 Per-connection buffer limit (1,000 events or 5 MB) → close with `resync_required` (§20).
 
+Delivered with T703: `packages/gateway/src/ws.ts` closes a connection past 1,000 queued events or 5 MiB buffered with `resync_required`, tested in `ws.test.ts` › "a client that falls too far behind is closed with resync_required". No separate PR.
+
 ### T706 · Wake webhooks — S1
 
 Deps: T402, T205 · Migration: 0027 (`wake_outbox`)
@@ -901,7 +903,7 @@ Deps: T707, T517 · Migration: —
 
 `read_file`, `list_dir`, `grep`, `diff`, `apply_changeset` against the canonical workspace (the sandbox-backed coding tools come with the sandbox milestone).
 
-### T711 · MCP provenance framing — Q1
+### T711 · MCP provenance framing — S1 (moved from Q1)
 
 Deps: T709, T412 · Migration: —
 

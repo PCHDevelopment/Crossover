@@ -283,13 +283,15 @@ describe("provenance labels (§16.5)", () => {
     const NOT_LABELED_YET: Record<string, string> = {
       "inbox.list":
         "summaries quote the message or task they are about; labeling them is follow-up work",
-      "workspace.read": "file content: the MCP provenance framing is T711",
-      "sandbox.file.read": "file content: the MCP provenance framing is T711",
+      "workspace.read": "file content; MCP frames every tool result as participant data (T711)",
+      "sandbox.file.read": "file content; MCP frames every tool result as participant data (T711)",
       "workspace.list": "paths only",
-      "workspace.search": "file content: the MCP provenance framing is T711",
-      "workspace.diff": "file content: the MCP provenance framing is T711",
-      "workspace.history": "commit messages: the MCP provenance framing is T711",
-      "workspace.blame": "authors are named per line; the MCP provenance framing is T711",
+      "workspace.search": "file content; MCP frames every tool result as participant data (T711)",
+      "workspace.diff": "file content; MCP frames every tool result as participant data (T711)",
+      "workspace.history":
+        "commit messages; MCP frames every tool result as participant data (T711)",
+      "workspace.blame":
+        "authors are named per line; MCP frames every tool result as participant data (T711)",
       "workspace.health.get": "platform-run output",
       "sandbox.status": "working-copy paths and canonical revision numbers",
       "conflicts.list": "ChangeSet metadata",

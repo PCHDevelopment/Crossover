@@ -41,10 +41,15 @@ const read = (method: string, params: Record<string, unknown> = {}) => ({
   params,
 });
 
+/** The start of a minute window, far from any real time. */
+const FIXED_NOW = 4_000_000 * 60_000;
+
 async function setup(
   options: { settings?: object; limiter?: BudgetLimiter; clock?: () => number } = {},
 ) {
-  const limiter = options.limiter ?? new MemoryBudgetLimiter(options.clock);
+  // A fixed clock unless a test moves its own: on the real one, a minute boundary during a test
+  // resets the windows and a refusal it expects doesn't come (seen in CI).
+  const limiter = options.limiter ?? new MemoryBudgetLimiter(options.clock ?? (() => FIXED_NOW));
   const warnings: unknown[] = [];
   const d = new Dispatcher({
     pool,
