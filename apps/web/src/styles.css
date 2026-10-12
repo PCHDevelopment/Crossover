@@ -226,6 +226,28 @@ td {
 .feed li[data-type="capability.denied"] {
   color: var(--danger);
 }
+.message-list {
+  max-height: 420px;
+  overflow-y: auto;
+}
+.message-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: 13px;
+}
+.message-tags {
+  flex-wrap: wrap;
+}
+.message-controls {
+  flex-wrap: wrap;
+  align-items: end;
+}
+.message-controls label {
+  min-width: 150px;
+  flex: 1;
+}
 @media (max-width: 640px) {
   .card {
     margin: 0;

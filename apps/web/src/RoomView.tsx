@@ -31,6 +31,7 @@ const OwnerControlsView = lazy(() =>
   import("./OwnerControlsView.js").then((m) => ({ default: m.OwnerControlsView })),
 );
 const CollaborationView = lazy(() => import("./CollaborationView.js"));
+const MessagesView = lazy(() => import("./MessagesView.js"));
 
 const FEED_LIMIT = 200;
 const BACKLOG = 50;
@@ -40,6 +41,7 @@ type Tab =
   | "setup"
   | "owner-controls"
   | "tasks"
+  | "messages"
   | "collaboration"
   | "activity"
   | "files"
@@ -50,6 +52,7 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "setup", label: "Setup" },
   { id: "owner-controls", label: "Owner controls" },
   { id: "tasks", label: "Tasks" },
+  { id: "messages", label: "Messages" },
   { id: "collaboration", label: "Inbox, decisions & memory" },
   { id: "activity", label: "Activity" },
   { id: "files", label: "Files" },
@@ -320,6 +323,18 @@ export function RoomView(props: {
             canPropose={me.role !== "OBSERVER"}
             canPosition={me.role !== "OBSERVER"}
             canDecide={me.role === "LEAD"}
+            nameOf={names}
+            onEvent={onEvent}
+          />
+        </Suspense>
+      )}
+      {tab === "messages" && (
+        <Suspense fallback={<p className="muted">Loading messages…</p>}>
+          <MessagesView
+            room={open.room}
+            participants={participants}
+            tasks={tasks}
+            selfId={me.participant_id}
             nameOf={names}
             onEvent={onEvent}
           />

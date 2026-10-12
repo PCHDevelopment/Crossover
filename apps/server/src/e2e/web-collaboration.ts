@@ -728,4 +728,149 @@ export function registerWebDecisionsAndInbox(fixture: WebFixture): void {
     expect(problems).toEqual([]);
     await page.close();
   }, 120_000);
+
+  it("T1502: the live message channel sends mentions and task, decision and file references", async () => {
+    const page: Page = await fixture.browser!.newPage();
+    const problems: string[] = [];
+    page.on("pageerror", (error) => problems.push(`pageerror: ${error.message}`));
+    page.on("console", (entry) => {
+      if (entry.type() === "error") problems.push(`console: ${entry.text()}`);
+    });
+
+    await page.goto(fixture.baseUrl);
+    await page.getByTestId("login-name").fill("Message owner");
+    await page.getByTestId("login-submit").click();
+    await page.getByTestId("room-name").fill("Messages room");
+    await page.getByTestId("room-objective").fill("Try the live message channel");
+    await page.getByTestId("room-create").click();
+    await page.getByTestId("room-title").waitFor();
+    const roomId = /\/rooms\/([^/]+)/.exec(new URL(page.url()).pathname)![1]!;
+
+    const client = new CrossoverClient({ baseUrl: fixture.baseUrl });
+    const login = await client.devLogin({
+      subject: "Message owner",
+      display_name: "Message owner",
+    });
+    const session = await client.roomSession(login.session_token, roomId);
+    const owner = client.room(roomId, session.tokens.access_token);
+    const invite = await owner.api.room.invite<unknown>({ role: "DEVELOPER" });
+    const joined = await client.join(roomId, {
+      token: (invite.one_time as { token: string }).token,
+      manifest: manifest("Message agent"),
+    });
+    const agentId = (joined as unknown as { participant_id: string }).participant_id;
+    const agent = client.room(roomId, joined.tokens.access_token);
+    const workspace = await owner.api.workspace.list<{ workspace_revision: number }>();
+    await owner.api.workspace.apply_changeset({
+      source: "API",
+      message: "Seed file reference",
+      base_workspace_revision: workspace.response.workspace_revision,
+      operations: [{ type: "create", path: "src/auth.ts", content: "export const auth = true;\n" }],
+    });
+    const task = await owner.api.tasks.create<{ id: string }>({
+      title: "Review authentication",
+      requirements: ["Check the login flow"],
+    });
+    await owner.api.decisions.propose({
+      title: "Choose a token format",
+      context: "Pick the format for the login flow.",
+      options: [{ summary: "JWT" }, { summary: "Session token" }],
+    });
+    const decision = (
+      await owner.api.decisions.list<{ decisions: { id: string; title: string }[] }>({ limit: 100 })
+    ).response.decisions.find((item) => item.title === "Choose a token format")!;
+
+    await page.getByTestId("tab-messages").click();
+    await expect
+      .poll(() =>
+        page
+          .getByTestId("message-mention-picker")
+          .locator("option")
+          .filter({ hasText: "Message agent" })
+          .count(),
+      )
+      .toBe(1);
+    await page.getByTestId("message-mention-picker").selectOption(agentId);
+    const messageBody =
+      'Please review authentication. @Message agent <img src=x onerror="window.__messageXss=1">';
+    await page.getByTestId("message-body").fill(messageBody);
+    await expect
+      .poll(() =>
+        page
+          .getByTestId("message-reference-target")
+          .locator("option")
+          .filter({ hasText: "Review authentication" })
+          .count(),
+      )
+      .toBe(1);
+    await page.getByTestId("message-reference-kind").selectOption("task");
+    await page.getByTestId("message-reference-target").selectOption(task.response.id);
+    await page.getByTestId("message-add-reference").click();
+    await page.getByTestId("message-reference-kind").selectOption("decision");
+    await expect
+      .poll(() =>
+        page
+          .getByTestId("message-reference-target")
+          .locator("option")
+          .filter({ hasText: "Choose a token format" })
+          .count(),
+      )
+      .toBe(1);
+    await page.getByTestId("message-reference-target").selectOption(decision.id);
+    await page.getByTestId("message-add-reference").click();
+    await page.getByTestId("message-reference-kind").selectOption("file");
+    await page.getByTestId("message-file-target").selectOption("src");
+    await expect
+      .poll(() =>
+        page
+          .getByTestId("message-file-target")
+          .locator("option")
+          .filter({ hasText: "auth.ts" })
+          .count(),
+      )
+      .toBe(1);
+    await page.getByTestId("message-file-target").selectOption("src/auth.ts");
+    await page.getByTestId("message-add-reference").click();
+    await page.getByTestId("message-send").click();
+
+    await expect.poll(() => page.getByTestId("message-list").textContent()).toContain(messageBody);
+    await expect
+      .poll(() => page.getByTestId("message-list").textContent())
+      .toContain("task: Review authentication");
+    await expect
+      .poll(() => page.getByTestId("message-list").textContent())
+      .toContain("decision: Choose a token format");
+    await expect
+      .poll(() => page.getByTestId("message-list").textContent())
+      .toContain("file: src/auth.ts");
+    const shownMessage = page.getByTestId("room-message").first().locator("p");
+    await expect.poll(() => shownMessage.textContent()).toBe(messageBody);
+    expect(await shownMessage.locator("img").count()).toBe(0);
+    expect(
+      await page.evaluate(
+        () => (globalThis as typeof globalThis & { __messageXss?: number }).__messageXss,
+      ),
+    ).toBeUndefined();
+    await expect
+      .poll(
+        async () =>
+          (
+            await agent.api.inbox.list<{ items: { kind: string; summary: string }[] }>({
+              unacked_only: true,
+            })
+          ).response.items.some((item) => item.kind === "MENTION" && item.summary === messageBody),
+        { timeout: 10_000 },
+      )
+      .toBe(true);
+
+    await agent.api.messages.send({ body: "I see it and will review the login flow." });
+    const agentReply = page
+      .getByTestId("room-message")
+      .filter({ hasText: "I see it and will review the login flow." });
+    await expect
+      .poll(() => agentReply.textContent())
+      .toContain("From Message agent · trust: participant");
+    expect(problems).toEqual([]);
+    await page.close();
+  }, 60_000);
 }
