@@ -504,7 +504,7 @@ describe("browser OAuth sessions", () => {
     const start = await s.app.inject({ method: "GET", url: "/v1/auth/oauth/github" });
     const authorization = new URL(start.headers.location!);
     const state = authorization.searchParams.get("state")!;
-    const stateCookie = "crossover_oauth_state_" + state;
+    const stateCookie = "__Host-crossover_oauth_state_" + state;
     expect(start.statusCode).toBe(302);
     expect(authorization.searchParams.get("challenge")).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(start.headers["cache-control"]).toBe("no-store");
@@ -513,6 +513,7 @@ describe("browser OAuth sessions", () => {
     expect(startCookies).toContain(
       stateCookie + "=1; Path=/; Max-Age=600; HttpOnly; SameSite=Lax; Secure",
     );
+    expect(startCookies.every((value) => !/; Domain=/i.test(value ?? ""))).toBe(true);
 
     const callback = await s.app.inject({
       method: "GET",
@@ -548,6 +549,15 @@ describe("browser OAuth sessions", () => {
     const token = tokenMatch![1]!;
     expect(token).toMatch(/^us_/);
     const cookie = "__Host-crossover_session=" + token;
+    expect(
+      (
+        await s.app.inject({
+          method: "GET",
+          url: "/v1/rooms",
+          headers: { cookie: "crossover_session=" + token },
+        })
+      ).statusCode,
+    ).toBe(401);
 
     expect(
       (await s.app.inject({ method: "GET", url: "/v1/rooms", headers: { cookie } })).statusCode,

@@ -89,6 +89,7 @@ const BEARER = /^Bearer ([^\s]+)$/i;
 const SESSION_COOKIE = "crossover_session";
 const SECURE_SESSION_COOKIE = "__Host-crossover_session";
 const STATE_COOKIE_PREFIX = "crossover_oauth_state_";
+const SECURE_STATE_COOKIE_PREFIX = "__Host-crossover_oauth_state_";
 const OAUTH_STATE = /^[A-Za-z0-9_-]{43}$/;
 
 /** The bearer token from the `Authorization` header, or `UNAUTHENTICATED`. */
@@ -171,6 +172,7 @@ export function buildGateway(options: GatewayOptions): FastifyInstance {
   const { dispatcher, pool } = options;
   const secureCookies = options.secureCookies ?? false;
   const sessionCookieName = secureCookies ? SECURE_SESSION_COOKIE : SESSION_COOKIE;
+  const stateCookiePrefix = secureCookies ? SECURE_STATE_COOKIE_PREFIX : STATE_COOKIE_PREFIX;
   const cookieAuthEnabled = options.oauth !== undefined;
   const app = Fastify({
     logger: false,
@@ -221,7 +223,7 @@ export function buildGateway(options: GatewayOptions): FastifyInstance {
         const verifier = randomBytes(32).toString("base64url");
         const challenge = createHash("sha256").update(verifier).digest("base64url");
         await stateStore.save(state, { provider: selected.name, verifier });
-        const cookie = `${STATE_COOKIE_PREFIX}${state}=1; Path=/; Max-Age=${OAUTH_STATE_TTL_MS / 1000}; HttpOnly; SameSite=Lax${secureCookies ? "; Secure" : ""}`;
+        const cookie = `${stateCookiePrefix}${state}=1; Path=/; Max-Age=${OAUTH_STATE_TTL_MS / 1000}; HttpOnly; SameSite=Lax${secureCookies ? "; Secure" : ""}`;
         const redirectUri = `${publicBaseUrl}/v1/auth/oauth/${selected.name}/callback`;
         return reply
           .header("Cache-Control", "no-store")
@@ -247,7 +249,7 @@ export function buildGateway(options: GatewayOptions): FastifyInstance {
         return response.header("Location", destination.toString()).send();
       };
       if (!selected || typeof state !== "string" || !OAUTH_STATE.test(state)) return failed();
-      const stateCookie = `${STATE_COOKIE_PREFIX}${state}`;
+      const stateCookie = `${stateCookiePrefix}${state}`;
       if (cookieValue(request, stateCookie) !== "1") return failed();
       const transaction = await stateStore.consume(state);
       const clearState = clearCookie(stateCookie, secureCookies);
