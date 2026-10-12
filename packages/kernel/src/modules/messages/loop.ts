@@ -72,6 +72,7 @@ export async function currentMessageRun(client: PoolClient, roomId: string): Pro
 export interface LoopCheck {
   /** Set when this very message is the one that tips the room into a loop. */
   detected?: { event: EmittedEvent & { actor_id: string }; participants: string[] };
+  inboxEvents?: EmittedEvent[];
 }
 
 /**
@@ -129,15 +130,23 @@ export async function checkLoopProtection(
        ORDER BY id`,
       [roomId],
     );
+    const inboxEvents: EmittedEvent[] = [];
     for (const { id } of leaders) {
-      await deliverInbox(client, roomId, id, {
-        kind: "LOOP_DETECTED",
-        ref: { kind: "participant", id: sender.id },
-        summary: `${participants.length} agents have exchanged ${run.length + 1} messages with no task, ChangeSet, decision or memory change; their messages are limited to one a minute until something changes.`,
-        author_id: "system",
-      });
+      await deliverInbox(
+        client,
+        roomId,
+        id,
+        {
+          kind: "LOOP_DETECTED",
+          ref: { kind: "participant", id: sender.id },
+          summary: `${participants.length} agents have exchanged ${run.length + 1} messages with no task, ChangeSet, decision or memory change; their messages are limited to one a minute until something changes.`,
+          author_id: "system",
+        },
+        inboxEvents,
+      );
     }
     return {
+      inboxEvents,
       detected: {
         participants,
         event: {

@@ -4,7 +4,7 @@ import { createTestDatabase, type TestDatabase } from "@crossover/db/testing";
 import { authorize } from "@crossover/policy";
 import { newId, type CrossoverError } from "@crossover/protocol";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { Dispatcher } from "../../dispatcher.js";
+import { Dispatcher, type EmittedEvent } from "../../dispatcher.js";
 import type { Principal } from "../../principal.js";
 import { deliverInbox } from "./inbox.js";
 import {
@@ -87,13 +87,20 @@ async function setup() {
     client?: { query: (sql: string, params?: unknown[]) => Promise<unknown> },
   ) => {
     const own = client ? undefined : await pool.connect();
+    const events: EmittedEvent[] = [];
     try {
-      return await deliverInbox((client ?? own) as never, room, to, {
-        kind: kind as "MENTION",
-        ref: { kind: "message", id: `msg_${++n}` },
-        summary,
-        author_id: "system",
-      });
+      return await deliverInbox(
+        (client ?? own) as never,
+        room,
+        to,
+        {
+          kind: kind as "MENTION",
+          ref: { kind: "message", id: `msg_${++n}` },
+          summary,
+          author_id: "system",
+        },
+        events,
+      );
     } finally {
       own?.release();
     }

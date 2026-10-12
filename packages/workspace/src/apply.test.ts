@@ -466,6 +466,15 @@ describe("workspace.apply_changeset", () => {
             trigger: "manual",
           },
         },
+        {
+          type: "inbox.delivered",
+          actor_id: "system",
+          payload: {
+            recipient_id: lead,
+            item_id: expect.stringMatching(/^inbox_/),
+            kind: "ESCALATION",
+          },
+        },
       ],
     });
     expect(Object.keys(escalated.events[0]!.payload).sort()).toEqual([
@@ -539,6 +548,15 @@ describe("workspace.apply_changeset", () => {
         type: "workspace.conflict.escalated",
         payload: { conflict_id: conflictId, escalated_to: lead, trigger: "attempts" },
       },
+      {
+        type: "inbox.delivered",
+        actor_id: "system",
+        payload: {
+          recipient_id: lead,
+          item_id: expect.stringMatching(/^inbox_/),
+          kind: "ESCALATION",
+        },
+      },
     ]);
     expect((await f.rowsFor("conflicts"))[0]).toMatchObject({ status: "ESCALATED", attempts: 2 });
     const { rows } = await db.pool.query(
@@ -582,11 +600,19 @@ describe("workspace.apply_changeset", () => {
     now = new Date(created.getTime() + 10 * 60 * 1000 + 1);
     expect(await sweeper.tick()).toBe(1);
     expect((await f.rowsFor("conflicts"))[0]?.status).toBe("ESCALATED");
-    expect((await f.rowsFor("events")).at(-1)).toMatchObject({
-      type: "workspace.conflict.escalated",
-      actor_id: "system",
-      payload: { conflict_id: conflictId, escalated_to: lead, trigger: "timeout" },
-    });
+    const events = await f.rowsFor("events");
+    expect(events.slice(-2)).toMatchObject([
+      {
+        type: "workspace.conflict.escalated",
+        actor_id: "system",
+        payload: { conflict_id: conflictId, escalated_to: lead, trigger: "timeout" },
+      },
+      {
+        type: "inbox.delivered",
+        actor_id: "system",
+        payload: { recipient_id: lead, kind: "ESCALATION" },
+      },
+    ]);
     const { rows } = await db.pool.query(
       "SELECT participant_id FROM inbox_items WHERE room_id = $1",
       [f.room],
@@ -1071,6 +1097,11 @@ describe("workspace.apply_changeset — secret scanning (T901)", () => {
       expect(item.summary).toContain("config.ts:1");
       expect(item.summary).not.toContain(HIGH_ENTROPY);
     }
+    const notifications = response.events.filter((event) => event.type === "inbox.delivered");
+    expect(notifications.map((event) => event.payload["recipient_id"]).sort()).toEqual(
+      [f.actor, owner].sort(),
+    );
+    expect(notifications.every((event) => event.payload["kind"] === "SECRET_SCAN")).toBe(true);
   });
 
   it("sends a single inbox item when the author is the room owner", async () => {

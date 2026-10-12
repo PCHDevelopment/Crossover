@@ -106,6 +106,7 @@ export async function changeAgentManifest(
   };
   const parts = Object.entries(changes).map(([f, c]) => `${f} ${c.before} → ${c.after}`);
   if (webhookChanged) parts.push("wake webhook changed");
+  const inboxEvents: EmittedEvent[] = [];
   const { rows: leaders } = await client.query<{ id: string }>(
     `SELECT id FROM participants
      WHERE room_id = $1 AND status <> 'REMOVED' AND id <> $2
@@ -114,13 +115,19 @@ export async function changeAgentManifest(
     [roomId, participantId],
   );
   for (const { id } of leaders) {
-    await deliverInbox(client, roomId, id, {
-      kind: "MANIFEST_CHANGED",
-      // The summary quotes what the agent declared (vendor, model), so it is the agent's words.
-      author_id: participantId,
-      ref: { kind: "participant", id: participantId },
-      summary: `${next.name} (${participantId}) changed its manifest: ${parts.join("; ")}`,
-    });
+    await deliverInbox(
+      client,
+      roomId,
+      id,
+      {
+        kind: "MANIFEST_CHANGED",
+        // The summary quotes what the agent declared (vendor, model), so it is the agent's words.
+        author_id: participantId,
+        ref: { kind: "participant", id: participantId },
+        summary: `${next.name} (${participantId}) changed its manifest: ${parts.join("; ")}`,
+      },
+      inboxEvents,
+    );
   }
   return {
     changed: true,
@@ -132,6 +139,7 @@ export async function changeAgentManifest(
         ...(actorId ? { actor_id: actorId } : {}),
         payload,
       },
+      ...inboxEvents,
     ],
   };
 }

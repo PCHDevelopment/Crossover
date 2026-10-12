@@ -1,7 +1,7 @@
 import type { Pool } from "@crossover/db";
 import { CrossoverError } from "@crossover/protocol";
 import { z } from "zod";
-import type { Dispatcher } from "../../dispatcher.js";
+import type { Dispatcher, EmittedEvent } from "../../dispatcher.js";
 import { currentLeadId, deliverInbox } from "../inbox/inbox.js";
 import { loadActor } from "./create-update.js";
 import { leaseSql, loadTask } from "./task.js";
@@ -146,13 +146,20 @@ export async function sweepExpiredLeases(
           const row = rows[0];
           if (!row) continue;
           released.push({ room_id: roomId, task_id: c.id, previous_owner_id: c.owner_id });
+          const inboxEvents: (EmittedEvent & { actor_id: string })[] = [];
           if (lead !== null) {
-            await deliverInbox(ctx.client, roomId, lead, {
-              kind: "LEASE_EXPIRED",
-              ref: { kind: "task", id: c.id },
-              summary: `${c.owner_id}'s claim expired; the task is open again: ${c.title}`,
-              author_id: c.created_by, // the title is the task creator's
-            });
+            await deliverInbox(
+              ctx.client,
+              roomId,
+              lead,
+              {
+                kind: "LEASE_EXPIRED",
+                ref: { kind: "task", id: c.id },
+                summary: `${c.owner_id}'s claim expired; the task is open again: ${c.title}`,
+                author_id: c.created_by, // the title is the task creator's
+              },
+              inboxEvents,
+            );
           }
           events.push({
             type: "task.lease_expired" as const,
@@ -164,6 +171,7 @@ export async function sweepExpiredLeases(
               version: row.version,
             },
           });
+          events.push(...inboxEvents);
         }
         return { result: released, events };
       },

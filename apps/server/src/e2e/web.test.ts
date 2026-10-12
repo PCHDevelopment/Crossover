@@ -1336,6 +1336,26 @@ describe.skipIf(!executablePath && !inCi)("web app in a browser", () => {
     await page.getByTestId("tab-collaboration").click();
     await page.getByTestId("collab-inbox").click();
 
+    // A separate participant mentions the inbox owner while the browser is already open. The
+    // non-health item must arrive through the live event subscription, without a manual refresh.
+    const invite = await owner.api.room.invite<unknown>({ role: "DEVELOPER" });
+    const joined = await client.join(roomId, {
+      token: (invite.one_time as { token: string }).token,
+      manifest: manifest("Mentioner"),
+    });
+    const mentioner = client.room(roomId, joined.tokens.access_token);
+    await mentioner.api.messages.send({
+      body: "Health author, please review this note.",
+      mentions: [session.participant_id],
+    });
+    await expect
+      .poll(() => page.getByTestId("inbox-list").textContent(), { timeout: 10_000 })
+      .toContain("MENTION");
+    await page.getByTestId("inbox-ack").click();
+    await expect
+      .poll(() => page.getByTestId("inbox-list").textContent())
+      .toContain("No unacknowledged inbox items.");
+
     const imported = await owner.api.git.import<{ applied_revision: number }>({
       url: "https://github.com/acme/widgets",
       branch: "main",

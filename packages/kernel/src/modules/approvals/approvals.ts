@@ -83,7 +83,7 @@ export async function queueApproval(
     idempotency_hash: string;
     capability: string;
   },
-): Promise<{ approval: ApprovalView; created: boolean }> {
+): Promise<{ approval: ApprovalView; created: boolean; events: EmittedEvent[] }> {
   const room_id = requester.room_id;
   const request_hash = hashRequest({ method: request.method, params: request.params });
   // The key stands for one request: reusing it for another is the usual key-reuse error, and must
@@ -121,7 +121,7 @@ export async function queueApproval(
      ORDER BY created_at DESC LIMIT 1`,
     [room_id, requester.participant_id, request_hash],
   );
-  if (rows[0]) return { approval: approvalView(rows[0]), created: false };
+  if (rows[0]) return { approval: approvalView(rows[0]), created: false, events: [] };
 
   // A lapsed one no longer holds its place in the unique index.
   await client.query(
@@ -156,15 +156,22 @@ export async function queueApproval(
      ORDER BY id`,
     [room_id, requester.participant_id],
   );
+  const events: EmittedEvent[] = [];
   for (const { id: decider } of deciders) {
-    await deliverInbox(client, room_id, decider, {
-      kind: "APPROVAL",
-      ref: { kind: "approval", id },
-      author_id: "system",
-      summary: `${requester.participant_id} asks to run ${request.method}, which needs approval`,
-    });
+    await deliverInbox(
+      client,
+      room_id,
+      decider,
+      {
+        kind: "APPROVAL",
+        ref: { kind: "approval", id },
+        author_id: "system",
+        summary: `${requester.participant_id} asks to run ${request.method}, which needs approval`,
+      },
+      events,
+    );
   }
-  return { approval: approvalView(inserted.rows[0]!), created: true };
+  return { approval: approvalView(inserted.rows[0]!), created: true, events };
 }
 
 export const approvalsListParams = z.strictObject({
@@ -345,18 +352,24 @@ export function registerApprovalCommands(dispatcher: Dispatcher): void {
           p.note ?? null,
         ],
       );
-      await deliverInbox(ctx.client, ctx.room_id, approval.requester_id, {
-        kind: "APPROVAL",
-        ref: { kind: "approval", id: approval.id },
-        author_id: "system",
-        summary: `Your request to run ${approval.method} was ${
-          p.decision !== "approve"
-            ? "rejected"
-            : runsNow
-              ? "approved and has run"
-              : "approved: send it again with the same idempotency key to run it"
-        }`,
-      });
+      await deliverInbox(
+        ctx.client,
+        ctx.room_id,
+        approval.requester_id,
+        {
+          kind: "APPROVAL",
+          ref: { kind: "approval", id: approval.id },
+          author_id: "system",
+          summary: `Your request to run ${approval.method} was ${
+            p.decision !== "approve"
+              ? "rejected"
+              : runsNow
+                ? "approved and has run"
+                : "approved: send it again with the same idempotency key to run it"
+          }`,
+        },
+        events,
+      );
       return {
         response: {
           approval: approvalView(updated[0]!),

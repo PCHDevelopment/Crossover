@@ -1202,6 +1202,7 @@ participant.role_changed / participant.manifest_changed / participant.paused / p
 
 capability.granted / capability.revoked / capability.denied
 approval.requested / approval.decided
+inbox.delivered
 
 message.sent / message.edited
 

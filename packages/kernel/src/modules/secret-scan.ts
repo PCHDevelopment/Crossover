@@ -1,6 +1,7 @@
 import { CrossoverError } from "@crossover/protocol";
 import { scanSecrets, type SecretFinding } from "@crossover/security";
 import type { PoolClient } from "@crossover/db";
+import type { EmittedEvent } from "../dispatcher.js";
 import { deliverInbox } from "./inbox/inbox.js";
 
 /**
@@ -43,6 +44,7 @@ export async function scanTextForSecrets(
   authorId: string,
   text: string,
   location: SecretLocation,
+  events: EmittedEvent[],
 ): Promise<void> {
   const findings = scanSecrets(text);
   const high = findings.filter((f) => f.confidence === "high");
@@ -88,12 +90,18 @@ export async function scanTextForSecrets(
         [roomId, recipient, JSON.stringify(inboxRef(location)), summary.slice(0, 500)],
       );
       if (open.length > 0) continue;
-      await deliverInbox(client, roomId, recipient, {
-        kind: "SECRET_SCAN",
-        ref: inboxRef(location),
-        summary,
-        author_id: "system",
-      });
+      await deliverInbox(
+        client,
+        roomId,
+        recipient,
+        {
+          kind: "SECRET_SCAN",
+          ref: inboxRef(location),
+          summary,
+          author_id: "system",
+        },
+        events,
+      );
     }
   }
 }

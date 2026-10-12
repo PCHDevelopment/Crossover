@@ -1032,7 +1032,11 @@ export class Dispatcher {
         : envelope.method;
     try {
       const queued = await withTransaction(this.pool, async (client) => {
-        const { approval, created } = await queueApproval(client, principal, {
+        const {
+          approval,
+          created,
+          events: inboxEvents,
+        } = await queueApproval(client, principal, {
           method: envelope.method,
           params,
           idempotency_key: idempotency.key,
@@ -1055,6 +1059,15 @@ export class Dispatcher {
                     expires_at: approval.expires_at,
                   },
                 },
+                ...inboxEvents.map((event) => ({
+                  type: event.type,
+                  actor_id: event.actor_id ?? "system",
+                  causation_id: envelope.id,
+                  ...(event.payload !== undefined ? { payload: event.payload } : {}),
+                  ...(event.schema_version !== undefined
+                    ? { schema_version: event.schema_version }
+                    : {}),
+                })),
               ],
               token,
             )
