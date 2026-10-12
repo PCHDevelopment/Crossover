@@ -1004,6 +1004,24 @@ describe("DockerExecutionDriver", () => {
         expect(resources.volume_ref).toBe(name);
         await driver.start({ sandbox_id: sandboxId, resources });
 
+        const [container] = JSON.parse(
+          execFileSync("docker", ["container", "inspect", name], {
+            encoding: "utf8",
+            timeout: 10_000,
+          }),
+        ) as Array<{
+          HostConfig: {
+            NetworkMode: string;
+            CapDrop: string[];
+            SecurityOpt: string[];
+          };
+          Config: { User: string };
+        }>;
+        expect(container?.HostConfig.NetworkMode).toBe("none");
+        expect(container?.HostConfig.CapDrop).toContain("ALL");
+        expect(container?.HostConfig.SecurityOpt).toContain("no-new-privileges");
+        expect(container?.Config.User).toMatch(/^[1-9]\d*(?::\d+)?$/);
+
         let stdout = "";
         const execution = await driver.exec({
           sandbox_id: sandboxId,
