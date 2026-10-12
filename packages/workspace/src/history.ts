@@ -10,7 +10,7 @@ export const workspaceDiffParamsSchema = z.strictObject({
   to_revision: revision,
   paths: z.array(pathSchema()).max(500).optional(),
 });
-const workspaceHistoryParamsSchema = z.strictObject({
+export const workspaceHistoryParamsSchema = z.strictObject({
   path: pathSchema().optional(),
   limit: z.number().int().min(1).max(200).default(50),
   before: revision.optional(),

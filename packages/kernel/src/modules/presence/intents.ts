@@ -203,12 +203,8 @@ export async function filterReadableIntents(
   return visible;
 }
 
-/** Register set/clear and list commands; `normalizePath` is shared with workspace writes. */
-export function registerPresenceIntentCommands(
-  dispatcher: Dispatcher,
-  store: EditIntentStore,
-  normalizePath: (path: string) => string,
-): void {
+/** Build the exact set/clear command schemas for MCP and the dispatcher (§11.4). */
+export function createPresenceIntentParamsSchemas(normalizePath: (path: string) => string) {
   const path = z.string().transform((input, ctx) => {
     try {
       return normalizePath(input);
@@ -227,7 +223,7 @@ export function registerPresenceIntentCommands(
       message: "start_line must be less than or equal to end_line",
       path: ["end_line"],
     });
-  const setParams = z
+  const set = z
     .strictObject({
       paths: z
         .array(path)
@@ -250,12 +246,23 @@ export function registerPresenceIntentCommands(
       }
     });
 
+  return { set, clear: z.strictObject({}) };
+}
+
+/** Register set/clear and list commands; `normalizePath` is shared with workspace writes. */
+export function registerPresenceIntentCommands(
+  dispatcher: Dispatcher,
+  store: EditIntentStore,
+  normalizePath: (path: string) => string,
+): void {
+  const params = createPresenceIntentParamsSchemas(normalizePath);
+
   dispatcher.registerCommand({
     method: "presence.set_intent",
     action: "presence.update",
     mutating: false,
     view: "own",
-    params: setParams,
+    params: params.set,
     execute: async (ctx, params) => {
       if (params.task_id !== undefined) await requireRoomTask(ctx, params.task_id);
       const expires_at = await store.set(ctx.room_id, ctx.principal.participant_id, {
@@ -272,7 +279,7 @@ export function registerPresenceIntentCommands(
     action: "presence.update",
     mutating: false,
     view: "own",
-    params: z.strictObject({}),
+    params: params.clear,
     execute: async (ctx) => {
       await store.clear(ctx.room_id, ctx.principal.participant_id);
       return { response: { cleared: true } };
