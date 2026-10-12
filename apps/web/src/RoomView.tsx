@@ -50,7 +50,7 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "setup", label: "Setup" },
   { id: "owner-controls", label: "Owner controls" },
   { id: "tasks", label: "Tasks" },
-  { id: "collaboration", label: "Decisions & memory" },
+  { id: "collaboration", label: "Inbox, decisions & memory" },
   { id: "activity", label: "Activity" },
   { id: "files", label: "Files" },
   { id: "changes", label: "Changes" },
