@@ -2,6 +2,35 @@
 
 Periodic big-picture reviews by O1: is the merged code building the product in ARCHITECTURE.md, in the right order? Newest first.
 
+## 2026-10-12 · Review 7 addendum (08:20 UTC; 7 PRs merged since Review 7)
+
+**M14 progress.** Seven §30 steps moved from SDK-only into the browser in four hours:
+
+- step 7, agent edit intents (#206);
+- steps 10–12, ChangeSet diff, conflicts, lead escalation and held ChangeSets (#207 `workspace.changeset.get` with ladder-gated candidate content, #208);
+- steps 16–17, task review with evidence, checkpoint, export and PR (#209, #210).
+
+**Still without UI:** steps 2–5, 13, and the owner controls.
+
+**Defects review caught, all fixed before or right after merge:**
+
+- Server-initiated intent reloads were billed to an agent subscriber's command budget, and a `RATE_LIMITED` reload was swallowed (#206).
+- A Monaco MergeView race, root-caused on the second attempt: `setValue` on an attached model during an in-flight diff (#208, #211).
+- Two Docker integration tests matched other runs' containers, or asserted before an asynchronous removal finished (#208, #213).
+
+**Course corrections.**
+
+1. **A recurring CI failure is a bug.** One re-run is allowed only to confirm an infrastructure failure. A failure that comes back after a fix gets root-caused, not re-run (MergeView, 07:05).
+2. **T1407 moved from Q1 to S2.** Q1 was silent from 02:27 and missed the 07:30 deadline for the contract. Q1 keeps T1402. T1407 is open as #212: application-level ping and pong, 4408 on two misses, 50 s client read deadlines in the TypeScript and Python SDKs and the Go tail, and Go `retry_after` clamped at 60 s.
+3. **S2's order:** #212 → a robust T902 benchmark (below) → MergeView view-state → T1401. T1404 has no owner until an engineer frees up.
+
+**Tech-debt register, new:**
+
+- T902's secret-scan benchmark has a hard 250 ms wall-clock bound, and it tripped at 251 ms on the shared runner. It's a ReDoS guard: use a generous bound or a ratio against a benign input of the same size.
+- MergeView replaces its models on every choice, so scroll and cursor reset. Save and restore the view state.
+- The Changes tab pages through the room's whole ChangeSet event history on every open.
+- Reading an unapplied ChangeSet's candidate content writes unreferenced git objects. Memoize it if the merge view ever polls.
+
 ## 2026-10-12 · Review 7 (backend about 139 of 140 tasks; about 57 PRs merged since Review 6)
 
 **State.**
