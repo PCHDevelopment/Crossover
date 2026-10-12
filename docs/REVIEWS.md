@@ -2,6 +2,58 @@
 
 Periodic big-picture reviews by O1: is the merged code building the product in ARCHITECTURE.md, in the right order? Newest first.
 
+## 2026-10-12 · Review 10 (20:20 UTC; 5 PRs merged since Review 9)
+
+**State.** #232–#236 merged, all by S2, each with CI green on the merged head:
+
+- T1406, the §30 demo acceptance test: all 17 steps through the browser, SDK, MCP and Docker (#232). M14 is done.
+- T1415, a real-Docker smoke test for `DockerExecutionDriver` (#233).
+- T1416, the first production server image, a Compose `server` profile and a deploy-topology test (#234). It is labelled development/demo-only per T1418.
+- T1501, MCP tools for plugins, edit intents, history and blame (#235). Plugin output is framed `trust="external"` for agents.
+- T1502, the message channel in the web app (#236). Bodies are plain text, mentions are ids, references come from pickers, and each message shows provenance.
+
+**Against §29 (MVP scope), item by item at b34f994.** The backend covers nearly all of §29. The gaps were on the surfaces people and agents touch. They are now M15 (T1501–T1509), and T1501 and T1502, the two largest, are closed. What remains for a deployable MVP:
+
+- Real human sign-in (T1503). Only `dev-login` exists. This blocks any non-demo deployment.
+- Budget configuration (T1504). Budgets are enforced, but nothing sets them.
+- The Terminal tab (T1505).
+- The room export bundle and an archive button (T1506).
+- Smaller UI gaps (T1507): veto, task actions, memory write, escalate, the health badge, and showing whether an author is a human or an agent.
+
+Policy runs as TypeScript, not OPA (T1509, last). That is a fidelity gap, not a functional one.
+
+**Layering.** The package graph is clean: protocol → db → ledger/policy → kernel → workspace → gateway → mcp → apps, with no cycles. One leak: `apps/web` imports `@crossover/workspace/protected-paths` for a constant. That is harmless today, but it ties the browser bundle to a server package. Move `DEFAULT_PROTECTED_PATHS` to protocol (debt below).
+
+**New signal: a 500 from the deployed server.** On #237, whose only change is one test's timeout, the deploy-topology test got `500 INTERNAL` from `sandbox.exec`. The same test passed on #234–#236. The server container's logs were not captured, so the cause is unknown. Logged as T1513. Step 1 makes the test print the container's logs on failure. Treat it as a product bug until shown otherwise.
+
+**Course corrections.**
+
+1. **Task order for S2:**
+   1. T1513 (capture server logs in deploy-topology)
+   2. Merge #237 (T1510)
+   3. T1511 (secret-scanner wall-clock bound, with the margin measured and stated)
+   4. T1503 (OAuth sign-in, session token in an HttpOnly cookie)
+   5. T1504 (budgets)
+   6. T1505 (Terminal)
+   7. T1506 (export and archive)
+   8. T1507 (UI completeness)
+   9. T1512 (server-side ref validation)
+   10. T1508 (Go CLI)
+   11. T1509 (OPA)
+2. **Containers in tests leave evidence.** Any e2e test that runs a container prints that container's logs when the test fails, before cleanup. A failure whose cause was thrown away cannot be fixed.
+3. **Intermittent failures are reported with names and output.** S2 slipped on this three times today. On the third (seq 1082) S2 produced test names and errors, which became T1510 and T1511. The rule stands: save the output before rerunning.
+4. **Decisions needed from Peter:**
+   - T1418: a remote sandbox-host driver, or amend §4.1.
+   - Staffing. Q1 has been silent about 18 hours, and S2 has made every merge since Review 7 (21 PRs).
+
+**Tech-debt register, new:**
+
+- `apps/web` imports a constant from `@crossover/workspace`. Move `DEFAULT_PROTECTED_PATHS` into `@crossover/protocol`.
+- `packages/kernel/src/dispatcher.ts` (about 1,790 lines) and `packages/workspace/src/execution.ts` (about 1,840 lines) are the two largest files and still growing. Split them along existing seams the next time either needs a substantive change.
+- `frameToolResult` gained a positional `trust` argument before `tag`. Prefer an options object if it grows again.
+
+**Closed since Review 9:** the real-Docker driver gap (T1415), the deploy-topology gap (T1416), the MCP plugin and intent gap (T1501), and the missing human message channel (T1502). The unidentified 5 s compose timeout from T1417 is now named, and fixed in #237 pending a green CI run.
+
 ## 2026-10-12 · Review 9 (16:20 UTC; 8 PRs merged since Review 8)
 
 **State.** #224–#231 merged, all by S2, all with CI green on the merged head:
