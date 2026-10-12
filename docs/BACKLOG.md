@@ -27,7 +27,7 @@ Conventions are in `docs/ENGINEERING.md`. Section references (§) point to `docs
 | M12 Plugins (§21.4–21.5)              | T1201–T1206 | S1 (T1201, moved in Review 5), S2 (T1202–T1206)             |
 | M13 Lessons from building (§34)       | T1301–T1303 | S1                                                          |
 | M14 Demo-ready web app (Review 7)     | T1401–T1416 | S2 (T1401–T1416; T1402 moved from Q1)                       |
-| M15 MVP scope gaps (§29, Review 10)   | T1501–T1509 | S2 (T1501–T1502 assigned; rest unassigned)                  |
+| M15 MVP scope gaps (§29, Review 10)   | T1501–T1512 | S2 (T1501–T1502, T1510–T1511 assigned; rest unassigned)     |
 
 **Start here:** S1 → T101, T105, T114 (independent). S2 → T501, T505 (only need the scaffold).
 
@@ -1569,3 +1569,15 @@ Messages, inbox, sandbox and the `room mcp` stdio shim.
 ### T1509 · OPA-WASM behind `authorize()` — unassigned
 
 D9 fidelity with no functional change. Last.
+
+### T1510 · compose.test.ts sandbox-over-MCP test times out under load — S2
+
+T1417's second unidentified flake, now named (seq 1082): `apps/server/src/compose.test.ts` › composeServer › "supports a sandbox coding flow through MCP before and after submission" (line 1578), `Test timed out in 5000ms` during a full parallel `pnpm check`. Find what it waits on; give it an explicit timeout sized to the work or remove the wait. Do not just raise the default.
+
+### T1511 · Secret-scanner time-bound assertion fails under load — S2
+
+`packages/security/src/secret-scanner.test.ts:181`, "scans a file just under the 2 MiB bound within a time bound": `expected 1020 to be less than 1000` under a full parallel run. A wall-clock bound in a unit test measures machine load, not the scanner. Replace it with a deterministic guard (for example an assertion on work done, or a bound with a documented margin run in isolation).
+
+### T1512 · Validate message refs on the server — unassigned
+
+`messages.send` checks mentions but stores `refs` as given. Reject task, decision and file references that do not exist in the room (`VALIDATION`), as mentions do.
