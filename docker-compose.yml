@@ -15,3 +15,48 @@ services:
     image: redis:7
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      retries: 15
+  server:
+    image: crossover-server:local
+    build:
+      context: .
+      dockerfile: apps/server/Dockerfile
+    profiles: ["server"]
+    container_name: crossover-server
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgres://crossover:crossover@postgres:5432/crossover
+      REDIS_URL: redis://redis:6379
+      WORKSPACE_ROOT: ${CROSSOVER_WORKSPACE_ROOT:-${PWD}/.data/workspaces}
+      HOST: 0.0.0.0
+      PORT: 8080
+      DEV_LOGIN: "true"
+      SANDBOX_DISK_ENFORCEMENT: soft
+      GIT_INTERNAL_HOST: crossover-server
+      GIT_INTERNAL_CONTAINER: crossover-server
+      GIT_INTERNAL_TOKEN_SECRET: ${GIT_INTERNAL_TOKEN_SECRET:?Set GIT_INTERNAL_TOKEN_SECRET in .env}
+      GIT_FETCHER_IMAGE: crossover-git-fetcher:latest
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    group_add:
+      - "${DOCKER_GID:-998}"
+    ports:
+      - "8080:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - "${CROSSOVER_WORKSPACE_ROOT:-${PWD}/.data/workspaces}:${CROSSOVER_WORKSPACE_ROOT:-${PWD}/.data/workspaces}"
+    networks:
+      default: {}
+      crossover-git: {}
+networks:
+  crossover-git:
+    name: crossover-git
+    external: true

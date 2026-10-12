@@ -150,6 +150,11 @@ export function buildGateway(options: GatewayOptions): FastifyInstance {
     return reply.status(404).send(new CrossoverError("NOT_FOUND", "No such route").toErrorBody());
   });
 
+  app.get("/health", async (_request, reply) => {
+    await pool.query("SELECT 1");
+    return reply.status(200).send({ status: "ok" });
+  });
+
   app.post<{ Params: { roomId: string } }>("/v1/rooms/:roomId/commands", async (request, reply) => {
     const principal = await authenticate(pool, bearerToken(request));
     // A token is for one room. Anything else looks the same as a room that doesn't exist.
