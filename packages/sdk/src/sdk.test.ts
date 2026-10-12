@@ -278,11 +278,16 @@ class FakeSocket implements WebSocketLike {
   }
 }
 
-const subscribeWith = (script: (s: FakeSocket, i: number) => void, options: object = {}) => {
+const subscribeWith = (
+  script: (s: FakeSocket, i: number) => void,
+  options: object = {},
+  webSocketReadTimeoutMs?: number,
+) => {
   FakeSocket.instances = [];
   FakeSocket.script = script;
   const room = clientWith(async () => ok(), {
     WebSocket: FakeSocket as unknown as WebSocketCtor,
+    ...(webSocketReadTimeoutMs === undefined ? {} : { webSocketReadTimeoutMs }),
   }).room("room_1", "tok");
   return room.subscribe({ reconnect: { minMs: 1, maxMs: 2 }, ...options });
 };
@@ -297,6 +302,36 @@ const take = async (sub: AsyncIterable<{ sequence: number }>, n: number) => {
 };
 
 describe("subscribe", () => {
+  it("answers server heartbeat pings without delivering them as events", async () => {
+    const sub = subscribeWith((socket, index) => {
+      if (index === 0) {
+        socket.emit({ type: "ping", id: "ping-1" });
+        socket.event(1);
+      }
+    });
+    expect(await take(sub, 1)).toEqual([1]);
+    expect(FakeSocket.instances[0]!.sent).toContainEqual({ type: "pong", id: "ping-1" });
+    sub.close();
+  });
+
+  it("reconnects from the last event when its WebSocket read deadline expires", async () => {
+    const sub = subscribeWith(
+      (socket, index) => {
+        if (index === 1) socket.event(1);
+      },
+      {},
+      20,
+    );
+    expect(await take(sub, 1)).toEqual([1]);
+    sub.close();
+    expect(FakeSocket.instances).toHaveLength(2);
+    expect(
+      FakeSocket.instances.map(
+        (socket) => socket.sent.find((frame) => frame["type"] === "subscribe")?.["after"],
+      ),
+    ).toEqual([0, 0]);
+  });
+
   it("delivers every event once and in order across a dropped connection, asking for what's after the last one", async () => {
     const sub = subscribeWith((s, i) => {
       if (i === 0) {

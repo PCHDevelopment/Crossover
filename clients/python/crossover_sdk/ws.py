@@ -21,6 +21,7 @@ from .errors import CrossoverError, TransportError
 # Close codes the server uses (§16.4, application range).
 CLOSE_UNAUTHENTICATED = 4401
 CLOSE_NOT_FOUND = 4404
+CLOSE_TIMEOUT = 4408
 CLOSE_RESYNC_REQUIRED = 4409
 
 #: How long a subscription keeps retrying a failing refresh (the server's grace for a spent token is 30 s).
@@ -42,6 +43,7 @@ class WsConfig:
     refresh: Callable[[str], Awaitable[bool]] | None = None
     connect: Connect | None = None
     hello_timeout_s: float = 10.0
+    read_timeout_s: float = 50.0
 
 
 def frame_error(frame: Mapping[str, Any]) -> CrossoverError:
@@ -67,8 +69,9 @@ def _retry_after(error: CrossoverError) -> float | None:
 class WsSession:
     """One connected, greeted socket."""
 
-    def __init__(self, ws: Any) -> None:
+    def __init__(self, ws: Any, read_timeout_s: float = 50.0) -> None:
         self._ws = ws
+        self._read_timeout_s = read_timeout_s
         self._frame_handler: Callable[[dict[str, Any]], None] | None = None
         self._close_handler: Callable[[int, str], None] | None = None
         self._closed = False
@@ -82,7 +85,7 @@ class WsSession:
             ws = await asyncio.wait_for(connect(config.url), config.hello_timeout_s)
         except (OSError, asyncio.TimeoutError, websockets.WebSocketException) as error:
             raise TransportError("Couldn't open the WebSocket", retryable=True) from error
-        session = cls(ws)
+        session = cls(ws, config.read_timeout_s)
         session._reader = asyncio.ensure_future(session._read())
         token = config.get_token() if config.get_token else config.token
         await ws.send(
@@ -109,7 +112,16 @@ class WsSession:
     async def _read(self) -> None:
         greeted = False
         try:
-            async for raw in self._ws:
+            while True:
+                try:
+                    raw = await asyncio.wait_for(
+                        self._ws.recv(), timeout=self._read_timeout_s if greeted else None
+                    )
+                except asyncio.TimeoutError:
+                    await self._ws.close(code=CLOSE_TIMEOUT, reason="read timeout")
+                    break
+                except websockets.WebSocketException:
+                    break
                 try:
                     frame = json.loads(raw)
                 except ValueError:
@@ -123,10 +135,13 @@ class WsSession:
                     elif frame.get("type") == "error" and not self._hello.done():
                         self._hello.set_exception(frame_error(frame))
                     continue
+                if frame.get("type") == "ping":
+                    ping_id = frame.get("id")
+                    if isinstance(ping_id, str):
+                        await self.send({"type": "pong", "id": ping_id})
+                    continue
                 if self._frame_handler:
                     self._frame_handler(frame)
-        except websockets.WebSocketException:
-            pass
         finally:
             self._closed = True
             code = getattr(self._ws, "close_code", None) or 1006

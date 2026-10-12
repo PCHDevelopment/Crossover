@@ -69,6 +69,10 @@ export interface WebSocketOptions {
   maxBufferedBytes?: number;
   /** Close a connection that hasn't said hello within this long. Default 10000. */
   helloTimeoutMs?: number;
+  /** Send an application-level ping this often after hello. Default 20000. */
+  pingIntervalMs?: number;
+  /** Close with TIMEOUT after this many consecutive unanswered ping intervals. Default 2. */
+  missedPongLimit?: number;
   /** Builds the per-subscription event filter. Default: the kernel's (tests substitute one). */
   createMatcher?: typeof createEventMatcher;
   /** Told about a failure that is a bug, not a client error (e.g. a filter that threw). */
@@ -171,6 +175,8 @@ function sandboxUpdateBytes(update: SandboxOutputUpdate): number {
  *
  * A connection that can't keep up (more than 1,000 queued events or 5 MiB) is closed with
  * `resync_required`; the client reconnects with `after = last sequence it saw`.
+ * After hello, the server also sends `ping { id }` every 20 seconds; clients echo `pong { id }`.
+ * Two consecutive unanswered intervals close the connection with `TIMEOUT` (4408).
  */
 export function attachWebSocket(app: FastifyInstance, options: WebSocketOptions): void {
   const wss = new WebSocketServer({ noServer: true });
@@ -213,6 +219,10 @@ class Connection {
   private queue: Promise<void> = Promise.resolve();
   private readonly timers: ReturnType<typeof setTimeout>[] = [];
   private revalidate: ReturnType<typeof setInterval> | undefined;
+  private heartbeat: ReturnType<typeof setInterval> | undefined;
+  private pingSequence = 0;
+  private pendingPingId: string | undefined;
+  private missedPongs = 0;
 
   constructor(
     private readonly ws: WebSocket,
@@ -271,6 +281,14 @@ class Connection {
         type: "error",
         error: new CrossoverError("VALIDATION", "Frames must be JSON objects").toErrorBody().error,
       });
+      return;
+    }
+    // Pongs must not queue behind a command or backfill; a busy room still has to answer heartbeats.
+    if (this.helloDone && frame.type === "pong") {
+      if (typeof frame.id === "string" && frame.id === this.pendingPingId) {
+        this.pendingPingId = undefined;
+        this.missedPongs = 0;
+      }
       return;
     }
     // One at a time, in order: a command frame must not overtake the hello before it.
@@ -361,12 +379,28 @@ class Connection {
         (error: unknown) => this.fail(CLOSE.UNAUTHENTICATED, error),
       );
     }, this.o.revalidateIntervalMs ?? 30_000);
+    this.heartbeat = setInterval(() => this.heartbeatTick(), this.o.pingIntervalMs ?? 20_000);
     this.send({
       type: "hello_ok",
       protocol_version: version,
       participant_id: this.principal.participant_id,
       room_id: this.principal.room_id,
     });
+  }
+
+  private heartbeatTick(): void {
+    if (this.closed || this.ws.readyState !== this.ws.OPEN) return;
+    if (this.pendingPingId !== undefined) {
+      this.missedPongs++;
+      if (this.missedPongs >= (this.o.missedPongLimit ?? 2)) {
+        this.ws.close(CLOSE.TIMEOUT, "heartbeat timeout");
+        void this.cleanup();
+        return;
+      }
+    }
+    const id = String(++this.pingSequence);
+    this.pendingPingId = id;
+    this.send({ type: "ping", id });
   }
 
   private async command(frame: Record<string, unknown>): Promise<void> {
@@ -1005,6 +1039,7 @@ class Connection {
     this.closed = true;
     for (const t of this.timers) clearTimeout(t);
     if (this.revalidate) clearInterval(this.revalidate);
+    if (this.heartbeat) clearInterval(this.heartbeat);
     await this.stopStream();
     this.stopSandboxOutput();
     await this.stopPresence();
