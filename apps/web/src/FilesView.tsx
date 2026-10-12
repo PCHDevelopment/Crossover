@@ -307,6 +307,7 @@ export default function FilesView(props: {
     const lineCount = model.getLineCount();
     const decorations: monaco.editor.IModelDeltaDecoration[] = [];
     for (const intent of intentRangesOn(intents, current, selfId, nameOf, purposeOf)) {
+      if (intent.whole_file) continue;
       const startLine = Math.min(intent.start_line, lineCount);
       const endLine = Math.min(intent.end_line, lineCount);
       decorations.push({
@@ -486,7 +487,8 @@ export default function FilesView(props: {
                 title={intent.label}
               >
                 <span className={`presence-dot presence-${intent.color}`} />
-                {intent.label} · lines {intent.start_line}–{intent.end_line}
+                {intent.label} ·{" "}
+                {intent.whole_file ? "whole file" : `lines ${intent.start_line}–${intent.end_line}`}
               </li>
             ))}
           </ul>

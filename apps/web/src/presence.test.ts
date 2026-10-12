@@ -185,6 +185,7 @@ describe("live editor intents", () => {
         participant_id: "pair",
         name: "Pair",
         color: colorOf("pair"),
+        whole_file: false,
         start_line: 2,
         end_line: 4,
         label: "Pair · Edit notes",
@@ -208,5 +209,37 @@ describe("live editor intents", () => {
         () => "Edit notes",
       ),
     ).toEqual([]);
+  });
+
+  it("lists a path-only intent as a whole-file intent", () => {
+    const intents: IntentMap = applyIntentSnapshot([
+      {
+        participant_id: "pair",
+        paths: ["src/notes.txt"],
+        ranges: [],
+        task_id: null,
+        expires_at: "2026-10-12T12:00:00Z",
+      },
+    ]);
+
+    expect(
+      intentRangesOn(
+        intents,
+        "src/notes.txt",
+        "self",
+        () => "Pair",
+        () => undefined,
+      ),
+    ).toEqual([
+      {
+        participant_id: "pair",
+        name: "Pair",
+        color: colorOf("pair"),
+        whole_file: true,
+        start_line: 0,
+        end_line: 0,
+        label: "Pair · Active edit",
+      },
+    ]);
   });
 });

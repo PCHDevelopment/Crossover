@@ -8,7 +8,9 @@ import {
   presenceFor,
   type PresenceSubscriber,
   type EditIntent,
+  type EditIntentStore,
   type EditIntentSubscriber,
+  filterReadableIntents,
   redactEventFor,
   type Principal,
   type SubscriptionFilter,
@@ -79,8 +81,9 @@ export interface WebSocketOptions {
   maxSandboxOutputBufferedBytes?: number;
   /** Live presence (§13.4, Redis), for `presence.subscribe`. */
   presence?: PresenceSubscriber;
-  /** Intent invalidations; each update is reloaded through the ACL-filtered list command. */
+  /** Intent invalidations and backing store for unbudgeted, reader-filtered refreshes. */
   intents?: EditIntentSubscriber;
+  intentStore?: Pick<EditIntentStore, "list">;
 }
 
 /** Close codes (4000-range, application defined). */
@@ -161,7 +164,7 @@ function sandboxUpdateBytes(update: SandboxOutputUpdate): number {
  *   `presence.snapshot { presence }` and then each update as `presence { record }`, every record
  *   as this participant may see it (open files they can't read and a cursor on one are left out).
  *   If intent fanout is available, it also sends `presence.intents.snapshot { intents }` on
- *   connect and after each set/clear. The list command filters unreadable paths. Nothing is sent
+ *   connect and after each set/clear. Each snapshot filters unreadable paths. Nothing is sent
  *   when a record or intent expires: clients drop it once its `expires_at` passes.
  *   A refusal is an `error` frame with `subscription: "presence"`, which leaves the event stream
  *   alone. `presence.unsubscribe` stops it.
@@ -451,7 +454,7 @@ class Connection {
       out: Promise.resolve(),
       pending: new Map(),
       intentsPending: false,
-      intentsSyncing: this.o.intents !== undefined,
+      intentsSyncing: this.o.intents !== undefined && this.o.intentStore !== undefined,
       intentsRefreshQueued: false,
       readable: new Map(),
       unsubscribe: async () => undefined,
@@ -461,7 +464,7 @@ class Connection {
     stream.unsubscribe = await this.o.presence.subscribe(this.roomId, (record) =>
       this.onPresence(stream, record),
     );
-    if (this.o.intents) {
+    if (this.o.intents && this.o.intentStore) {
       const stop = await this.o.intents.subscribe(this.roomId, () => this.onIntentChange(stream));
       const stopPresence = stream.unsubscribe;
       stream.unsubscribe = async () => {
@@ -477,17 +480,10 @@ class Connection {
           method: "presence.list",
           params: {},
         }),
-        this.o.intents
-          ? this.o.dispatcher.dispatch(this.principal!, {
-              id: newId("cmd"),
-              method: "presence.list_intents",
-              params: {},
-            })
-          : undefined,
+        this.o.intents && this.o.intentStore ? this.listReadableIntents(stream) : undefined,
       ]);
       snapshot = (listed.response as { presence: Presence[] }).presence;
-      if (listedIntents)
-        intentSnapshot = (listedIntents.response as { intents: EditIntent[] }).intents;
+      if (listedIntents) intentSnapshot = listedIntents;
     } catch (error) {
       if (this.presenceStream === stream) await this.stopPresence();
       this.send({ type: "error", subscription: "presence", error: toHttpError(error).body.error });
@@ -516,7 +512,7 @@ class Connection {
     if (!stream.intentsSyncing) this.queueIntentSnapshot(stream);
   }
 
-  /** Coalesce invalidations and always reload through the reader-filtered command. */
+  /** Coalesce invalidations and read/filter without charging the subscriber's command budget. */
   private queueIntentSnapshot(stream: PresenceStream): void {
     if (stream.intentsRefreshQueued || stream.intentsSyncing) return;
     stream.intentsRefreshQueued = true;
@@ -524,23 +520,32 @@ class Connection {
       .then(async () => {
         while (stream.intentsPending && this.presenceStream === stream && !this.closed) {
           stream.intentsPending = false;
-          const listed = await this.o.dispatcher.dispatch(this.principal!, {
-            id: newId("cmd"),
-            method: "presence.list_intents",
-            params: {},
-          });
+          const intents = await this.listReadableIntents(stream);
           if (this.presenceStream !== stream || this.closed) return;
-          this.send({
-            type: "presence.intents.snapshot",
-            intents: (listed.response as { intents: EditIntent[] }).intents,
-          });
+          this.send({ type: "presence.intents.snapshot", intents });
         }
       })
-      .catch((error: unknown) => this.o.onInternalError?.(error))
+      .catch((error: unknown) => {
+        this.o.onInternalError?.(error);
+        if (this.presenceStream === stream && !this.closed)
+          this.send({
+            type: "error",
+            subscription: "presence",
+            error: toHttpError(error).body.error,
+          });
+      })
       .finally(() => {
         stream.intentsRefreshQueued = false;
         if (stream.intentsPending && !stream.intentsSyncing) this.queueIntentSnapshot(stream);
       });
+  }
+
+  private async listReadableIntents(stream: PresenceStream): Promise<EditIntent[]> {
+    const store = this.o.intentStore;
+    if (!store) return [];
+    return filterReadableIntents(await store.list(this.roomId), (path) =>
+      this.mayReadPath(stream, path),
+    );
   }
 
   private onPresence(stream: PresenceStream, record: Presence): void {
@@ -573,7 +578,7 @@ class Connection {
         { method: "presence.subscribe", params: {}, client: this.o.pool },
       );
     } catch (error) {
-      if (!(error instanceof CrossoverError)) throw error;
+      if (!(error instanceof CrossoverError) || error.code !== "FORBIDDEN") throw error;
       allowed = false;
     }
     if (stream.readable.size >= MAX_READABLE_CACHE) stream.readable.clear();

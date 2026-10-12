@@ -2,6 +2,8 @@ import type { Pool } from "@crossover/db";
 import { createTestDatabase, type TestDatabase } from "@crossover/db/testing";
 import {
   Dispatcher,
+  MemoryBudgetLimiter,
+  BUDGET_DEFAULTS,
   findOrCreateUser,
   issueTokens,
   RedisEventPublisher,
@@ -13,6 +15,7 @@ import {
   registerRoomEventsSubscribeCommand,
   type EditIntent,
   type EditIntentSubscriber,
+  type BudgetLimiter,
   type EventSubscriber,
   type Presence,
   type PresenceStore,
@@ -24,7 +27,6 @@ import { authorize } from "@crossover/policy";
 import { newId, type RoomEvent } from "@crossover/protocol";
 import type { FastifyInstance } from "fastify";
 import WebSocket from "ws";
-import { z } from "zod";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildGateway } from "./server.js";
 import type {
@@ -104,6 +106,15 @@ class ManualIntents implements EditIntentSubscriber {
   }
 }
 
+class ManualIntentStore {
+  current: EditIntent[] = [];
+  failure: unknown;
+  async list(_roomId: string): Promise<EditIntent[]> {
+    if (this.failure !== undefined) throw this.failure;
+    return this.current;
+  }
+}
+
 const record = (participant_id: string, expires_at: string): Presence => ({
   participant_id,
   expires_at,
@@ -124,6 +135,7 @@ interface Env {
 async function setup(
   ws: Partial<WebSocketOptions> & { subscriber?: EventSubscriber } = {},
   withRedis = false,
+  budgets?: BudgetLimiter,
 ): Promise<Env> {
   let publisher: RedisEventPublisher | undefined;
   let redisSub: RedisEventSubscriber | undefined;
@@ -140,6 +152,7 @@ async function setup(
     pool,
     authorize,
     nodeId: `node-${++n}`,
+    ...(budgets ? { budgets } : {}),
     ...(publisher ? { publisher } : {}),
   });
   registerRoomCommands(dispatcher);
@@ -1091,22 +1104,18 @@ describe("presence.subscribe (§13.4)", () => {
 
   it("sends intent snapshots on subscribe and after set and clear invalidations", async () => {
     const intents = new ManualIntents();
-    const env = await setup({ presence: new ManualPresence(), intents });
-    let current: EditIntent[] = [];
-    env.dispatcher.registerCommand({
-      method: "presence.list_intents",
-      action: "room.read",
-      mutating: false,
-      view: "participant",
-      params: z.strictObject({}),
-      execute: async () => ({ response: { intents: current } }),
+    const store = new ManualIntentStore();
+    const env = await setup({
+      presence: new ManualPresence(),
+      intents,
+      intentStore: store,
     });
     const c = await ready(env);
     c.send({ type: "presence.subscribe" });
     await c.frame("presence.snapshot");
     expect(await c.frame("presence.intents.snapshot")).toMatchObject({ intents: [] });
 
-    current = [
+    store.current = [
       {
         participant_id: "p_agent",
         paths: ["src/a.ts"],
@@ -1118,14 +1127,97 @@ describe("presence.subscribe (§13.4)", () => {
     const afterInitial = c.frames.length;
     intents.emit();
     const added = await c.frame("presence.intents.snapshot", afterInitial);
-    expect(added.intents).toEqual(current);
+    expect(added.intents).toEqual(store.current);
 
-    current = [];
+    store.current = [];
     const afterAdded = c.frames.length;
     intents.emit();
     const cleared = await c.frame("presence.intents.snapshot", afterAdded);
     expect(cleared.intents).toEqual([]);
     c.send({ type: "presence.unsubscribe" });
     await c.until(() => intents.handlers.size === 0, "intent unsubscribe");
+  });
+
+  it("does not spend an agent's five-command budget on ten intent snapshots", async () => {
+    const budgets = new MemoryBudgetLimiter();
+    const intents = new ManualIntents();
+    const store = new ManualIntentStore();
+    const env = await setup(
+      { presence: new ManualPresence(), intents, intentStore: store },
+      false,
+      budgets,
+    );
+    const agentId = newId("part");
+    await pool.query(
+      `INSERT INTO participants (id, room_id, kind, display_name, authority, role, status,
+                                agent_manifest, budgets)
+       VALUES ($1, $2, 'AGENT', 'Observer agent', 'MEMBER', 'DEVELOPER', 'ACTIVE',
+               '{"name":"Observer agent"}'::jsonb, '{"commands":5}'::jsonb)`,
+      [agentId, env.room],
+    );
+    const agent = await issueTokens(pool, agentId);
+    const c = await ready(env, agent.access_token);
+    c.send({ type: "presence.subscribe" });
+    await c.frame("presence.snapshot");
+    await c.frame("presence.intents.snapshot");
+
+    for (let i = 0; i < 10; i++) {
+      store.current = [
+        {
+          participant_id: "another_agent",
+          paths: ["src/a.ts"],
+          ranges: [{ path: "src/a.ts", start_line: i + 1, end_line: i + 1 }],
+          task_id: null,
+          expires_at: new Date(Date.now() + 45_000).toISOString(),
+        },
+      ];
+      const after = c.frames.length;
+      intents.emit();
+      const snapshot = await c.frame("presence.intents.snapshot", after);
+      expect(snapshot.intents[0].ranges[0].start_line).toBe(i + 1);
+    }
+
+    const key = { room_id: env.room, participant_id: agentId, budget: "commands" as const };
+    expect(await budgets.peek(key, BUDGET_DEFAULTS.commands.windowMs)).toBe(1);
+    const remaining = Array.from({ length: 4 }, () => cmd("presence.list"));
+    for (const frame of remaining) c.send(frame);
+    await c.until(
+      () =>
+        remaining.every((frame) =>
+          c.frames.some((reply) => reply.type === "result" && reply.id === frame.id),
+        ),
+      "four remaining budgeted commands",
+    );
+    const final = cmd("presence.list");
+    c.send(final);
+    expect(await c.frame("error")).toMatchObject({
+      id: final.id,
+      error: { code: "BUDGET_EXCEEDED" },
+    });
+  });
+
+  it("sends a presence error frame when an intent refresh fails", async () => {
+    const intents = new ManualIntents();
+    const store = new ManualIntentStore();
+    const internalErrors: unknown[] = [];
+    const env = await setup({
+      presence: new ManualPresence(),
+      intents,
+      intentStore: store,
+      onInternalError: (error) => internalErrors.push(error),
+    });
+    const c = await ready(env);
+    c.send({ type: "presence.subscribe" });
+    await c.frame("presence.snapshot");
+    await c.frame("presence.intents.snapshot");
+
+    store.failure = new Error("redis unavailable");
+    intents.emit();
+    const error = await c.frame("error");
+    expect(error).toMatchObject({
+      subscription: "presence",
+      error: { code: "INTERNAL" },
+    });
+    expect(internalErrors).toHaveLength(1);
   });
 });

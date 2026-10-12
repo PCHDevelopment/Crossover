@@ -25,6 +25,7 @@ export interface RemoteIntentRange {
   participant_id: string;
   name: string;
   color: number;
+  whole_file: boolean;
   start_line: number;
   end_line: number;
   label: string;
@@ -61,14 +62,26 @@ export function intentRangesOn(
     if (intent.participant_id === selfId || !intent.paths.includes(path)) continue;
     const name = nameOf(intent.participant_id);
     const purpose = intent.task_id ? (purposeOf(intent.task_id) ?? "Active edit") : "Active edit";
-    for (const range of intent.ranges) {
-      if (range.path !== path) continue;
+    const matching = intent.ranges.filter((range) => range.path === path);
+    for (const range of matching) {
       out.push({
         participant_id: intent.participant_id,
         name,
         color: colorOf(intent.participant_id),
+        whole_file: false,
         start_line: range.start_line,
         end_line: range.end_line,
+        label: `${name} · ${purpose}`,
+      });
+    }
+    if (matching.length === 0) {
+      out.push({
+        participant_id: intent.participant_id,
+        name,
+        color: colorOf(intent.participant_id),
+        whole_file: true,
+        start_line: 0,
+        end_line: 0,
         label: `${name} · ${purpose}`,
       });
     }

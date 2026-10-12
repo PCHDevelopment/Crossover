@@ -430,6 +430,12 @@ describe.skipIf(!executablePath && !inCi)("web app in a browser", () => {
       .toContain("Pair · Update notes");
     await page.locator(".remote-intent").first().waitFor();
 
+    await pair.api.presence.set_intent({ paths: ["src/notes.txt"], task_id: task.response.id });
+    await expect
+      .poll(async () => page.getByTestId("edit-intent").textContent())
+      .toContain("whole file");
+    await expect.poll(() => page.locator(".remote-intent").count()).toBe(0);
+
     // Peter puts the cursor on line 3: Pair sees it in presence.
     await lines.click();
     await page.keyboard.press("Control+End");
