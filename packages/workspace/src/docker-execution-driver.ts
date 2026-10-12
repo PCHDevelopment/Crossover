@@ -1450,7 +1450,13 @@ export class DockerExecutionDriver implements ExecutionDriver {
     if (separator < 0) throw new Error("ERROR: Docker returned invalid volume inspection data");
     try {
       const options: unknown = JSON.parse(inspected.stdout.slice(separator + 1).trim()) as unknown;
-      if (!options || typeof options !== "object" || Array.isArray(options))
+      if (options === null) {
+        return {
+          driver: inspected.stdout.slice(0, separator).trim(),
+          options: {},
+        };
+      }
+      if (typeof options !== "object" || Array.isArray(options))
         throw new Error("volume options must be an object");
       return {
         driver: inspected.stdout.slice(0, separator).trim(),
