@@ -113,6 +113,7 @@ jobs:
           test "$status" -eq 1
           printf '%s\n' "$output" | node --input-type=module -e 'let input="";for await(const chunk of process.stdin)input+=chunk;const value=JSON.parse(input);if(value.error?.code!=="unavailable"||input.includes("fixture-token"))process.exit(1);'
       - run: docker run --rm --network none --entrypoint git crossover-git-fetcher:test --version
+      # Run Chromium-backed web E2E after Docker tests finish changing bridge networks.
       - run: pnpm test
 
   workspace-benchmark:
