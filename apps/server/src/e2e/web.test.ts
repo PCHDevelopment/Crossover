@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { createTestDatabase, type TestDatabase } from "@crossover/db/testing";
 import { CrossoverClient, type RoomClient } from "@crossover/sdk";
+import { DEFAULT_PROTECTED_PATHS } from "@crossover/workspace/protected-paths";
 import { git, type UpstreamFetcher } from "@crossover/workspace";
 import { chromium, type Browser, type Page } from "playwright-core";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -372,6 +373,20 @@ describe.skipIf(!executablePath && !inCi)("web app in a browser", () => {
       .toContain("complete");
     await owner.api.room.set_egress_allowlist({ hosts: ["live.example"] });
     await expect.poll(() => page.getByTestId("egress-hosts").inputValue()).toBe("live.example");
+    await page.getByTestId("protected-paths").fill("draft/protected/**");
+    await owner.api.room.set_egress_allowlist({ hosts: ["live.example", "refresh.example"] });
+    await expect
+      .poll(() => page.getByTestId("egress-hosts").inputValue())
+      .toBe("live.example\nrefresh.example");
+    await expect
+      .poll(() => page.getByTestId("protected-paths").inputValue())
+      .toBe("draft/protected/**");
+    await page.getByTestId("protected-paths").fill(DEFAULT_PROTECTED_PATHS.join("\n"));
+    await page.getByTestId("egress-hosts").fill("draft.example");
+    await owner.api.room.set_protected_paths({ patterns: ["external/**"] });
+    await expect.poll(() => page.getByTestId("protected-paths").inputValue()).toBe("external/**");
+    await expect.poll(() => page.getByTestId("egress-hosts").inputValue()).toBe("draft.example");
+    await page.getByTestId("egress-hosts").fill("live.example\nrefresh.example");
     await page.getByTestId("protected-paths").fill("infra/release/**\n.github/workflows/**");
     await page.getByTestId("save-protected-paths").click();
     await expect
@@ -382,8 +397,54 @@ describe.skipIf(!executablePath && !inCi)("web app in a browser", () => {
         sections: { room: { settings: Record<string, unknown> } };
       }>({ view: "summary" })
     ).response.sections.room.settings;
-    expect(settings["egress_allowlist"]).toEqual(["live.example"]);
+    expect(settings["egress_allowlist"]).toEqual(["live.example", "refresh.example"]);
     expect(settings["protected_paths"]).toEqual([".github/workflows/**", "infra/release/**"]);
+
+    await page.getByTestId("capability-participant").selectOption(observer.id);
+    await page.getByTestId("capability-bundle").waitFor();
+    await page.getByTestId("capability-input").fill("tasks.create");
+    await page.getByTestId("capability-requires-approval").check();
+    await page.getByTestId("grant-capability").click();
+    await expect
+      .poll(() => page.getByTestId("capability-grant").textContent())
+      .toContain("tasks.create (tier 1, approval required)");
+    await expect(
+      observer.room.api.tasks.create({
+        title: "Approval gated work",
+        requirements: ["Review me"],
+      }),
+    ).rejects.toMatchObject({ code: "APPROVAL_REQUIRED" });
+    await expect(
+      observer.room.api.tasks.create({
+        title: "Rejected gated work",
+        requirements: ["Reject me"],
+      }),
+    ).rejects.toMatchObject({ code: "APPROVAL_REQUIRED" });
+    await expect.poll(() => page.getByTestId("pending-approval").count()).toBe(2);
+    const approvalRow = page
+      .getByTestId("pending-approval")
+      .filter({ hasText: "Approval gated work" });
+    await approvalRow.getByTestId("approve-request").click();
+    await expect
+      .poll(async () => {
+        const result = await owner.api.tasks.list<{ tasks: { title: string }[] }>({ limit: 100 });
+        return result.response.tasks.some((task) => task.title === "Approval gated work");
+      })
+      .toBe(true);
+    await expect.poll(() => page.getByTestId("pending-approval").count()).toBe(1);
+    const rejectedRow = page
+      .getByTestId("pending-approval")
+      .filter({ hasText: "Rejected gated work" });
+    await rejectedRow.getByTestId("reject-request").click();
+    await expect.poll(() => page.getByTestId("pending-approval").count()).toBe(0);
+    await expect
+      .poll(async () => {
+        const result = await owner.api.tasks.list<{ tasks: { title: string }[] }>({ limit: 100 });
+        return result.response.tasks.some((task) => task.title === "Rejected gated work");
+      })
+      .toBe(false);
+    await page.getByTestId("revoke-capability").click();
+    await expect.poll(() => page.getByTestId("capability-grant").count()).toBe(0);
 
     const observerRow = page.getByTestId("owner-participant").filter({ hasText: "ObserverAgent" });
     acceptDialogs = false;
@@ -406,6 +467,10 @@ describe.skipIf(!executablePath && !inCi)("web app in a browser", () => {
       expect.arrayContaining([
         expect.stringContaining("registry.acme.test, *.packages.example"),
         expect.stringContaining("infra/release/**, .github/workflows/**"),
+        expect.stringContaining("Grant tasks.create to ObserverAgent with approval required"),
+        expect.stringContaining("Approve tasks.create from ObserverAgent"),
+        expect.stringContaining("Rejected gated work"),
+        expect.stringContaining("Revoke tasks.create from ObserverAgent"),
         expect.stringContaining("ObserverAgent"),
         expect.stringContaining("Project Alpha"),
       ]),

@@ -109,6 +109,9 @@ importers:
       '@crossover/sdk':
         specifier: workspace:*
         version: link:../../packages/sdk
+      '@crossover/workspace':
+        specifier: workspace:*
+        version: link:../../packages/workspace
       monaco-editor:
         specifier: ^0.57.0
         version: 0.57.0
@@ -1048,9 +1051,6 @@ packages:
 
   '@types/react@19.3.0':
     resolution: {integrity: sha512-N0rFCuH9YoxG9/m61l9MfpJKfmLOVU0em7ipIz6TRgSSkvReLB9vL85GB+yr8Bs5leqpvg96JSwF4ZS1s4viQg==}
-
-  '@types/trusted-types@2.0.7':
-    resolution: {integrity: sha512-ScaPdn1dQczgbl0QFTeTOmVHFULt394XJgOQNoyVhZ6r2vLnMLJfBPd53SB52T/3G36VI1/g2MZaX0cwDuXsfw==}
 
   '@types/ws@8.18.2':
     resolution: {integrity: sha512-67MQl+fpWKVTT1NYdnmo3U4sc/xPo/zQBncVnI74qmQa0z/b+1g6iYqNmGCPbxO+zz2aklb08a0oHfegiVd0/w==}
@@ -3036,9 +3036,6 @@ snapshots:
     dependencies:
       csstype: 3.2.3
 
-  '@types/trusted-types@2.0.7':
-    optional: true
-
   '@types/ws@8.18.2':
     dependencies:
       '@types/node': 22.20.5
@@ -3298,9 +3295,7 @@ snapshots:
 
   detect-libc@2.1.2: {}
 
-  dompurify@3.4.15:
-    optionalDependencies:
-      '@types/trusted-types': 2.0.7
+  dompurify@3.4.15: {}
 
   dunder-proto@1.0.1:
     dependencies:

@@ -325,6 +325,7 @@ export function RoomView(props: {
             leadParticipantId={room.lead_participant_id}
             roomStatus={room.status}
             settings={room.settings}
+            onEvent={onEvent}
             onRefresh={reload}
           />
         </Suspense>

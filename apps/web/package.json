@@ -10,6 +10,7 @@
   "dependencies": {
     "@crossover/protocol": "workspace:*",
     "@crossover/sdk": "workspace:*",
+    "@crossover/workspace": "workspace:*",
     "monaco-editor": "^0.57.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",

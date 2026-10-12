@@ -1,9 +1,33 @@
-import { useEffect, useState, type FormEvent } from "react";
-import type { RoomClient } from "@crossover/sdk";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import type { RoomClient, SdkEvent } from "@crossover/sdk";
+import { DEFAULT_PROTECTED_PATHS } from "@crossover/workspace/protected-paths";
 import type { Participant } from "./model.js";
 
 type Settings = Record<string, unknown> | null;
-const DEFAULT_PROTECTED_PATHS = [".github/workflows/**", "**/*.pem", "**/.env*", "infra/prod/**"];
+type EventListener = (listener: (event: SdkEvent) => void) => () => void;
+
+interface CapabilityState {
+  participant_id: string;
+  bundle: string[];
+  grants: {
+    id: string;
+    capability: string;
+    tier: number;
+    requires_approval: boolean;
+    expires_at: string | null;
+  }[];
+  revocations: { id: string; capability: string }[];
+}
+
+interface Approval {
+  id: string;
+  requester_id: string;
+  method: string;
+  params: unknown;
+  capability: string;
+  expires_at: string;
+}
+
 const list = (value: unknown): string[] =>
   Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
 const lines = (value: string): string[] => [
@@ -14,8 +38,29 @@ const lines = (value: string): string[] => [
       .filter(Boolean),
   ),
 ];
+const sameLines = (left: string, right: string): boolean =>
+  lines(left).sort().join("\n") === lines(right).sort().join("\n");
 const errorText = (error: unknown): string =>
   error instanceof Error ? error.message : "The action failed";
+
+function useServerSyncedText(serverValue: string): [string, (value: string) => void] {
+  const [value, setValue] = useState(serverValue);
+  const previousServerValue = useRef(serverValue);
+
+  useEffect(() => {
+    const previous = previousServerValue.current;
+    if (sameLines(previous, serverValue)) {
+      previousServerValue.current = serverValue;
+      return;
+    }
+    previousServerValue.current = serverValue;
+    setValue((current) =>
+      sameLines(current, previous) || sameLines(current, serverValue) ? serverValue : current,
+    );
+  }, [serverValue]);
+
+  return [value, setValue];
+}
 
 export function OwnerControlsView(props: {
   room: RoomClient;
@@ -25,6 +70,7 @@ export function OwnerControlsView(props: {
   leadParticipantId: string | null;
   roomStatus: string;
   settings: Settings;
+  onEvent: EventListener;
   onRefresh: () => Promise<void>;
 }) {
   const {
@@ -35,20 +81,58 @@ export function OwnerControlsView(props: {
     leadParticipantId,
     roomStatus,
     settings,
+    onEvent,
     onRefresh,
   } = props;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [egress, setEgress] = useState(() => list(settings?.["egress_allowlist"]).join("\n"));
-  const [protectedPaths, setProtectedPaths] = useState(() =>
-    list(settings?.["protected_paths"] ?? DEFAULT_PROTECTED_PATHS).join("\n"),
-  );
+  const egressServerValue = list(settings?.["egress_allowlist"]).join("\n");
+  const protectedPathsServerValue = list(
+    settings?.["protected_paths"] ?? DEFAULT_PROTECTED_PATHS,
+  ).join("\n");
+  const [egress, setEgress] = useServerSyncedText(egressServerValue);
+  const [protectedPaths, setProtectedPaths] = useServerSyncedText(protectedPathsServerValue);
+  const targets = participants.filter((participant) => participant.status !== "REMOVED");
+  const [targetId, setTargetId] = useState("");
+  const [capabilityState, setCapabilityState] = useState<CapabilityState>();
+  const [capability, setCapability] = useState("");
+  const [expiresAt, setExpiresAt] = useState("");
+  const [requiresApproval, setRequiresApproval] = useState(false);
+  const [approvals, setApprovals] = useState<Approval[]>([]);
+
+  const refreshCapabilities = useCallback(async () => {
+    if (!targetId) {
+      setCapabilityState(undefined);
+      return;
+    }
+    const result = await room.api.capabilities.list<CapabilityState>({ participant_id: targetId });
+    setCapabilityState(result.response);
+  }, [room, targetId]);
+
+  const refreshApprovals = useCallback(async () => {
+    const result = await room.api.approvals.list<{ approvals: Approval[] }>({
+      status: "PENDING",
+      limit: 100,
+    });
+    setApprovals(result.response.approvals);
+  }, [room]);
 
   useEffect(() => {
-    setEgress(list(settings?.["egress_allowlist"]).join("\n"));
-    setProtectedPaths(list(settings?.["protected_paths"] ?? DEFAULT_PROTECTED_PATHS).join("\n"));
-  }, [settings]);
+    void refreshCapabilities().catch((err: unknown) => setError(errorText(err)));
+  }, [refreshCapabilities]);
+
+  useEffect(() => {
+    void refreshApprovals().catch((err: unknown) => setError(errorText(err)));
+    return onEvent((event) => {
+      if (event.type === "approval.requested" || event.type === "approval.decided") {
+        void refreshApprovals().catch((err: unknown) => setError(errorText(err)));
+      }
+      if (event.type === "capability.granted" || event.type === "capability.revoked") {
+        void refreshCapabilities().catch((err: unknown) => setError(errorText(err)));
+      }
+    });
+  }, [onEvent, refreshApprovals, refreshCapabilities]);
 
   const perform = async (label: string, action: () => Promise<void>) => {
     setBusy(true);
@@ -104,6 +188,58 @@ export function OwnerControlsView(props: {
       return;
     void perform("Save protected paths", async () => {
       await room.api.room.set_protected_paths({ patterns });
+    });
+  };
+
+  const grantCapability = (event: FormEvent) => {
+    event.preventDefault();
+    const participant = targets.find((item) => item.id === targetId);
+    const trimmed = capability.trim();
+    if (!participant || !trimmed) return;
+    const approvalText = requiresApproval ? " with approval required" : "";
+    if (!window.confirm(`Grant ${trimmed} to ${participant.display_name}${approvalText}?`)) return;
+    void perform("Grant capability", async () => {
+      await room.api.capabilities.grant({
+        participant_id: targetId,
+        capability: trimmed,
+        requires_approval: requiresApproval,
+        ...(expiresAt ? { expires_at: new Date(expiresAt).toISOString() } : {}),
+      });
+      await refreshCapabilities();
+      setCapability("");
+      setExpiresAt("");
+    });
+  };
+
+  const revokeCapability = (grant: CapabilityState["grants"][number]) => {
+    const participant = targets.find((item) => item.id === targetId);
+    if (
+      !participant ||
+      !window.confirm(`Revoke ${grant.capability} from ${participant.display_name}?`)
+    )
+      return;
+    void perform("Revoke capability", async () => {
+      await room.api.capabilities.revoke({
+        participant_id: targetId,
+        capability: grant.capability,
+      });
+      await refreshCapabilities();
+    });
+  };
+
+  const decideApproval = (approval: Approval, decision: "approve" | "reject") => {
+    const requester = targets.find((participant) => participant.id === approval.requester_id);
+    const requesterName = requester?.display_name ?? approval.requester_id;
+    const request = `${approval.method} from ${requesterName}`;
+    const details = JSON.stringify(approval.params) ?? "Request details unavailable";
+    const message =
+      decision === "approve"
+        ? `Approve ${request}? The command may run immediately. Request: ${details}`
+        : `Reject ${request}? Request: ${details}`;
+    if (!window.confirm(message)) return;
+    void perform(`${decision === "approve" ? "Approve" : "Reject"} request`, async () => {
+      await room.api.approvals.decide({ approval_id: approval.id, decision });
+      await refreshApprovals();
     });
   };
 
@@ -177,6 +313,155 @@ export function OwnerControlsView(props: {
               </li>
             ))}
         </ul>
+      </section>
+
+      <section aria-label="Capabilities">
+        <h3>Capabilities</h3>
+        <label>
+          Participant
+          <select
+            data-testid="capability-participant"
+            value={targetId}
+            onChange={(event) => setTargetId(event.target.value)}
+          >
+            <option value="">Choose a participant</option>
+            {targets.map((participant) => (
+              <option key={participant.id} value={participant.id}>
+                {participant.display_name}
+              </option>
+            ))}
+          </select>
+        </label>
+        {targetId && (
+          <>
+            {capabilityState?.participant_id === targetId ? (
+              <>
+                <p>
+                  <strong>Role bundle</strong>
+                </p>
+                <p data-testid="capability-bundle">
+                  {capabilityState.bundle.join(", ") || "No role capabilities"}
+                </p>
+                <h4>Explicit grants</h4>
+                {capabilityState.grants.length ? (
+                  <ul className="list" data-testid="capability-grants">
+                    {capabilityState.grants.map((grant) => (
+                      <li key={grant.id} data-testid="capability-grant">
+                        {grant.capability} (tier {grant.tier}
+                        {grant.requires_approval ? ", approval required" : ""}){" "}
+                        {grant.expires_at && (
+                          <span className="muted">
+                            expires {new Date(grant.expires_at).toLocaleString()}{" "}
+                          </span>
+                        )}
+                        <button
+                          data-testid="revoke-capability"
+                          disabled={busy}
+                          onClick={() => revokeCapability(grant)}
+                        >
+                          Revoke
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="muted">No explicit grants.</p>
+                )}
+                <h4>Revocations</h4>
+                <ul className="list" data-testid="capability-revocations">
+                  {capabilityState.revocations.map((revocation) => (
+                    <li key={revocation.id}>{revocation.capability}</li>
+                  ))}
+                </ul>
+              </>
+            ) : (
+              <p className="muted">Loading capabilities…</p>
+            )}
+            <form onSubmit={grantCapability}>
+              <label>
+                Capability
+                <input
+                  data-testid="capability-input"
+                  value={capability}
+                  onChange={(event) => setCapability(event.target.value)}
+                  placeholder="tasks.create or workspace.write:src/**"
+                  required
+                />
+              </label>
+              <label>
+                Expires at (required for Tier 3)
+                <input
+                  data-testid="capability-expiry"
+                  type="datetime-local"
+                  value={expiresAt}
+                  onChange={(event) => setExpiresAt(event.target.value)}
+                />
+              </label>
+              <label>
+                <input
+                  data-testid="capability-requires-approval"
+                  type="checkbox"
+                  checked={requiresApproval}
+                  onChange={(event) => setRequiresApproval(event.target.checked)}
+                />
+                Require approval when this capability is used
+              </label>
+              <button data-testid="grant-capability" disabled={busy || !capability.trim()}>
+                Grant capability
+              </button>
+            </form>
+            <p className="muted">
+              The server validates capability names. Authority powers cannot be granted or revoked
+              here; Tier 3 grants expire within 24 hours.
+            </p>
+          </>
+        )}
+      </section>
+
+      <section aria-label="Approvals">
+        <h3>Pending approvals</h3>
+        <button
+          data-testid="refresh-approvals"
+          disabled={busy}
+          onClick={() => void refreshApprovals().catch((err: unknown) => setError(errorText(err)))}
+        >
+          Refresh
+        </button>
+        {approvals.length === 0 ? (
+          <p className="muted">No pending approvals.</p>
+        ) : (
+          <ul className="list" data-testid="pending-approvals">
+            {approvals.map((approval) => {
+              const requester = targets.find(
+                (participant) => participant.id === approval.requester_id,
+              );
+              return (
+                <li key={approval.id} data-testid="pending-approval">
+                  <strong>{approval.method}</strong> from{" "}
+                  {requester?.display_name ?? approval.requester_id}
+                  <div className="muted">
+                    {approval.capability} · expires {new Date(approval.expires_at).toLocaleString()}
+                  </div>
+                  <pre>{JSON.stringify(approval.params, null, 2)}</pre>
+                  <button
+                    data-testid="approve-request"
+                    disabled={busy}
+                    onClick={() => decideApproval(approval, "approve")}
+                  >
+                    Approve
+                  </button>{" "}
+                  <button
+                    data-testid="reject-request"
+                    disabled={busy}
+                    onClick={() => decideApproval(approval, "reject")}
+                  >
+                    Reject
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        )}
       </section>
 
       <section aria-label="Network egress policy">
