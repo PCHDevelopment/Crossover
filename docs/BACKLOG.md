@@ -1560,7 +1560,7 @@ Budgets are enforced, but nothing sets `rooms.settings.budgets` or `participants
 
 ### T1507 · Web UI completeness — unassigned
 
-Decision veto and withdraw; task create, assign and claim; memory write; one-click conflict escalate; health and revision badge in the header; upstream-pull button.
+Decision veto and withdraw; task create, assign and claim; memory write; one-click conflict escalate; health and revision badge in the header; upstream-pull button; show `provenance.author_kind` (HUMAN/AGENT/SYSTEM) beside the trust label in MessagesView and CollaborationView, since `trust` is `participant` for humans and agents alike.
 
 ### T1508 · Go CLI breadth — unassigned
 
