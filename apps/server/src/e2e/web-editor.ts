@@ -406,7 +406,7 @@ export function registerWebEditorTests(fixture: WebFixture): void {
     await page.getByTestId("conflict-banner").waitFor();
     await page.keyboard.press("Control+s");
     await page.getByTestId("merge-view").waitFor();
-    expect(await page.getByTestId("merge-conflict").count()).toBe(1);
+    await expect.poll(() => page.getByTestId("merge-conflict").count()).toBe(1);
     const result = page.locator(
       '[data-testid="merge-editor"] .modified .view-lines[role="presentation"]',
     );
