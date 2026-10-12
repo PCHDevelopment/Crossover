@@ -87,16 +87,14 @@ export default function MergeView(props: {
     };
   }, []);
 
-  // A new head: new models. A new choice: the result is rewritten from the regions.
+  // A new head or choice gets fresh models. Editing an attached model with setValue can leave a
+  // worker diff for its previous version in flight; Monaco may then receive no result while that
+  // diff view model's cancellation token is still live.
   useEffect(() => {
     const editor = diff.current;
     if (!editor || !head || !regions) return;
     const result = resolveRegions(regions, choices);
     const current = editor.getModel();
-    if (current && current.original.getValue() === head.content) {
-      current.modified.setValue(result);
-      return;
-    }
     const next = {
       original: monaco.editor.createModel(head.content, undefined),
       modified: monaco.editor.createModel(result, undefined),

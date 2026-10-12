@@ -858,11 +858,14 @@ describe.skipIf(!executablePath && !inCi)("web app in a browser", () => {
       .poll(async () => page.getByTestId("changes-diff").textContent())
       .toContain("clean diff line");
 
+    const baseText = Array.from({ length: 4_000 }, (_, index) => `line ${index}`).join("\n") + "\n";
+    const headText = baseText.replace("line 2000\n", "head line 2000\n");
+    const mineText = baseText.replace("line 2000\n", "agent line 2000\n");
     await owner.api.workspace.apply_changeset({
       source: "API",
       message: "Seed conflict file",
       base_workspace_revision: clean.response.applied_revision,
-      operations: [{ type: "create", path: "docs/conflict.txt", content: "base\nsecond\n" }],
+      operations: [{ type: "create", path: "docs/conflict.txt", content: baseText }],
     });
     const base = await owner.api.workspace.read<{
       content: string;
@@ -874,7 +877,7 @@ describe.skipIf(!executablePath && !inCi)("web app in a browser", () => {
       message: "Change the head",
       base_workspace_revision: base.response.workspace_revision,
       base_file_revisions: { "docs/conflict.txt": base.response.file_revision },
-      operations: [{ type: "modify", path: "docs/conflict.txt", content: "head\nsecond\n" }],
+      operations: [{ type: "modify", path: "docs/conflict.txt", content: headText }],
     });
     const submitted = await agent.api.workspace.apply_changeset<{
       status: string;
@@ -885,9 +888,7 @@ describe.skipIf(!executablePath && !inCi)("web app in a browser", () => {
       message: "Submit overlapping change",
       base_workspace_revision: base.response.workspace_revision,
       base_file_revisions: { "docs/conflict.txt": base.response.file_revision },
-      operations: [
-        { type: "modify", path: "docs/conflict.txt", content: "agent\nsubmitted edit\n" },
-      ],
+      operations: [{ type: "modify", path: "docs/conflict.txt", content: mineText }],
     });
     expect(submitted.response.status).toBe("CONFLICT");
     await agent.api.conflicts.escalate({ conflict_id: submitted.response.conflict_id });
@@ -902,6 +903,23 @@ describe.skipIf(!executablePath && !inCi)("web app in a browser", () => {
       .waitFor();
     await page.getByRole("button", { name: "Resolve in MergeView" }).click();
     await page.getByTestId("merge-view").waitFor();
+    for (let repetition = 0; repetition < 20; repetition++) {
+      // Choosing a side rewrites the modified model and starts another asynchronous diff. Leave
+      // the tab immediately so the view and its models are disposed while that work is pending.
+      await page.getByTestId("take-theirs").click();
+      await page.getByTestId("take-ours").click();
+      await page.getByTestId("take-both").click();
+      await page.getByTestId("tab-activity").click();
+      await expect.poll(() => page.getByTestId("merge-view").count()).toBe(0);
+      await page.waitForTimeout(50);
+      expect(problems.filter((problem) => problem.startsWith("pageerror:"))).toEqual([]);
+
+      await page.getByTestId("tab-changes").click();
+      await expect.poll(() => conflictRow.getAttribute("data-status")).toBe("ESCALATED");
+      await conflictRow.getByRole("button", { name: "Details" }).click();
+      await page.getByRole("button", { name: "Resolve in MergeView" }).click();
+      await page.getByTestId("merge-view").waitFor();
+    }
     await page.getByTestId("merge-submit").click();
     await page.getByTestId("merge-view").waitFor({ state: "detached" });
     await expect
@@ -917,7 +935,7 @@ describe.skipIf(!executablePath && !inCi)("web app in a browser", () => {
     expect(
       (await owner.api.workspace.read<{ content: string }>({ path: "docs/conflict.txt" })).response
         .content,
-    ).toBe("agent\nsubmitted edit\n");
+    ).toBe(mineText);
 
     const current = await owner.api.workspace.read<{ workspace_revision: number }>({
       path: "docs/clean.txt",
