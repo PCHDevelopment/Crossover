@@ -2,6 +2,7 @@ import { describe } from "vitest";
 import {
   registerWebCollaborationStart,
   registerWebDecisionsAndInbox,
+  registerWebOwnerRoleChanges,
   registerWebTaskReview,
 } from "./web-collaboration.js";
 import { registerWebEditorTests } from "./web-editor.js";
@@ -12,6 +13,7 @@ const fixture = registerWebFixture();
 
 describe.skipIf(!fixture.executablePath && !fixture.inCi)("web app in a browser", () => {
   registerWebCollaborationStart(fixture);
+  registerWebOwnerRoleChanges(fixture);
   registerWebTaskReview(fixture);
   registerWebEditorTests(fixture);
   registerWebWorkspaceTests(fixture);
