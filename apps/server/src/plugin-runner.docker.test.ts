@@ -5,6 +5,7 @@ import { type ToolInvocation, ToolRegistry } from "@crossover/kernel";
 import { newId } from "@crossover/protocol";
 import { describe, expect, it, beforeAll, afterAll } from "vitest";
 import { z } from "zod";
+import { invokeDocker, type PluginDockerInvoker } from "./plugin-runner-docker.js";
 import { DockerToolRunner } from "./plugin-runner.js";
 
 const PLUGIN_IMAGE =
@@ -199,17 +200,33 @@ describe.skipIf(skipDockerIntegration)("DockerToolRunner real Docker integration
   }, 45_000);
 
   it("kills a timed-out plugin and leaves no labeled container behind", async () => {
-    const runner = createRunner(["/bin/busybox", "sleep", "60"], [], 1_500);
+    let containerName: string | undefined;
+    const invoke: PluginDockerInvoker = (binary, args, options) => {
+      if (args[0] === "run") {
+        const nameIndex = args.indexOf("--name");
+        if (nameIndex !== -1) containerName = args[nameIndex + 1];
+      }
+      return invokeDocker(binary, args, options);
+    };
+    const runner = createRunner(
+      ["/bin/busybox", "sleep", "60"],
+      [],
+      1_500,
+      undefined,
+      PLUGIN_IMAGE,
+      invoke,
+    );
     try {
       await expect(runner.run(invocation(), new AbortController().signal)).rejects.toThrow(
         /timed out/,
       );
+      expect(containerName).toMatch(/^crossover-plugin-[a-f0-9]{24}$/);
       const containers = execFileSync(
         "docker",
-        ["ps", "-a", "--filter", "label=crossover.plugin-run=true", "--format", "{{.ID}}"],
+        ["ps", "-a", "--filter", `name=^/${containerName}$`, "--format", "{{.ID}}"],
         { encoding: "utf8", timeout: 5_000 },
       );
-      expect(containers.trim()).toBe("");
+      expect(containers.trim(), `container ${containerName} should be removed`).toBe("");
     } finally {
       await runner.close();
     }
@@ -299,6 +316,7 @@ describe.skipIf(skipDockerIntegration)("DockerToolRunner real Docker integration
     timeoutMs = 10_000,
     sweepResources?: boolean,
     image = PLUGIN_IMAGE,
+    invoke: PluginDockerInvoker = invokeDocker,
   ): DockerToolRunner {
     const registry = new ToolRegistry();
     registry.register({
@@ -316,7 +334,8 @@ describe.skipIf(skipDockerIntegration)("DockerToolRunner real Docker integration
       egressProxySecret: PROXY_SECRET,
       credentials: async () => ({ GITHUB_TOKEN: CREDENTIAL }),
       timeoutMs,
-      ...(sweepResources !== undefined ? { sweepResources } : {}),
+      sweepResources: sweepResources ?? true,
+      invoke,
     });
   }
 
