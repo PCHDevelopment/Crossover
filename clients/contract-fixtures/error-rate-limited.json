@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "RATE_LIMITED",
+    "message": "try again shortly",
+    "retryable": true,
+    "details": { "retry_after": 0.02 }
+  }
+}
