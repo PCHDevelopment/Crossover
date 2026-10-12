@@ -95,6 +95,7 @@ export default function MergeView(props: {
     if (!editor || !head || !regions) return;
     const result = resolveRegions(regions, choices);
     const current = editor.getModel();
+    const viewState = editor.saveViewState();
     const next = {
       original: monaco.editor.createModel(head.content, undefined),
       modified: monaco.editor.createModel(result, undefined),
@@ -104,6 +105,7 @@ export default function MergeView(props: {
       pendingModelDisposals.current.add(current.modified);
     }
     editor.setModel(next);
+    if (viewState) editor.restoreViewState(viewState);
   }, [head, regions, choices]);
 
   const choose = (index: number, choice: Choice) =>
