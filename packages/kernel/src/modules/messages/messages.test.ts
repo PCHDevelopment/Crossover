@@ -460,4 +460,19 @@ describe("secret scanning on messages (T902)", () => {
     const { rows } = await pool.query("SELECT body FROM messages WHERE id = $1", [m.id]);
     expect(rows[0].body).toBe("before"); // unchanged
   });
+
+  it("scans a full 32 KiB body and finds a secret on its last line", async () => {
+    const s = await setup();
+    // A single-line private-key block on the final line of a body that is
+    // exactly MAX_BODY_BYTES. Proves the scanner reads the whole body, not a
+    // prefix: the finding must be on line 2 (the last line).
+    const oneLineKey =
+      "-----BEGIN PRIVATE KEY-----MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7-----END PRIVATE KEY-----";
+    const body = "x".repeat(MAX_BODY_BYTES - oneLineKey.length - 1) + "\n" + oneLineKey;
+    expect(Buffer.byteLength(body, "utf8")).toBe(MAX_BODY_BYTES);
+    const err = await rejects(send(s, s.a, { body }), "VALIDATION");
+    expect(err.details).toMatchObject({ reason: "secret_detected" });
+    const findings = (err.details as { findings: Array<Record<string, unknown>> }).findings;
+    expect(findings[0]).toMatchObject({ rule: "private_key_block", line: 2 });
+  });
 });

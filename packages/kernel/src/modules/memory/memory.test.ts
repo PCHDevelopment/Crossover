@@ -2,6 +2,7 @@ import type { Pool } from "@crossover/db";
 import { createTestDatabase, type TestDatabase } from "@crossover/db/testing";
 import { authorize } from "@crossover/policy";
 import { CrossoverError, newId } from "@crossover/protocol";
+import { scanSecrets } from "@crossover/security";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Dispatcher } from "../../dispatcher.js";
 import type { Principal } from "../../principal.js";
@@ -325,6 +326,25 @@ describe("secret scanning on memory (T902)", () => {
       expect(r.summary).toContain("high_entropy_assignment");
       expect(r.summary).not.toContain("aB3dE5gH7jK9mN1pQ3rS5tU7vW9xY2zA");
     }
+  });
+
+  it("scans a full 64 KiB worst-case value in under 250 ms and accepts it", async () => {
+    // The scanner's worst case is many unterminated BEGIN markers, each scanning
+    // up to KEY_BLOCK_MAX (16 KiB) for an END that never comes. Four of them
+    // fill exactly MAX_MEMORY_VALUE_BYTES (64 KiB).
+    const worst = ("-----BEGIN PRIVATE KEY-----" + "A".repeat(16 * 1024))
+      .repeat(4)
+      .slice(0, MAX_MEMORY_VALUE_BYTES);
+    expect(Buffer.byteLength(worst, "utf8")).toBe(MAX_MEMORY_VALUE_BYTES);
+    const t0 = process.hrtime.bigint();
+    const findings = scanSecrets(worst);
+    const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+    expect(ms).toBeLessThan(250);
+    expect(findings).toHaveLength(0); // unterminated BEGINs are not findings
+    // And the value is accepted by memory.put (no high-confidence secret).
+    const s = await setup();
+    const out = await put(s, s.dev, { key: "big/worst", value: worst });
+    expect((out.response as MemoryEntryView).value).toBe(worst);
   });
 });
 
