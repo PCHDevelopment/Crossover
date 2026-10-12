@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -999,7 +999,7 @@ describe("DockerHealthRunner", () => {
   });
 
   it.skipIf(skipDockerIntegration)("kills and removes a container on timeout", async () => {
-    const command = "sleep 30";
+    const command = `sleep 30; : ${randomUUID()}`;
     const before = dockerHealthContainers(command);
     const { repository, revision } = await makeRepo();
     const result = await new DockerHealthRunner({
@@ -1011,7 +1011,7 @@ describe("DockerHealthRunner", () => {
   });
 
   it.skipIf(skipDockerIntegration)("kills and removes a container when aborted", async () => {
-    const command = "sleep 30";
+    const command = `sleep 30; : ${randomUUID()}`;
     const before = dockerHealthContainers(command);
     const { repository, revision } = await makeRepo();
     const controller = new AbortController();
