@@ -78,6 +78,16 @@ export async function scanTextForSecrets(
     const more = low.length > 5 ? ` (+${low.length - 5} more)` : "";
     const summary = `Secret scan: ${shown.join(", ")}${more}. Review before this ships.`;
     for (const recipient of recipients) {
+      // An edit that leaves the same match in place must not pile up another item: skip the
+      // recipient who already has an unacknowledged one for this location with this summary.
+      const { rows: open } = await client.query(
+        `SELECT 1 FROM inbox_items
+         WHERE room_id = $1 AND participant_id = $2 AND kind = 'SECRET_SCAN'
+           AND ref = $3::jsonb AND summary = $4 AND acked_at IS NULL
+         LIMIT 1`,
+        [roomId, recipient, JSON.stringify(inboxRef(location)), summary.slice(0, 500)],
+      );
+      if (open.length > 0) continue;
       await deliverInbox(client, roomId, recipient, {
         kind: "SECRET_SCAN",
         ref: inboxRef(location),
