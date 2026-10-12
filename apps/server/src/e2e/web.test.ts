@@ -721,11 +721,14 @@ describe.skipIf(!executablePath && !inCi)("web app in a browser", () => {
       roomId,
       (await client.roomSession(login.session_token, roomId)).tokens.access_token,
     ).api;
+    // Keep the file much longer than the diff editor viewport to exercise a nonzero scroll state.
+    const tail = Array.from({ length: 240 }, (_, i) => `line-${String(i + 4).padStart(4, "0")}`);
+    const originalContent = ["one", "two", "three", ...tail].join("\n");
     await api.workspace.apply_changeset({
       source: "API",
       message: "Seed",
       base_workspace_revision: 0,
-      operations: [{ type: "create", path: "src/m.txt", content: "one\ntwo\nthree" }],
+      operations: [{ type: "create", path: "src/m.txt", content: originalContent }],
     });
     const file = async () =>
       (
@@ -788,9 +791,18 @@ describe.skipIf(!executablePath && !inCi)("web app in a browser", () => {
     await expect.poll(async () => result.textContent()).toContain("two-mine");
     await page.getByTestId("take-both").click();
     await expect.poll(async () => result.textContent()).toContain("two-theirs");
+    await result.click();
+    await page.keyboard.press("Control+End");
+    await expect.poll(async () => result.textContent()).toContain(tail.at(-1));
+    await page.getByTestId("take-theirs").click();
+    await expect.poll(async () => result.textContent()).toContain(tail.at(-1));
+    await page.getByTestId("take-both").click();
+    await expect.poll(async () => result.textContent()).toContain(tail.at(-1));
     await page.getByTestId("merge-submit").click();
     await page.getByTestId("merge-view").waitFor({ state: "detached" });
-    expect((await file()).content).toBe("one\ntwo-mine\ntwo-theirs\nthree");
+    expect((await file()).content).toBe(
+      ["one", "two-mine", "two-theirs", "three", ...tail].join("\n"),
+    );
     expect(await conflictStatuses()).toEqual(["RESOLVED"]);
     await expect.poll(async () => lines.textContent()).toContain("two-theirs");
     expect(await page.getByTestId("draft-indicator").count()).toBe(0);
@@ -804,7 +816,7 @@ describe.skipIf(!executablePath && !inCi)("web app in a browser", () => {
     await page.getByTestId("merge-discard").click();
     await page.getByTestId("merge-view").waitFor({ state: "detached" });
     expect(await conflictStatuses()).toEqual(["RESOLVED", "ABANDONED"]);
-    expect((await file()).content).toBe("one\nTWO\ntwo-theirs\nthree");
+    expect((await file()).content).toBe(["one", "TWO", "two-theirs", "three", ...tail].join("\n"));
     await expect.poll(async () => lines.textContent()).toContain("TWO");
     expect(problems).toEqual([]);
   }, 120_000);
