@@ -166,6 +166,15 @@ describe.skipIf(!image)("deployed server topology", () => {
   }, 90_000);
 
   afterAll(async () => {
+    if (containerCreated) {
+      try {
+        const logs = await run("docker", ["logs", "--tail", "200", containerName]);
+        const output = [logs.stdout.trim(), logs.stderr.trim()].filter(Boolean).join("\n");
+        console.error(`[deploy-topology] server container ${containerName} logs:\n${output}`);
+      } catch (error) {
+        console.error(`[deploy-topology] could not read logs for ${containerName}:`, error);
+      }
+    }
     if (roomId) {
       let ids: string[] = [];
       try {

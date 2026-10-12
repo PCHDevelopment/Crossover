@@ -60,7 +60,7 @@ const manifest = (extra: Record<string, unknown> = {}) => ({
 });
 
 async function setup(
-  onInternalError?: (e: unknown) => void,
+  onInternalError?: NonNullable<Parameters<typeof buildGateway>[0]["onInternalError"]>,
   devLogin = false,
   gateway: Partial<Parameters<typeof buildGateway>[0]> = {},
 ) {
@@ -252,7 +252,7 @@ describe("POST /v1/rooms/:roomId/commands", () => {
     expect(res.json().error.details).toEqual({ approval_id: "ap_1" });
   });
 
-  it("hides the cause of an internal error and reports it to the hook", async () => {
+  it("hides a thrown non-Crossover error and reports it to the hook", async () => {
     const seen = vi.fn();
     const s = await setup(seen);
     const res = await command(s, envelope("tasks.assign"));
@@ -260,6 +260,16 @@ describe("POST /v1/rooms/:roomId/commands", () => {
     expect(res.payload).not.toContain("hunter2");
     expect(res.json().error).toMatchObject({ message: "Internal error", retryable: false });
     expect(seen).toHaveBeenCalledOnce();
+    expect(seen.mock.calls[0]?.[0]).toBeInstanceOf(Error);
+    expect(seen.mock.calls[0]?.[0]).not.toBeInstanceOf(CrossoverError);
+    expect(seen).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "secret internal detail: password=hunter2" }),
+      expect.objectContaining({
+        method: "POST",
+        body: expect.objectContaining({ method: "tasks.assign" }),
+        routeOptions: expect.objectContaining({ url: "/v1/rooms/:roomId/commands" }),
+      }),
+    );
   });
 
   it("unknown routes get the error body too", async () => {
