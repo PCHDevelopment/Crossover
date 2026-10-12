@@ -59,7 +59,7 @@ const envSchema = z.object({
       }
       return entries;
     }),
-  /** Refresh attempts per client address per minute (`POST /v1/auth/refresh`). Default 30. */
+  /** Refresh requests and OAuth starts per client address per minute. Default 30. */
   REFRESH_PER_MINUTE: z.coerce.number().int().min(1).max(100_000).default(30),
   /** Serve the built web app (`apps/web/dist`) from this directory next to the API. */
   WEB_ROOT: z.string().min(1).optional(),
@@ -139,12 +139,14 @@ export interface ServerConfig {
   port: number;
   nodeId: string;
   devLogin: boolean;
+  /** Secure cookie mode follows the public HTTPS origin, with production as a safe fallback. */
   secureCookies?: boolean;
   oauth?: {
     publicBaseUrl: string;
     github: { clientId: string; clientSecret: string };
   };
   trustProxy?: string[];
+  /** Per-address limit for refresh requests and OAuth starts. */
   refreshPerMinute?: number;
   /** Directory of the built web app, served next to the API. */
   webRoot?: string;
@@ -287,7 +289,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     port: e.PORT,
     nodeId: e.NODE_ID ?? `${hostname()}-${process.pid}`,
     devLogin: e.DEV_LOGIN,
-    secureCookies: env.NODE_ENV === "production",
+    secureCookies: e.OAUTH_PUBLIC_BASE_URL
+      ? new URL(e.OAUTH_PUBLIC_BASE_URL).protocol === "https:"
+      : env.NODE_ENV === "production",
     ...(e.GITHUB_OAUTH_CLIENT_ID && e.GITHUB_OAUTH_CLIENT_SECRET && e.OAUTH_PUBLIC_BASE_URL
       ? {
           oauth: {

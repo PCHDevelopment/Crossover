@@ -2332,6 +2332,18 @@ describe("loadConfig", () => {
     );
   });
 
+  it("sets secure cookies for an HTTPS public origin outside production", () => {
+    expect(
+      loadConfig({
+        ...env,
+        NODE_ENV: "staging",
+        GITHUB_OAUTH_CLIENT_ID: "id",
+        GITHUB_OAUTH_CLIENT_SECRET: "secret",
+        OAUTH_PUBLIC_BASE_URL: "https://staging.example.com",
+      }).secureCookies,
+    ).toBe(true);
+  });
+
   it("parses the operator health image allowlist", () => {
     expect(loadConfig({ ...env, HEALTH_IMAGES: "node:22, python:3.13 " }).healthImages).toEqual([
       "node:22",

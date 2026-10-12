@@ -525,8 +525,13 @@ describe("browser OAuth sessions", () => {
     expect(callback.body).not.toContain("session_token");
     const callbackHeaders = callback.headers["set-cookie"];
     const cookieHeaders = Array.isArray(callbackHeaders) ? callbackHeaders : [callbackHeaders];
-    const sessionCookie = cookieHeaders.find((value) => value?.startsWith("crossover_session="));
-    expect(sessionCookie).toMatch(/; Path=\/; Max-Age=\d+; HttpOnly; SameSite=Lax; Secure$/);
+    const sessionCookie = cookieHeaders.find((value) =>
+      value?.startsWith("__Host-crossover_session="),
+    );
+    expect(sessionCookie).toMatch(
+      /^__Host-crossover_session=[^;]+; Path=\/; Max-Age=\d+; HttpOnly; SameSite=Lax; Secure$/,
+    );
+    expect(sessionCookie).not.toMatch(/; Domain=/i);
     expect(cookieHeaders).toContain(
       stateCookie +
         "=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; SameSite=Lax; Secure",
@@ -538,11 +543,11 @@ describe("browser OAuth sessions", () => {
         verifier: expect.any(String),
       }),
     );
-    const tokenMatch = /crossover_session=([^;]+)/.exec(sessionCookie ?? "");
+    const tokenMatch = /__Host-crossover_session=([^;]+)/.exec(sessionCookie ?? "");
     expect(tokenMatch).not.toBeNull();
     const token = tokenMatch![1]!;
     expect(token).toMatch(/^us_/);
-    const cookie = "crossover_session=" + token;
+    const cookie = "__Host-crossover_session=" + token;
 
     expect(
       (await s.app.inject({ method: "GET", url: "/v1/rooms", headers: { cookie } })).statusCode,
@@ -588,10 +593,143 @@ describe("browser OAuth sessions", () => {
 
     const logout = await post(s, "/v1/auth/logout", {}, { cookie, origin: baseUrl });
     expect(logout.json()).toEqual({ ok: true });
-    expect(logout.headers["set-cookie"]).toContain("crossover_session=; Path=/; Max-Age=0");
+    expect(logout.headers["set-cookie"]).toContain("__Host-crossover_session=; Path=/; Max-Age=0");
     expect(
       (await s.app.inject({ method: "GET", url: "/v1/rooms", headers: { cookie } })).statusCode,
     ).toBe(401);
+  });
+
+  it("keeps the unprefixed session cookie for local HTTP", async () => {
+    let saved: OAuthState | undefined;
+    const stateStore: OAuthStateStore = {
+      async save(_state, value) {
+        saved = value;
+      },
+      async consume() {
+        const value = saved;
+        saved = undefined;
+        return value;
+      },
+      async ready() {},
+      async close() {},
+    };
+    const provider: OAuthProvider = {
+      name: "github",
+      authorizationUrl: ({ state }) => {
+        const url = new URL("https://identity.example/authorize");
+        url.searchParams.set("state", state);
+        return url.toString();
+      },
+      identity: async () => ({
+        provider: "github",
+        subject: `local-http-${++n}`,
+        display_name: "Local User",
+      }),
+    };
+    const s = await setup(undefined, false, {
+      secureCookies: false,
+      oauth: {
+        publicBaseUrl: "http://localhost:8080",
+        stateStore,
+        providers: { github: provider },
+      },
+    });
+    const start = await s.app.inject({ method: "GET", url: "/v1/auth/oauth/github" });
+    const state = new URL(start.headers.location!).searchParams.get("state")!;
+    const callback = await s.app.inject({
+      method: "GET",
+      url: "/v1/auth/oauth/github/callback?state=" + state + "&code=local-code",
+      headers: { cookie: `crossover_oauth_state_${state}=1` },
+    });
+    const headers = callback.headers["set-cookie"];
+    const cookies = Array.isArray(headers) ? headers : [headers];
+    const sessionCookie = cookies.find((value) => value?.startsWith("crossover_session="));
+    expect(callback.statusCode).toBe(303);
+    expect(sessionCookie).toMatch(
+      /^crossover_session=[^;]+; Path=\/; Max-Age=\d+; HttpOnly; SameSite=Lax$/,
+    );
+  });
+});
+
+describe("GET /v1/auth/oauth/:provider rate limit", () => {
+  it("limits starts per client address before saving OAuth state", async () => {
+    const counts = new Map<string, number>();
+    const limiter = {
+      hit: async (key: string, limit: number) => {
+        const next = (counts.get(key) ?? 0) + 1;
+        counts.set(key, next);
+        return next <= limit
+          ? { allowed: true as const }
+          : { allowed: false as const, retry_after_ms: 12_500 };
+      },
+    };
+    const saved: string[] = [];
+    const stateStore: OAuthStateStore = {
+      async save(state) {
+        saved.push(state);
+      },
+      async consume() {
+        return undefined;
+      },
+      async ready() {},
+      async close() {},
+    };
+    const provider: OAuthProvider = {
+      name: "github",
+      authorizationUrl: () => "https://identity.example/authorize",
+      identity: async () => ({ provider: "github", subject: "unused", display_name: "Unused" }),
+    };
+    const s = await setup(undefined, false, {
+      oauth: {
+        publicBaseUrl: "https://crossover.test",
+        stateStore,
+        providers: { github: provider },
+      },
+      oauthStartLimit: { limiter, perMinute: 2 },
+    });
+    const start = (remoteAddress: string) =>
+      s.app.inject({ method: "GET", url: "/v1/auth/oauth/github", remoteAddress });
+
+    expect((await start("203.0.113.1")).statusCode).toBe(302);
+    expect((await start("203.0.113.1")).statusCode).toBe(302);
+    const limited = await start("203.0.113.1");
+    errorShape(limited.json(), "RATE_LIMITED", 429, limited);
+    expect(limited.headers["retry-after"]).toBe("13");
+    expect((await start("203.0.113.2")).statusCode).toBe(302);
+    expect(saved).toHaveLength(3);
+    expect(counts).toEqual(
+      new Map([
+        ["oauth-start:203.0.113.1", 3],
+        ["oauth-start:203.0.113.2", 1],
+      ]),
+    );
+  });
+
+  it("fails open when the shared limiter is unavailable", async () => {
+    const stateStore: OAuthStateStore = {
+      async save() {},
+      async consume() {
+        return undefined;
+      },
+      async ready() {},
+      async close() {},
+    };
+    const provider: OAuthProvider = {
+      name: "github",
+      authorizationUrl: () => "https://identity.example/authorize",
+      identity: async () => ({ provider: "github", subject: "unused", display_name: "Unused" }),
+    };
+    const s = await setup(undefined, false, {
+      oauth: {
+        publicBaseUrl: "https://crossover.test",
+        stateStore,
+        providers: { github: provider },
+      },
+      oauthStartLimit: { limiter: { hit: async () => Promise.reject(new Error("redis down")) } },
+    });
+    expect((await s.app.inject({ method: "GET", url: "/v1/auth/oauth/github" })).statusCode).toBe(
+      302,
+    );
   });
 });
 
