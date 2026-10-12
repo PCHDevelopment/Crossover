@@ -2,6 +2,7 @@ import { createPool, withTransaction, type Pool } from "@crossover/db";
 import {
   buildGateway,
   RedisOAuthStateStore,
+  type RouteRateLimiter,
   type SandboxOutputMetadata,
   type SandboxOutputSource,
 } from "@crossover/gateway";
@@ -195,6 +196,20 @@ export async function composeServer(
   const presenceSubscriber = new RedisPresenceSubscriber(config.redisUrl);
   const ownBudgets = overrides.budgets ? undefined : new RedisBudgetLimiter(config.redisUrl);
   const budgets = overrides.budgets ?? ownBudgets!;
+  const authRouteLimiter: RouteRateLimiter = {
+    hit: async (key, limit, windowMs) => {
+      const d = await budgets.consume(
+        { room_id: "_auth", participant_id: key, budget: "commands" },
+        limit,
+        windowMs,
+      );
+      return d.allowed ? { allowed: true } : { allowed: false, retry_after_ms: d.retry_after_ms };
+    },
+  };
+  const authRouteLimit = {
+    limiter: authRouteLimiter,
+    perMinute: config.refreshPerMinute ?? 30,
+  };
   const sandboxLogStore = new FileLogStore(join(config.workspaceRoot, ".sandbox-exec-logs"));
   const sandboxOutputHub = new SandboxOutputHub();
   const sandboxOutput: SandboxOutputSource = {
@@ -508,22 +523,8 @@ export async function composeServer(
             }
           : undefined,
       trustProxy: config.trustProxy && config.trustProxy.length > 0 ? config.trustProxy : false,
-      refreshLimit: {
-        limiter: {
-          // The budget limiter's counters, under keys no room can have.
-          hit: async (key, limit, windowMs) => {
-            const d = await budgets.consume(
-              { room_id: "_auth", participant_id: key, budget: "commands" },
-              limit,
-              windowMs,
-            );
-            return d.allowed
-              ? { allowed: true }
-              : { allowed: false, retry_after_ms: d.retry_after_ms };
-          },
-        },
-        perMinute: config.refreshPerMinute ?? 30,
-      },
+      refreshLimit: authRouteLimit,
+      oauthStartLimit: authRouteLimit,
       ...(config.webRoot ? { staticRoot: config.webRoot } : {}),
       ws: {
         subscriber,
