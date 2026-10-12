@@ -481,6 +481,7 @@ describe("browser OAuth sessions", () => {
         const url = new URL("https://identity.example/authorize");
         url.searchParams.set("state", input.state);
         url.searchParams.set("challenge", input.challenge);
+        url.searchParams.set("nonce", input.nonce!);
         return url.toString();
       },
       identity: vi.fn(async () => ({
@@ -504,15 +505,19 @@ describe("browser OAuth sessions", () => {
     const start = await s.app.inject({ method: "GET", url: "/v1/auth/oauth/github" });
     const authorization = new URL(start.headers.location!);
     const state = authorization.searchParams.get("state")!;
+    const nonce = authorization.searchParams.get("nonce")!;
     const stateCookie = "__Host-crossover_oauth_state_" + state;
     expect(start.statusCode).toBe(302);
     expect(authorization.searchParams.get("challenge")).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(nonce).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(values.get(state)?.nonce).toBe(nonce);
     expect(start.headers["cache-control"]).toBe("no-store");
     const startHeaders = start.headers["set-cookie"];
     const startCookies = Array.isArray(startHeaders) ? startHeaders : [startHeaders];
     expect(startCookies).toContain(
       stateCookie + "=1; Path=/; Max-Age=600; HttpOnly; SameSite=Lax; Secure",
     );
+    expect(startCookies.every((value) => !value?.includes(nonce))).toBe(true);
     expect(startCookies.every((value) => !/; Domain=/i.test(value ?? ""))).toBe(true);
 
     const callback = await s.app.inject({
@@ -542,6 +547,7 @@ describe("browser OAuth sessions", () => {
         redirectUri: baseUrl + "/v1/auth/oauth/github/callback",
         code: "one-time-code",
         verifier: expect.any(String),
+        nonce,
       }),
     );
     const tokenMatch = /__Host-crossover_session=([^;]+)/.exec(sessionCookie ?? "");

@@ -38,6 +38,8 @@ const envSchema = z.object({
   OAUTH_PUBLIC_BASE_URL: z.string().url().optional(),
   GITHUB_OAUTH_CLIENT_ID: z.string().trim().min(1).max(200).optional(),
   GITHUB_OAUTH_CLIENT_SECRET: z.string().min(1).max(4096).optional(),
+  GOOGLE_OAUTH_CLIENT_ID: z.string().trim().min(1).max(200).optional(),
+  GOOGLE_OAUTH_CLIENT_SECRET: z.string().min(1).max(4096).optional(),
   /** Reverse proxies in front of the server (comma-separated addresses or CIDRs): the client address is the first `X-Forwarded-For` hop that is not one of them. Default: none. */
   TRUST_PROXY: z
     .string()
@@ -143,7 +145,8 @@ export interface ServerConfig {
   secureCookies?: boolean;
   oauth?: {
     publicBaseUrl: string;
-    github: { clientId: string; clientSecret: string };
+    github?: { clientId: string; clientSecret: string };
+    google?: { clientId: string; clientSecret: string };
   };
   trustProxy?: string[];
   /** Per-address limit for refresh requests and OAuth starts. */
@@ -205,10 +208,21 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   if (env.NODE_ENV === "production" && e.DEV_LOGIN && !e.DEV_LOGIN_ALLOW_PRODUCTION) {
     invalidConfig("DEV_LOGIN is forbidden in production unless DEV_LOGIN_ALLOW_PRODUCTION=true");
   }
-  const hasClientId = Boolean(e.GITHUB_OAUTH_CLIENT_ID);
-  const hasClientSecret = Boolean(e.GITHUB_OAUTH_CLIENT_SECRET);
-  if (hasClientId !== hasClientSecret || (hasClientId && !e.OAUTH_PUBLIC_BASE_URL)) {
+  const hasGitHubClientId = Boolean(e.GITHUB_OAUTH_CLIENT_ID);
+  const hasGitHubClientSecret = Boolean(e.GITHUB_OAUTH_CLIENT_SECRET);
+  if (
+    hasGitHubClientId !== hasGitHubClientSecret ||
+    (hasGitHubClientId && !e.OAUTH_PUBLIC_BASE_URL)
+  ) {
     invalidConfig("set both GitHub OAuth credentials and OAUTH_PUBLIC_BASE_URL together");
+  }
+  const hasGoogleClientId = Boolean(e.GOOGLE_OAUTH_CLIENT_ID);
+  const hasGoogleClientSecret = Boolean(e.GOOGLE_OAUTH_CLIENT_SECRET);
+  if (
+    hasGoogleClientId !== hasGoogleClientSecret ||
+    (hasGoogleClientId && !e.OAUTH_PUBLIC_BASE_URL)
+  ) {
+    invalidConfig("set both Google OAuth credentials and OAUTH_PUBLIC_BASE_URL together");
   }
   if (e.OAUTH_PUBLIC_BASE_URL) {
     const base = new URL(e.OAUTH_PUBLIC_BASE_URL);
@@ -292,14 +306,26 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     secureCookies: e.OAUTH_PUBLIC_BASE_URL
       ? new URL(e.OAUTH_PUBLIC_BASE_URL).protocol === "https:"
       : env.NODE_ENV === "production",
-    ...(e.GITHUB_OAUTH_CLIENT_ID && e.GITHUB_OAUTH_CLIENT_SECRET && e.OAUTH_PUBLIC_BASE_URL
+    ...((hasGitHubClientId || hasGoogleClientId) && e.OAUTH_PUBLIC_BASE_URL
       ? {
           oauth: {
             publicBaseUrl: new URL(e.OAUTH_PUBLIC_BASE_URL).origin,
-            github: {
-              clientId: e.GITHUB_OAUTH_CLIENT_ID,
-              clientSecret: e.GITHUB_OAUTH_CLIENT_SECRET,
-            },
+            ...(e.GITHUB_OAUTH_CLIENT_ID && e.GITHUB_OAUTH_CLIENT_SECRET
+              ? {
+                  github: {
+                    clientId: e.GITHUB_OAUTH_CLIENT_ID,
+                    clientSecret: e.GITHUB_OAUTH_CLIENT_SECRET,
+                  },
+                }
+              : {}),
+            ...(e.GOOGLE_OAUTH_CLIENT_ID && e.GOOGLE_OAUTH_CLIENT_SECRET
+              ? {
+                  google: {
+                    clientId: e.GOOGLE_OAUTH_CLIENT_ID,
+                    clientSecret: e.GOOGLE_OAUTH_CLIENT_SECRET,
+                  },
+                }
+              : {}),
           },
         }
       : {}),

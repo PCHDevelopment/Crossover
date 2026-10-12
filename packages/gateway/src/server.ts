@@ -221,15 +221,16 @@ export function buildGateway(options: GatewayOptions): FastifyInstance {
         }
         const state = randomBytes(32).toString("base64url");
         const verifier = randomBytes(32).toString("base64url");
+        const nonce = randomBytes(32).toString("base64url");
         const challenge = createHash("sha256").update(verifier).digest("base64url");
-        await stateStore.save(state, { provider: selected.name, verifier });
+        await stateStore.save(state, { provider: selected.name, verifier, nonce });
         const cookie = `${stateCookiePrefix}${state}=1; Path=/; Max-Age=${OAUTH_STATE_TTL_MS / 1000}; HttpOnly; SameSite=Lax${secureCookies ? "; Secure" : ""}`;
         const redirectUri = `${publicBaseUrl}/v1/auth/oauth/${selected.name}/callback`;
         return reply
           .header("Cache-Control", "no-store")
           .header("Referrer-Policy", "no-referrer")
           .header("Set-Cookie", cookie)
-          .redirect(selected.authorizationUrl({ state, challenge, redirectUri }));
+          .redirect(selected.authorizationUrl({ state, challenge, redirectUri, nonce }));
       },
     );
     app.get<{
@@ -269,6 +270,7 @@ export function buildGateway(options: GatewayOptions): FastifyInstance {
           redirectUri: `${publicBaseUrl}/v1/auth/oauth/${selected.name}/callback`,
           code,
           verifier: transaction.verifier,
+          ...(transaction.nonce === undefined ? {} : { nonce: transaction.nonce }),
         });
       } catch {
         return failed(clearState);
@@ -276,7 +278,7 @@ export function buildGateway(options: GatewayOptions): FastifyInstance {
       if (
         identity.provider !== selected.name ||
         !identity.subject ||
-        identity.subject.length > 200 ||
+        identity.subject.length > 255 ||
         typeof identity.display_name !== "string" ||
         !identity.display_name.trim()
       ) {

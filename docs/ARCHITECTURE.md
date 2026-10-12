@@ -840,6 +840,7 @@ Vendor and model are self-declared and displayed as such; they are not trusted f
 - Removing or pausing a participant revokes its tokens and closes its WebSocket connections.
 - Humans authenticate to the platform with GitHub or Google OAuth; room access comes from membership.
 - OAuth starts are rate-limited per client address using `REFRESH_PER_MINUTE` before the one-use Redis state is saved. Browser cookies use `Secure` when the public origin is HTTPS (also in staging); secure session and state cookies use the `__Host-` prefix, `Path=/`, and no `Domain`. Local HTTP keeps the unprefixed cookie names.
+- Google sign-in uses authorization code with PKCE and a nonce stored only in the one-use Redis transaction. The server accepts only RS256 ID tokens signed by Google's published JWKS, checks the two documented issuer spellings, client audience, expiry and issue time (with at most 60 seconds of clock tolerance), nonce, and subject. The Google `sub` is the stable user key; email claims are not read or used to link accounts.
 
 ## 15.4 Interfaces by priority (D7)
 

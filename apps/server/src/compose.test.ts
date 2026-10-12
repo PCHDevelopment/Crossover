@@ -2240,6 +2240,28 @@ describe("composeServer", () => {
     await server.close();
     await server.close();
   });
+
+  it("registers Google OAuth from Google-only configuration", async () => {
+    const { server } = await start({
+      secureCookies: true,
+      oauth: {
+        publicBaseUrl: "https://crossover.example.com",
+        google: { clientId: "google-client", clientSecret: "google-secret" },
+      },
+    });
+    const response = await server.app.inject({
+      method: "GET",
+      url: "/v1/auth/oauth/google",
+    });
+    const authorization = new URL(response.headers.location!);
+
+    expect(response.statusCode).toBe(302);
+    expect(authorization.origin + authorization.pathname).toBe(
+      "https://accounts.google.com/o/oauth2/v2/auth",
+    );
+    expect(authorization.searchParams.get("scope")).toBe("openid profile");
+    expect(authorization.searchParams.get("nonce")).toMatch(/^[A-Za-z0-9_-]{43}$/);
+  });
 });
 
 describe("loadConfig", () => {
@@ -2313,6 +2335,16 @@ describe("loadConfig", () => {
     expect(() =>
       loadConfig({ ...env, GITHUB_OAUTH_CLIENT_ID: "id", GITHUB_OAUTH_CLIENT_SECRET: "secret" }),
     ).toThrow(/set both GitHub OAuth credentials and OAUTH_PUBLIC_BASE_URL together/);
+    expect(() => loadConfig({ ...env, GOOGLE_OAUTH_CLIENT_ID: "id" })).toThrow(
+      /set both Google OAuth credentials and OAUTH_PUBLIC_BASE_URL together/,
+    );
+    expect(() =>
+      loadConfig({
+        ...env,
+        GOOGLE_OAUTH_CLIENT_ID: "id",
+        GOOGLE_OAUTH_CLIENT_SECRET: "secret",
+      }),
+    ).toThrow(/set both Google OAuth credentials and OAUTH_PUBLIC_BASE_URL together/);
     expect(() => loadConfig({ ...env, OAUTH_PUBLIC_BASE_URL: "http://example.com" })).toThrow(
       /must use HTTPS except for localhost development/,
     );
@@ -2330,6 +2362,20 @@ describe("loadConfig", () => {
     expect(() => loadConfig({ ...env, OAUTH_PUBLIC_BASE_URL: "https://example.com/path" })).toThrow(
       /must be an origin without a path/,
     );
+    expect(
+      loadConfig({
+        ...env,
+        GOOGLE_OAUTH_CLIENT_ID: "google-id",
+        GOOGLE_OAUTH_CLIENT_SECRET: "google-secret",
+        OAUTH_PUBLIC_BASE_URL: "https://crossover.example.com",
+      }),
+    ).toMatchObject({
+      secureCookies: true,
+      oauth: {
+        publicBaseUrl: "https://crossover.example.com",
+        google: { clientId: "google-id", clientSecret: "google-secret" },
+      },
+    });
   });
 
   it("sets secure cookies for an HTTPS public origin outside production", () => {
