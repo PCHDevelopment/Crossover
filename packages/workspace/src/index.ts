@@ -26,7 +26,10 @@ export {
   conflictsListParamsSchema,
   registerWorkspaceConflictReads,
 } from "./conflict-reads.js";
-export { registerWorkspaceConflictActions } from "./conflict-actions.js";
+export {
+  conflictsActionParamsSchema,
+  registerWorkspaceConflictActions,
+} from "./conflict-actions.js";
 export {
   ConflictEscalationSweeper,
   sweepConflictEscalations,
