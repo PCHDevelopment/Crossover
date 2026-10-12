@@ -30,17 +30,27 @@ const RoomSetupView = lazy(() =>
 const OwnerControlsView = lazy(() =>
   import("./OwnerControlsView.js").then((m) => ({ default: m.OwnerControlsView })),
 );
+const CollaborationView = lazy(() => import("./CollaborationView.js"));
 
 const FEED_LIMIT = 200;
 const BACKLOG = 50;
 
 type Tab =
-  "overview" | "setup" | "owner-controls" | "tasks" | "activity" | "files" | "changes" | "delivery";
+  | "overview"
+  | "setup"
+  | "owner-controls"
+  | "tasks"
+  | "collaboration"
+  | "activity"
+  | "files"
+  | "changes"
+  | "delivery";
 const TABS: { id: Tab; label: string }[] = [
   { id: "overview", label: "Overview" },
   { id: "setup", label: "Setup" },
   { id: "owner-controls", label: "Owner controls" },
   { id: "tasks", label: "Tasks" },
+  { id: "collaboration", label: "Decisions & memory" },
   { id: "activity", label: "Activity" },
   { id: "files", label: "Files" },
   { id: "changes", label: "Changes" },
@@ -300,6 +310,19 @@ export function RoomView(props: {
             ))}
           </div>
         </section>
+      )}
+      {tab === "collaboration" && (
+        <Suspense fallback={<p className="muted">Loading inbox, decisions and memory…</p>}>
+          <CollaborationView
+            room={open.room}
+            selfId={me.participant_id}
+            canPropose={me.role !== "OBSERVER"}
+            canPosition={me.role !== "OBSERVER"}
+            canDecide={me.role === "LEAD"}
+            nameOf={names}
+            onEvent={onEvent}
+          />
+        </Suspense>
       )}
       {tab === "setup" && maySetup && (
         <Suspense fallback={<p className="muted">Loading project setup…</p>}>
