@@ -144,8 +144,8 @@ describe("loop protection (§17.6)", () => {
       const err = await rejects(say(s, who), "RATE_LIMITED");
       expect(err.retryable).toBe(true);
       expect(err.details).toMatchObject({ reason: "loop_throttle" });
-      expect(err.details!.retry_after_seconds).toBeGreaterThan(0);
-      expect(err.details!.retry_after_seconds).toBeLessThanOrEqual(LOOP_THROTTLE_SECONDS);
+      expect(err.details!.retry_after).toBeGreaterThan(0);
+      expect(err.details!.retry_after).toBeLessThanOrEqual(LOOP_THROTTLE_SECONDS);
     }
     // A refused message writes nothing, and the loop is announced only once.
     const { rows } = await pool.query(

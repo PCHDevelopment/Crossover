@@ -80,7 +80,7 @@ export interface LoopCheck {
  * If more than {@link LOOP_MESSAGE_LIMIT} consecutive agent messages from two or more agents
  * have gone by with no state change, the room is in a loop and each of those agents is throttled
  * to one message a minute: a send sooner is `RATE_LIMITED` (retryable, with
- * `details.retry_after_seconds`). Humans and agents outside the loop are not throttled, and any
+ * `details.retry_after`, in seconds, which the gateway also sends as `Retry-After`). Humans and agents outside the loop are not throttled, and any
  * task, ChangeSet, decision or memory event, or a human's message, resets it. The message that
  * makes the run exceed the limit is accepted, and emits `loop.detected` plus an inbox item for
  * the lead and the owner, once per loop.
@@ -108,7 +108,7 @@ export async function checkLoopProtection(
         {
           details: {
             reason: "loop_throttle",
-            retry_after_seconds: wait,
+            retry_after: wait,
             consecutive_agent_messages: run.length,
           },
         },
