@@ -101,6 +101,7 @@ import {
   type ExecutionDriver,
   type UpstreamDeps,
   type WorkspaceCommandDeps,
+  DEFAULT_GIT_INTERNAL_NETWORK,
 } from "@crossover/workspace";
 import type { ServerConfig } from "./config.js";
 
@@ -244,6 +245,7 @@ export async function composeServer(
         ...(config.gitInternalContainer
           ? { gitInternalContainer: config.gitInternalContainer }
           : {}),
+        gitInternalNetwork: config.gitInternalNetwork ?? DEFAULT_GIT_INTERNAL_NETWORK,
         gitInternalPort: config.gitInternalPort ?? 8081,
         ...(config.gitInternalTokenSecret
           ? { gitInternalTokenSecret: config.gitInternalTokenSecret }

@@ -3,7 +3,6 @@ import { isIP } from "node:net";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
-const GIT_NETWORK = "crossover-git";
 
 async function inspectContainerNetworks(containerName: string): Promise<string> {
   const { stdout } = await execFileAsync(
@@ -18,6 +17,7 @@ async function inspectContainerNetworks(containerName: string): Promise<string> 
 export async function resolveGitInternalListenHost(
   configuredHost: string,
   containerName: string,
+  networkName: string,
   inspectNetworks: (containerName: string) => Promise<string> = inspectContainerNetworks,
 ): Promise<string> {
   if (isIP(configuredHost)) return configuredHost;
@@ -35,10 +35,10 @@ export async function resolveGitInternalListenHost(
     );
   }
 
-  const address = networks?.[GIT_NETWORK]?.IPAddress;
+  const address = networks?.[networkName]?.IPAddress;
   if (typeof address !== "string" || isIP(address) !== 4)
     throw new Error(
-      `Docker container ${containerName} is not attached to ${GIT_NETWORK} with an IPv4 address`,
+      `Docker container ${containerName} is not attached to ${networkName} with an IPv4 address`,
     );
   return address;
 }

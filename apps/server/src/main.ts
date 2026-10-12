@@ -1,5 +1,5 @@
 import { createPool, migrate } from "@crossover/db";
-import { assertGitVersion } from "@crossover/workspace";
+import { assertGitVersion, DEFAULT_GIT_INTERNAL_NETWORK } from "@crossover/workspace";
 import { composeServer } from "./compose.js";
 import { loadConfig } from "./config.js";
 import { resolveGitInternalListenHost } from "./git-internal-listener.js";
@@ -26,6 +26,7 @@ async function main(): Promise<void> {
     const gitInternalHost = await resolveGitInternalListenHost(
       config.gitInternalHost!,
       config.gitInternalContainer!,
+      config.gitInternalNetwork ?? DEFAULT_GIT_INTERNAL_NETWORK,
     );
     const address = await server.gitApp.listen({
       host: gitInternalHost,

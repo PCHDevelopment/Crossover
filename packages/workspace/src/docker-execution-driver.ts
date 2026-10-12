@@ -28,7 +28,7 @@ import { SANDBOX_SNAPSHOT_HELPER } from "./sandbox-snapshot-helper.js";
 
 const DEFAULT_IMAGE = "node:22-bookworm-slim";
 const DEFAULT_GIT_FETCHER_IMAGE = "crossover-git-fetcher:latest";
-const GIT_NETWORK = "crossover-git";
+export const DEFAULT_GIT_INTERNAL_NETWORK = "crossover-git";
 const FETCH_TIMEOUT_MS = 4 * 60 * 1000;
 const MAX_SNAPSHOT_OUTPUT_BYTES = 96 * 1024 * 1024;
 
@@ -67,6 +67,8 @@ export interface DockerExecutionDriverOptions {
   egressProxySecret?: string;
   /** Name of the server container attached to the private crossover-git network. */
   gitInternalContainer?: string;
+  /** Name of the private network shared by the server and one-shot fetchers. */
+  gitInternalNetwork?: string;
   gitInternalPort?: number;
   /** HMAC secret for five-minute, sandbox-scoped workspace fetch credentials. */
   gitInternalTokenSecret?: string;
@@ -206,6 +208,7 @@ export class DockerExecutionDriver implements ExecutionDriver {
   private readonly egressProxyPort: number;
   private readonly egressProxySecret: string | undefined;
   private readonly gitInternalContainer: string | undefined;
+  private readonly gitInternalNetwork: string;
   private readonly gitInternalPort: number;
   private readonly gitInternalTokenSecret: string | undefined;
   private readonly gitFetcherImage: string;
@@ -255,6 +258,10 @@ export class DockerExecutionDriver implements ExecutionDriver {
       !/^[a-z0-9][a-z0-9_.-]*$/.test(this.gitInternalContainer)
     ) {
       throw new Error("GIT_INTERNAL_CONTAINER must be a Docker container name");
+    }
+    this.gitInternalNetwork = options.gitInternalNetwork?.trim() || DEFAULT_GIT_INTERNAL_NETWORK;
+    if (!/^[a-z0-9][a-z0-9_.-]{0,127}$/.test(this.gitInternalNetwork)) {
+      throw new Error("GIT_INTERNAL_NETWORK must be a Docker network name");
     }
     if (
       options.gitInternalPort !== undefined &&
@@ -561,7 +568,7 @@ export class DockerExecutionDriver implements ExecutionDriver {
       `crossover.room=${input.room_id}`,
       "--label",
       `crossover.sandbox=${input.sandbox_id}`,
-      `--network=${GIT_NETWORK}`,
+      `--network=${this.gitInternalNetwork}`,
       "--read-only",
       "--user=1000:1000",
       "--cap-drop=ALL",
@@ -1298,7 +1305,14 @@ export class DockerExecutionDriver implements ExecutionDriver {
     if (!inspected) {
       try {
         await this.mustSucceed(
-          ["network", "create", "--internal", "--label", "crossover.git=true", GIT_NETWORK],
+          [
+            "network",
+            "create",
+            "--internal",
+            "--label",
+            "crossover.git=true",
+            this.gitInternalNetwork,
+          ],
           "ERROR: internal Git network creation failed",
         );
       } catch (error) {
@@ -1307,11 +1321,11 @@ export class DockerExecutionDriver implements ExecutionDriver {
       inspected = await this.inspectGitNetwork();
     }
     if (!inspected?.internal)
-      throw new Error(`ERROR: Docker network ${GIT_NETWORK} is not internal`);
+      throw new Error(`ERROR: Docker network ${this.gitInternalNetwork} is not internal`);
     if (inspected.serverConnected) return;
     try {
       await this.mustSucceed(
-        ["network", "connect", GIT_NETWORK, this.gitInternalContainer!],
+        ["network", "connect", this.gitInternalNetwork, this.gitInternalContainer!],
         "ERROR: internal Git server network connection failed",
       );
     } catch (error) {
@@ -1328,7 +1342,7 @@ export class DockerExecutionDriver implements ExecutionDriver {
       "inspect",
       "--format",
       "{{.Internal}}|{{json .Containers}}",
-      GIT_NETWORK,
+      this.gitInternalNetwork,
     ]);
     if (inspected.code !== 0) {
       const message = inspected.stderr.toLowerCase();

@@ -45,6 +45,7 @@ services:
       DEV_LOGIN_ALLOW_PRODUCTION: "true"
       SANDBOX_DISK_ENFORCEMENT: soft
       GIT_INTERNAL_HOST: crossover-server
+      GIT_INTERNAL_NETWORK: ${GIT_INTERNAL_NETWORK:-crossover-git}
       GIT_INTERNAL_CONTAINER: crossover-server
       GIT_INTERNAL_TOKEN_SECRET: ${GIT_INTERNAL_TOKEN_SECRET:?Set GIT_INTERNAL_TOKEN_SECRET in .env}
       GIT_FETCHER_IMAGE: crossover-git-fetcher:latest
@@ -62,5 +63,5 @@ services:
       crossover-git: {}
 networks:
   crossover-git:
-    name: crossover-git
+    name: ${GIT_INTERNAL_NETWORK:-crossover-git}
     external: true
