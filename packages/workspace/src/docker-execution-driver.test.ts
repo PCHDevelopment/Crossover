@@ -973,6 +973,97 @@ describe("DockerExecutionDriver", () => {
   const skipDockerIntegration = !dockerImageAvailable && !process.env["CI"];
 
   it.skipIf(skipDockerIntegration)(
+    "reuses and removes a real default Docker volume with null inspect options",
+    async () => {
+      const driver = new DockerExecutionDriver();
+      const sandboxId = newId("sandbox");
+      const name = `crossover-sbx-${sandboxId.toLowerCase()}`;
+      let resources: Awaited<ReturnType<typeof driver.create>> | undefined;
+      let destroyed = false;
+      try {
+        expect(
+          execFileSync("docker", ["volume", "create", name], {
+            encoding: "utf8",
+            timeout: 20_000,
+          }).trim(),
+        ).toBe(name);
+        expect(
+          execFileSync(
+            "docker",
+            ["volume", "inspect", "--format", "{{.Driver}}|{{json .Options}}", name],
+            { encoding: "utf8", timeout: 10_000 },
+          ).trim(),
+        ).toBe("local|null");
+
+        resources = await driver.create({
+          sandbox_id: sandboxId,
+          room_id: newId("room"),
+          participant_id: newId("part"),
+          limits: { disk_enforcement: "soft" },
+        });
+        expect(resources.volume_ref).toBe(name);
+        await driver.start({ sandbox_id: sandboxId, resources });
+
+        const [container] = JSON.parse(
+          execFileSync("docker", ["container", "inspect", name], {
+            encoding: "utf8",
+            timeout: 10_000,
+          }),
+        ) as Array<{
+          HostConfig: {
+            NetworkMode: string;
+            CapDrop: string[];
+            SecurityOpt: string[];
+          };
+          Config: { User: string };
+        }>;
+        expect(container?.HostConfig.NetworkMode).toBe("none");
+        expect(container?.HostConfig.CapDrop).toContain("ALL");
+        expect(container?.HostConfig.SecurityOpt).toContain("no-new-privileges");
+        expect(container?.Config.User).toMatch(/^[1-9]\d*(?::\d+)?$/);
+
+        let stdout = "";
+        const execution = await driver.exec({
+          sandbox_id: sandboxId,
+          resources,
+          exec_id: newId("exec"),
+          command: "printf T1415-real-docker-smoke",
+          cwd: "/workspace",
+          timeoutMs: 10_000,
+          onOutput: async (stream, chunk) => {
+            if (stream === "stdout") stdout += chunk.toString("utf8");
+          },
+        });
+        await expect(execution.finished).resolves.toMatchObject({ reason: "exit", exit_code: 0 });
+        expect(stdout).toBe("T1415-real-docker-smoke");
+
+        await driver.destroy({ sandbox_id: sandboxId, resources });
+        destroyed = true;
+        expect(() =>
+          execFileSync("docker", ["volume", "inspect", name], { stdio: "ignore" }),
+        ).toThrow();
+        expect(() =>
+          execFileSync("docker", ["container", "inspect", name], { stdio: "ignore" }),
+        ).toThrow();
+      } finally {
+        if (!destroyed) {
+          for (const args of [
+            ["container", "rm", "--force", name],
+            ["volume", "rm", "--force", name],
+          ]) {
+            try {
+              execFileSync("docker", args, { stdio: "ignore", timeout: 10_000 });
+            } catch {
+              // Cleanup is best effort here so the original assertion remains visible.
+            }
+          }
+        }
+      }
+    },
+    30_000,
+  );
+
+  it.skipIf(skipDockerIntegration)(
     "creates, hibernates, resumes and removes a soft-mode Docker sandbox",
     async () => {
       const driver = new DockerExecutionDriver();
