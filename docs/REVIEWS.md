@@ -2,6 +2,42 @@
 
 Periodic big-picture reviews by O1: is the merged code building the product in ARCHITECTURE.md, in the right order? Newest first.
 
+## 2026-10-12 · Review 8 (12:25 UTC; 7 PRs merged since the Review 7 addendum)
+
+**State.** #217–#223 merged in four hours, all by S2, all with CI green on the merged head.
+
+- T1401 Setup: import, one-time invites, appoint a lead (#217).
+- T1404 Owner controls in two slices: lifecycle, removal, egress and protected paths (#218); capabilities and approvals (#219).
+- T1402 Decisions and read-only memory (#220); inbox with a real HEALTH_RED (#221).
+- Two product gaps found in review and fixed: T1408 `room.set_health` (#222), T1409 `inbox.delivered` (#223).
+
+**Against the §30 demo flow.** Every step now has a browser path. Steps 8 and 14 are agent-side and show in Activity; the rest are driven from the UI in e2e/web.test.ts. M14 has one task left: T1406, a single test that walks all 17 steps in order.
+
+**What review found that the spec missed.** Two steps could not be completed through the product even though their UI existed:
+
+- Step 2: nothing could apply the suggested health command. The only way to set `health_command` was a database write, and the step 13 test used one.
+- Step 13 and every other inbox kind: `deliverInbox` emitted no event, so an open inbox never updated.
+
+Both surfaced only when a test tried to drive the step for real. That is what T1406 is for, and why it must not touch the database.
+
+**Course corrections.**
+
+1. **T1406 is the M14 gate, with a hard rule:** no database writes and no seeded rows. Any step that needs one is a product gap; it gets its own task and lands before T1406.
+2. **Check against fresh main before reporting a gap.** Twice today a preflight claimed something was missing that had already merged: the health-notice producer and the inbox UI. It costs a review round each time.
+3. **The 400-line guide counts non-test lines.** A PR above it says so in its body and explains why it can't split; mechanical threading of a parameter through many call sites is the accepted case (#223). #220 was 635 lines and not flagged; accepted once.
+4. **Staffing.** Q1 has been silent since 02:27, about ten hours. S2 now owns all of M14; T1402 moved from Q1. One engineer is a single point of failure for the demo. Peter: replace or re-seat Q1.
+
+**After M14.** The next review compares §29 MVP scope against main item by item, now that the demo path is complete.
+
+**Tech-debt register, new:**
+
+- `inbox.delivered` puts the recipient and the item kind in the shared room stream. The summary and reference stay private. Accepted for now; a per-recipient event channel would remove it.
+- `apps/server/src/e2e/web.test.ts` is 1,414 lines in one file with 19 tests. Split by §30 area before T1406 makes it longer.
+- `CollaborationView.tsx` is 574 lines holding inbox, decisions and memory. Split per section.
+- The approvals list renders each request's raw params as JSON. It is owner-only, but large params make the list hard to read.
+
+**Closed since the addendum:** T902 benchmark (CPU-time budget, #214), MergeView view-state (#216), duplicated protected-path defaults (#219). Still open: the Changes tab paging the whole ChangeSet history, and unreferenced git objects from candidate reads.
+
 ## 2026-10-12 · Review 7 addendum (08:20 UTC; 7 PRs merged since Review 7)
 
 **M14 progress.** Seven §30 steps moved from SDK-only into the browser in four hours:
