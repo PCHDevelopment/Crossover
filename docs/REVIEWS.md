@@ -2,6 +2,73 @@
 
 Periodic big-picture reviews by O1: is the merged code building the product in ARCHITECTURE.md, in the right order? Newest first.
 
+## 2026-10-12 · Review 7 (backend about 139 of 140 tasks; about 57 PRs merged since Review 6)
+
+**State.**
+
+- **Merged since Review 6** (#148–#204):
+  - All of M10, the execution sandboxes: T1002–T1006 and T1008, on top of T611.
+  - All of M12, the plugins: T1201–T1206.
+  - In M11: the T1104 web shell, the T1105a editor and drafts, the T1105b cursors and presence (human cursors only), the T1105c merge view, the T1103 Python SDK, the T1106 refresh route, and the T1102 Go CLI (#200, #203).
+  - In M9: T901–T903 (egress, secret scanning, circuit breakers).
+  - In M7: T704, T706 follow-ups, T711.
+  - CI: a self-hosted runner, and the concurrent Docker-sweeper and timeout fixes (#204).
+- **Main:** 140 backlog headings and 32 migrations (0021 was never used; the gap is harmless and documented here). Zero TODO or FIXME. No plain `.skip`; every `skipIf` still runs under `CI`.
+- **Layering is clean.** No package imports from `apps/*`, and the gateway doesn't import the web app.
+- **The Go CLI** is built and cross-compiled for six targets in CI.
+
+**Against the §30 demo flow.** The backend now covers every step. The web app is what blocks a demo:
+
+- **End to end in the browser:** steps 1, 6, 9 and 15 (e2e/web.test.ts), and step 14 as an Activity line.
+- **Backend or SDK only, with no UI:**
+  - steps 2 (import a repo), 3 and 4 (invites, appoint lead), and 5 (decisions and memory);
+  - steps 10–12 (there's no diff view, no conflict list and no lead escalation view; MergeView covers only your own conflict);
+  - step 13 (health, inbox);
+  - steps 16 and 17 (task review, checkpoint, export and PR).
+- **Missing in the UI:** step 7. Agents' edit intents work on the backend, but the editor doesn't render them. T1105b shipped cursors only.
+- **Owner controls in §29** beyond pause and resume (revoke, freeze, budgets, approvals) have no UI either.
+
+**On track.** The platform is feature-complete on the backend and has a working CLI, two SDKs and a browser shell. Review keeps catching real defects before merge:
+
+- a config write that would `chmod 0700` the user's home directory;
+- two CLI processes restoring a spent refresh token;
+- a full-repository `git grep` on every apply inside the room transaction (#199);
+- a loop throttle sending its wait under a key no client reads (#201);
+- a concurrent Docker sweep failing on "removal already in progress" (#204).
+
+**Course corrections.**
+
+1. **The critical path is now the web UI for the §30 demo.** New milestone M14 in the backlog: T1105b-intents and T1401–T1406. No new backend features until the demo runs in a browser, except fixes and T1407.
+2. **A demo acceptance test closes M14.** T1406 is one browser test that walks all 17 steps of §30 against a real server. It replaces the per-task step lists as the definition of done.
+3. **WebSocket liveness (T1407).** Nothing pings: not the gateway, not the SDK, not the Go tail. A half-open connection hangs `events tail` and an idle browser tab silently. Add server pings, a client read deadline, and a documented close code.
+4. **Seat changes.** O1 (seat i_O0IphApTqR) resumed as lead on 10-12 at Peter's request, after a second O1 seat had led since 10-08. Reviews and merges go through one seat to avoid double handling. Q1 came back on 10-12 after about 37 hours of silence; its earlier tasks had been reassigned (T903 and T1102 to S2, T711 to the other O1 seat).
+5. **Order.**
+   - **S2:** T1105b-intents (step 7), then T1403 (diff and conflict views, steps 10–12), then T1405 (review and export, steps 16–17).
+   - **Q1:** T1407 (heartbeat, contract first), then T1402 (inbox, decisions and memory, steps 5 and 13).
+   - **S1, if active, or the next free engineer:** T1401 (invites, appoint lead, import; steps 2–4), then T1404 (owner controls).
+   - **O1:** T1406, the demo test skeleton, written against the steps already working, so each M14 PR turns one more step green.
+
+**Tech-debt register.**
+
+- **New:**
+  - The Go CLI honours `retry_after` with no upper bound. Cap it at about 60 s (rides with T1407).
+  - The sweeper's per-ID inspect fallback runs unbounded in parallel. Fine at today's scale.
+  - About 41 tests have explicit timeouts of 15 s or more. Several were raised only because the shared runner was busy. Prefer fixed clocks and smaller inputs over longer timeouts.
+  - `mcp` depends on `gateway`.
+- **Resolved:**
+  - the concurrent Docker cleanup flake (#204);
+  - the budgets minute-boundary flake (fixed clock);
+  - the loop throttle's `retry_after` key (#201);
+  - repeated secret-scan inbox items on edit (#202).
+- **Carried over:** everything in Review 6's register that isn't listed as resolved, including the web session token in `sessionStorage`, the broad CSP `connect-src`, and the wake outbox clock and claim window.
+
+**Quality.**
+
+- **S2:** carried M10, M12, T903 and T1102 alone through two lead changes. It posts contracts before code, addresses review asks within minutes with tests that pin them, and its CI is green before it asks for review. At or above its baseline.
+- **Q1:** pushed tests to an already-merged PR (#188) without checking its state, after a long unannounced absence. Its tests themselves were good. Under watch: contract first, check PR state before pushing, and say when you'll be away.
+
+**Lead process.** The lead's 10-minute check-in was a session-only job that died on every session restart, so check-ins fell back to hourly. They now chain through server-side one-shot reminders, which survive restarts.
+
 ## 2026-10-07 · Review 6 (about 110 of 141 tasks; 8 PRs merged since Review 5)
 
 **State.**

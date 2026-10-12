@@ -10,22 +10,23 @@ Conventions are in `docs/ENGINEERING.md`. Section references (§) point to `docs
 
 ## Ownership at a glance
 
-| Milestone                             | Tasks       | Owner                                                       |
-| ------------------------------------- | ----------- | ----------------------------------------------------------- |
-| M0 Foundation                         | T000        | O1                                                          |
-| M1 Persistence, ledger, commands      | T101–T118   | S1                                                          |
-| M2 Rooms, participants, auth, policy  | T201–T215   | S1                                                          |
-| M3 Tasks                              | T301–T312   | S1                                                          |
-| M4 Messages, inbox, decisions, memory | T401–T412   | S1 (moved from S2 for T404–T409, T411–T412 in Review 3)     |
-| M5 Workspace engine                   | T501–T520   | S2                                                          |
-| M6 Conflicts and health               | T601–T610   | S2                                                          |
-| M7 Gateway, MCP, end-to-end           | T701–T713   | S1 (T701–T709, T713), S2 (T710), Q1 (T705, T711), O1 (T712) |
-| M8 Git interoperability (§24)         | T801–T807   | S1 (moved from S2 in Review 4)                              |
-| M9 Safety controls (§22–23)           | T901–T906   | S1 (T904–T906), Q1 (T901–T902), S2 (T903)                   |
-| M10 Execution sandboxes (§14)         | T1001–T1008 | S2 (T1007 split into T1007 + T1007b in Review 5)            |
-| M11 Clients (§27, §29)                | T1101–T1106 | S1 (T1102 → Q1)                                             |
-| M12 Plugins (§21.4–21.5)              | T1201–T1206 | S1 (T1201, moved in Review 5), S2 (T1202–T1206)             |
-| M13 Lessons from building (§34)       | T1301–T1303 | S1                                                          |
+| Milestone                             | Tasks       | Owner                                                                            |
+| ------------------------------------- | ----------- | -------------------------------------------------------------------------------- |
+| M0 Foundation                         | T000        | O1                                                                               |
+| M1 Persistence, ledger, commands      | T101–T118   | S1                                                                               |
+| M2 Rooms, participants, auth, policy  | T201–T215   | S1                                                                               |
+| M3 Tasks                              | T301–T312   | S1                                                                               |
+| M4 Messages, inbox, decisions, memory | T401–T412   | S1 (moved from S2 for T404–T409, T411–T412 in Review 3)                          |
+| M5 Workspace engine                   | T501–T520   | S2                                                                               |
+| M6 Conflicts and health               | T601–T610   | S2                                                                               |
+| M7 Gateway, MCP, end-to-end           | T701–T713   | S1 (T701–T709, T713), S2 (T710), Q1 (T705, T711), O1 (T712)                      |
+| M8 Git interoperability (§24)         | T801–T807   | S1 (moved from S2 in Review 4)                                                   |
+| M9 Safety controls (§22–23)           | T901–T906   | S1 (T904–T906), Q1 (T901–T902), S2 (T903)                                        |
+| M10 Execution sandboxes (§14)         | T1001–T1008 | S2 (T1007 split into T1007 + T1007b in Review 5)                                 |
+| M11 Clients (§27, §29)                | T1101–T1106 | S1 (T1102 → Q1)                                                                  |
+| M12 Plugins (§21.4–21.5)              | T1201–T1206 | S1 (T1201, moved in Review 5), S2 (T1202–T1206)                                  |
+| M13 Lessons from building (§34)       | T1301–T1303 | S1                                                                               |
+| M14 Demo-ready web app (Review 7)     | T1401–T1407 | S2 (T1403, T1405), Q1 (T1402, T1407), S1 or next free (T1401, T1404), O1 (T1406) |
 
 **Start here:** S1 → T101, T105, T114 (independent). S2 → T501, T505 (only need the scaffold).
 
@@ -1185,6 +1186,7 @@ Editor with live intents, draft flush, live cursors and merge view (§27; demo s
 
 - **T1105a · Editor and drafts.** File tree from `workspace.list`; Monaco editor (bundled, no CDN, within the gateway CSP); each open buffer is a draft with its `base_file_revision` and a draft indicator. Flushes (§13.2): 1.5 s idle, 10 s of continuous typing, explicit save, switching files or closing the tab, each as an `EDITOR` ChangeSet. Incoming `workspace.changeset.applied` on an open file (§13.3): a clean buffer is replaced, a dirty one is merged three-way in the browser and rebased if clean, otherwise kept and marked conflicted. The draft logic is a UI-free module with unit tests; the browser merge agrees with `git merge-file` wherever it calls a merge clean.
 - **T1105b · Live intents and cursors.** Agents' edit intents (`presence.list_intents`, §11.4) render as highlighted ranges; human cursors, selections and open files go through the presence channel (§13.4).
+  - **Review 7:** cursors and presence shipped (#194, #195). **T1105b-intents** remains, and S2 owns it. Render `presence.list_intents` ranges in the editor, live through the subscription: set, clear and expiry. Each range is labelled with the agent and its stated purpose, and stays read-only for the viewer. A browser test shows an agent's intent appear and clear (§30 step 7).
 - **T1105c · Merge view.** A flush that comes back as a Conflict opens a three-way merge view (base, mine, theirs); resolving submits a `RESOLUTION` ChangeSet (§11).
 
 ---
@@ -1305,3 +1307,115 @@ When `vendor`, `model`, `client` or `client_version` changes, the platform store
 - An MCP reconnect with a new `clientInfo.version` produces exactly one event and one inbox item each for the lead and owner; reconnecting again with the same version produces none.
 - The event payload never contains the webhook URL (a test scans the payload).
 - `participants.update_manifest` joins the §16.1 catalog (mutating) and `participant.manifest_changed` the §16.2 event types, both documented in the same PR.
+
+---
+
+## M14 Demo-ready web app (Review 7)
+
+Added in Review 7. The backend covers every §30 step, but most steps have no UI. Each task below uses only the public API through `@crossover/sdk`. It adds a browser test for its demo steps in `apps/server/src/e2e/web.test.ts`, or a sibling file, and keeps within the gateway CSP. No new kernel commands without an O1-approved contract in the room.
+
+### T1401 · Invites, appoint lead and repository import — S1 (or next free)
+
+Deps: T1104 · Migration: —
+
+§30 steps 2–4.
+
+- **Import:** the owner imports a GitHub repository (`git.import`) from the room view, with progress shown from events and the suggested health command offered.
+- **Invites:** the owner creates an invite (`room.invite`) for a human or an agent. The UI shows the one-time link once, with a copy button, and never shows it again.
+- **Lead:** the owner appoints a lead (`room.set_lead`); the appointee accepts (`room.accept_lead`).
+
+Tests:
+
+- A browser test covers import, invite and appointment end to end.
+- The invite token never appears in Activity or in a second view.
+
+### T1402 · Inbox, decisions and memory panels — Q1
+
+Deps: T1104 · Migration: —
+
+§30 steps 5 and 13.
+
+- **Inbox:** an inbox panel (`inbox.list`, `inbox.ack`) with a live unread count. Items link to their ref: a task, a ChangeSet, a decision or a health run.
+- **Decisions:** a decisions view (`decisions.list`, `get`, `propose`, `add_position`, `decide`, `veto`).
+- **Memory:** a memory view (`memory.list`, `get`, `history`, `put`).
+- Health red and green results appear as inbox items with the failing command's output (`workspace.health.get`).
+
+Tests:
+
+- A browser test: a proposal with two positions is decided and its memory entry appears.
+- A red health result lands in the lead's inbox, then clears on green.
+
+### T1403 · ChangeSet diff, conflicts list and lead escalation — S2
+
+Deps: T1105c · Migration: —
+
+§30 steps 10–12.
+
+- **Diff:** an applied ChangeSet opens a diff view (`workspace.changeset.get`, `workspace.diff`).
+- **Conflicts:** a conflicts list for the room (`conflicts.list`, `conflicts.get`). The owner of a conflict resolves it in the existing MergeView. The lead sees escalated conflicts (`conflicts.escalate`) and can resolve or abandon them (`conflicts.abandon`).
+- **Holds:** held ChangeSets from T903 show with their reasons, and the lead or owner can approve or reject them (`workspace.changeset.decide_hold`).
+
+Tests:
+
+- A browser test: a clean merge shows its diff.
+- An agent's conflict is escalated and resolved by the lead.
+- A held ChangeSet is approved.
+
+### T1404 · Owner controls — S1 (or next free)
+
+Deps: T1104 · Migration: —
+
+§29 owner controls beyond pause and resume:
+
+- remove a participant (`participants.remove`);
+- freeze and resume the room (`room.freeze`, `room.resume`);
+- capabilities (`capabilities.list`, `grant`, `revoke`);
+- approvals (`approvals.list`, `decide`);
+- the egress allowlist and protected paths (`room.set_egress_allowlist`, `room.set_protected_paths`).
+
+Every destructive action asks for confirmation, and a non-owner sees none of these controls.
+
+Tests:
+
+- A browser test: freezing the room blocks an agent's apply with `ROOM_PAUSED`, and resuming lets it through.
+- A capability revoke takes effect on the agent's next call.
+
+### T1405 · Task review, checkpoint, export and PR — S2
+
+Deps: T1104, T806 · Migration: —
+
+§30 steps 16–17.
+
+- **Review:** the lead reviews a submitted task (`tasks.review`), showing its evidence and `missing_evidence` (T1302).
+- **Checkpoint:** create a checkpoint (`checkpoints.create`) and list checkpoints (`checkpoints.list`).
+- **Export and PR:** export one (`checkpoints.export`), optionally opening a PR through the GitHub integration. The PR URL is shown and provider errors are scrubbed.
+
+Tests:
+
+- A browser test: approve a task, checkpoint, export.
+- With a fake GitHub integration, the PR link appears.
+
+### T1406 · §30 demo acceptance test — O1
+
+Deps: — (grows with T1401–T1405) · Migration: —
+
+One browser test walks all 17 steps of §30 in order against a real `apps/server`, with the SDK playing the agents. Steps whose UI hasn't merged are marked pending in a single list at the top of the file, and each M14 PR removes its steps from that list. M14 is done when the list is empty and the test passes in CI.
+
+### T1407 · WebSocket liveness — Q1
+
+Deps: T703, T1101, T1102 · Migration: —
+
+Nothing detects a half-open WebSocket today, so `events tail`, SDK subscriptions and idle browser tabs can hang silently.
+
+**Server:** the gateway sends a WebSocket ping every 25 s and terminates a socket that hasn't answered two in a row. The interval is configurable for tests.
+
+**Clients:** the SDK and the Go CLI set a read deadline, about 60 s, that is reset by every frame or pong, and reconnect from the last sequence when it passes. The Go CLI also caps a `retry_after` wait at 60 s.
+
+**Docs:** document the intervals and any close code in §16.
+
+Q1 posts the contract in the room before coding.
+
+Tests:
+
+- A fake-clock gateway test terminates a socket that stops answering pings.
+- An SDK test and a Go test each reconnect after a silent server, with no event lost and none duplicated.
