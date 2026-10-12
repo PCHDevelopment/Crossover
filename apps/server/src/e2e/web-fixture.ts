@@ -37,8 +37,8 @@ const gitIdentity = {
 const runGit = (cwd: string, args: string[]) =>
   git(args, { cwd, timeoutMs: 30_000, env: gitIdentity });
 
-/** Reuse DockerExecutionDriver's required private network or create it for this fixture. */
-async function ensureGitNetwork(): Promise<boolean> {
+/** Ensure the shared DockerExecutionDriver network exists; parallel jobs may use it. */
+async function ensureGitNetwork(): Promise<void> {
   const { stdout } = await execFileAsync(
     "docker",
     ["network", "ls", "--filter", `name=^${GIT_NETWORK}$`, "--format", "{{.Name}}"],
@@ -52,14 +52,13 @@ async function ensureGitNetwork(): Promise<boolean> {
     );
     if (inspected.stdout.trim() !== "true")
       throw new Error(`The existing ${GIT_NETWORK} network is not internal`);
-    return false;
+    return;
   }
   await execFileAsync(
     "docker",
     ["network", "create", "--internal", "--label", "crossover.git=true", GIT_NETWORK],
     { timeout: 10_000 },
   );
-  return true;
 }
 
 /** Bridge only the host-bound Git listener hop; the production fetcher and HMAC remain real. */
@@ -181,7 +180,6 @@ export function registerWebFixture(): WebFixture {
   let gitBridgeContainer: string;
   let gitInternalTokenSecret: string;
   let gitBridgeStarted = false;
-  let gitNetworkCreated = false;
   const executablePath = chromiumPath();
   const inCi = Boolean(process.env["CI"]);
 
@@ -216,7 +214,7 @@ export function registerWebFixture(): WebFixture {
     gitSocketPath = join(gitSocketDirectory, "git.sock");
     gitBridgeContainer = `crossover-web-git-bridge-${process.pid}-${randomBytes(6).toString("hex")}`;
     gitInternalTokenSecret = randomBytes(32).toString("hex");
-    gitNetworkCreated = await ensureGitNetwork();
+    await ensureGitNetwork();
     upstreamDir = join(dir, "upstream");
     await mkdir(upstreamDir, { recursive: true });
     await runGit(upstreamDir, ["init", "-q", "-b", "main"]);
@@ -360,10 +358,6 @@ export function registerWebFixture(): WebFixture {
         }),
       );
     await attempt(() => server?.close());
-    if (gitNetworkCreated)
-      await attempt(() =>
-        execFileAsync("docker", ["network", "rm", GIT_NETWORK], { timeout: 10_000 }),
-      );
     await attempt(() => db?.drop());
     if (dir) await attempt(() => rm(dir, { recursive: true, force: true }));
     if (errors.length) throw new AggregateError(errors, "Web e2e fixture cleanup failed");
