@@ -27,14 +27,19 @@ const CheckpointExportView = lazy(() => import("./CheckpointExportView.js"));
 const RoomSetupView = lazy(() =>
   import("./RoomSetupView.js").then((m) => ({ default: m.RoomSetupView })),
 );
+const OwnerControlsView = lazy(() =>
+  import("./OwnerControlsView.js").then((m) => ({ default: m.OwnerControlsView })),
+);
 
 const FEED_LIMIT = 200;
 const BACKLOG = 50;
 
-type Tab = "overview" | "setup" | "tasks" | "activity" | "files" | "changes" | "delivery";
+type Tab =
+  "overview" | "setup" | "owner-controls" | "tasks" | "activity" | "files" | "changes" | "delivery";
 const TABS: { id: Tab; label: string }[] = [
   { id: "overview", label: "Overview" },
   { id: "setup", label: "Setup" },
+  { id: "owner-controls", label: "Owner controls" },
   { id: "tasks", label: "Tasks" },
   { id: "activity", label: "Activity" },
   { id: "files", label: "Files" },
@@ -207,7 +212,10 @@ export function RoomView(props: {
         </span>
       </p>
       <nav className="tabs" role="tablist">
-        {TABS.filter(({ id }) => id !== "setup" || maySetup).map(({ id, label }) => (
+        {TABS.filter(
+          ({ id }) =>
+            (id !== "setup" || maySetup) && (id !== "owner-controls" || me.authority === "OWNER"),
+        ).map(({ id, label }) => (
           <button
             key={id}
             role="tab"
@@ -304,6 +312,19 @@ export function RoomView(props: {
             mayInvite={mayInvite}
             mayAppointLead={mayAppointLead}
             onEvent={onEvent}
+          />
+        </Suspense>
+      )}
+      {tab === "owner-controls" && me.authority === "OWNER" && (
+        <Suspense fallback={<p className="muted">Loading owner controls…</p>}>
+          <OwnerControlsView
+            room={open.room}
+            participants={participants}
+            selfId={me.participant_id}
+            leadParticipantId={room.lead_participant_id}
+            roomStatus={room.status}
+            settings={room.settings}
+            onRefresh={reload}
           />
         </Suspense>
       )}
