@@ -17,6 +17,7 @@ import {
   messagesListParams,
   messagesSendParams,
   roomDigestParams,
+  roomSetHealthParams,
   taskVersionParams,
   tasksAssignParams,
   tasksBlockParams,
@@ -72,6 +73,14 @@ export const BASE_TOOLS: readonly McpToolDefinition[] = [
     method: "room.get_state",
     input: {},
     mutating: false,
+  },
+  {
+    name: "room_set_health",
+    description:
+      "Set the room health command and optionally its Docker image. Only the room lead or owner may change these settings; null clears the command or resets the image to the server default.",
+    method: "room.set_health",
+    input: roomSetHealthParams.shape,
+    mutating: true,
   },
   {
     name: "capabilities_list",

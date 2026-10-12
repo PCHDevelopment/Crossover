@@ -31,6 +31,8 @@ export function RoomSetupView(props: {
   mayImport: boolean;
   mayInvite: boolean;
   mayAppointLead: boolean;
+  maySetHealth: boolean;
+  settings: Record<string, unknown> | null;
   onEvent: EventListener;
 }) {
   const {
@@ -41,8 +43,14 @@ export function RoomSetupView(props: {
     mayImport,
     mayInvite,
     mayAppointLead,
+    maySetHealth,
+    settings,
     onEvent,
   } = props;
+  const configuredHealthCommand =
+    typeof settings?.health_command === "string" ? settings.health_command : "";
+  const configuredHealthImage =
+    typeof settings?.health_image === "string" ? settings.health_image : "";
   const [repositoryUrl, setRepositoryUrl] = useState("");
   const [branch, setBranch] = useState("main");
   const [importBusy, setImportBusy] = useState(false);
@@ -59,6 +67,16 @@ export function RoomSetupView(props: {
   const [leadBusy, setLeadBusy] = useState(false);
   const [leadNotice, setLeadNotice] = useState<string>();
   const [leadError, setLeadError] = useState<string>();
+  const [healthCommand, setHealthCommand] = useState(configuredHealthCommand);
+  const [healthImage, setHealthImage] = useState(configuredHealthImage);
+  const [healthBusy, setHealthBusy] = useState(false);
+  const [healthStatus, setHealthStatus] = useState<string>();
+  const [healthError, setHealthError] = useState<string>();
+
+  useEffect(() => {
+    setHealthCommand(configuredHealthCommand);
+    setHealthImage(configuredHealthImage);
+  }, [configuredHealthCommand, configuredHealthImage]);
 
   useEffect(
     () =>
@@ -75,6 +93,8 @@ export function RoomSetupView(props: {
               ? `Repository import synced at revision ${revision}.`
               : "Repository import synced.",
           );
+        } else if (event.type === "room.health_settings_changed") {
+          setHealthStatus("Health settings updated.");
         }
       }),
     [onEvent],
@@ -126,6 +146,62 @@ export function RoomSetupView(props: {
       setInviteError(error instanceof Error ? error.message : "Invite creation failed");
     } finally {
       setInviteBusy(false);
+    }
+  };
+
+  const useSuggestedHealthCommand = async () => {
+    const command = imported?.suggested_health_command?.command;
+    if (!maySetHealth || !command) return;
+    if (!window.confirm(`Use this command for room health checks?\n\n${command}`)) return;
+    setHealthBusy(true);
+    setHealthError(undefined);
+    setHealthStatus(undefined);
+    try {
+      await room.api.room.set_health({ health_command: command });
+      setHealthCommand(command);
+      setHealthStatus("Health command configured.");
+    } catch (error) {
+      setHealthError(error instanceof Error ? error.message : "Health command could not be saved");
+    } finally {
+      setHealthBusy(false);
+    }
+  };
+
+  const saveHealthSettings = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!maySetHealth) return;
+    if (!window.confirm("Save the room health settings?")) return;
+    setHealthBusy(true);
+    setHealthError(undefined);
+    setHealthStatus(undefined);
+    try {
+      await room.api.room.set_health({
+        health_command: healthCommand.trim() || null,
+        health_image: healthImage.trim() || null,
+      });
+      setHealthStatus("Health settings saved.");
+    } catch (error) {
+      setHealthError(error instanceof Error ? error.message : "Health settings could not be saved");
+    } finally {
+      setHealthBusy(false);
+    }
+  };
+
+  const clearHealthCommand = async () => {
+    if (!maySetHealth || !window.confirm("Clear the room health command?")) return;
+    setHealthBusy(true);
+    setHealthError(undefined);
+    setHealthStatus(undefined);
+    try {
+      await room.api.room.set_health({ health_command: null });
+      setHealthCommand("");
+      setHealthStatus("Health command cleared.");
+    } catch (error) {
+      setHealthError(
+        error instanceof Error ? error.message : "Health command could not be cleared",
+      );
+    } finally {
+      setHealthBusy(false);
     }
   };
 
@@ -236,10 +312,75 @@ const joined = await client.join("${roomId}", { token, manifest });`;
             </p>
           )}
           {imported?.suggested_health_command && (
-            <p data-testid="health-command-suggestion">
-              Suggested health command (not applied):{" "}
-              <code>{imported.suggested_health_command.command}</code>
-              <span className="muted"> — {imported.suggested_health_command.reason}</span>
+            <div data-testid="health-command-suggestion">
+              <p>
+                Suggested health command (not applied):{" "}
+                <code>{imported.suggested_health_command.command}</code>
+                <span className="muted"> — {imported.suggested_health_command.reason}</span>
+              </p>
+              {maySetHealth && (
+                <button
+                  type="button"
+                  data-testid="health-use-suggestion"
+                  disabled={healthBusy}
+                  onClick={() => void useSuggestedHealthCommand()}
+                >
+                  Use this command
+                </button>
+              )}
+            </div>
+          )}
+        </section>
+      )}
+
+      {maySetHealth && (
+        <section className="delivery-section" aria-label="Health check settings">
+          <h3>Health check settings</h3>
+          <p className="muted">
+            Health checks run in an isolated container. Leave the image blank to use the server
+            default; a chosen image must be approved by the operator.
+          </p>
+          <form onSubmit={(event) => void saveHealthSettings(event)}>
+            <label>
+              Health command
+              <input
+                data-testid="health-command"
+                value={healthCommand}
+                onChange={(event) => setHealthCommand(event.target.value)}
+                maxLength={4096}
+                placeholder="No health command configured"
+              />
+            </label>
+            <label>
+              Health image
+              <input
+                data-testid="health-image"
+                value={healthImage}
+                onChange={(event) => setHealthImage(event.target.value)}
+                maxLength={255}
+                placeholder="Server default"
+              />
+            </label>
+            <button data-testid="health-save" disabled={healthBusy}>
+              {healthBusy ? "Saving…" : "Save health settings"}
+            </button>
+            <button
+              type="button"
+              data-testid="health-clear"
+              disabled={healthBusy || !configuredHealthCommand}
+              onClick={() => void clearHealthCommand()}
+            >
+              Clear health command
+            </button>
+          </form>
+          {healthStatus && (
+            <p role="status" aria-live="polite" data-testid="health-settings-status">
+              {healthStatus}
+            </p>
+          )}
+          {healthError && (
+            <p role="alert" className="error" data-testid="health-settings-error">
+              {healthError}
             </p>
           )}
         </section>

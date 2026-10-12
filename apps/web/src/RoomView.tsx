@@ -195,6 +195,7 @@ export function RoomView(props: {
   const me = open.me;
   const mayControl = me.authority === "OWNER" || me.authority === "ADMIN" || me.role === "LEAD";
   const mayImport = me.authority === "OWNER" || me.role === "LEAD";
+  const maySetHealth = me.authority === "OWNER" || me.role === "LEAD";
   const mayInvite = me.authority === "OWNER" || me.authority === "ADMIN";
   const mayAppointLead = me.authority === "OWNER" || me.authority === "ADMIN";
   const maySetup = mayImport || mayInvite || mayAppointLead;
@@ -334,6 +335,8 @@ export function RoomView(props: {
             mayImport={mayImport}
             mayInvite={mayInvite}
             mayAppointLead={mayAppointLead}
+            maySetHealth={maySetHealth}
+            settings={room.settings}
             onEvent={onEvent}
           />
         </Suspense>

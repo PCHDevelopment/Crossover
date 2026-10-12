@@ -52,6 +52,7 @@ import {
   registerRoomEventsCommand,
   registerRoomLifecycleCommands,
   registerRoomProtectedPathsCommand,
+  registerRoomHealthSettingsCommand,
   registerTaskCommands,
   registerTaskHeartbeat,
   registerTaskLifecycleCommands,
@@ -74,6 +75,7 @@ import {
   ConflictEscalationSweeper,
   DockerExecutionDriver,
   DockerHealthRunner,
+  DEFAULT_HEALTH_IMAGE,
   ExecutionService,
   HealthCheckQueue,
   workspaceHealthGate,
@@ -555,6 +557,10 @@ function registerCommands(
     },
   });
   registerRoomProtectedPathsCommand(dispatcher);
+  registerRoomHealthSettingsCommand(dispatcher, {
+    allowedImages: config.healthImages,
+    defaultImage: DEFAULT_HEALTH_IMAGE,
+  });
   registerInviteCommands(dispatcher);
   registerJoinCommand(dispatcher);
   registerCapabilityCommands(dispatcher);

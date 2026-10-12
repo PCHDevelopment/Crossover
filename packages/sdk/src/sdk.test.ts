@@ -32,7 +32,13 @@ describe("typed API", () => {
     await api.tasks.create({ title: "t" });
     await api.workspace.health.get();
     await api.room.events.list({ after: 0 });
-    expect(calls).toEqual(["tasks.create", "workspace.health.get", "room.events.list"]);
+    await api.room.set_health({ health_command: "npm test", health_image: null });
+    expect(calls).toEqual([
+      "tasks.create",
+      "workspace.health.get",
+      "room.events.list",
+      "room.set_health",
+    ]);
     expect((api as unknown as Record<string, unknown>)["nonsense"]).toBeUndefined();
     expect((api.tasks as unknown as Record<string, unknown>)["nonsense"]).toBeUndefined();
   });

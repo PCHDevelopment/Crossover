@@ -206,6 +206,29 @@ describe.skipIf(!executablePath && !inCi)("web app in a browser", () => {
       .poll(async () => page.getByTestId("health-command-suggestion").textContent())
       .toContain("npm run typecheck && npm test");
 
+    const readHealthSettings = async () =>
+      (
+        await owner.api.room.get_state<{
+          sections: { room: { settings: Record<string, unknown> | null } };
+        }>()
+      ).response.sections.room.settings;
+    await page.getByTestId("health-use-suggestion").click();
+    await expect
+      .poll(async () => (await readHealthSettings())?.health_command)
+      .toBe("npm run typecheck && npm test");
+    await page.getByTestId("health-command").fill("node --check package.json");
+    await page.getByTestId("health-image").fill("");
+    await page.getByTestId("health-save").click();
+    await expect
+      .poll(async () => (await readHealthSettings())?.health_command)
+      .toBe("node --check package.json");
+    await expect
+      .poll(async () => (await readHealthSettings())?.health_image)
+      .toBe("node:22-bookworm-slim");
+    await expect.poll(() => page.getByTestId("health-clear").isEnabled()).toBe(true);
+    await page.getByTestId("health-clear").click();
+    await expect.poll(async () => (await readHealthSettings())?.health_command).toBe(null);
+
     await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
     await page.getByTestId("invite-create").click();
     await expect.poll(async () => page.getByTestId("invite-token").count()).toBe(1);
@@ -465,6 +488,9 @@ describe.skipIf(!executablePath && !inCi)("web app in a browser", () => {
     await expect.poll(() => page.getByTestId("owner-room-status").textContent()).toBe("ACTIVE");
     expect(confirmationMessages).toEqual(
       expect.arrayContaining([
+        expect.stringContaining("Use this command for room health checks?"),
+        "Save the room health settings?",
+        "Clear the room health command?",
         expect.stringContaining("registry.acme.test, *.packages.example"),
         expect.stringContaining("infra/release/**, .github/workflows/**"),
         expect.stringContaining("Grant tasks.create to ObserverAgent with approval required"),
@@ -1314,10 +1340,7 @@ describe.skipIf(!executablePath && !inCi)("web app in a browser", () => {
       url: "https://github.com/acme/widgets",
       branch: "main",
     });
-    await db.pool.query("UPDATE rooms SET settings = settings || $2::jsonb WHERE id = $1", [
-      roomId,
-      JSON.stringify({ health_command: "node --check broken.js" }),
-    ]);
+    await owner.api.room.set_health({ health_command: "node --check broken.js" });
     await owner.api.workspace.apply_changeset({
       source: "API",
       message: "Add a syntax error to trigger the health notice",

@@ -66,6 +66,7 @@ METHODS: dict[str, bool] = {
     "room.invite": True,
     "room.resume": True,
     "room.set_egress_allowlist": True,
+    "room.set_health": True,
     "room.set_lead": True,
     "room.set_protected_paths": True,
     "room.transfer_lead": True,
