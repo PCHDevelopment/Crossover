@@ -582,21 +582,21 @@ function registerWebDemoFlow(fixture: WebFixture): void {
         expect(submitted.counterparty_changesets.length).toBeGreaterThan(0);
       });
 
-      // 12. C syncs, fails two racing resolutions, and ArchitectAgent resolves in the browser.
+      // 12. C syncs, misses two concurrent agent edits, then the lead resolves through MCP.
       await demoStep(
-        "step 12: Agent C syncs, two resolutions escalate, and the lead resolves in MergeView",
+        "step 12: Agent C syncs, two stale resolutions escalate, and the lead resolves through MCP",
         async () => {
           const synced = (await agentC.room.api.sandbox.sync<{ synced_to: number }>({})).response;
           expect(synced.synced_to).toBeGreaterThan(afterAgentA!.workspace_revision - 1);
 
           const raceOneContent = afterAgentA!.content.replace(":agent-a`", ":agent-a:peter-one`");
           const raceOne = (
-            await owner.api.workspace.apply_changeset<{
+            await agentB.room.api.workspace.apply_changeset<{
               status: string;
               applied_revision: number;
             }>({
               source: "API",
-              message: "Peter updates the token while C resolves",
+              message: "Agent B updates the token while C resolves",
               base_workspace_revision: afterAgentA!.workspace_revision,
               base_file_revisions: { "src/auth.js": afterAgentA!.file_revision },
               operations: [{ type: "modify", path: "src/auth.js", content: raceOneContent }],
@@ -625,18 +625,18 @@ function registerWebDemoFlow(fixture: WebFixture): void {
           expect(failedOne.status).toBe("CONFLICT");
           expect(failedOne.conflict_id).toBe(conflictId);
 
-          const afterRaceOne = await workspaceFile(owner, "src/auth.js");
+          const afterRaceOne = await workspaceFile(agentA.room, "src/auth.js");
           const raceTwoContent = afterRaceOne.content.replace(
             ":agent-a:peter-one`",
             ":agent-a:peter-two`",
           );
           const raceTwo = (
-            await owner.api.workspace.apply_changeset<{
+            await agentA.room.api.workspace.apply_changeset<{
               status: string;
               applied_revision: number;
             }>({
               source: "API",
-              message: "Peter updates the token again while C resolves",
+              message: "Agent A updates the token again while C resolves",
               base_workspace_revision: afterRaceOne.workspace_revision,
               base_file_revisions: { "src/auth.js": afterRaceOne.file_revision },
               operations: [{ type: "modify", path: "src/auth.js", content: raceTwoContent }],
@@ -668,13 +668,20 @@ function registerWebDemoFlow(fixture: WebFixture): void {
           expect(failedTwo.status).toBe("CONFLICT");
           expect(failedTwo.conflict_id).toBe(conflictId);
 
-          const leadInbox = (
-            await architect.room.api.inbox.list<{
-              items: { kind: string; ref: { kind: string; id: string } }[];
-            }>({ unacked_only: true })
-          ).response.items;
+          const conflict = await callMcp<{ status: string; attempts: number }>(
+            mcp!,
+            "conflicts_get",
+            { conflict_id: conflictId },
+          );
+          expect(conflict.status).toBe("ESCALATED");
+          expect(conflict.attempts).toBe(2);
+          const leadInbox = await callMcp<{
+            items: { kind: string; ref: { kind: string; id: string } }[];
+          }>(mcp!, "inbox_list", { unacked_only: true });
           expect(
-            leadInbox.some((item) => item.kind === "ESCALATION" && item.ref.id === conflictId),
+            leadInbox.items.some(
+              (item) => item.kind === "ESCALATION" && item.ref.id === conflictId,
+            ),
           ).toBe(true);
 
           await page.getByTestId("tab-changes").click();
@@ -684,17 +691,30 @@ function registerWebDemoFlow(fixture: WebFixture): void {
             () => conflictRow.getAttribute("data-status"),
             (status) => status === "ESCALATED",
           );
-          await conflictRow.getByRole("button", { name: "Details" }).click();
-          await page.getByRole("heading", { name: `Conflict ${conflictId}` }).waitFor();
-          await page.getByRole("button", { name: "Resolve in MergeView" }).click();
-          await page.getByTestId("merge-view").waitFor();
-          await page.getByTestId("take-theirs").click();
-          await page.getByTestId("merge-submit").click();
-          await page.getByTestId("merge-view").waitFor({ state: "detached" });
-          const resolved = await architect.room.api.conflicts.get<{ status: string }>({
+          const afterRaceTwo = await workspaceFile(agentB.room, "src/auth.js");
+          const resolutionContent = afterRaceTwo.content;
+          const resolution = await callMcp<{ status: string; applied_revision: number }>(
+            mcp!,
+            "apply_changeset",
+            {
+              source: "RESOLUTION",
+              conflict_id: conflictId,
+              message: "ArchitectAgent resolves Agent C's conflict",
+              base_workspace_revision: afterRaceTwo.workspace_revision,
+              base_file_revisions: { "src/auth.js": afterRaceTwo.file_revision },
+              operations: [{ type: "modify", path: "src/auth.js", content: resolutionContent }],
+            },
+          );
+          expect(resolution.status).toBe("APPLIED");
+          const resolvedConflict = await callMcp<{ status: string }>(mcp!, "conflicts_get", {
             conflict_id: conflictId,
           });
-          expect(resolved.response.status).toBe("RESOLVED");
+          expect(resolvedConflict.status).toBe("RESOLVED");
+          await waitForStep(
+            "step 12: the browser observes Agent C's resolved conflict leave the open list",
+            async () => conflictRow.count(),
+            (count) => count === 0,
+          );
         },
         120_000,
       );
