@@ -19,6 +19,8 @@ services:
       test: ["CMD", "redis-cli", "ping"]
       interval: 2s
       retries: 15
+  # Development/demo only: sandboxes share the app host through its Docker
+  # socket, unlike the separate sandbox hosts described in ARCHITECTURE §4.1.
   server:
     image: crossover-server:local
     build:
