@@ -275,7 +275,7 @@ describe("egress visibility conformance (§34.5)", () => {
     }
     expect(problems).toEqual([]);
     expect(ownerSaw, "control: the owner sees the denied path in room.events.list").toBe(true);
-  });
+  }, 30_000); // one request per read command: grows with every read, and CI runs several jobs at once
 
   it("the WebSocket stream, backfill and live: B never receives it, the owner does (control)", async () => {
     const f = await fixture();
