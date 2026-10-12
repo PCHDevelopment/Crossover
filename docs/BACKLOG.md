@@ -10,23 +10,23 @@ Conventions are in `docs/ENGINEERING.md`. Section references (§) point to `docs
 
 ## Ownership at a glance
 
-| Milestone                             | Tasks       | Owner                                                                      |
-| ------------------------------------- | ----------- | -------------------------------------------------------------------------- |
-| M0 Foundation                         | T000        | O1                                                                         |
-| M1 Persistence, ledger, commands      | T101–T118   | S1                                                                         |
-| M2 Rooms, participants, auth, policy  | T201–T215   | S1                                                                         |
-| M3 Tasks                              | T301–T312   | S1                                                                         |
-| M4 Messages, inbox, decisions, memory | T401–T412   | S1 (moved from S2 for T404–T409, T411–T412 in Review 3)                    |
-| M5 Workspace engine                   | T501–T520   | S2                                                                         |
-| M6 Conflicts and health               | T601–T610   | S2                                                                         |
-| M7 Gateway, MCP, end-to-end           | T701–T713   | S1 (T701–T709, T713), S2 (T710), Q1 (T705, T711), O1 (T712)                |
-| M8 Git interoperability (§24)         | T801–T807   | S1 (moved from S2 in Review 4)                                             |
-| M9 Safety controls (§22–23)           | T901–T906   | S1 (T904–T906), Q1 (T901–T902), S2 (T903)                                  |
-| M10 Execution sandboxes (§14)         | T1001–T1008 | S2 (T1007 split into T1007 + T1007b in Review 5)                           |
-| M11 Clients (§27, §29)                | T1101–T1106 | S1 (T1102 → Q1)                                                            |
-| M12 Plugins (§21.4–21.5)              | T1201–T1206 | S1 (T1201, moved in Review 5), S2 (T1202–T1206)                            |
-| M13 Lessons from building (§34)       | T1301–T1303 | S1                                                                         |
-| M14 Demo-ready web app (Review 7)     | T1401–T1407 | S2 (T1401, T1403, T1405, T1407), Q1 (T1402), next free (T1404), O1 (T1406) |
+| Milestone                             | Tasks       | Owner                                                       |
+| ------------------------------------- | ----------- | ----------------------------------------------------------- |
+| M0 Foundation                         | T000        | O1                                                          |
+| M1 Persistence, ledger, commands      | T101–T118   | S1                                                          |
+| M2 Rooms, participants, auth, policy  | T201–T215   | S1                                                          |
+| M3 Tasks                              | T301–T312   | S1                                                          |
+| M4 Messages, inbox, decisions, memory | T401–T412   | S1 (moved from S2 for T404–T409, T411–T412 in Review 3)     |
+| M5 Workspace engine                   | T501–T520   | S2                                                          |
+| M6 Conflicts and health               | T601–T610   | S2                                                          |
+| M7 Gateway, MCP, end-to-end           | T701–T713   | S1 (T701–T709, T713), S2 (T710), Q1 (T705, T711), O1 (T712) |
+| M8 Git interoperability (§24)         | T801–T807   | S1 (moved from S2 in Review 4)                              |
+| M9 Safety controls (§22–23)           | T901–T906   | S1 (T904–T906), Q1 (T901–T902), S2 (T903)                   |
+| M10 Execution sandboxes (§14)         | T1001–T1008 | S2 (T1007 split into T1007 + T1007b in Review 5)            |
+| M11 Clients (§27, §29)                | T1101–T1106 | S1 (T1102 → Q1)                                             |
+| M12 Plugins (§21.4–21.5)              | T1201–T1206 | S1 (T1201, moved in Review 5), S2 (T1202–T1206)             |
+| M13 Lessons from building (§34)       | T1301–T1303 | S1                                                          |
+| M14 Demo-ready web app (Review 7)     | T1401–T1407 | S2 (T1401, T1403–T1407), Q1 (T1402)                         |
 
 **Start here:** S1 → T101, T105, T114 (independent). S2 → T501, T505 (only need the scaffold).
 
@@ -1361,7 +1361,7 @@ Tests:
 - An agent's conflict is escalated and resolved by the lead.
 - A held ChangeSet is approved.
 
-### T1404 · Owner controls — S1 (or next free)
+### T1404 · Owner controls — S2
 
 Deps: T1104 · Migration: —
 
@@ -1395,7 +1395,7 @@ Tests:
 - A browser test: approve a task, checkpoint, export.
 - With a fake GitHub integration, the PR link appears.
 
-### T1406 · §30 demo acceptance test — O1
+### T1406 · §30 demo acceptance test — S2
 
 Deps: — (grows with T1401–T1405) · Migration: —
 
