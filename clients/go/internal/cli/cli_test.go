@@ -258,6 +258,23 @@ func TestRetryableErrorHonorsRetryAfterAndReusesCommandEnvelope(t *testing.T) {
 	}
 }
 
+func TestRetryAfterWaitIsCappedAtSixtySeconds(t *testing.T) {
+	body := []byte(`{"error":{"code":"RATE_LIMITED","message":"slow down","retryable":true,"details":{"retry_after":120}}}`)
+	apiErr := parseProtocolError(http.StatusTooManyRequests, body)
+	if apiErr.retryAfter != maxRetryAfter {
+		t.Fatalf("details retry_after = %s, want cap %s", apiErr.retryAfter, maxRetryAfter)
+	}
+	applyRetryAfter(apiErr, "300")
+	if apiErr.retryAfter != maxRetryAfter {
+		t.Fatalf("header retry_after = %s, want cap %s", apiErr.retryAfter, maxRetryAfter)
+	}
+
+	date := time.Now().Add(5 * time.Minute).UTC().Format(http.TimeFormat)
+	if got := parseRetryAfter(date); got != maxRetryAfter {
+		t.Fatalf("date Retry-After = %s, want cap %s", got, maxRetryAfter)
+	}
+}
+
 func TestLoginRedactsSessionTokenFromAPIError(t *testing.T) {
 	const session = "session-secret-in-error"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

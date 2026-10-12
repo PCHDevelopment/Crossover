@@ -211,10 +211,16 @@ class Client {
   closeCode: number | undefined;
   private waiters: (() => void)[] = [];
   readonly sock: WebSocket;
-  constructor(url: string, token?: string) {
+  constructor(
+    url: string,
+    token?: string,
+    private readonly autoPong = true,
+  ) {
     this.sock = new WebSocket(url, token ? { headers: { authorization: `Bearer ${token}` } } : {});
     this.sock.on("message", (d) => {
-      this.frames.push(JSON.parse(d.toString()));
+      const frame = JSON.parse(d.toString()) as Frame;
+      this.frames.push(frame);
+      if (this.autoPong && frame.type === "ping") this.send({ type: "pong", id: frame.id });
       this.wake();
     });
     this.sock.on("close", (code) => {
@@ -272,8 +278,12 @@ const cmd = (method: string, params: Frame = {}, extra: Frame = {}): Frame => ({
   ...extra,
 });
 
-async function ready(env: Env, token: string = env.owner.access_token): Promise<Client> {
-  const c = new Client(env.url(env.room), token);
+async function ready(
+  env: Env,
+  token: string = env.owner.access_token,
+  autoPong = true,
+): Promise<Client> {
+  const c = new Client(env.url(env.room), token, autoPong);
   await c.open();
   c.send(hello());
   await c.frame("hello_ok");
@@ -428,6 +438,29 @@ describe("hello and negotiation (§16.4)", () => {
     const env = await setup({ helloTimeoutMs: 100 });
     const c = new Client(env.url(env.room), env.owner.access_token);
     await c.open();
+    expect(await c.closed()).toBe(4408);
+  });
+
+  it("pings live connections and resets missed-pong tracking for the matching id", async () => {
+    const env = await setup({ pingIntervalMs: 20, missedPongLimit: 2 });
+    const c = await ready(env, undefined, false);
+    let from = c.frames.length;
+    const first = await c.frame("ping", from);
+    expect(first.id).toBeTypeOf("string");
+    from = c.frames.length;
+    const second = await c.frame("ping", from);
+    c.send({ type: "pong", id: second.id });
+    from = c.frames.length;
+    const third = await c.frame("ping", from);
+    expect(third.id).not.toBe(second.id);
+    expect(c.closeCode).toBeUndefined();
+  });
+
+  it("closes an unresponsive connection with TIMEOUT after two missed pongs", async () => {
+    const env = await setup({ pingIntervalMs: 20, missedPongLimit: 2 });
+    const c = await ready(env, undefined, false);
+    await c.frame("ping");
+    await c.frame("ping", c.frames.length);
     expect(await c.closed()).toBe(4408);
   });
 

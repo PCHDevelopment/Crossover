@@ -18,6 +18,7 @@ import (
 const (
 	protocolVersion = 1
 	clientVersion   = "0.1.0"
+	wsReadTimeout   = 50 * time.Second
 )
 
 func (a *app) events(args []string) error {
@@ -169,6 +170,7 @@ func (a *app) streamOnce(cursor *int64) (retry bool, err error) {
 		return true, transportError("subscribe to events: " + err.Error())
 	}
 	for {
+		_ = conn.SetReadDeadline(time.Now().Add(wsReadTimeout))
 		var frame map[string]json.RawMessage
 		if err := conn.ReadJSON(&frame); err != nil {
 			if a.ctx.Err() != nil {
@@ -180,6 +182,9 @@ func (a *app) streamOnce(cursor *int64) (retry bool, err error) {
 			if closeCode(err) == 4409 {
 				return true, nil
 			}
+			if closeCode(err) == 4408 {
+				return true, nil
+			}
 			return true, transportError("event stream disconnected: " + err.Error())
 		}
 		var frameType string
@@ -189,6 +194,17 @@ func (a *app) streamOnce(cursor *int64) (retry bool, err error) {
 		switch frameType {
 		case "subscribed", "pong":
 			continue
+		case "ping":
+			var id string
+			if len(frame["id"]) == 0 || json.Unmarshal(frame["id"], &id) != nil || id == "" {
+				return false, malformedError("WebSocket ping has no id")
+			}
+			if err := conn.WriteJSON(map[string]string{"type": "pong", "id": id}); err != nil {
+				if a.ctx.Err() != nil {
+					return false, nil
+				}
+				return true, transportError("reply to WebSocket ping: " + err.Error())
+			}
 		case "resync_required":
 			return true, nil
 		case "error":

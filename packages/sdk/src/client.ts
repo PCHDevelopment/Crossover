@@ -21,6 +21,8 @@ export interface ClientOptions {
   /** Sent in the WebSocket `hello`. */
   clientName?: string;
   clientVersion?: string;
+  /** Reconnect when a WebSocket receives no server frames for this long. Default 50000 ms. */
+  webSocketReadTimeoutMs?: number;
 }
 
 /** A user's session, from signing in. */
@@ -243,6 +245,7 @@ export class RoomClient {
       WebSocket,
       client: o.clientName,
       clientVersion: o.clientVersion,
+      readTimeoutMs: o.webSocketReadTimeoutMs ?? 50_000,
     };
   }
 

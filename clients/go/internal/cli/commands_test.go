@@ -183,6 +183,23 @@ func TestEventTailReconnectsFromLastDeliveredSequence(t *testing.T) {
 		subscribed = append(subscribed, subscribe.After)
 		mu.Unlock()
 		n := attempt.Add(1)
+		if err := conn.WriteJSON(map[string]string{"type": "ping", "id": "ping-1"}); err != nil {
+			return
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+		var pong struct {
+			Type string `json:"type"`
+			ID   string `json:"id"`
+		}
+		if err := conn.ReadJSON(&pong); err != nil {
+			t.Errorf("read pong: %v", err)
+			return
+		}
+		if pong.Type != "pong" || pong.ID != "ping-1" {
+			t.Errorf("pong = %#v", pong)
+			return
+		}
+		_ = conn.SetReadDeadline(time.Time{})
 		if n == 1 {
 			_ = writeFixtureFrame(t, conn, "ws-subscribed.json", map[string]any{"after": subscribe.After, "last_sequence": 7})
 			_ = writeFixtureFrame(t, conn, "ws-event-7.json", nil)
