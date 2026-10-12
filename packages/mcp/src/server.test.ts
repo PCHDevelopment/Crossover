@@ -764,6 +764,12 @@ describe("MCP task tools (T708)", () => {
 });
 
 describe("MCP plugin, edit-intent and workspace tools (T1501)", () => {
+  const expectFramed = (result: unknown, tool: string) => {
+    const text = (result as { content?: { text?: string }[] }).content?.[0]?.text;
+    expect(text).toContain(`Data returned by ${tool}:`);
+    expect(text).toContain(`<data trust="participant" tool="${tool}" id="`);
+  };
+
   const methods = [
     "tools.list",
     "tools.invoke",
@@ -823,6 +829,7 @@ describe("MCP plugin, edit-intent and workspace tools (T1501)", () => {
     const agent = await connect(s.url, s.agent.access_token);
 
     const listed = await agent.callTool({ name: "tools_list", arguments: {} });
+    expectFramed(listed, "tools_list");
     expect(structured(listed).tools).toEqual([
       expect.objectContaining({ name: "test.echo", capability: "github.read_repository" }),
     ]);
@@ -831,6 +838,7 @@ describe("MCP plugin, edit-intent and workspace tools (T1501)", () => {
       arguments: { tool: "test.echo", args: { repo: "org/repo", message: "hello" } },
     });
     expect(invoked.isError).toBeFalsy();
+    expectFramed(invoked, "tools_invoke");
     expect(structured(invoked)).toMatchObject({
       tool: "test.echo",
       result: { tool: "test.echo", args: { repo: "org/repo", message: "hello" } },
@@ -857,6 +865,7 @@ describe("MCP plugin, edit-intent and workspace tools (T1501)", () => {
       name: "workspace_history",
       arguments: { path: "src/auth.ts" },
     });
+    expectFramed(history, "workspace_history");
     expect(structured(history).entries).toEqual(
       expect.arrayContaining([expect.objectContaining({ workspace_revision: 1 })]),
     );
@@ -864,6 +873,7 @@ describe("MCP plugin, edit-intent and workspace tools (T1501)", () => {
       name: "workspace_blame",
       arguments: { path: "src/auth.ts" },
     });
+    expectFramed(blame, "workspace_blame");
     expect(structured(blame)).toMatchObject({
       line_count: 2,
       ranges: [expect.objectContaining({ start: 1, end: 3, actor_id: s.agentId })],
@@ -877,9 +887,11 @@ describe("MCP plugin, edit-intent and workspace tools (T1501)", () => {
       },
     });
     expect(intent.isError).toBeFalsy();
+    expectFramed(intent, "presence_set_intent");
     expect(structured(intent).expires_at).toEqual(expect.any(String));
     const cleared = await agent.callTool({ name: "presence_clear_intent", arguments: {} });
     expect(cleared.isError).toBeFalsy();
+    expectFramed(cleared, "presence_clear_intent");
     expect(structured(cleared)).toEqual({ cleared: true });
   });
 });
