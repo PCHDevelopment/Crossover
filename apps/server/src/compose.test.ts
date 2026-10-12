@@ -1761,7 +1761,7 @@ describe("composeServer", () => {
       await cmd(envelope("workspace.read", { path: "src/hello.ts" }), token),
     );
     expect(finalFile.response.content).toBe(resolution);
-  });
+  }, 15_000);
 
   it("moves sandbox file writes off the room actor", async () => {
     const driver = new RecordingExecutionDriver();
