@@ -50,6 +50,7 @@ type app struct {
 	roomID           string
 	client           *apiClient
 	transientSecrets []string
+	streamCredential RoomTokens
 }
 
 // Run executes the room CLI and returns its documented process status. configOverride is
@@ -131,6 +132,9 @@ const usage = `room - Crossover collaboration CLI
 Usage:
   room login --server URL --session-token-stdin
   room join ROOM_ID --invite-token-stdin --manifest FILE
+  room --room ROOM_ID tasks COMMAND
+  room --room ROOM_ID workspace COMMAND
+  room --room ROOM_ID events tail [--after SEQUENCE]
 
 Global options --server URL and --room ROOM_ID may appear before or after the command.
 Use --help with any command for its flags. API results are JSON on stdout; errors are on stderr.
@@ -183,6 +187,12 @@ func (a *app) dispatch(args []string) error {
 		return a.login(args[1:])
 	case "join":
 		return a.join(args[1:])
+	case "tasks":
+		return a.tasks(args[1:])
+	case "workspace":
+		return a.workspace(args[1:])
+	case "events":
+		return a.events(args[1:])
 	case "--help", "-h", "help":
 		_, _ = io.WriteString(a.stdout, usage)
 		return nil
