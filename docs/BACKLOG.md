@@ -26,7 +26,7 @@ Conventions are in `docs/ENGINEERING.md`. Section references (§) point to `docs
 | M11 Clients (§27, §29)                | T1101–T1106 | S1 (T1102 → Q1)                                             |
 | M12 Plugins (§21.4–21.5)              | T1201–T1206 | S1 (T1201, moved in Review 5), S2 (T1202–T1206)             |
 | M13 Lessons from building (§34)       | T1301–T1303 | S1                                                          |
-| M14 Demo-ready web app (Review 7)     | T1401–T1407 | S2 (T1401, T1403–T1407), Q1 (T1402)                         |
+| M14 Demo-ready web app (Review 7)     | T1401–T1407 | S2 (T1401–T1407; T1402 moved from Q1)                       |
 
 **Start here:** S1 → T101, T105, T114 (independent). S2 → T501, T505 (only need the scaffold).
 
@@ -1329,7 +1329,7 @@ Tests:
 - A browser test covers import, invite and appointment end to end.
 - The invite token never appears in Activity or in a second view.
 
-### T1402 · Inbox, decisions and memory panels — Q1
+### T1402 · Inbox, decisions and memory panels — S2 (moved from Q1)
 
 Deps: T1104 · Migration: —
 
