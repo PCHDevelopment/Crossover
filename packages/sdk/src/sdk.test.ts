@@ -130,6 +130,27 @@ describe("REST transport", () => {
     expect(calls).toBe(1);
   });
 
+  it("retries a network-aborted mutation with the same idempotency key", async () => {
+    const bodies: string[] = [];
+    let attempts = 0;
+    const room = clientWith(
+      async (_url, init) => {
+        bodies.push(String(init?.body));
+        if (attempts++ === 0) throw new DOMException("network changed", "AbortError");
+        return ok({ done: true });
+      },
+      {},
+      2,
+    ).room("room_1", "tok");
+
+    const result = await room.api.messages.send({ body: "once" });
+
+    expect(result.response).toEqual({ done: true });
+    expect(bodies).toHaveLength(2);
+    expect(bodies[1]).toBe(bodies[0]);
+    expect(JSON.parse(bodies[0]!).idempotency_key).toBeTypeOf("string");
+  });
+
   it("gives up after the attempts it was told, as a retryable TransportError; a 202 gate is an error with its details", async () => {
     const down = clientWith(async () => {
       throw new TypeError("fetch failed");
