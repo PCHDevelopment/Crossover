@@ -26,7 +26,7 @@ Conventions are in `docs/ENGINEERING.md`. Section references (§) point to `docs
 | M11 Clients (§27, §29)                | T1101–T1106 | S1 (T1102 → Q1)                                             |
 | M12 Plugins (§21.4–21.5)              | T1201–T1206 | S1 (T1201, moved in Review 5), S2 (T1202–T1206)             |
 | M13 Lessons from building (§34)       | T1301–T1303 | S1                                                          |
-| M14 Demo-ready web app (Review 7)     | T1401–T1413 | S2 (T1401–T1413; T1402 moved from Q1)                       |
+| M14 Demo-ready web app (Review 7)     | T1401–T1414 | S2 (T1401–T1414; T1402 moved from Q1)                       |
 
 **Start here:** S1 → T101, T105, T114 (independent). S2 → T501, T505 (only need the scaffold).
 
@@ -1479,5 +1479,18 @@ Tests:
 - `local|null` with no required options passes.
 - `local|null` with required `SANDBOX_VOLUME_OPTS` is still rejected by `assertHardVolume`.
 - `local|[]` is rejected.
+
+Must merge before T1406.
+
+### T1414 · Server shutdown waits on lease renewals queued behind busy room actors — S2
+
+`LeaseRenewer.stop()` (`packages/kernel/src/lease-renewer.ts`) awaits the in-flight renewal pass. Each renewal is submitted to its room's actor queue, so a room busy with a long command (a sandbox exec, for example) holds shutdown until that command finishes. T1406's teardown found it: `composeServer.close` stalled at `renewer.stop()`.
+
+- Confirm the cause first.
+- Make `stop()` independent of other actor work: abort or skip renewals still queued, or bound the wait. `close()` must still release every lease.
+
+Tests:
+
+- A kernel unit test with a blocked room actor shows `stop()` returns promptly and `close()` still releases every lease.
 
 Must merge before T1406.
