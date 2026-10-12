@@ -3,7 +3,7 @@ import { deliverInbox, type Dispatcher, type EmittedEvent } from "@crossover/ker
 import { CrossoverError } from "@crossover/protocol";
 import { z } from "zod";
 
-const abandonParamsSchema = z.strictObject({ conflict_id: z.string().min(1) });
+export const conflictsActionParamsSchema = z.strictObject({ conflict_id: z.string().min(1) });
 
 interface EscalationTarget {
   id: string;
@@ -63,7 +63,7 @@ export function registerWorkspaceConflictActions(dispatcher: Dispatcher): void {
     method: "conflicts.escalate",
     action: "conflicts.escalate",
     mutating: true,
-    params: abandonParamsSchema,
+    params: conflictsActionParamsSchema,
     execute: async (ctx, params) => {
       const { rows } = await ctx.client.query<
         EscalationTarget & {
@@ -115,7 +115,7 @@ export function registerWorkspaceConflictActions(dispatcher: Dispatcher): void {
     method: "conflicts.abandon",
     action: "conflicts.abandon",
     mutating: true,
-    params: abandonParamsSchema,
+    params: conflictsActionParamsSchema,
     execute: async (ctx, params) => {
       const { rows } = await ctx.client.query<{
         id: string;

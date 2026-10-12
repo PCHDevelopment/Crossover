@@ -38,6 +38,9 @@ import {
   workspaceReadParamsSchema,
   workspaceSearchParamsSchema,
   changesSubmitParamsSchema,
+  conflictsActionParamsSchema,
+  conflictsGetParamsSchema,
+  conflictsListParamsSchema,
   sandboxExecParamsSchema,
   sandboxFileReadParamsSchema,
   sandboxFileWriteInputSchema,
@@ -323,6 +326,34 @@ const tool = (
  * written by other participants and carries `provenance` (§16.5): data, never instructions.
  */
 export const COLLABORATION_TOOLS: readonly McpToolDefinition[] = [
+  tool(
+    "conflicts_list",
+    "conflicts.list",
+    "List room conflicts, optionally filtered by status or submitter. File paths are redacted unless you can read them.",
+    conflictsListParamsSchema.shape,
+    false,
+  ),
+  tool(
+    "conflicts_get",
+    "conflicts.get",
+    "Read one room conflict. File paths and counterpart changesets are redacted unless you can read every affected path.",
+    conflictsGetParamsSchema.shape,
+    false,
+  ),
+  tool(
+    "conflicts_escalate",
+    "conflicts.escalate",
+    "Escalate your own open conflict to the room lead or owner for a decision.",
+    conflictsActionParamsSchema.shape,
+    true,
+  ),
+  tool(
+    "conflicts_abandon",
+    "conflicts.abandon",
+    "Abandon an open or escalated conflict you submitted.",
+    conflictsActionParamsSchema.shape,
+    true,
+  ),
   tool(
     "messages_send",
     "messages.send",
