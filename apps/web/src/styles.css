@@ -70,6 +70,19 @@ input {
   background: var(--bg);
   color: inherit;
 }
+textarea {
+  display: block;
+  width: 100%;
+  padding: 8px;
+  margin-top: 4px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  color: inherit;
+  font: inherit;
+  min-height: 72px;
+  resize: vertical;
+}
 button {
   padding: 6px 12px;
   border: 1px solid var(--line);
@@ -122,6 +135,31 @@ button.link {
   display: flex;
   gap: 8px;
   margin: 12px 0;
+  overflow-x: auto;
+}
+.delivery-section {
+  padding-top: 8px;
+  margin-top: 20px;
+  border-top: 1px solid var(--line);
+}
+.delivery-card {
+  padding: 12px;
+  margin: 10px 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.delivery-card h4 {
+  margin: 0;
+}
+.delivery-card ol {
+  padding-left: 24px;
+}
+.delivery-card ol > li {
+  padding: 6px 0;
+}
+.delivery-actions {
+  display: flex;
+  gap: 8px;
 }
 table {
   width: 100%;

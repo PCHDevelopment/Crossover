@@ -220,6 +220,91 @@ describe.skipIf(!executablePath && !inCi)("web app in a browser", () => {
     await page.getByTestId("login-name").waitFor();
   }, 120_000);
 
+  it("shows task evidence and missing requirements so the lead can review the task", async () => {
+    const page = await browser!.newPage();
+    const problems: string[] = [];
+    page.on("pageerror", (error) => problems.push(`pageerror: ${error.message}`));
+    page.on("console", (entry) => {
+      if (entry.type() === "error") problems.push(`console: ${entry.text()}`);
+    });
+
+    await page.goto(baseUrl);
+    await page.getByTestId("login-name").fill("Peter");
+    await page.getByTestId("login-submit").click();
+    await page.getByTestId("room-name").fill("Task Review");
+    await page.getByTestId("room-objective").fill("Review evidence and export a checkpoint");
+    await page.getByTestId("room-create").click();
+    await expect.poll(async () => page.getByTestId("room-title").textContent()).toBe("Task Review");
+    const roomId = /\/rooms\/([^/]+)/.exec(new URL(page.url()).pathname)![1]!;
+
+    const client = new CrossoverClient({ baseUrl });
+    const login = await client.devLogin({ subject: "Peter", display_name: "Peter" });
+    const owner: RoomClient = client.room(
+      roomId,
+      (await client.roomSession(login.session_token, roomId)).tokens.access_token,
+    );
+    const ownerId = (await db.pool.query("SELECT owner_id FROM rooms WHERE id = $1", [roomId]))
+      .rows[0].owner_id as string;
+    const invite = await owner.api.room.invite<unknown>({ role: "DEVELOPER" });
+    const joined = await client.join(roomId, {
+      token: (invite.one_time as { token: string }).token,
+      manifest: manifest("ReviewAgent"),
+    });
+    const agentId = (joined as unknown as { participant_id: string }).participant_id;
+    const agent = client.room(roomId, joined.tokens.access_token);
+    const task = (
+      await owner.api.tasks.create<{ id: string; version: number }>({
+        title: "Release note",
+        description: "Provide evidence for the implemented work.",
+        requirements: ["Unit tests pass", "Supply a release note"],
+        reviewer_id: ownerId,
+      })
+    ).response;
+    const assigned = (
+      await owner.api.tasks.assign<{ version: number }>({
+        task_id: task.id,
+        expected_version: task.version,
+        participant_id: agentId,
+      })
+    ).response;
+    const started = (
+      await agent.api.tasks.start<{ version: number }>({
+        task_id: task.id,
+        expected_version: assigned.version,
+      })
+    ).response;
+    await agent.api.tasks.submit({
+      task_id: task.id,
+      expected_version: started.version,
+      evidence: [{ requirement: 0, proof: [{ kind: "test", ref: "unit tests pass" }] }],
+    });
+
+    await page.getByTestId("tab-delivery").click();
+    const reviewTask = page.getByTestId("review-task");
+    await expect.poll(async () => reviewTask.textContent()).toContain("Release note");
+    await expect
+      .poll(async () => reviewTask.getByTestId("task-evidence").textContent())
+      .toContain("unit tests pass");
+    await expect
+      .poll(async () => reviewTask.getByTestId("task-missing-evidence").textContent())
+      .toContain("Missing evidence for: Supply a release note");
+    await reviewTask.getByTestId("review-comments").fill("Evidence checked.");
+    await reviewTask.getByTestId("approve-task").click();
+    await expect.poll(async () => page.getByTestId("review-task").count()).toBe(0);
+    await expect
+      .poll(async () => {
+        const page = await owner.api.tasks.list<{ tasks: { id: string; status: string }[] }>({
+          status: ["DONE"],
+          limit: 100,
+        });
+        return page.response.tasks.some((item) => item.id === task.id);
+      })
+      .toBe(true);
+
+    expect(problems).toEqual([]);
+    await page.close();
+  }, 120_000);
+
   it("the editor (T1105a): open a file from the tree, edits flush as EDITOR ChangeSets on idle and on Ctrl+S, and someone else's change replaces a clean buffer", async () => {
     const page: Page = await browser!.newPage();
     const problems: string[] = [];
