@@ -27,7 +27,7 @@ Conventions are in `docs/ENGINEERING.md`. Section references (§) point to `docs
 | M12 Plugins (§21.4–21.5)              | T1201–T1206 | S1 (T1201, moved in Review 5), S2 (T1202–T1206)             |
 | M13 Lessons from building (§34)       | T1301–T1303 | S1                                                          |
 | M14 Demo-ready web app (Review 7)     | T1401–T1416 | S2 (T1401–T1416; T1402 moved from Q1)                       |
-| M15 MVP scope gaps (§29, Review 10)   | T1501–T1513 | S2 (T1501–T1502, T1510–T1511, T1513 assigned; rest unassigned) |
+| M15 MVP scope gaps (§29, Review 10)   | T1501–T1514 | S2 (T1501–T1503, T1510–T1511, T1513–T1514; rest unassigned) |
 
 **Start here:** S1 → T101, T105, T114 (independent). S2 → T501, T505 (only need the scaffold).
 
@@ -1587,3 +1587,11 @@ T1417's second unidentified flake, now named (seq 1082): `apps/server/src/compos
 First seen on #237 (head 89e9ce0, CI run 38301197654, 2026-10-12 20:02 UTC), a change that touched only one test timeout. `apps/server/src/e2e/deploy-topology.test.ts` › "fetches a canonical workspace into a sandbox through the deployed server on crossover-git": `sandbox.exec` (test line 244) returned `500 {"code":"INTERNAL","message":"Internal error"}`. The same test passed on #234, #235 and #236. The server container's logs were not captured, so the cause is unknown.
 
 Step 1 (this task): print the server container's `docker logs` when the test fails, before cleanup. Step 2: when it recurs with logs, open a root-cause task. A 500 from the deployed server is a product bug until shown otherwise.
+
+Step 1 done in #238 (internal errors now logged). Likely root cause found while fixing #240 (2026-10-12 21:54): see T1514.
+
+### T1514 · Git listener binds to a nondeterministic address when GIT_INTERNAL_HOST is a hostname — S2
+
+A container on two networks (bridge and `crossover-git`) resolves its own hostname to whichever address `/etc/hosts` lists first. With `GIT_INTERNAL_HOST=<container name>`, the internal Git listener sometimes binds to the bridge IP, which sandbox fetchers on the internal `crossover-git` network cannot reach. Sandbox materialization then fails, which is the likely cause of T1513's intermittent `sandbox.exec` 500. `docker-compose.yml` has the same setting (`GIT_INTERNAL_HOST: crossover-server`).
+
+Fix it in the server: when `GIT_INTERNAL_HOST` is not an IP literal, resolve this container's address on `crossover-git` deterministically, by inspecting its own container (`GIT_INTERNAL_CONTAINER`) for `NetworkSettings.Networks["crossover-git"].IPAddress`. Fail startup if it has no address there. Then revert the deploy-topology fixture to the plain container name, so the test proves the product path.
