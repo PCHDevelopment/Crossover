@@ -83,6 +83,17 @@ textarea {
   min-height: 72px;
   resize: vertical;
 }
+select {
+  display: block;
+  width: 100%;
+  padding: 8px;
+  margin-top: 4px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  color: inherit;
+  font: inherit;
+}
 button {
   padding: 6px 12px;
   border: 1px solid var(--line);
@@ -160,6 +171,15 @@ button.link {
 .delivery-actions {
   display: flex;
   gap: 8px;
+}
+.inline-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.inline-option input {
+  width: auto;
+  margin: 0;
 }
 table {
   width: 100%;
