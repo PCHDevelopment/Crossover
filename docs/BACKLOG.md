@@ -26,7 +26,7 @@ Conventions are in `docs/ENGINEERING.md`. Section references (§) point to `docs
 | M11 Clients (§27, §29)                | T1101–T1106 | S1 (T1102 → Q1)                                             |
 | M12 Plugins (§21.4–21.5)              | T1201–T1206 | S1 (T1201, moved in Review 5), S2 (T1202–T1206)             |
 | M13 Lessons from building (§34)       | T1301–T1303 | S1                                                          |
-| M14 Demo-ready web app (Review 7)     | T1401–T1410 | S2 (T1401–T1410; T1402 moved from Q1)                       |
+| M14 Demo-ready web app (Review 7)     | T1401–T1412 | S2 (T1401–T1412; T1402 moved from Q1)                       |
 
 **Start here:** S1 → T101, T105, T114 (independent). S2 → T501, T505 (only need the scaffold).
 
@@ -1459,3 +1459,11 @@ Mapping the 17 §30 steps onto product actions on main 9f2d160 found two actions
 - **Step 4 (Peter takes the Developer role).** `apps/web` never calls `participants.set_role`. Add a role change to Owner controls for any participant, including the owner, with a confirmation that names the participant and the new role. Use the existing command only.
 
 Two small PRs. Both must merge before T1406.
+
+### T1411 · MergeView conflict count is intermittent — S2
+
+A local full `pnpm check` saw the web-editor merge-view browser test expect one conflict and get zero; an isolated rerun passed. Find the race, which is likely in the ordering between ChangeSet submission and the conflict read, fix it, and add a regression test. Must merge before T1406.
+
+### T1412 · Plugin-runner Docker cleanup is intermittent — S2
+
+A local full `pnpm check` saw the plugin-runner cleanup test find a leftover container. #213 made this test wait for asynchronous removal, so this is a second cause or an incomplete fix. Find it from the log and fix it. Must merge before T1406.
