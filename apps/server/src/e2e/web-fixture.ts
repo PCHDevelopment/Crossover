@@ -39,26 +39,36 @@ const runGit = (cwd: string, args: string[]) =>
 
 /** Ensure the shared DockerExecutionDriver network exists; parallel jobs may use it. */
 async function ensureGitNetwork(): Promise<void> {
-  const { stdout } = await execFileAsync(
-    "docker",
-    ["network", "ls", "--filter", `name=^${GIT_NETWORK}$`, "--format", "{{.Name}}"],
-    { timeout: 10_000 },
-  );
-  if (stdout.split(/\r?\n/).some((name) => name.trim() === GIT_NETWORK)) {
+  const assertInternal = async () => {
     const inspected = await execFileAsync(
       "docker",
       ["network", "inspect", "--format", "{{.Internal}}", GIT_NETWORK],
       { timeout: 10_000 },
     );
     if (inspected.stdout.trim() !== "true")
-      throw new Error(`The existing ${GIT_NETWORK} network is not internal`);
-    return;
-  }
-  await execFileAsync(
+      throw new Error("The existing " + GIT_NETWORK + " network is not internal");
+  };
+  const { stdout } = await execFileAsync(
     "docker",
-    ["network", "create", "--internal", "--label", "crossover.git=true", GIT_NETWORK],
+    ["network", "ls", "--filter", "name=^" + GIT_NETWORK + "$", "--format", "{{.Name}}"],
     { timeout: 10_000 },
   );
+  if (stdout.split(/\r?\n/).some((name) => name.trim() === GIT_NETWORK)) {
+    await assertInternal();
+    return;
+  }
+  try {
+    await execFileAsync(
+      "docker",
+      ["network", "create", "--internal", "--label", "crossover.git=true", GIT_NETWORK],
+      { timeout: 10_000 },
+    );
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    if (!detail.toLowerCase().includes("already exists")) throw error;
+  }
+  // Another worker may have created the network after our initial list.
+  await assertInternal();
 }
 
 /** Bridge only the host-bound Git listener hop; the production fetcher and HMAC remain real. */

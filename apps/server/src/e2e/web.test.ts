@@ -7,6 +7,7 @@ import {
 } from "./web-collaboration.js";
 import { registerWebEditorTests } from "./web-editor.js";
 import { registerWebFixture } from "./web-fixture.js";
+import { registerWebDemoFlow } from "./web-demo-flow.js";
 import { registerWebWorkspaceTests } from "./web-workspace.js";
 
 const fixture = registerWebFixture();
@@ -21,4 +22,5 @@ describe.skipIf(!fixture.executablePath && !fixture.inCi)("web app in a browser"
   registerWebEditorTests(fixture);
   registerWebWorkspaceTests(fixture);
   registerWebDecisionsAndInbox(fixture);
+  registerWebDemoFlow(fixture);
 });
