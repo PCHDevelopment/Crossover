@@ -24,13 +24,17 @@ const FilesView = lazy(() => import("./FilesView.js"));
 const ChangesView = lazy(() => import("./ChangesView.js"));
 const TaskReviewView = lazy(() => import("./TaskReviewView.js"));
 const CheckpointExportView = lazy(() => import("./CheckpointExportView.js"));
+const RoomSetupView = lazy(() =>
+  import("./RoomSetupView.js").then((m) => ({ default: m.RoomSetupView })),
+);
 
 const FEED_LIMIT = 200;
 const BACKLOG = 50;
 
-type Tab = "overview" | "tasks" | "activity" | "files" | "changes" | "delivery";
+type Tab = "overview" | "setup" | "tasks" | "activity" | "files" | "changes" | "delivery";
 const TABS: { id: Tab; label: string }[] = [
   { id: "overview", label: "Overview" },
+  { id: "setup", label: "Setup" },
   { id: "tasks", label: "Tasks" },
   { id: "activity", label: "Activity" },
   { id: "files", label: "Files" },
@@ -175,6 +179,10 @@ export function RoomView(props: {
   };
   const me = open.me;
   const mayControl = me.authority === "OWNER" || me.authority === "ADMIN" || me.role === "LEAD";
+  const mayImport = me.authority === "OWNER" || me.role === "LEAD";
+  const mayInvite = me.authority === "OWNER" || me.authority === "ADMIN";
+  const mayAppointLead = me.authority === "OWNER" || me.authority === "ADMIN";
+  const maySetup = mayImport || mayInvite || mayAppointLead;
 
   const control = async (p: Participant, method: "pause" | "resume") => {
     setNotice(undefined);
@@ -199,7 +207,7 @@ export function RoomView(props: {
         </span>
       </p>
       <nav className="tabs" role="tablist">
-        {TABS.map(({ id, label }) => (
+        {TABS.filter(({ id }) => id !== "setup" || maySetup).map(({ id, label }) => (
           <button
             key={id}
             role="tab"
@@ -284,6 +292,20 @@ export function RoomView(props: {
             ))}
           </div>
         </section>
+      )}
+      {tab === "setup" && maySetup && (
+        <Suspense fallback={<p className="muted">Loading project setup…</p>}>
+          <RoomSetupView
+            room={open.room}
+            roomId={roomId}
+            participants={participants}
+            leadParticipantId={room.lead_participant_id}
+            mayImport={mayImport}
+            mayInvite={mayInvite}
+            mayAppointLead={mayAppointLead}
+            onEvent={onEvent}
+          />
+        </Suspense>
       )}
       {tab === "files" && (
         <Suspense fallback={<p className="muted">Loading editor…</p>}>

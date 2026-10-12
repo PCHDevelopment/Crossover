@@ -81,7 +81,11 @@ beforeAll(async () => {
   await mkdir(upstreamDir, { recursive: true });
   await runGit(upstreamDir, ["init", "-q", "-b", "main"]);
   await writeFile(join(upstreamDir, "README.md"), "# Browser acceptance fixture\n");
-  await runGit(upstreamDir, ["add", "README.md"]);
+  await writeFile(
+    join(upstreamDir, "package.json"),
+    JSON.stringify({ name: "widgets", scripts: { typecheck: "tsc --noEmit", test: "vitest run" } }),
+  );
+  await runGit(upstreamDir, ["add", "README.md", "package.json"]);
   await runGit(upstreamDir, ["commit", "-q", "-m", "Initial"]);
   const remoteParent = join(dir, "remote");
   await mkdir(remoteParent);
@@ -178,17 +182,62 @@ describe.skipIf(!executablePath && !inCi)("web app in a browser", () => {
     await page.getByTestId("open-room").click();
     await page.getByTestId("room-title").waitFor();
 
-    // The same person, from code: owner access, to invite the agents (the invites are the people's part).
+    // The same person, from code, has owner access; room setup itself stays in the browser.
     const client = new CrossoverClient({ baseUrl });
     const login = await client.devLogin({ subject: "Peter", display_name: "Peter" });
     const owner: RoomClient = client.room(
       roomId,
       (await client.roomSession(login.session_token, roomId)).tokens.access_token,
     );
-    const joinAgent = async (name: string) => {
-      const invite = await owner.api.room.invite<unknown>({ role: "DEVELOPER" });
+    await page.getByTestId("tab-setup").click();
+    await page.getByTestId("import-url").fill("https://github.com/acme/widgets");
+    await page.getByTestId("import-submit").click();
+    await expect
+      .poll(async () => page.getByTestId("import-status").textContent())
+      .toContain("Repository import synced at revision 1.");
+    await expect
+      .poll(async () => page.getByTestId("health-command-suggestion").textContent())
+      .toContain("npm run typecheck && npm test");
+
+    await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await page.getByTestId("invite-create").click();
+    await expect.poll(async () => page.getByTestId("invite-token").count()).toBe(1);
+    const inviteToken = await page.getByTestId("invite-token").inputValue();
+    expect(inviteToken).not.toBe("");
+    await page.getByTestId("invite-join-examples").locator("summary").click();
+    const joinExamples = await page.getByTestId("invite-join-examples").textContent();
+    expect(joinExamples).toContain(`room join ${roomId} --invite-token-stdin`);
+    expect(joinExamples).toContain("CROSSOVER_INVITE_TOKEN");
+    expect(joinExamples).toContain("CROSSOVER_ROOM_ACCESS_TOKEN");
+    expect(joinExamples).toContain("one hour");
+    expect(joinExamples).toContain("stored room credentials");
+    expect(joinExamples).not.toContain(inviteToken);
+    await page.getByTestId("invite-copy").click();
+    await expect.poll(async () => page.getByTestId("invite-copy").textContent()).toBe("Copied");
+    expect(
+      await page.evaluate(() =>
+        (
+          navigator as unknown as { clipboard: { readText: () => Promise<string> } }
+        ).clipboard.readText(),
+      ),
+    ).toBe(inviteToken);
+    await page.getByTestId("invite-hide").click();
+    await expect.poll(async () => page.getByTestId("invite-token").count()).toBe(0);
+    expect(await page.locator("body").innerText()).not.toContain(inviteToken);
+    await page.getByTestId("tab-activity").click();
+    await expect
+      .poll(async () => page.getByTestId("feed").textContent())
+      .toContain("participant.invited");
+    expect(await page.getByTestId("feed").textContent()).not.toContain(inviteToken);
+    await page.getByTestId("tab-setup").click();
+    await expect.poll(async () => page.getByTestId("invite-token").count()).toBe(0);
+
+    const joinAgent = async (name: string, token?: string) => {
+      const invite = token
+        ? undefined
+        : await owner.api.room.invite<{ role: string }>({ role: "DEVELOPER" });
       const joined = await client.join(roomId, {
-        token: (invite.one_time as { token: string }).token,
+        token: token ?? (invite!.one_time as { token: string }).token,
         manifest: manifest(name),
       });
       return {
@@ -198,10 +247,11 @@ describe.skipIf(!executablePath && !inCi)("web app in a browser", () => {
     };
 
     // 3. Three agents join; the page shows them as they arrive.
-    const architect = await joinAgent("ArchitectAgent");
+    const architect = await joinAgent("ArchitectAgent", inviteToken);
     const agentA = await joinAgent("AgentA");
     const agentB = await joinAgent("AgentB");
     const agentC = await joinAgent("AgentC");
+    await page.getByTestId("tab-overview").click();
     await expect
       .poll(async () =>
         page
@@ -211,7 +261,10 @@ describe.skipIf(!executablePath && !inCi)("web app in a browser", () => {
       .toEqual(expect.arrayContaining(["Peter", "ArchitectAgent", "AgentA", "AgentB", "AgentC"]));
 
     // 4. ArchitectAgent becomes lead.
-    await owner.api.room.set_lead({ participant_id: architect.id });
+    await page.getByTestId("tab-setup").click();
+    await page.getByTestId("lead-participant").selectOption(architect.id);
+    await page.getByTestId("appoint-lead").click();
+    await page.getByTestId("tab-overview").click();
     await expect
       .poll(async () => page.locator('[data-name="ArchitectAgent"]').textContent())
       .toContain("lead");
