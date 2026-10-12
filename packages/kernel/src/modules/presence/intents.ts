@@ -2,9 +2,38 @@ import { Redis, type RedisOptions } from "ioredis";
 import { CrossoverError } from "@crossover/protocol";
 import { z } from "zod";
 import type { Dispatcher, CommandContext } from "../../dispatcher.js";
+import { RedisRoomFanout } from "../../publisher.js";
 import { filterReadablePaths } from "./readable-paths.js";
 
 export const EDIT_INTENT_TTL_MS = 45_000;
+
+const SET_INTENT = `
+local function equal(a, b)
+  if type(a) ~= type(b) then return false end
+  if type(a) ~= 'table' then return a == b end
+  for k, v in pairs(a) do
+    if not equal(v, b[k]) then return false end
+  end
+  for k, _ in pairs(b) do
+    if a[k] == nil then return false end
+  end
+  return true
+end
+local oldRaw = redis.call('GET', KEYS[1])
+local changed = true
+if oldRaw then
+  local ok, old = pcall(cjson.decode, oldRaw)
+  if ok then
+    local wanted = cjson.decode(ARGV[2])
+    changed = not (equal(old.paths, wanted.paths)
+      and equal(old.ranges, wanted.ranges)
+      and equal(old.task_id, wanted.task_id))
+  end
+end
+redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[3])
+if changed then redis.call('PUBLISH', KEYS[2], 'changed') end
+return changed and 1 or 0
+`;
 
 export interface EditIntentRange {
   path: string;
@@ -28,6 +57,11 @@ export interface EditIntentStore {
   clear(roomId: string, participantId: string): Promise<void>;
   list(roomId: string): Promise<EditIntent[]>;
   close(): Promise<void>;
+}
+
+/** A room-level invalidation; subscribers re-read intents and apply reader filtering. */
+export interface EditIntentSubscriber {
+  subscribe(roomId: string, handler: () => void): Promise<() => Promise<void>>;
 }
 
 /** Ephemeral, room-scoped Redis state for edit intents (§11.4, §19.3). */
@@ -76,12 +110,24 @@ export class RedisEditIntentStore implements EditIntentStore {
   async set(roomId: string, participantId: string, intent: EditIntentValue): Promise<string> {
     const expiresAt = new Date(Date.now() + this.ttlMs).toISOString();
     const value: EditIntent = { ...intent, participant_id: participantId, expires_at: expiresAt };
-    await this.redis.set(intentKey(roomId, participantId), JSON.stringify(value), "PX", this.ttlMs);
+    await this.redis.eval(
+      SET_INTENT,
+      2,
+      intentKey(roomId, participantId),
+      editIntentChannel(roomId),
+      JSON.stringify(value),
+      JSON.stringify({ paths: intent.paths, ranges: intent.ranges, task_id: intent.task_id }),
+      String(this.ttlMs),
+    );
     return expiresAt;
   }
 
   async clear(roomId: string, participantId: string): Promise<void> {
-    await this.redis.del(intentKey(roomId, participantId));
+    await this.redis
+      .multi()
+      .del(intentKey(roomId, participantId))
+      .publish(editIntentChannel(roomId), "changed")
+      .exec();
   }
 
   async list(roomId: string): Promise<EditIntent[]> {
@@ -116,6 +162,45 @@ export class RedisEditIntentStore implements EditIntentStore {
   async close(): Promise<void> {
     if (this.ownsClient) this.redis.disconnect();
   }
+}
+
+/** Invalidation-only channel: readers re-load paths and apply their own visibility filter. */
+export const editIntentChannel = (roomId: string): string =>
+  `presence:intent:live:${encodeURIComponent(roomId)}`;
+
+/** Best-effort room fanout for intent changes, separate from the durable event stream. */
+export class RedisEditIntentSubscriber
+  extends RedisRoomFanout<true>
+  implements EditIntentSubscriber
+{
+  constructor(url: string, options: RedisOptions = {}) {
+    super(url, editIntentChannel, (raw) => (raw === "changed" ? true : undefined), options);
+  }
+}
+
+/** Keep the command and live snapshots on the same per-path visibility rule. */
+export async function filterReadableIntents(
+  stored: readonly EditIntent[],
+  canRead: (path: string) => Promise<boolean>,
+): Promise<EditIntent[]> {
+  const readable = new Set(
+    await filterReadablePaths(
+      stored.flatMap(({ paths }) => paths),
+      canRead,
+    ),
+  );
+  const visible: EditIntent[] = [];
+  for (const intent of stored) {
+    const paths = intent.paths.filter((path) => readable.has(path));
+    if (paths.length === 0) continue;
+    const keep = new Set(paths);
+    visible.push({
+      ...intent,
+      paths,
+      ranges: intent.ranges.filter((range) => keep.has(range.path)),
+    });
+  }
+  return visible;
 }
 
 /** Register set/clear and list commands; `normalizePath` is shared with workspace writes. */
@@ -205,31 +290,15 @@ export function registerPresenceIntentCommands(
       // they may read: others are left out, and an intent with none left is left out whole
       // (its task link with it), so a denied path is neither named nor hinted at (§34.5).
       const stored = await store.list(ctx.room_id);
-      const visible = new Set(
-        await filterReadablePaths(
-          stored.flatMap(({ paths }) => paths),
-          async (path) => {
-            try {
-              await ctx.authorize("workspace.read", { path });
-              return true;
-            } catch (error) {
-              if (error instanceof CrossoverError && error.code === "FORBIDDEN") return false;
-              throw error;
-            }
-          },
-        ),
-      );
-      const intents = [];
-      for (const intent of stored) {
-        const paths = intent.paths.filter((path) => visible.has(path));
-        if (paths.length === 0) continue;
-        const keep = new Set(paths);
-        intents.push({
-          ...intent,
-          paths,
-          ranges: intent.ranges.filter((r) => keep.has(r.path)),
-        });
-      }
+      const intents = await filterReadableIntents(stored, async (path) => {
+        try {
+          await ctx.authorize("workspace.read", { path });
+          return true;
+        } catch (error) {
+          if (error instanceof CrossoverError && error.code === "FORBIDDEN") return false;
+          throw error;
+        }
+      });
       return { response: { intents } };
     },
   });

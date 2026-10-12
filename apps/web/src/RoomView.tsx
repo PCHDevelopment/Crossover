@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { RoomClient, SdkEvent } from "@crossover/sdk";
+import type { PresenceIntent, RoomClient, SdkEvent } from "@crossover/sdk";
 import { isUnauthenticated } from "./App.js";
 import {
   affectsState,
@@ -10,7 +10,14 @@ import {
   type Task,
 } from "./model.js";
 import { openRoom, type OpenRoom } from "./session.js";
-import { applyPresence, livePresence, type PresenceMap } from "./presence.js";
+import {
+  applyIntentSnapshot,
+  applyPresence,
+  liveIntents,
+  livePresence,
+  type IntentMap,
+  type PresenceMap,
+} from "./presence.js";
 
 // Monaco is large: it loads with the Files tab, not with the room.
 const FilesView = lazy(() => import("./FilesView.js"));
@@ -39,6 +46,7 @@ export function RoomView(props: {
   const [tab, setTab] = useState<Tab>("overview");
   const [notice, setNotice] = useState<string>();
   const [presence, setPresence] = useState<PresenceMap>(new Map());
+  const [intents, setIntents] = useState<IntentMap>(new Map());
   const roomRef = useRef<RoomClient>(undefined);
   const listeners = useRef(new Set<(event: SdkEvent) => void>());
   const onEvent = useCallback((listener: (event: SdkEvent) => void) => {
@@ -111,10 +119,16 @@ export function RoomView(props: {
         },
         onError: (err) => setError(message(err)),
         onPresence: (update) => setPresence((p) => applyPresence(p, update)),
+        onPresenceIntents: (snapshot: PresenceIntent[]) =>
+          setIntents(applyIntentSnapshot(snapshot)),
       });
     })();
-    // Records aren't announced when they expire: drop them as their time passes.
-    const expiry = setInterval(() => setPresence((p) => livePresence(p, Date.now())), 5_000);
+    // Records and intents aren't announced when they expire: drop them at their deadline.
+    const expiry = setInterval(() => {
+      const now = Date.now();
+      setPresence((p) => livePresence(p, now));
+      setIntents((p) => liveIntents(p, now));
+    }, 5_000);
     return () => {
       closed = true;
       clearTimeout(timer);
@@ -127,6 +141,10 @@ export function RoomView(props: {
     const byId = new Map((state?.sections.participants ?? []).map((p) => [p.id, p.display_name]));
     return (id: string) => (id === "system" ? "System" : (byId.get(id) ?? id.slice(0, 10)));
   }, [state]);
+  const purposeOf = useMemo(() => {
+    const byId = new Map(tasks.map((task) => [task.id, task.title]));
+    return (taskId: string) => byId.get(taskId);
+  }, [tasks]);
 
   if (error && !state) {
     return (
@@ -262,8 +280,10 @@ export function RoomView(props: {
             room={open.room}
             onEvent={onEvent}
             presence={presence}
+            intents={intents}
             selfId={me.participant_id}
             nameOf={names}
+            purposeOf={purposeOf}
           />
         </Suspense>
       )}

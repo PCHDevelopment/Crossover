@@ -258,6 +258,16 @@ export interface PresenceRecord {
 
 export type PresenceUpdate = { snapshot: PresenceRecord[] } | { record: PresenceRecord };
 
+/** One room-scoped agent edit intent, as the subscriber may see it (§11.4, §13.4). */
+export interface PresenceIntent {
+  participant_id: string;
+  paths: string[];
+  ranges: { path: string; start_line: number; end_line: number }[];
+  task_id: string | null;
+  /** Drop the intent after this unless it is replaced. */
+  expires_at: string;
+}
+
 export interface SubscribeOptions {
   /** Deliver events with a sequence greater than this (the last one you have). Default 0: from the start. */
   after?: number;
@@ -277,9 +287,12 @@ export interface SubscribeOptions {
   scopes?: { tasks?: "mine" | "all"; mentions?: boolean };
   /**
    * Live presence on the same connection: a `snapshot` each time the stream connects, then each
-   * `record` as it changes. A refusal goes to `onPresenceError` and leaves the events flowing.
+   * `record` as it changes. Intent snapshots follow the same subscription and refresh on set or
+   * clear; clients drop them at `expires_at`. A refusal goes to `onPresenceError` and leaves the
+   * events flowing.
    */
   onPresence?: (update: PresenceUpdate) => void;
+  onPresenceIntents?: (intents: PresenceIntent[]) => void;
   onPresenceError?: (error: CrossoverError) => void;
   /** Reconnect waits: first `minMs` (default 100), doubling with jitter up to `maxMs` (default 5000). */
   reconnect?: { minMs?: number; maxMs?: number };
@@ -393,13 +406,17 @@ export class Subscription implements AsyncIterable<SdkEvent> {
                   filtered = profile !== undefined && profile !== "all";
                 }
                 this.options.onState?.("live");
-                if (this.options.onPresence) session.send({ type: "presence.subscribe" });
+                if (this.options.onPresence || this.options.onPresenceIntents)
+                  session.send({ type: "presence.subscribe" });
                 break;
               case "presence.snapshot":
                 this.options.onPresence?.({ snapshot: frame["presence"] as PresenceRecord[] });
                 break;
               case "presence":
                 this.options.onPresence?.({ record: frame["record"] as PresenceRecord });
+                break;
+              case "presence.intents.snapshot":
+                this.options.onPresenceIntents?.(frame["intents"] as PresenceIntent[]);
                 break;
               case "event": {
                 const event = frame["event"] as SdkEvent;
