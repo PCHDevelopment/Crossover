@@ -19,7 +19,7 @@ describe("RedisOAuthStateStore", () => {
     try {
       await Promise.all([store.ready(), probe.ping()]);
       const state = randomBytes(32).toString("base64url");
-      const value = { provider: "github", verifier: "verifier" };
+      const value = { provider: "github", verifier: "verifier", nonce: "nonce" };
       await store.save(state, value);
       const key = `oauth:state:${createHash("sha256").update(state).digest("hex")}`;
       const ttl = await probe.pttl(key);

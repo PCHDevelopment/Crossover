@@ -9,6 +9,7 @@ import {
 import { MCP_TOOLS, registerMcp } from "@crossover/mcp";
 import { buildInternalGitServer } from "./internal-git.js";
 import { githubOAuthProvider } from "./github-oauth.js";
+import { googleOAuthProvider } from "./google-oauth.js";
 import { IntegrationCredentialBroker } from "./integration-broker.js";
 import { GitHubPullRequestProvider } from "./github-pull-request.js";
 import { registerBrowserTools } from "./browser-plugin.js";
@@ -519,7 +520,14 @@ export async function composeServer(
           ? {
               publicBaseUrl: config.oauth.publicBaseUrl,
               stateStore: oauthStateStore,
-              providers: { github: githubOAuthProvider(config.oauth.github) },
+              providers: {
+                ...(config.oauth.github
+                  ? { github: githubOAuthProvider(config.oauth.github) }
+                  : {}),
+                ...(config.oauth.google
+                  ? { google: googleOAuthProvider(config.oauth.google) }
+                  : {}),
+              },
             }
           : undefined,
       trustProxy: config.trustProxy && config.trustProxy.length > 0 ? config.trustProxy : false,

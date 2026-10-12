@@ -4,7 +4,7 @@ import type { ProviderIdentity } from "@crossover/kernel";
 
 export const OAUTH_STATE_TTL_MS = 10 * 60_000;
 
-export type OAuthState = { provider: string; verifier: string };
+export type OAuthState = { provider: string; verifier: string; nonce?: string };
 
 export interface OAuthStateStore {
   save(state: string, value: OAuthState): Promise<void>;
@@ -13,9 +13,19 @@ export interface OAuthStateStore {
   close(): Promise<void>;
 }
 
-export type OAuthAuthorizationRequest = { state: string; challenge: string; redirectUri: string };
+export type OAuthAuthorizationRequest = {
+  state: string;
+  challenge: string;
+  redirectUri: string;
+  nonce?: string;
+};
 
-export type OAuthCodeExchange = { code: string; redirectUri: string; verifier: string };
+export type OAuthCodeExchange = {
+  code: string;
+  redirectUri: string;
+  verifier: string;
+  nonce?: string;
+};
 
 export interface OAuthProvider {
   readonly name: string;
@@ -56,7 +66,9 @@ export class RedisOAuthStateStore implements OAuthStateStore {
     if (raw === null) return undefined;
     try {
       const value = JSON.parse(raw) as OAuthState;
-      return typeof value.provider === "string" && typeof value.verifier === "string"
+      return typeof value.provider === "string" &&
+        typeof value.verifier === "string" &&
+        (value.nonce === undefined || typeof value.nonce === "string")
         ? value
         : undefined;
     } catch {
