@@ -312,6 +312,50 @@ async function walkthrough(app: App, withAppliedChange = true) {
 }
 
 describe("composeServer", () => {
+  it("logs internal gateway failures with the route pattern and without request secrets", async () => {
+    const internalError = new Error("injected internal gateway failure");
+    const { server } = await start();
+    const query = vi.spyOn(db.pool, "query").mockImplementationOnce(async () => {
+      throw internalError;
+    });
+    const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    try {
+      const response = await server.app.inject({
+        method: "POST",
+        url: "/v1/commands?token=query-secret",
+        headers: {
+          authorization: "Bearer us_header-secret",
+          "content-type": "application/json",
+        },
+        payload: JSON.stringify({
+          method: "room.create",
+          params: { slug: "body-secret", name: "Test", objective: "Test" },
+        }),
+      });
+
+      expect(response.statusCode).toBe(500);
+      expect(stderr).toHaveBeenCalledOnce();
+      const line = stderr.mock.calls[0]?.[0];
+      expect(typeof line).toBe("string");
+      const record = JSON.parse(line as string) as Record<string, unknown>;
+      expect(record).toMatchObject({
+        event: "gateway.internal_error",
+        method: "POST",
+        route: "/v1/commands",
+        command_method: "room.create",
+        stack: expect.stringContaining("injected internal gateway failure"),
+      });
+      expect(line).not.toContain("query-secret");
+      expect(line).not.toContain("us_header-secret");
+      expect(line).not.toContain("body-secret");
+      expect(line).not.toContain("objective");
+    } finally {
+      query.mockRestore();
+      stderr.mockRestore();
+    }
+  });
+
   it("stops agent sandboxes on freeze and cleans up on participant removal and archive", async () => {
     const driver = new RecordingExecutionDriver();
     const { server } = await start({}, new RecordingPublisher(), { executionDriver: driver });

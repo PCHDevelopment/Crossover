@@ -4,7 +4,7 @@ import {
   type SandboxOutputMetadata,
   type SandboxOutputSource,
 } from "@crossover/gateway";
-import { registerMcp } from "@crossover/mcp";
+import { MCP_TOOLS, registerMcp } from "@crossover/mcp";
 import { buildInternalGitServer } from "./internal-git.js";
 import { IntegrationCredentialBroker } from "./integration-broker.js";
 import { GitHubPullRequestProvider } from "./github-pull-request.js";
@@ -454,6 +454,43 @@ export async function composeServer(
     const app = buildGateway({
       dispatcher,
       pool,
+      onInternalError: (error, request) => {
+        const body =
+          typeof request.body === "object" && request.body !== null && !Array.isArray(request.body)
+            ? (request.body as Record<string, unknown>)
+            : undefined;
+        const params =
+          typeof body?.params === "object" && body.params !== null && !Array.isArray(body.params)
+            ? (body.params as Record<string, unknown>)
+            : undefined;
+        const route = request.routeOptions.url;
+        const commandRoute = route === "/v1/commands" || route === "/v1/rooms/:roomId/commands";
+        const candidate = commandRoute
+          ? typeof body?.method === "string"
+            ? body.method
+            : undefined
+          : route === "/mcp" && body?.method === "tools/call" && typeof params?.name === "string"
+            ? MCP_TOOLS.find((tool) => tool.name === params.name)?.method
+            : undefined;
+        const commandMethod =
+          candidate && /^[a-zA-Z][a-zA-Z0-9_./-]{0,127}$/.test(candidate) ? candidate : undefined;
+        const stack =
+          error instanceof Error
+            ? (error.stack ?? `${error.name}: ${error.message}`)
+            : String(error);
+
+        // JSON keeps stack newlines escaped so each failure is a single stderr line. Only the
+        // route pattern and command method are included; never log request URLs, headers, or other body fields.
+        console.error(
+          JSON.stringify({
+            event: "gateway.internal_error",
+            method: request.method,
+            route: request.routeOptions.url ?? "<unmatched>",
+            ...(commandMethod ? { command_method: commandMethod } : {}),
+            stack,
+          }),
+        );
+      },
       devLogin: config.devLogin,
       trustProxy: config.trustProxy && config.trustProxy.length > 0 ? config.trustProxy : false,
       refreshLimit: {
