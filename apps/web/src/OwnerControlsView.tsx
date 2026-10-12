@@ -28,6 +28,9 @@ interface Approval {
   expires_at: string;
 }
 
+type AssignableRole = Exclude<Participant["role"], "LEAD">;
+const ASSIGNABLE_ROLES: readonly AssignableRole[] = ["DEVELOPER", "REVIEWER", "OBSERVER"];
+
 const list = (value: unknown): string[] =>
   Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
 const lines = (value: string): string[] => [
@@ -95,6 +98,8 @@ export function OwnerControlsView(props: {
   const [protectedPaths, setProtectedPaths] = useServerSyncedText(protectedPathsServerValue);
   const targets = participants.filter((participant) => participant.status !== "REMOVED");
   const [targetId, setTargetId] = useState("");
+  const [roleTargetId, setRoleTargetId] = useState("");
+  const [nextRole, setNextRole] = useState<AssignableRole>("DEVELOPER");
   const [capabilityState, setCapabilityState] = useState<CapabilityState>();
   const [capability, setCapability] = useState("");
   const [expiresAt, setExpiresAt] = useState("");
@@ -160,6 +165,17 @@ export function OwnerControlsView(props: {
       return;
     void perform(`Remove ${participant.display_name}`, async () => {
       await room.api.participants.remove({ participant_id: participant.id });
+    });
+  };
+
+  const changeRole = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const participant = targets.find((item) => item.id === roleTargetId);
+    if (!participant || participant.role === "LEAD" || participant.role === nextRole) return;
+    const subject = participant.id === selfId ? "your role" : `${participant.display_name}'s role`;
+    if (!window.confirm(`Change ${subject} from ${participant.role} to ${nextRole}?`)) return;
+    void perform("Change participant role", async () => {
+      await room.api.participants.set_role({ participant_id: participant.id, role: nextRole });
     });
   };
 
@@ -289,6 +305,64 @@ export function OwnerControlsView(props: {
       </section>
 
       <section aria-label="Participant access">
+        <h3>Change participant role</h3>
+        <label>
+          Participant
+          <select
+            data-testid="role-participant"
+            value={roleTargetId}
+            onChange={(event) => {
+              const id = event.target.value;
+              const participant = targets.find((item) => item.id === id);
+              setRoleTargetId(id);
+              setNextRole(
+                participant && participant.role !== "LEAD" ? participant.role : "DEVELOPER",
+              );
+            }}
+          >
+            <option value="">Choose a participant</option>
+            {targets.map((participant) => (
+              <option key={participant.id} value={participant.id}>
+                {participant.display_name}
+                {participant.id === selfId ? " (you)" : ""}
+              </option>
+            ))}
+          </select>
+        </label>
+        {roleTargetId &&
+        targets.find((participant) => participant.id === roleTargetId)?.role === "LEAD" ? (
+          <p className="muted" data-testid="role-lead-guidance">
+            Appoint another lead before changing this participant’s role.
+          </p>
+        ) : (
+          <form onSubmit={changeRole}>
+            <label>
+              New role
+              <select
+                data-testid="participant-role-value"
+                value={nextRole}
+                onChange={(event) => setNextRole(event.target.value as AssignableRole)}
+              >
+                {ASSIGNABLE_ROLES.map((role) => (
+                  <option key={role} value={role}>
+                    {role}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              data-testid="change-participant-role"
+              disabled={
+                busy ||
+                !roleTargetId ||
+                targets.find((item) => item.id === roleTargetId)?.role === nextRole
+              }
+            >
+              Change role
+            </button>
+          </form>
+        )}
+
         <h3>Remove participant</h3>
         <ul className="list">
           {participants
