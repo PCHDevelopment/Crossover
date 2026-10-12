@@ -2,6 +2,46 @@
 
 Periodic big-picture reviews by O1: is the merged code building the product in ARCHITECTURE.md, in the right order? Newest first.
 
+## 2026-10-12 · Review 9 (16:20 UTC; 8 PRs merged since Review 8)
+
+**State.** #224–#231 merged, all by S2, all with CI green on the merged head:
+
+- #224 split the browser e2e into a shared fixture plus per-area files, keeping the same nine tests.
+- T1410 MCP conflict tools (#225) and the owner role change (#226).
+- T1411 and T1412 fixed the two intermittent tests (#227, #228).
+- T1413 Docker volume `Options: null` (#229).
+- T1414 shutdown waiting on lease renewals queued behind a busy room actor (#230).
+- T1406 PR A, the Git bridge harness with a bad-token probe (#231).
+
+**Against the §30 demo flow.** The 17-step walk-through (#232) passes locally in 45 s against a real server, real Docker sandboxes, the real health runner, one MCP agent and three SDK agents. It is in review: step 12 must have the lead resolve through MCP, not in Peter's browser. When #232 merges green in CI, M14 is done.
+
+**What T1406 found.** Writing one test that drives the demo for real turned up six things that unit tests and per-feature e2e tests had not:
+
+- Two product gaps on the demo path: no MCP conflict tools for an MCP lead, and no role change in the browser.
+- Two production bugs:
+  - `inspectVolume` rejected Docker's `null` options, so a default deployment could not create a sandbox.
+  - `LeaseRenewer.stop` could block shutdown behind any long room command.
+- Two intermittent tests, both test races, now fixed.
+
+The volume bug hid because `DockerExecutionDriver` is unit-tested only against a mocked `docker` binary.
+
+**Course corrections.**
+
+1. **A real-Docker driver smoke test.** Add a Docker-gated test that creates, inspects and removes a real sandbox volume and container through `DockerExecutionDriver` (T1415). Mocked CLI output is not evidence of Docker's real output.
+2. **Deploy-topology test after M14.** The e2e bridges one network hop, because the server runs on the host while production runs it on `crossover-git`. Add a test that runs `apps/server` itself in a container on that network (T1416).
+3. **Hold agreed scope in PRs.** #232 departed from the step-12 map agreed at 13:02 without saying so. A PR that changes an agreed plan states the change in its body.
+4. **Staffing.** Q1 has now been silent about 14 hours. S2 carried all 16 merges since Review 7. Decision still needed from Peter.
+
+**After M14.** Next review: §29 MVP scope against main, item by item.
+
+**Tech-debt register, new:**
+
+- `ensureGitNetwork` in the e2e fixture can race when two jobs create the network at once (treat "already exists" as success).
+- The Changes view lists only open and escalated conflicts, so a resolved conflict just disappears. A "recently resolved" view would help the demo narrative.
+- `web-demo-flow.ts` is about 920 lines in one test. It is acceptable as an acceptance test, but keep step helpers small as it grows.
+
+**Closed since Review 8:** e2e file size (split in #224), intermittent MergeView and plugin-runner tests (#227, #228).
+
 ## 2026-10-12 · Review 8 (12:25 UTC; 7 PRs merged since the Review 7 addendum)
 
 **State.** #217–#223 merged in four hours, all by S2, all with CI green on the merged head.

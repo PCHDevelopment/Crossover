@@ -26,7 +26,7 @@ Conventions are in `docs/ENGINEERING.md`. Section references (§) point to `docs
 | M11 Clients (§27, §29)                | T1101–T1106 | S1 (T1102 → Q1)                                             |
 | M12 Plugins (§21.4–21.5)              | T1201–T1206 | S1 (T1201, moved in Review 5), S2 (T1202–T1206)             |
 | M13 Lessons from building (§34)       | T1301–T1303 | S1                                                          |
-| M14 Demo-ready web app (Review 7)     | T1401–T1414 | S2 (T1401–T1414; T1402 moved from Q1)                       |
+| M14 Demo-ready web app (Review 7)     | T1401–T1416 | S2 (T1401–T1416; T1402 moved from Q1)                       |
 
 **Start here:** S1 → T101, T105, T114 (independent). S2 → T501, T505 (only need the scaffold).
 
@@ -1494,3 +1494,17 @@ Tests:
 - A kernel unit test with a blocked room actor shows `stop()` returns promptly and `close()` still releases every lease.
 
 Must merge before T1406.
+
+### T1415 · Real-Docker smoke test for DockerExecutionDriver — S2
+
+The driver's unit tests mock the `docker` binary, so T1413 (`Options: null`) reached main. Add a test that runs only when Docker is available and drives a real daemon through `DockerExecutionDriver`:
+
+- create, inspect, reuse and remove a sandbox volume and container;
+- run one exec;
+- confirm `--network=none` and the hardening flags on the real container (`docker inspect`).
+
+Clean up by exact names only.
+
+### T1416 · Deploy-topology test: server container on crossover-git — S2
+
+The browser e2e bridges the fetcher-to-server hop with a test-only Unix-socket relay (#231). Add one test that builds and runs `apps/server` as a container attached to `crossover-git`, exactly as deployed, and runs a sandbox fetch end to end with no bridge. After M14.
