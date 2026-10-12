@@ -1517,3 +1517,14 @@ A local full run around 16:20 UTC on 2026-10-12 saw two failures that passed on 
 - `apps/server/src/compose.test.ts`: a 5 s timeout in an unidentified test.
 
 Open a fix task the next time either fails, with its saved output. Rule from now on: before rerunning a failed test, save its full output (name, error, stack).
+
+### T1418 · Deployment topology vs ARCHITECTURE §4.1 — O1 (decision), owner TBD
+
+§4.1 puts sandboxes on separate sandbox hosts that never share a host with app nodes. The only server image (T1416) runs sandboxes through the app host's Docker socket: a single-host topology that is acceptable for the MVP demo but is not the documented production design.
+
+Decide before any non-demo deployment:
+
+- (a) implement a remote sandbox-host driver (`ExecutionDriver` over an authenticated channel); or
+- (b) amend §4.1 to allow a single-host mode with stated limits.
+
+Until then the compose file must label itself demo or development only.
