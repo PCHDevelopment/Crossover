@@ -1185,4 +1185,101 @@ describe.skipIf(!executablePath && !inCi)("web app in a browser", () => {
     ).toBe("name: held\n");
     expect(problems).toEqual([]);
   }, 120_000);
+
+  it("T1402 step 5: decide in the browser and read the memory mirror", async () => {
+    const page: Page = await browser!.newPage();
+    const problems: string[] = [];
+    page.on("pageerror", (error) => problems.push(`pageerror: ${error.message}`));
+    page.on("console", (entry) => {
+      if (entry.type() === "error") problems.push(`console: ${entry.text()}`);
+    });
+
+    await page.goto(baseUrl);
+    await page.getByTestId("login-name").fill("Peter");
+    await page.getByTestId("login-submit").click();
+    await page.getByTestId("room-name").fill("Decisions room");
+    await page.getByTestId("room-objective").fill("Decisions and shared memory in the browser");
+    await page.getByTestId("room-create").click();
+    await page.getByTestId("room-title").waitFor();
+    const roomId = /\/rooms\/([^/]+)/.exec(new URL(page.url()).pathname)![1]!;
+
+    const client = new CrossoverClient({ baseUrl });
+    const login = await client.devLogin({ subject: "Peter", display_name: "Peter" });
+    const session = await client.roomSession(login.session_token, roomId);
+    const owner: RoomClient = client.room(roomId, session.tokens.access_token);
+    await owner.api.room.set_lead({ participant_id: session.participant_id });
+    const invite = await owner.api.room.invite<unknown>({ role: "DEVELOPER" });
+    const joined = await client.join(roomId, {
+      token: (invite.one_time as { token: string }).token,
+      manifest: manifest("NonLeadDecisionAgent"),
+    });
+    const nonLead = client.room(roomId, joined.tokens.access_token);
+    await page.reload();
+    await page.getByTestId("room-title").waitFor();
+    await page.getByTestId("tab-collaboration").click();
+    await page.getByTestId("collab-decisions").click();
+
+    // A live decision event refreshes the list without erasing the current form draft.
+    await page.getByTestId("decision-title").fill("Draft while decisions change");
+    await page.getByTestId("decision-options").fill("First\nSecond");
+    await nonLead.api.decisions.propose({
+      title: "Use short-lived sessions?",
+      options: [{ summary: "Yes" }, { summary: "No" }],
+    });
+    await expect
+      .poll(() => page.getByTestId("decision-title").inputValue())
+      .toBe("Draft while decisions change");
+
+    // §30 step 5: propose, take positions, decide, then read the system memory mirror.
+    await page.getByTestId("decision-title").fill("Session tokens or JWT");
+    await page.getByTestId("decision-context").fill("Choose the authentication format.");
+    await page.getByTestId("decision-options").fill("Session tokens\nJWT");
+    await page.getByTestId("decision-propose").click();
+    await expect
+      .poll(() => page.getByTestId("decision-detail").textContent())
+      .toContain("Session tokens or JWT");
+    const decisionId = (
+      await owner.api.decisions.list<{ decisions: { id: string; title: string }[] }>({ limit: 100 })
+    ).response.decisions.find((decision) => decision.title === "Session tokens or JWT")!.id;
+    await expect(
+      nonLead.api.decisions.decide({
+        decision_id: decisionId,
+        expected_version: 1,
+        outcome_option_id: "opt_1",
+        rationale: "Non-lead attempt",
+      }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+    await page.getByTestId("position-option").selectOption("opt_2");
+    await page.getByTestId("position-argument").fill("JWT works across our current clients.");
+    await page.getByTestId("add-position").click();
+    await expect
+      .poll(() => page.getByTestId("decision-detail").textContent())
+      .toContain("JWT works across our current clients.");
+    await page.getByTestId("decision-outcome").selectOption("opt_2");
+    await page
+      .getByTestId("decision-rationale")
+      .fill("JWT is the best fit for the current clients.");
+    await page.getByTestId("decide").click();
+    await expect
+      .poll(() => page.getByTestId("decision-detail").textContent())
+      .toContain("ACCEPTED");
+    await expect
+      .poll(() => page.getByTestId("decision-detail").textContent())
+      .toContain("JWT is the best fit");
+
+    await page.getByTestId("collab-memory").click();
+    const mirror = page.getByTestId("memory-key").filter({ hasText: `decisions/${decisionId}` });
+    await expect.poll(() => mirror.count()).toBe(1);
+    await mirror.click();
+    await expect
+      .poll(() => page.getByTestId("memory-detail").textContent())
+      .toContain("Session tokens or JWT");
+    await expect
+      .poll(() => page.getByTestId("memory-detail").textContent())
+      .toContain("JWT is the best fit");
+    await expect.poll(() => page.getByTestId("memory-history").textContent()).toContain("system");
+
+    expect(problems).toEqual([]);
+    await page.close();
+  }, 120_000);
 });
