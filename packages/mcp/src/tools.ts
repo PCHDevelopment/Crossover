@@ -69,6 +69,8 @@ export interface McpToolDefinition {
   /** Tool arguments. They become the command's `params` unless `toParams` says otherwise. */
   input: z.ZodRawShape;
   toParams?: (args: Record<string, unknown>) => Record<string, unknown>;
+  /** Trust label for the result frame; defaults to participant data. */
+  trust?: "participant" | "external";
   /** Mutating tools also accept an optional `idempotency_key`, so a retry can be made safe. */
   mutating: boolean;
 }
@@ -341,7 +343,15 @@ const tool = (
   description: string,
   input: z.ZodRawShape,
   mutating: boolean,
-): McpToolDefinition => ({ name, method, description, input, mutating });
+  trust?: McpToolDefinition["trust"],
+): McpToolDefinition => ({
+  name,
+  method,
+  description,
+  input,
+  mutating,
+  ...(trust ? { trust } : {}),
+});
 
 /** Edit-intent commands are ephemeral presence updates; they still use the normal dispatcher. */
 export const PRESENCE_TOOLS: readonly McpToolDefinition[] = [
@@ -532,6 +542,7 @@ export const PLUGIN_TOOLS: readonly McpToolDefinition[] = [
     "Invoke a plugin tool by name with its declared arguments.",
     toolsInvokeParams.shape,
     true,
+    "external",
   ),
 ];
 
