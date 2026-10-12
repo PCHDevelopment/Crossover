@@ -49,7 +49,16 @@ type MemoryRevision = {
   provenance: Provenance;
 };
 
-type Section = "decisions" | "memory";
+type InboxItem = {
+  id: string;
+  kind: string;
+  summary: string;
+  created_at: string;
+  acked_at: string | null;
+  provenance: Provenance;
+};
+
+type Section = "inbox" | "decisions" | "memory";
 const message = (error: unknown): string =>
   error instanceof Error ? error.message : "Something went wrong";
 
@@ -66,6 +75,7 @@ export default function CollaborationView(props: {
   const [section, setSection] = useState<Section>("decisions");
   const [notice, setNotice] = useState<string>();
   const [busy, setBusy] = useState<string>();
+  const [inbox, setInbox] = useState<InboxItem[]>([]);
   const [decisions, setDecisions] = useState<Decision[]>([]);
   const [selectedDecision, setSelectedDecision] = useState<Decision>();
   const [decisionTitle, setDecisionTitle] = useState("");
@@ -84,6 +94,13 @@ export default function CollaborationView(props: {
   const loadDecisions = useCallback(async () => {
     const page = await room.api.decisions.list<{ decisions: Decision[] }>({ limit: 100 });
     setDecisions(page.response.decisions);
+  }, [room]);
+  const loadInbox = useCallback(async () => {
+    const page = await room.api.inbox.list<{ items: InboxItem[] }>({
+      unacked_only: true,
+      limit: 100,
+    });
+    setInbox(page.response.items);
   }, [room]);
   const loadDecision = useCallback(
     async (id: string) => {
@@ -115,14 +132,17 @@ export default function CollaborationView(props: {
   );
 
   useEffect(() => {
-    void Promise.allSettled([loadDecisions(), loadMemory()]).then((results) => {
+    void Promise.allSettled([loadInbox(), loadDecisions(), loadMemory()]).then((results) => {
       const failed = results.find((result) => result.status === "rejected");
       if (failed?.status === "rejected") setNotice(message(failed.reason));
     });
-  }, [loadDecisions, loadMemory]);
+  }, [loadDecisions, loadInbox, loadMemory]);
 
   useEffect(() => {
     const unsubscribe = onEvent((event) => {
+      if (event.type === "workspace.health") {
+        void loadInbox().catch((error: unknown) => setNotice(message(error)));
+      }
       if (event.type.startsWith("decision.")) {
         void loadDecisions().catch((error: unknown) => setNotice(message(error)));
         if (selectedDecision?.id) {
@@ -146,6 +166,7 @@ export default function CollaborationView(props: {
       unsubscribe();
     };
   }, [
+    loadInbox,
     loadDecision,
     loadDecisions,
     loadMemory,
@@ -234,11 +255,24 @@ export default function CollaborationView(props: {
     }
   };
 
+  const acknowledge = async (id: string) => {
+    setBusy(`ack:${id}`);
+    setNotice(undefined);
+    try {
+      await room.api.inbox.ack({ ids: [id] });
+      await loadInbox();
+    } catch (error) {
+      setNotice(message(error));
+    } finally {
+      setBusy(undefined);
+    }
+  };
+
   return (
     <section aria-label="Collaboration" data-testid="collaboration-view">
-      <h2>Decisions and memory</h2>
-      <nav className="tabs" aria-label="Decisions and memory sections">
-        {(["decisions", "memory"] as const).map((id) => (
+      <h2>Inbox, decisions and memory</h2>
+      <nav className="tabs" aria-label="Inbox, decisions and memory sections">
+        {(["inbox", "decisions", "memory"] as const).map((id) => (
           <button
             key={id}
             role="tab"
@@ -254,6 +288,31 @@ export default function CollaborationView(props: {
         <p role="alert" className="error" data-testid="collaboration-notice">
           {notice}
         </p>
+      )}
+
+      {section === "inbox" && (
+        <section aria-label="Inbox">
+          <h3>Inbox</h3>
+          <ul className="list" data-testid="inbox-list">
+            {inbox.map((item) => (
+              <li key={item.id} data-testid="inbox-item">
+                <strong>{item.kind}</strong>
+                <p>{item.summary}</p>
+                <p className="muted">
+                  From {nameOf(item.provenance.author_id)} · trust: {item.provenance.trust}
+                </p>
+                <button
+                  disabled={busy !== undefined}
+                  onClick={() => void acknowledge(item.id)}
+                  data-testid="inbox-ack"
+                >
+                  Acknowledge
+                </button>
+              </li>
+            ))}
+            {inbox.length === 0 && <li className="muted">No unacknowledged inbox items.</li>}
+          </ul>
+        </section>
       )}
 
       {section === "decisions" && (

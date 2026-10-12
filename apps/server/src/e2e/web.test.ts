@@ -1282,4 +1282,90 @@ describe.skipIf(!executablePath && !inCi)("web app in a browser", () => {
     expect(problems).toEqual([]);
     await page.close();
   }, 120_000);
+
+  it("T1402 step 13: a failing health run appears in the author's inbox and can be acknowledged", async () => {
+    const page: Page = await browser!.newPage();
+    const problems: string[] = [];
+    page.on("pageerror", (error) => problems.push(`pageerror: ${error.message}`));
+    page.on("console", (entry) => {
+      if (entry.type() === "error") problems.push(`console: ${entry.text()}`);
+    });
+
+    await page.goto(baseUrl);
+    await page.getByTestId("login-name").fill("Health author");
+    await page.getByTestId("login-submit").click();
+    await page.getByTestId("room-name").fill("Health inbox room");
+    await page.getByTestId("room-objective").fill("Surface and acknowledge failing health runs");
+    await page.getByTestId("room-create").click();
+    await page.getByTestId("room-title").waitFor();
+    const roomId = /\/rooms\/([^/]+)/.exec(new URL(page.url()).pathname)![1]!;
+
+    const client = new CrossoverClient({ baseUrl });
+    const login = await client.devLogin({
+      subject: "Health author",
+      display_name: "Health author",
+    });
+    const session = await client.roomSession(login.session_token, roomId);
+    const owner: RoomClient = client.room(roomId, session.tokens.access_token);
+    await page.getByTestId("tab-collaboration").click();
+    await page.getByTestId("collab-inbox").click();
+
+    const imported = await owner.api.git.import<{ applied_revision: number }>({
+      url: "https://github.com/acme/widgets",
+      branch: "main",
+    });
+    await db.pool.query("UPDATE rooms SET settings = settings || $2::jsonb WHERE id = $1", [
+      roomId,
+      JSON.stringify({ health_command: "node --check broken.js" }),
+    ]);
+    await owner.api.workspace.apply_changeset({
+      source: "API",
+      message: "Add a syntax error to trigger the health notice",
+      base_workspace_revision: imported.response.applied_revision,
+      operations: [{ type: "create", path: "broken.js", content: "module.exports = ;\n" }],
+    });
+
+    const revision = imported.response.applied_revision + 1;
+    await expect
+      .poll(
+        async () => {
+          const { rows } = await db.pool.query<{ status: string }>(
+            "SELECT status FROM health_runs WHERE room_id = $1 AND revision = $2 ORDER BY created_at DESC LIMIT 1",
+            [roomId, revision],
+          );
+          return rows[0]?.status ?? null;
+        },
+        { timeout: 90_000 },
+      )
+      .toBe("RED");
+    await expect
+      .poll(
+        async () => {
+          const inbox = await owner.api.inbox.list<{ items: { kind: string }[] }>({
+            unacked_only: true,
+          });
+          return inbox.response.items.some((entry) => entry.kind === "HEALTH_RED");
+        },
+        { timeout: 30_000 },
+      )
+      .toBe(true);
+
+    const item = page.getByTestId("inbox-item");
+    await expect.poll(() => item.count(), { timeout: 10_000 }).toBe(1);
+    await expect.poll(() => item.textContent()).toContain("HEALTH_RED");
+    await expect.poll(() => item.textContent()).toContain("Health check failed");
+    await page.getByTestId("inbox-ack").click();
+    await expect
+      .poll(() => page.getByTestId("inbox-list").textContent())
+      .toContain("No unacknowledged inbox items.");
+    await expect
+      .poll(async () => {
+        const inbox = await owner.api.inbox.list<{ items: unknown[] }>({ unacked_only: true });
+        return inbox.response.items.length;
+      })
+      .toBe(0);
+
+    expect(problems).toEqual([]);
+    await page.close();
+  }, 120_000);
 });
