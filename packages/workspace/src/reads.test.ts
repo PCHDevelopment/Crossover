@@ -48,13 +48,20 @@ async function fixture(authorize: Authorizer = allowAll) {
     authority: "OWNER" as const,
     role: "LEAD" as const,
   };
-  const dispatch = (method: string, params: Record<string, unknown>, mutating = false) =>
-    dispatcher.dispatch(principal, {
+  const dispatchAs = (
+    who: typeof principal | Parameters<Dispatcher["dispatch"]>[0],
+    method: string,
+    params: Record<string, unknown>,
+    mutating = false,
+  ) =>
+    dispatcher.dispatch(who, {
       id: newId("cmd"),
       method,
       params,
       ...(mutating ? { idempotency_key: newId("cmd") } : {}),
     });
+  const dispatch = (method: string, params: Record<string, unknown>, mutating = false) =>
+    dispatchAs(principal, method, params, mutating);
   const apply = (operations: Operation[], base = 0) =>
     dispatch(
       "workspace.apply_changeset",
@@ -66,7 +73,18 @@ async function fixture(authorize: Authorizer = allowAll) {
       },
       true,
     );
-  return { room, workspace, repo, options, dispatch, apply, owner };
+  return {
+    room,
+    workspace,
+    repo,
+    options,
+    dispatcher,
+    principal,
+    dispatchAs,
+    dispatch,
+    apply,
+    owner,
+  };
 }
 
 it("reads old contents and file revisions after later modification/deletion, independent of cached refs", async () => {
@@ -131,6 +149,122 @@ it("lists only sorted direct children, preserving full literal room paths and hi
     content: "dir[1]/a",
   });
   expect(JSON.stringify(root.response)).not.toMatch(/[a-f0-9]{40}/);
+});
+
+it("reads submitted candidate content with non-conflicting edits for the review ladder only", async () => {
+  const f = await fixture();
+  const submitterId = newId("part");
+  const reviewerId = newId("part");
+  for (const [id, name] of [
+    [submitterId, "Submitter"],
+    [reviewerId, "Reviewer"],
+  ]) {
+    await db.pool.query(
+      `INSERT INTO participants (id, room_id, kind, display_name, authority, role, status)
+       VALUES ($1, $2, 'HUMAN', $3, 'MEMBER', 'DEVELOPER', 'ACTIVE')`,
+      [id, f.room, name],
+    );
+  }
+  const submitter = {
+    ...f.principal,
+    participant_id: submitterId,
+    authority: "MEMBER" as const,
+    role: "DEVELOPER" as const,
+  };
+  const reviewer = { ...submitter, participant_id: reviewerId };
+
+  await f.apply([{ type: "create", path: "docs/review.txt", content: "base\nunchanged\n" }]);
+  await f.apply([{ type: "modify", path: "docs/review.txt", content: "head\nunchanged\n" }], 1);
+  const result = await f.dispatchAs(
+    submitter,
+    "workspace.apply_changeset",
+    {
+      source: "API",
+      message: "Candidate with a clean second-line edit",
+      base_workspace_revision: 1,
+      operations: [{ type: "modify", path: "docs/review.txt", content: "mine\nsubmitted edit\n" }],
+    },
+    true,
+  );
+  const changesetId = (result.response as { changeset_id: string }).changeset_id;
+  expect(result.response).toMatchObject({ status: "CONFLICT" });
+
+  const metadata = await f.dispatchAs(reviewer, "workspace.changeset.get", {
+    changeset_id: changesetId,
+  });
+  expect(metadata.response).toMatchObject({
+    id: changesetId,
+    status: "CONFLICT",
+    paths: ["docs/review.txt"],
+  });
+  await expect(
+    f.dispatchAs(reviewer, "workspace.changeset.get", {
+      changeset_id: changesetId,
+      path: "docs/review.txt",
+    }),
+  ).rejects.toMatchObject({ code: "FORBIDDEN" });
+
+  const candidate = await f.dispatchAs(submitter, "workspace.changeset.get", {
+    changeset_id: changesetId,
+    path: "docs/review.txt",
+  });
+  expect(candidate.response).toMatchObject({
+    path: "docs/review.txt",
+    content: "mine\nsubmitted edit\n",
+    encoding: "utf8",
+  });
+});
+
+it("redacts unreadable touched paths and returns applied contents at that revision", async () => {
+  const readerId = newId("part");
+  const f = await fixture(async (principal, action, resource, context) => {
+    if (
+      principal.participant_id === readerId &&
+      action === "workspace.read" &&
+      resource.path === "secrets/private.txt"
+    )
+      throw new CrossoverError("FORBIDDEN", "Path is not readable");
+    return allowAll(principal, action, resource, context);
+  });
+  await db.pool.query(
+    `INSERT INTO participants (id, room_id, kind, display_name, authority, role, status)
+     VALUES ($1, $2, 'HUMAN', 'Reader', 'MEMBER', 'DEVELOPER', 'ACTIVE')`,
+    [readerId, f.room],
+  );
+  const reader = {
+    ...f.principal,
+    participant_id: readerId,
+    authority: "MEMBER" as const,
+    role: "DEVELOPER" as const,
+  };
+  const created = await f.apply([
+    { type: "create", path: "secrets/private.txt", content: "private\n" },
+    { type: "create", path: "docs/public.txt", content: "public\n" },
+  ]);
+  const changesetId = (created.response as { changeset_id: string }).changeset_id;
+  const metadata = await f.dispatchAs(reader, "workspace.changeset.get", {
+    changeset_id: changesetId,
+  });
+  expect(metadata.response).toMatchObject({ paths: ["docs/public.txt"] });
+  await expect(
+    f.dispatchAs(reader, "workspace.changeset.get", {
+      changeset_id: changesetId,
+      path: "secrets/private.txt",
+    }),
+  ).rejects.toMatchObject({ code: "NOT_FOUND" });
+  await expect(
+    f.dispatchAs(reader, "workspace.changeset.get", { changeset_id: "cs_other-room" }),
+  ).rejects.toMatchObject({ code: "NOT_FOUND" });
+
+  const publicContent = await f.dispatch("workspace.changeset.get", {
+    changeset_id: changesetId,
+    path: "docs/public.txt",
+  });
+  expect(publicContent.response).toMatchObject({
+    content: "public\n",
+    encoding: "utf8",
+    applied_revision: 1,
+  });
 });
 
 it("returns binary and large text bytes as base64", async () => {

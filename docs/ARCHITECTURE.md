@@ -917,7 +917,8 @@ WORKSPACE
   workspace.list / workspace.read / workspace.search
   workspace.diff / workspace.history / workspace.blame
   workspace.apply_changeset
-  workspace.changeset.get  status of a submitted ChangeSet
+  workspace.changeset.get  {changeset_id, path?}; metadata and readable touched paths;
+                           path returns candidate content for a pending ChangeSet
   workspace.changeset.decide_hold {changeset_id, decision, reason?}  lead or owner (§22.4)
   workspace.health.get     latest health per revision
 
@@ -954,6 +955,12 @@ GIT
   git.import / git.pull_upstream
   checkpoints.create / checkpoints.list / checkpoints.export
 ```
+
+`workspace.changeset.get` metadata is available to room participants authorized for `workspace.read`.
+The returned `paths` list includes only touched paths that participant can read. Supplying `path`
+returns the ChangeSet's candidate file content (including for a deleted file) only when the path is
+touched and readable. Pending candidate content is restricted to the submitter, room lead, owner,
+and admins; applied content is read from that ChangeSet's applied revision.
 
 ## 16.2 Command envelope
 
