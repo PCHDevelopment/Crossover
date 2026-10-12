@@ -26,7 +26,7 @@ Conventions are in `docs/ENGINEERING.md`. Section references (§) point to `docs
 | M11 Clients (§27, §29)                | T1101–T1106 | S1 (T1102 → Q1)                                             |
 | M12 Plugins (§21.4–21.5)              | T1201–T1206 | S1 (T1201, moved in Review 5), S2 (T1202–T1206)             |
 | M13 Lessons from building (§34)       | T1301–T1303 | S1                                                          |
-| M14 Demo-ready web app (Review 7)     | T1401–T1407 | S2 (T1401–T1407; T1402 moved from Q1)                       |
+| M14 Demo-ready web app (Review 7)     | T1401–T1408 | S2 (T1401–T1408; T1402 moved from Q1)                       |
 
 **Start here:** S1 → T101, T105, T114 (independent). S2 → T501, T505 (only need the scaffold).
 
@@ -1419,3 +1419,19 @@ Tests:
 
 - A fake-clock gateway test terminates a socket that stops answering pings.
 - An SDK test and a Go test each reconnect after a silent server, with no event lost and none duplicated.
+
+### T1408 · Set the room health command — S2
+
+ARCHITECTURE §24.1 says the lead or owner sets `health_command` and `health_image`, and the import flow suggests a command (T802). No command applies it today: the only way to set it is a direct database write, which the T1402 browser test uses. §30 step 2 cannot be completed through the product.
+
+- Add `room.set_health` (owner or lead): `{ health_command: string | null, health_image?: string }`. Validate the image against the operator `HEALTH_IMAGES` allowlist. Store it in room settings and emit `room.settings_changed` so open clients refresh.
+- Add it to the protocol command list, the SDKs and the MCP tool list in the same PR.
+- In the Setup tab, "Use this command" applies the suggested command after a confirmation that shows it, and a field lets the owner or lead edit or clear it.
+- Replace the database write in the T1402 step 13 browser test with the new command.
+
+Tests:
+
+- A member or observer is `FORBIDDEN`; an image outside the allowlist is rejected; a null command turns health gating off.
+- In the browser: import, accept the suggestion, apply a ChangeSet, see a health run start.
+
+Must merge before T1406.
