@@ -1508,3 +1508,12 @@ Clean up by exact names only.
 ### T1416 · Deploy-topology test: server container on crossover-git — S2
 
 The browser e2e bridges the fetcher-to-server hop with a test-only Unix-socket relay (#231). Add one test that builds and runs `apps/server` as a container attached to `crossover-git`, exactly as deployed, and runs a sandbox fetch end to end with no bridge. After M14.
+
+### T1417 · Watch: two unreproduced intermittent failures — S2
+
+A local full run around 16:20 UTC on 2026-10-12 saw two failures that passed on rerun. No failure output was kept, and neither reproduced afterwards (3,031 of 3,031 passed):
+
+- `apps/server/src/browser-plugin.docker.test.ts`, "uses the signed room allowlist, denies unsafe destinations, and caps UTF-8 page text": a provider error.
+- `apps/server/src/compose.test.ts`: a 5 s timeout in an unidentified test.
+
+Open a fix task the next time either fails, with its saved output. Rule from now on: before rerunning a failed test, save its full output (name, error, stack).
