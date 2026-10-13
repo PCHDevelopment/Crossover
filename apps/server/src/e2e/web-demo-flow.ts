@@ -248,6 +248,41 @@ function registerWebDemoFlow(fixture: WebFixture): void {
         },
       );
 
+      await demoStep("T1505: Peter runs and cancels commands in the Terminal tab", async () => {
+        await page.getByTestId("tab-terminal").click();
+        await page
+          .getByTestId("terminal-command")
+          .fill("printf 'terminal-stdout\\n'; printf 'terminal-stderr\\n' >&2; exit 0");
+        await page.getByRole("button", { name: "Run command" }).click();
+        await waitForStep(
+          "T1505: stdout and stderr appear in the terminal",
+          () => page.getByTestId("terminal-output").textContent(),
+          (text) =>
+            (text?.includes("terminal-stdout") && text.includes("terminal-stderr")) ?? false,
+        );
+        await waitForStep(
+          "T1505: command exit status appears",
+          () => page.getByTestId("terminal-status").textContent(),
+          (status) => status?.includes("finished") ?? false,
+        );
+        expect(await page.getByTestId("terminal-result").textContent()).toContain("exit 0");
+
+        await page.getByTestId("terminal-command").fill("sleep 30; printf 'should-not-finish\\n'");
+        await page.getByRole("button", { name: "Run command" }).click();
+        await waitForStep(
+          "T1505: long-running command is active",
+          () => page.getByTestId("terminal-status").textContent(),
+          (status) => status?.includes("running") ?? false,
+        );
+        await page.getByTestId("terminal-stop").click();
+        await waitForStep(
+          "T1505: cancelled command reports completion",
+          () => page.getByTestId("terminal-result").textContent(),
+          (result) => result?.includes("cancelled") ?? false,
+        );
+        await page.getByTestId("tab-setup").click();
+      });
+
       // 3. Peter creates invites. ArchitectAgent joins over HTTP for real MCP; A/B/C use the SDK.
       const inviteTokens: string[] = [];
       await demoStep(
