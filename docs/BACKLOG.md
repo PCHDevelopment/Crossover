@@ -1646,6 +1646,8 @@ Found by S1 (seq 1300) while checking the T1509 2b Rego matcher against TypeScri
 - an audit of every caller and test of `wildcardMatch` and `glob.ts`;
 - one line in ARCHITECTURE stating what `*` means.
 
+In #279, S1 found that the bug also left a gap in the circuit breaker's protected-path check: `secrets/*` did not match a file named `secrets/*key`. The fix closes that gap too, with a regression test.
+
 ### T1524 · Move the room-export route out of gateway server.ts — S1
 
 From Reviews 13 and 14. `packages/gateway/src/server.ts` is 676 lines, and the export route (about 110 lines) is inline. Move it next to `room-export.ts` and register it from `server.ts`, as was done for `execution.ts`. Behaviour must not change: existing tests pass unchanged, and the diff moves code rather than rewriting it. Document beside the endpoint that exports refuse with `UNAVAILABLE` when Redis is down.
