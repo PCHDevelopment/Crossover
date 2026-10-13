@@ -2,6 +2,74 @@
 
 Periodic big-picture reviews by O1: is the merged code building the product in ARCHITECTURE.md, in the right order? Newest first.
 
+## 2026-10-13 · Review 14 (12:20 UTC; 10 PRs merged since Review 13)
+
+**State.** #265, #268, #269, #270, #271, #272, #273, #274, #275 and #276 merged, each with CI green on its head. #277 (T1522) is approved and waiting for CI.
+
+- **Export and archive, T1506, done.** The disk-staged archive source (#265), cleanup on failure and disconnect (#268), and the SDK download plus the archive button (#269) complete it. Retention is still Peter's decision (T1519); the archive stays one-way and read-only.
+- **Go CLI breadth, T1508, done** (#260, #261, #263).
+- **Authorization in Rego, T1509, steps 1a, 1b and 2a done.**
+  - #271 adds `authz.rego`, compiled to a committed `policy.wasm`. CI pins `opa` 1.21.2 behind a checksum and fails when the module is stale.
+  - #273 makes `authorize()` ask the policy. Any failure to load or evaluate refuses with `UNAVAILABLE`. The policy adds about 20 ms to a 3.7 s exec, so it was not the cause of #273's red CI.
+  - #275 moves role bundles and authority powers into Rego data generated from `bundles.ts`. An exhaustive test compares the policy with `effectiveCapabilities()` for every role, authority and capability.
+  - Scope matching (2b) is next and still runs in TypeScript.
+- **UI completeness, T1507, two slices done.** #274 adds health and revision badges, `author_kind`, and decision veto and withdraw. #276 adds task create, assign and claim, memory writes, upstream pull and conflict escalation. That covers every bullet in the original T1507 spec. The web board still cannot start or submit a task, so S2's next slice does that.
+- **Test reliability.** T1520 (#267) ends injected pools before dropping the database. T1521 (#270) waits for the saved budget state, not a notice. T1517's abort tests use a deterministic fake daemon (#272). T1522 (#277) gives the first deploy-topology exec a 45 s budget and logs every request's duration.
+
+**Against §29.** M15's scope is nearly closed:
+
+- T1509 2b: scope matching in Rego.
+- T1507: start and submit, then block, unblock and release.
+- T1519 needs Peter's decision.
+
+Nothing in §29 is unassigned. The §30 browser demo exercises every merged UI step.
+
+**What went well.**
+
+- **Diagnosis before blame.** I called #273's first failure a flake. S1 answered with data: 3/3 failures with 1b, 4/4 passes without it, then per-phase timings showing the policy was not the cause. I withdrew the call. The real cause, a 10 s abort with no margin, became T1522 with a measured fix.
+- **Equivalence testing finds real bugs.** S1's 2b prototype compared the Rego scope matcher with the TypeScript one over 118,482 cases. It found a pre-existing TypeScript bug: in `glob.ts`, a `*` in the pattern is compared literally when the text has a `*` at that position. So `src/*` does not cover `src/*.ts`. The bug only ever refuses, never allows, but it contradicts the documented semantics.
+- **Plans first, scoped well.** S2 audited §29 against the merged code before proposing the next T1507 slice and asked before widening it.
+
+**What needs correcting.**
+
+1. **Flake calls need evidence.** My "flake" call on #273 was a guess. From now on, a failure is called a flake only with evidence: it reproduces on the base branch, or per-phase timings point elsewhere.
+2. **Behaviour fixes found inside a refactor ship separately.** The glob fix turns some refusals into allows, so it widens access. It gets its own PR before 2b (T1523), with a regression test and an audit of every caller, so it can be reviewed and reverted on its own.
+
+**Course corrections.**
+
+1. **S1:**
+   1. Merge #277 on green.
+   2. T1523: the glob `*` fix, as its own PR.
+   3. T1509 2b: scope matching in Rego, with the equivalence test kept in CI. Pin the code-point versus UTF-16 difference in a test, and confirm that request paths are length-checked in TypeScript before they reach the policy.
+   4. T1524: move the room-export route out of `gateway/src/server.ts`.
+2. **S2:**
+   1. T1507 slice 3: Start and Submit with per-requirement proof, plus a browser e2e.
+   2. T1507 slice 4: block, unblock and release.
+3. **For Peter (unchanged):**
+   - Merge docs PR #258.
+   - T1519: archive retention.
+   - T1418.
+   - Q1 staffing: Q1 has been silent for over a day.
+   - CI capacity: checks still queue for 5–20 minutes on one runner.
+   - Delete the throwaway branches `s1/diag-deploy-topology` and `s1/diag-deploy-topology-main`.
+
+**Tech-debt register, new:**
+
+- `glob.ts` `wildcardMatch` treats a pattern `*` as a literal against a text `*` (T1523). It fails closed.
+- Rego and TypeScript count string length differently: code points in Rego, UTF-16 units in TypeScript. They differ only for astral characters at the 512 and 4096 limits. Keep the difference documented and pinned until TypeScript is no longer on the path.
+
+**Carried over:**
+
+- `packages/gateway/src/server.ts` is 676 lines, and the export route is still inline (now T1524).
+- Exports depend on Redis; document that next to the endpoint.
+- `RedisOAuthStateStore` opens its own Redis connection.
+- dev-login returns `session_token` in its response body.
+- The web app imports `@crossover/workspace/protected-paths`.
+- `dispatcher.ts` is 1,793 lines.
+- `execution.ts` is 1,921 lines.
+
+**Closed since Review 13:** T1506, T1508, T1520 and T1521. T1522 closes when #277 merges.
+
 ## 2026-10-13 · Review 13 (08:20 UTC; 13 PRs merged since Review 12)
 
 **State.** S1 rejoined at 05:40, so there are two engineers again. Between them, #249, #250, #252–#254, #256, #257, #259, #260 and #262–#264 merged, and #266 makes thirteen. Each merged with CI green on its head.

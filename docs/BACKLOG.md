@@ -1556,11 +1556,11 @@ PR A (#245, `budgets.set`/`budgets.get`, `room.budgets_changed`) and the Owner c
 
 §27 Terminal tab: the human's own sandbox via `sandbox.exec`, and read-only views of agents' sandbox output via `sandbox.output.subscribe`.
 
-### T1506 · Room export bundle and archive button — unassigned
+### T1506 · Room export bundle and archive button — S2
 
 §5 export bundle (git bundle, `events.jsonl`, `memory.json`, `tasks.json`, `decisions.json`), plus an archive button in owner controls.
 
-### T1507 · Web UI completeness — unassigned
+### T1507 · Web UI completeness — S2
 
 Decision veto and withdraw; task create, assign and claim; memory write; one-click conflict escalate; health and revision badge in the header; upstream-pull button; show `provenance.author_kind` (HUMAN/AGENT/SYSTEM) beside the trust label in MessagesView and CollaborationView, since `trust` is `participant` for humans and agents alike.
 
@@ -1568,7 +1568,7 @@ Decision veto and withdraw; task create, assign and claim; memory write; one-cli
 
 Messages, inbox, sandbox and the `room mcp` stdio shim.
 
-### T1509 · OPA-WASM behind `authorize()` — unassigned
+### T1509 · OPA-WASM behind `authorize()` — S1
 
 D9 fidelity with no functional change. Last.
 
@@ -1637,3 +1637,15 @@ Found by S2 (seq 1227–1228). In `apps/server/src/e2e/web.test.ts`, all 14 asse
 ### T1522 · Deploy-topology first sandbox.exec has no time margin — S1
 
 `apps/server/src/e2e/deploy-topology.test.ts:255` gives the first `sandbox.exec` a 10 s per-request abort (`requestJson`, line 47). That first request runs `ensureSandbox`, container create and a git fetch over `crossover-git`, all inside one request, under full-suite load. The whole test took 9.95 s (#257), 10.15 s (#261) and 14.9 s (#269). On #273 (run 38379543415, job 115236242740) the exec request alone went past 10 s. Time each phase of the first exec in CI, then give that one request a measured budget, as in T1510. If one phase dominates, for example the image pull or the fetch, decide whether it should be warmed before the test.
+
+### T1523 · Glob `*` is compared literally against a `*` in the text — S1
+
+Found by S1 (seq 1300) while checking the T1509 2b Rego matcher against TypeScript over 118,482 cases. In `glob.ts`, `wildcardMatch` treats a pattern `*` as a literal when the text has a `*` at that position. So pattern `*` does not match text `**`, and a grant `workspace.write:src/*` does not cover the path `src/*.ts`. It fails closed: it causes false denies, never allows. But it contradicts the documented meaning, where `*` matches any run of characters. Fix it in its own PR, before 2b, because the fix widens access. Include:
+
+- a regression test for both cases;
+- an audit of every caller and test of `wildcardMatch` and `glob.ts`;
+- one line in ARCHITECTURE stating what `*` means.
+
+### T1524 · Move the room-export route out of gateway server.ts — S1
+
+From Reviews 13 and 14. `packages/gateway/src/server.ts` is 676 lines, and the export route (about 110 lines) is inline. Move it next to `room-export.ts` and register it from `server.ts`, as was done for `execution.ts`. Behaviour must not change: existing tests pass unchanged, and the diff moves code rather than rewriting it. Document beside the endpoint that exports refuse with `UNAVAILABLE` when Redis is down.
