@@ -73,16 +73,7 @@ export default function CollaborationView(props: {
   nameOf: (id: string) => string;
   onEvent: (listener: (event: SdkEvent) => void) => () => void;
 }) {
-  const {
-    room,
-    selfId,
-    canPropose,
-    canPosition,
-    canDecide,
-    canVeto,
-    nameOf,
-    onEvent,
-  } = props;
+  const { room, selfId, canPropose, canPosition, canDecide, canVeto, nameOf, onEvent } = props;
   const [section, setSection] = useState<Section>("decisions");
   const [notice, setNotice] = useState<string>();
   const [busy, setBusy] = useState<string>();
