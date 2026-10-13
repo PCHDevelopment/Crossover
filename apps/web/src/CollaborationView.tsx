@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import type { RoomClient, SdkEvent } from "@crossover/sdk";
 
-type Provenance = { author_id: string; trust: string };
+type Provenance = { author_id: string; author_kind: "HUMAN" | "AGENT" | "SYSTEM"; trust: string };
 type DecisionOption = { id: string; summary: string; detail: string };
 type Position = {
   participant_id: string;
@@ -17,6 +17,7 @@ type Decision = {
   status: string;
   outcome_option_id: string | null;
   rationale: string | null;
+  decided_at?: string | null;
   proposed_by: string;
   provenance: Provenance;
   version: number;
@@ -68,10 +69,22 @@ export default function CollaborationView(props: {
   canPropose: boolean;
   canPosition: boolean;
   canDecide: boolean;
+  canWriteMemory: boolean;
+  canVeto: boolean;
   nameOf: (id: string) => string;
   onEvent: (listener: (event: SdkEvent) => void) => () => void;
 }) {
-  const { room, selfId, canPropose, canPosition, canDecide, nameOf, onEvent } = props;
+  const {
+    room,
+    selfId,
+    canPropose,
+    canPosition,
+    canDecide,
+    canWriteMemory,
+    canVeto,
+    nameOf,
+    onEvent,
+  } = props;
   const [section, setSection] = useState<Section>("decisions");
   const [notice, setNotice] = useState<string>();
   const [busy, setBusy] = useState<string>();
@@ -85,11 +98,18 @@ export default function CollaborationView(props: {
   const [positionArguments, setPositionArguments] = useState<Record<string, string>>({});
   const [outcomes, setOutcomes] = useState<Record<string, string>>({});
   const [rationales, setRationales] = useState<Record<string, string>>({});
+  const [vetoRationales, setVetoRationales] = useState<Record<string, string>>({});
   const [memoryPrefix, setMemoryPrefix] = useState("");
   const [memory, setMemory] = useState<MemorySummary[]>([]);
   const [memoryKey, setMemoryKey] = useState<string>();
   const [memoryEntry, setMemoryEntry] = useState<MemoryEntry>();
   const [memoryHistory, setMemoryHistory] = useState<MemoryRevision[]>([]);
+  const [memoryWriteKey, setMemoryWriteKey] = useState("");
+  const [memoryWriteValue, setMemoryWriteValue] = useState("");
+  const [memoryWriteType, setMemoryWriteType] = useState<"text/markdown" | "application/json">(
+    "text/markdown",
+  );
+  const [memorySourceRefs, setMemorySourceRefs] = useState("");
 
   const loadDecisions = useCallback(async () => {
     const page = await room.api.decisions.list<{ decisions: Decision[] }>({ limit: 100 });
@@ -127,6 +147,7 @@ export default function CollaborationView(props: {
       ]);
       setMemoryEntry(entry.response);
       setMemoryHistory(history.response.revisions);
+      return entry.response;
     },
     [room],
   );
@@ -244,13 +265,91 @@ export default function CollaborationView(props: {
     }
   };
 
+  const writeMemory = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const key = memoryWriteKey.trim();
+    setBusy("memory:write");
+    setNotice(undefined);
+    try {
+      const source_refs = memorySourceRefs
+        .split("\n")
+        .map((reference) => reference.trim())
+        .filter(Boolean)
+        .map((reference) => {
+          const separator = reference.indexOf(":");
+          if (separator < 1 || separator === reference.length - 1)
+            throw new Error("Write each source reference as kind:id on its own line.");
+          return {
+            kind: reference.slice(0, separator).trim(),
+            id: reference.slice(separator + 1).trim(),
+          };
+        });
+      const expected_revision = memoryEntry?.key === key ? memoryEntry.revision : 0;
+      await room.api.memory.put({
+        key,
+        value: memoryWriteValue,
+        content_type: memoryWriteType,
+        expected_revision,
+        source_refs,
+      });
+      setMemoryKey(key);
+      await Promise.all([loadMemory(memoryPrefix), loadMemoryDetail(key)]);
+    } catch (error) {
+      setNotice(message(error));
+    } finally {
+      setBusy(undefined);
+    }
+  };
+
+  const withdraw = async (decision: Decision) => {
+    setBusy(`withdraw:${decision.id}`);
+    setNotice(undefined);
+    try {
+      await room.api.decisions.withdraw({
+        decision_id: decision.id,
+        expected_version: decision.version,
+      });
+      await Promise.all([loadDecisions(), loadDecision(decision.id)]);
+    } catch (error) {
+      setNotice(message(error));
+      void loadDecision(decision.id).catch(() => undefined);
+    } finally {
+      setBusy(undefined);
+    }
+  };
+
+  const veto = async (event: FormEvent<HTMLFormElement>, decision: Decision) => {
+    event.preventDefault();
+    setBusy(`veto:${decision.id}`);
+    setNotice(undefined);
+    try {
+      await room.api.decisions.veto({
+        decision_id: decision.id,
+        expected_version: decision.version,
+        rationale: vetoRationales[decision.id] ?? "",
+      });
+      await Promise.all([loadDecisions(), loadDecision(decision.id), loadMemory(memoryPrefix)]);
+    } catch (error) {
+      setNotice(message(error));
+      void loadDecision(decision.id).catch(() => undefined);
+    } finally {
+      setBusy(undefined);
+    }
+  };
+
   const selectMemory = async (key: string) => {
     setMemoryKey(key);
     setMemoryEntry(undefined);
     setMemoryHistory([]);
     setNotice(undefined);
     try {
-      await loadMemoryDetail(key);
+      const entry = await loadMemoryDetail(key);
+      setMemoryWriteKey(entry.key);
+      setMemoryWriteValue(entry.redacted ? "" : entry.value);
+      setMemoryWriteType(entry.content_type as "text/markdown" | "application/json");
+      setMemorySourceRefs(
+        entry.source_refs.map((source) => `${source.kind}:${source.id}`).join("\n"),
+      );
     } catch (error) {
       setNotice(message(error));
     }
@@ -300,7 +399,8 @@ export default function CollaborationView(props: {
                 <strong>{item.kind}</strong>
                 <p>{item.summary}</p>
                 <p className="muted">
-                  From {nameOf(item.provenance.author_id)} · trust: {item.provenance.trust}
+                  From {nameOf(item.provenance.author_id)} · {item.provenance.author_kind} · trust:{" "}
+                  {item.provenance.trust}
                 </p>
                 <button
                   disabled={busy !== undefined}
@@ -379,9 +479,21 @@ export default function CollaborationView(props: {
               <p>{selectedDecision.context}</p>
               <p className="muted">
                 {selectedDecision.status} · proposed by{" "}
-                {nameOf(selectedDecision.provenance.author_id)} · trust:{" "}
+                {nameOf(selectedDecision.provenance.author_id)} ·{" "}
+                {selectedDecision.provenance.author_kind} · trust:{" "}
                 {selectedDecision.provenance.trust}
               </p>
+              {selectedDecision.status === "PROPOSED" &&
+                selectedDecision.proposed_by === selfId &&
+                canPropose && (
+                  <button
+                    disabled={busy !== undefined}
+                    data-testid="decision-withdraw"
+                    onClick={() => void withdraw(selectedDecision)}
+                  >
+                    Withdraw decision
+                  </button>
+                )}
               <ol>
                 {selectedDecision.options.map((option) => (
                   <li key={option.id}>
@@ -397,7 +509,9 @@ export default function CollaborationView(props: {
                     {nameOf(position.participant_id)}
                     {position.participant_id === selfId ? " (you)" : ""} chose {position.option_id}:{" "}
                     {position.argument}{" "}
-                    <span className="muted">(trust: {position.provenance.trust})</span>
+                    <span className="muted">
+                      ({position.provenance.author_kind} · trust: {position.provenance.trust})
+                    </span>
                   </li>
                 ))}
                 {(selectedDecision.positions ?? []).length === 0 && (
@@ -491,6 +605,33 @@ export default function CollaborationView(props: {
                   </button>
                 </form>
               )}
+              {canVeto &&
+                (selectedDecision.status === "ACCEPTED" ||
+                  selectedDecision.status === "REJECTED") &&
+                selectedDecision.decided_at &&
+                Date.now() >= Date.parse(selectedDecision.decided_at) &&
+                Date.now() - Date.parse(selectedDecision.decided_at) < 24 * 60 * 60 * 1000 && (
+                  <form onSubmit={(event) => void veto(event, selectedDecision)}>
+                    <label>
+                      Veto rationale
+                      <textarea
+                        value={vetoRationales[selectedDecision.id] ?? ""}
+                        onChange={(event) =>
+                          setVetoRationales((current) => ({
+                            ...current,
+                            [selectedDecision.id]: event.target.value,
+                          }))
+                        }
+                        maxLength={10_000}
+                        required
+                        data-testid="decision-veto-rationale"
+                      />
+                    </label>
+                    <button disabled={busy !== undefined} data-testid="decision-veto">
+                      Veto decision
+                    </button>
+                  </form>
+                )}
               {selectedDecision.status !== "PROPOSED" && selectedDecision.rationale && (
                 <p>Rationale: {selectedDecision.rationale}</p>
               )}
@@ -519,6 +660,54 @@ export default function CollaborationView(props: {
             </label>
             <button data-testid="memory-filter">Filter</button>
           </form>
+          {canWriteMemory && (
+            <form onSubmit={(event) => void writeMemory(event)} data-testid="memory-write-form">
+              <label>
+                Key
+                <input
+                  value={memoryWriteKey}
+                  onChange={(event) => setMemoryWriteKey(event.target.value)}
+                  maxLength={200}
+                  required
+                  data-testid="memory-write-key"
+                />
+              </label>
+              <label>
+                Content type
+                <select
+                  value={memoryWriteType}
+                  onChange={(event) =>
+                    setMemoryWriteType(event.target.value as "text/markdown" | "application/json")
+                  }
+                  data-testid="memory-write-type"
+                >
+                  <option value="text/markdown">Markdown text</option>
+                  <option value="application/json">JSON</option>
+                </select>
+              </label>
+              <label>
+                Value
+                <textarea
+                  value={memoryWriteValue}
+                  onChange={(event) => setMemoryWriteValue(event.target.value)}
+                  maxLength={65_536}
+                  required
+                  data-testid="memory-write-value"
+                />
+              </label>
+              <label>
+                Source references (kind:id, one per line)
+                <textarea
+                  value={memorySourceRefs}
+                  onChange={(event) => setMemorySourceRefs(event.target.value)}
+                  data-testid="memory-source-refs"
+                />
+              </label>
+              <button disabled={busy !== undefined} data-testid="memory-write">
+                {busy === "memory:write" ? "Saving…" : "Write shared memory"}
+              </button>
+            </form>
+          )}
           <ul className="list" data-testid="memory-list">
             {memory.map((entry) => (
               <li key={entry.key}>
@@ -531,7 +720,8 @@ export default function CollaborationView(props: {
                 </button>
                 <span className="muted">
                   {" "}
-                  · {nameOf(entry.provenance.author_id)} · trust: {entry.provenance.trust}
+                  · {nameOf(entry.provenance.author_id)} · {entry.provenance.author_kind} · trust:{" "}
+                  {entry.provenance.trust}
                 </span>
               </li>
             ))}
@@ -542,7 +732,8 @@ export default function CollaborationView(props: {
               <h4>{memoryEntry.key}</h4>
               <p className="muted">
                 Revision {memoryEntry.revision} · {memoryEntry.content_type} · from{" "}
-                {nameOf(memoryEntry.provenance.author_id)} · trust: {memoryEntry.provenance.trust}
+                {nameOf(memoryEntry.provenance.author_id)} · {memoryEntry.provenance.author_kind} ·
+                trust: {memoryEntry.provenance.trust}
               </p>
               <pre>{memoryEntry.redacted ? "[redacted by owner]" : memoryEntry.value}</pre>
               {memoryEntry.source_refs.length > 0 && (
@@ -558,7 +749,8 @@ export default function CollaborationView(props: {
                 {memoryHistory.map((revision) => (
                   <li key={revision.revision}>
                     r{revision.revision} · {revision.deleted ? "deleted" : revision.content_type} ·{" "}
-                    {nameOf(revision.provenance.author_id)} · trust: {revision.provenance.trust}
+                    {nameOf(revision.provenance.author_id)} · {revision.provenance.author_kind} ·
+                    trust: {revision.provenance.trust}
                     {revision.deleted ? null : (
                       <pre>{revision.redacted ? "[redacted by owner]" : revision.value}</pre>
                     )}

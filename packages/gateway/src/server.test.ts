@@ -15,7 +15,7 @@ import {
 import { authorize } from "@crossover/policy";
 import { CrossoverError, ERROR_CODES, newId } from "@crossover/protocol";
 import type { FastifyInstance } from "fastify";
-import { Readable } from "node:stream";
+import { PassThrough, Readable } from "node:stream";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { HTTP_STATUS, toHttpError } from "./errors.js";
@@ -239,6 +239,39 @@ describe("GET /v1/rooms/:roomId/export", () => {
       })
       .catch(() => undefined);
     await vi.waitFor(() => expect(cleanup).toHaveBeenCalledOnce());
+    const exported = await pool.query(
+      "SELECT 1 FROM events WHERE room_id = $1 AND type = 'room.exported'",
+      [s.room],
+    );
+    expect(exported.rows).toHaveLength(0);
+  });
+
+  it("aborts a disconnected download and releases its staging and room lock", async () => {
+    let signal: AbortSignal | undefined;
+    const stream = new PassThrough();
+    setImmediate(() => stream.write("archive chunk"));
+    const cleanup = vi.fn(async () => {});
+    const release = vi.fn(async () => {});
+    const source = {
+      create: vi.fn(async (_roomId: string, abort: AbortSignal) => {
+        signal = abort;
+        return { filename: "export.tar.gz", ledgerHead: "2", stream, cleanup };
+      }),
+    };
+    const limiter = { acquire: vi.fn(async () => release), close: vi.fn() };
+    const s = await setup(undefined, false, { roomExport: { source, limiter } });
+    const address = await s.app.listen({ host: "127.0.0.1", port: 0 });
+    const response = await fetch(`${address}/v1/rooms/${s.room}/export`, {
+      headers: { authorization: `Bearer ${s.owner.access_token}`, connection: "close" },
+    });
+    const reader = response.body!.getReader();
+    expect((await reader.read()).value).toEqual(new TextEncoder().encode("archive chunk"));
+    await reader.cancel();
+    await vi.waitFor(() => {
+      expect(signal?.aborted).toBe(true);
+      expect(cleanup).toHaveBeenCalledOnce();
+      expect(release).toHaveBeenCalledOnce();
+    });
     const exported = await pool.query(
       "SELECT 1 FROM events WHERE room_id = $1 AND type = 'room.exported'",
       [s.room],

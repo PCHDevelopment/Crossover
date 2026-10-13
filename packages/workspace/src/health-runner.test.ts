@@ -365,95 +365,71 @@ describe("DockerHealthRunner", () => {
   });
 
   /**
-   * A Docker daemon that is slow to create a container (T1517): it exists 100 ms after the
-   * create (or run) request, and a request in flight finishes even if its client is gone.
+   * A Docker daemon whose `create` stays in flight until the test lets it finish (T1517), with no
+   * clock involved: `createStarted` resolves when a create request arrives, `finishCreate()`
+   * makes the container exist and answers the request. A container exists exactly from the
+   * moment its create completes, as in Docker, and `rm` removes it.
    */
-  function slowCreateDaemon() {
-    const exists = new Map<string, number>();
-    const removed = new Set<string>();
-    const present = (name: string) =>
-      !removed.has(name) && exists.has(name) && Date.now() >= exists.get(name)!;
-    const nameOf = (args: readonly string[]) => args[args.indexOf("--name") + 1]!;
-    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-    const untilAborted = (signal?: AbortSignal) =>
-      new Promise<void>((resolve) => {
-        if (!signal || signal.aborted) return resolve();
-        signal.addEventListener("abort", () => resolve(), { once: true });
-      });
-    type Options = { signal?: AbortSignal; onAbort?: () => Promise<void> };
+  function controlledDaemon() {
+    const containers = new Set<string>();
     const calls: string[] = [];
-    const invoke = vi.fn(async (_binary: string, args: readonly string[], options?: Options) => {
+    let startCreate!: () => void;
+    let finishCreate!: () => void;
+    const createStarted = new Promise<void>((resolve) => (startCreate = resolve));
+    const createGate = new Promise<void>((resolve) => (finishCreate = resolve));
+    const nameOf = (args: readonly string[]) => args[args.indexOf("--name") + 1]!;
+    const invoke = vi.fn(async (_binary: string, args: readonly string[]) => {
       calls.push(args[0]!);
-      const ok = (output = "") => ({ code: 0, timedOut: false, output });
-      if (args[0] === "run") {
-        exists.set(nameOf(args), Date.now() + 100);
-        await untilAborted(options?.signal);
-        await options?.onAbort?.();
-        return { code: null, timedOut: false, aborted: true, output: "" };
-      }
       if (args[0] === "create") {
-        exists.set(nameOf(args), Date.now() + 100);
-        await sleep(100);
-        return ok("container-id");
+        startCreate();
+        await createGate; // still creating
+        containers.add(nameOf(args));
+      } else if (args[0] === "rm") {
+        containers.delete(args.at(-1)!);
+      } else if (args[0] === "start") {
+        return { code: 1, timedOut: false, output: "start must not be called after an abort" };
       }
-      if (args[0] === "start") {
-        await untilAborted(options?.signal);
-        await options?.onAbort?.();
-        return { code: null, timedOut: false, aborted: true, output: "" };
-      }
-      const name = args.at(-1)!;
-      if (args[0] === "kill") return { code: present(name) ? 0 : 1, timedOut: false, output: "" };
-      if (args[0] === "rm" && present(name)) removed.add(name);
-      return ok();
+      return { code: 0, timedOut: false, output: "" };
     });
-    return {
-      invoke,
-      calls,
-      leaked: () => [...exists.keys()].filter(present),
-    };
+    return { invoke, calls, containers, createStarted, finishCreate: () => finishCreate() };
   }
 
   it("leaves no container when aborted while the daemon is still creating it (T1517)", async () => {
     const { repository, revision } = await makeRepo();
-    const daemon = slowCreateDaemon();
+    const daemon = controlledDaemon();
     const controller = new AbortController();
-    const invoke = vi.fn(async (binary: string, args: readonly string[], options?: object) => {
-      if (args[0] === "create" || args[0] === "run") setTimeout(() => controller.abort(), 20);
-      return daemon.invoke(binary, args, options);
-    });
 
-    const result = await new DockerHealthRunner({}, invoke).run({
+    const running = new DockerHealthRunner({}, daemon.invoke).run({
       repository,
       revision,
       command: "sleep 30",
       signal: controller.signal,
     });
+    await daemon.createStarted;
+    controller.abort(); // the abort arrives while the create request is in flight
+    daemon.finishCreate(); // and the daemon completes that create anyway
+    const result = await running;
 
     expect(result.status).toBe("ERROR");
-    await new Promise((resolve) => setTimeout(resolve, 300)); // a late create would land by now
-    expect(daemon.leaked()).toEqual([]);
-    expect(daemon.calls).toEqual(["create", "rm"]); // never started: aborted once create returned
+    expect([...daemon.containers]).toEqual([]);
+    expect(daemon.calls).toEqual(["create", "rm"]); // never started; removed once it existed
   });
 
   it("leaves no install container when aborted while the daemon is still creating it (T1517)", async () => {
     await db.pool.query("DELETE FROM health_install_runs WHERE room_id = $1", ["room_health"]);
     const { repository, revision } = await makeLockedHealthRepo();
     const docker = fakeInstallDocker();
-    const daemon = slowCreateDaemon();
+    const daemon = controlledDaemon();
     const controller = new AbortController();
-    const invoke = vi.fn(
-      async (binary: string, args: readonly string[], options?: { signal?: AbortSignal }) => {
-        if (args[0] === "create" && args.includes("crossover.health.install=true")) {
-          setTimeout(() => controller.abort(), 20);
-          return daemon.invoke(binary, args, options);
-        }
-        if (["start", "kill", "rm"].includes(args[0]!) && args.at(-1)!.startsWith("health-install"))
-          return daemon.invoke(binary, args, options);
-        return docker.invoke(binary, args);
-      },
+    const forDaemon = (args: readonly string[]) =>
+      args[0] === "create"
+        ? args.includes("crossover.health.install=true")
+        : ["start", "rm"].includes(args[0]!) && args.at(-1)!.startsWith("health-install");
+    const invoke = vi.fn(async (binary: string, args: readonly string[]) =>
+      forDaemon(args) ? daemon.invoke(binary, args) : docker.invoke(binary, args),
     );
 
-    const result = await new DockerHealthRunner(
+    const running = new DockerHealthRunner(
       {
         egressProxyContainer: "egress-proxy",
         egressProxySecret: "0123456789abcdef0123456789abcdef",
@@ -467,20 +443,24 @@ describe("DockerHealthRunner", () => {
       signal: controller.signal,
       dependencyInstall: { pool: db.pool, command: "npm ci", lockfilePaths: ["package-lock.json"] },
     });
+    await daemon.createStarted;
+    controller.abort();
+    daemon.finishCreate();
+    const result = await running;
 
     expect(result.status).toBe("ERROR");
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    expect(daemon.leaked()).toEqual([]);
+    expect([...daemon.containers]).toEqual([]);
     expect(daemon.calls).toEqual(["create", "rm"]);
   });
 
   it("returns only once a container the daemon is auto-removing is gone (T1517)", async () => {
     const { repository, revision } = await makeRepo();
-    // After the kill the daemon removes the --rm container itself and takes 300 ms to finish;
-    // `docker rm -f` meanwhile fails with "removal already in progress" and the container is
-    // still listed. This is what CI saw 1.5 s into the real timeout case (run 38354265644).
-    let goneAt = Infinity;
-    const listed = () => Date.now() < goneAt;
+    // After the kill the daemon removes the --rm container itself and is still at it for the
+    // first two looks; `docker rm -f` meanwhile fails with "removal already in progress" and the
+    // container is still listed. This is what CI saw 1.5 s into the real timeout case (run
+    // 38354265644). The removal progresses with the looks, not with a clock.
+    let looks = 0;
+    const listed = () => looks < 2;
     const invoke = vi.fn(
       async (
         _binary: string,
@@ -489,7 +469,6 @@ describe("DockerHealthRunner", () => {
       ) => {
         if (args[0] === "start") {
           await options?.onTimeout?.();
-          goneAt = Date.now() + 300;
           return { code: null, timedOut: true, output: "" };
         }
         if (args[0] === "rm" && listed())
@@ -498,7 +477,11 @@ describe("DockerHealthRunner", () => {
             timedOut: false,
             output: "removal of container is already in progress",
           };
-        if (args[0] === "ps") return { code: 0, timedOut: false, output: listed() ? "abc123" : "" };
+        if (args[0] === "ps") {
+          const output = listed() ? "abc123" : "";
+          looks++;
+          return { code: 0, timedOut: false, output };
+        }
         return { code: 0, timedOut: false, output: "" };
       },
     );
@@ -511,6 +494,7 @@ describe("DockerHealthRunner", () => {
 
     expect(result.status).toBe("ERROR");
     expect(listed()).toBe(false); // gone by the time run() returns
+    expect(looks).toBe(3); // two looks while it was still being removed, one that found it gone
   });
 
   it("validates runner configuration", () => {

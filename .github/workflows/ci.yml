@@ -86,6 +86,29 @@ jobs:
           echo "$sum  $dir/rg.tar.gz" | sha256sum -c -
           tar -xzf "$dir/rg.tar.gz" -C "$dir" --strip-components=1
           echo "$dir" >> "$GITHUB_PATH"
+      # The authorization policy (D9) is Rego compiled to packages/policy/policy/policy.wasm, which is
+      # committed together with the role bundles it is built from (policy/bundles.gen.rego, generated from
+      # bundles.ts). A pinned, checksum-verified opa binary kept under the job's temp dir (nothing is
+      # installed system-wide) runs the Rego unit tests and checks that the committed module and bundles are what
+      # the sources build, so a changed policy cannot ship with an old module. The version also
+      # appears in packages/policy/src/wasm-cli.ts.
+      - name: Test the authorization policy (OPA)
+        run: |
+          set -euo pipefail
+          version=1.21.2
+          case "$(uname -m)" in
+            x86_64) arch=amd64; sum=830ab11f61ffec760b5e19db0d7ad02bf037e13f5ef4d665faeaf17632177527 ;;
+            aarch64) arch=arm64; sum=ed13bb8647b8a81e1f11741dd18babe02aced7a304314bd6bf8007793b6d4ff1 ;;
+            *) echo "No pinned opa for $(uname -m)"; exit 1 ;;
+          esac
+          dir="$RUNNER_TEMP/opa"
+          mkdir -p "$dir"
+          curl -fsSL -o "$dir/opa" "https://github.com/open-policy-agent/opa/releases/download/v$version/opa_linux_${arch}_static"
+          echo "$sum  $dir/opa" | sha256sum -c -
+          chmod +x "$dir/opa"
+          "$dir/opa" fmt --list --fail packages/policy/policy
+          "$dir/opa" test packages/policy/policy
+          OPA_BIN="$dir/opa" pnpm --filter @crossover/policy gen:wasm -- --check
       # --with-deps installs Chromium's system libraries through sudo, which a self-hosted runner may
       # not allow without a password. There, the libraries must already be on the machine.
       - name: Install Chromium

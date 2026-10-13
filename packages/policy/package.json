@@ -11,9 +11,12 @@
   },
   "dependencies": {
     "@crossover/db": "workspace:*",
-    "@crossover/protocol": "workspace:*"
+    "@crossover/protocol": "workspace:*",
+    "@open-policy-agent/opa-wasm": "1.10.0"
   },
   "scripts": {
-    "build": "tsc -b"
+    "build": "tsc -b",
+    "gen:wasm": "tsc -b && node dist/wasm-cli.js",
+    "test:rego": "opa test policy/"
   }
 }

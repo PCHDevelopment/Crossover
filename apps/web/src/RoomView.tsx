@@ -1,4 +1,13 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+} from "react";
 import type { PresenceIntent, RoomClient, SdkEvent } from "@crossover/sdk";
 import { isUnauthenticated } from "./App.js";
 import {
@@ -24,6 +33,9 @@ const FilesView = lazy(() => import("./FilesView.js"));
 const ChangesView = lazy(() => import("./ChangesView.js"));
 const TaskReviewView = lazy(() => import("./TaskReviewView.js"));
 const CheckpointExportView = lazy(() => import("./CheckpointExportView.js"));
+const RoomExportView = lazy(() =>
+  import("./RoomExportView.js").then((m) => ({ default: m.RoomExportView })),
+);
 const RoomSetupView = lazy(() =>
   import("./RoomSetupView.js").then((m) => ({ default: m.RoomSetupView })),
 );
@@ -66,18 +78,43 @@ const TABS: { id: Tab; label: string }[] = [
 const message = (error: unknown): string =>
   error instanceof Error ? error.message : "Something went wrong";
 
+interface HealthBadge {
+  status: string;
+  revision: number;
+  sequence: number;
+}
+
+function healthBadge(event: SdkEvent): HealthBadge | undefined {
+  const status = event.payload["status"];
+  const revision = event.payload["revision"];
+  if (
+    event.type !== "workspace.health" ||
+    typeof status !== "string" ||
+    typeof revision !== "number"
+  )
+    return undefined;
+  return { status, revision, sequence: event.sequence };
+}
+
 export function RoomView(props: { roomId: string; onBack: () => void; onSignedOut: () => void }) {
   const { roomId, onBack, onSignedOut } = props;
   const [open, setOpen] = useState<OpenRoom>();
   const [error, setError] = useState<string>();
   const [state, setState] = useState<RoomState>();
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [workspaceRevision, setWorkspaceRevision] = useState<number>();
+  const [workspaceHealth, setWorkspaceHealth] = useState<HealthBadge>();
+  const [workspaceStatusError, setWorkspaceStatusError] = useState<string>();
   const [feed, setFeed] = useState<SdkEvent[]>([]);
   const [live, setLive] = useState<string>("connecting");
   const [tab, setTab] = useState<Tab>("overview");
   const [notice, setNotice] = useState<string>();
   const [presence, setPresence] = useState<PresenceMap>(new Map());
   const [intents, setIntents] = useState<IntentMap>(new Map());
+  const [taskTitle, setTaskTitle] = useState("");
+  const [taskRequirements, setTaskRequirements] = useState("");
+  const [taskAssignees, setTaskAssignees] = useState<Record<string, string>>({});
+  const [taskBusy, setTaskBusy] = useState<string>();
   const roomRef = useRef<RoomClient>(undefined);
   const listeners = useRef(new Set<(event: SdkEvent) => void>());
   const onEvent = useCallback((listener: (event: SdkEvent) => void) => {
@@ -152,6 +189,20 @@ export function RoomView(props: { roomId: string; onBack: () => void; onSignedOu
         onState: (s) => setLive(s),
         onEvent: (event) => {
           setFeed((f) => [event, ...f].slice(0, FEED_LIMIT));
+          if (event.type === "workspace.changeset.applied") {
+            const revision = event.payload["applied_revision"];
+            if (typeof revision === "number")
+              setWorkspaceRevision((current) => Math.max(current ?? 0, revision));
+          } else if (event.type === "workspace.upstream_synced") {
+            const revision = event.payload["last_synced_room_revision"];
+            if (typeof revision === "number")
+              setWorkspaceRevision((current) => Math.max(current ?? 0, revision));
+          }
+          const health = healthBadge(event);
+          if (health)
+            setWorkspaceHealth((current) =>
+              !current || health.sequence > current.sequence ? health : current,
+            );
           if (affectsState(event.type)) refreshSoon();
           for (const listener of listeners.current) listener(event);
         },
@@ -174,6 +225,47 @@ export function RoomView(props: { roomId: string; onBack: () => void; onSignedOu
       sub?.close();
     };
   }, [open, reload]);
+
+  // The workspace head and latest health result are durable room data, not settings.
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    void (async () => {
+      const [history, latestHealth] = await Promise.all([
+        open.room.api.workspace.history<{ entries: { workspace_revision: number }[] }>({
+          limit: 1,
+        }),
+        (async () => {
+          let after = 0;
+          let latest: HealthBadge | undefined;
+          for (;;) {
+            const page = await open.room.api.room.events.list<{
+              events: SdkEvent[];
+              next_after: number | null;
+            }>({ after, limit: 500, types: ["workspace.health"] });
+            const last = page.response.events.at(-1);
+            if (last) latest = healthBadge(last) ?? latest;
+            if (page.response.next_after === null) return latest;
+            after = page.response.next_after;
+          }
+        })(),
+      ]);
+      if (cancelled) return;
+      const revision = history.response.entries[0]?.workspace_revision;
+      if (typeof revision === "number")
+        setWorkspaceRevision((current) => Math.max(current ?? 0, revision));
+      if (latestHealth)
+        setWorkspaceHealth((current) =>
+          !current || latestHealth.sequence > current.sequence ? latestHealth : current,
+        );
+      setWorkspaceStatusError(undefined);
+    })().catch((error: unknown) => {
+      if (!cancelled) setWorkspaceStatusError(message(error));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
 
   const names = useMemo(() => {
     const byId = new Map((state?.sections.participants ?? []).map((p) => [p.id, p.display_name]));
@@ -207,6 +299,9 @@ export function RoomView(props: { roomId: string; onBack: () => void; onSignedOu
   const mayInvite = me.authority === "OWNER" || me.authority === "ADMIN";
   const mayAppointLead = me.authority === "OWNER" || me.authority === "ADMIN";
   const maySetup = mayImport || mayInvite || mayAppointLead;
+  const mayCreateTasks = me.role === "DEVELOPER" || me.role === "LEAD";
+  const mayClaimTasks = mayCreateTasks;
+  const mayAssignTasks = me.authority === "OWNER" || me.authority === "ADMIN" || me.role === "LEAD";
 
   const control = async (p: Participant, method: "pause" | "resume") => {
     setNotice(undefined);
@@ -215,6 +310,52 @@ export function RoomView(props: { roomId: string; onBack: () => void; onSignedOu
       await reload();
     } catch (err) {
       setNotice(message(err));
+    }
+  };
+
+  const createTask = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const requirements = taskRequirements
+      .split("\n")
+      .map((requirement) => requirement.trim())
+      .filter(Boolean);
+    setTaskBusy("create");
+    setNotice(undefined);
+    try {
+      await open.room.api.tasks.create({ title: taskTitle.trim(), requirements });
+      setTaskTitle("");
+      setTaskRequirements("");
+      await reload();
+    } catch (err) {
+      setNotice(message(err));
+    } finally {
+      setTaskBusy(undefined);
+    }
+  };
+
+  const taskAction = async (task: Task, action: "claim" | "assign") => {
+    setTaskBusy(task.id);
+    setNotice(undefined);
+    try {
+      if (action === "claim") {
+        await open.room.api.tasks.claim({ task_id: task.id, expected_version: task.version });
+      } else {
+        const participantId =
+          taskAssignees[task.id] ??
+          participants.find((participant) => participant.status === "ACTIVE")?.id;
+        if (!participantId) throw new Error("Choose an active participant to assign this task.");
+        await open.room.api.tasks.assign({
+          task_id: task.id,
+          expected_version: task.version,
+          participant_id: participantId,
+        });
+      }
+      await reload();
+    } catch (err) {
+      setNotice(message(err));
+      await reload();
+    } finally {
+      setTaskBusy(undefined);
     }
   };
 
@@ -229,7 +370,19 @@ export function RoomView(props: { roomId: string; onBack: () => void; onSignedOu
         <span className="badge" data-testid="live-state">
           {live}
         </span>
+        <span className="badge" data-testid="workspace-revision">
+          Revision {workspaceRevision ?? "—"}
+        </span>{" "}
+        <span className="badge" data-testid="workspace-health">
+          Health{" "}
+          {workspaceHealth ? `${workspaceHealth.status} · r${workspaceHealth.revision}` : "not run"}
+        </span>
       </p>
+      {workspaceStatusError && (
+        <p role="alert" className="error" data-testid="workspace-status-error">
+          Workspace status unavailable: {workspaceStatusError}
+        </p>
+      )}
       <nav className="tabs" role="tablist">
         {TABS.filter(
           ({ id }) =>
@@ -303,6 +456,33 @@ export function RoomView(props: { roomId: string; onBack: () => void; onSignedOu
       {tab === "tasks" && (
         <section aria-label="Tasks board">
           <h2>Tasks</h2>
+          {mayCreateTasks && (
+            <form onSubmit={(event) => void createTask(event)} data-testid="task-create-form">
+              <label>
+                Task title
+                <input
+                  value={taskTitle}
+                  onChange={(event) => setTaskTitle(event.target.value)}
+                  maxLength={200}
+                  required
+                  data-testid="task-title"
+                />
+              </label>
+              <label>
+                Requirements (one per line)
+                <textarea
+                  value={taskRequirements}
+                  onChange={(event) => setTaskRequirements(event.target.value)}
+                  maxLength={50_000}
+                  required
+                  data-testid="task-requirements"
+                />
+              </label>
+              <button disabled={taskBusy !== undefined} data-testid="task-create">
+                {taskBusy === "create" ? "Creating…" : "Create task"}
+              </button>
+            </form>
+          )}
           <div className="board" data-testid="board">
             {TASK_STATUSES.map((status) => (
               <div key={status} className="column" data-testid={`column-${status}`}>
@@ -310,9 +490,56 @@ export function RoomView(props: { roomId: string; onBack: () => void; onSignedOu
                 {tasks
                   .filter((t) => t.status === status)
                   .map((t) => (
-                    <div key={t.id} className="task" data-testid="task">
+                    <div key={t.id} className="task" data-testid="task" data-id={t.id}>
                       <div>{t.title}</div>
                       <div className="muted">{t.owner_id ? names(t.owner_id) : "unassigned"}</div>
+                      {t.status === "OPEN" && mayClaimTasks && (
+                        <button
+                          disabled={taskBusy !== undefined}
+                          data-testid="task-claim"
+                          onClick={() => void taskAction(t, "claim")}
+                        >
+                          Claim
+                        </button>
+                      )}
+                      {t.status === "OPEN" && mayAssignTasks && (
+                        <span className="task-actions">
+                          <select
+                            aria-label={`Assign ${t.title} to`}
+                            value={
+                              taskAssignees[t.id] ??
+                              participants.find((participant) => participant.status === "ACTIVE")
+                                ?.id ??
+                              ""
+                            }
+                            onChange={(event) =>
+                              setTaskAssignees((current) => ({
+                                ...current,
+                                [t.id]: event.target.value,
+                              }))
+                            }
+                            data-testid="task-assignee"
+                          >
+                            {participants
+                              .filter((participant) => participant.status === "ACTIVE")
+                              .map((participant) => (
+                                <option key={participant.id} value={participant.id}>
+                                  {participant.display_name}
+                                </option>
+                              ))}
+                          </select>
+                          <button
+                            disabled={
+                              taskBusy !== undefined ||
+                              participants.every((p) => p.status !== "ACTIVE")
+                            }
+                            data-testid="task-assign"
+                            onClick={() => void taskAction(t, "assign")}
+                          >
+                            Assign
+                          </button>
+                        </span>
+                      )}
                     </div>
                   ))}
               </div>
@@ -328,6 +555,8 @@ export function RoomView(props: { roomId: string; onBack: () => void; onSignedOu
             canPropose={me.role !== "OBSERVER"}
             canPosition={me.role !== "OBSERVER"}
             canDecide={me.role === "LEAD"}
+            canWriteMemory={me.role !== "OBSERVER"}
+            canVeto={me.authority === "OWNER" || me.authority === "ADMIN"}
             nameOf={names}
             onEvent={onEvent}
           />
@@ -421,6 +650,10 @@ export function RoomView(props: { roomId: string; onBack: () => void; onSignedOu
                 me.authority === "OWNER" || me.authority === "ADMIN" || me.role === "LEAD"
               }
               onEvent={onEvent}
+            />
+            <RoomExportView
+              room={open.room}
+              mayExportRoom={me.authority === "OWNER" || me.authority === "ADMIN"}
             />
             <CheckpointExportView
               room={open.room}
