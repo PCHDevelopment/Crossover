@@ -11,6 +11,11 @@ import { normalizePath } from "./path.js";
 
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
 const INSTALL_EXPIRY_MARGIN_MS = 60 * 1000;
+/** `docker create` is quick; this only bounds a hung daemon. */
+const CREATE_TIMEOUT_MS = 60_000;
+/** How long to wait for the daemon to finish removing a container, and how often to look. */
+const REMOVAL_WAIT_MS = 10_000;
+const REMOVAL_POLL_MS = 200;
 const INSTALL_SETUP_STALE_MS = 2 * 60 * 1000;
 const MAX_LOG_BYTES = 1024 * 1024;
 export const DEFAULT_HEALTH_IMAGE = "node:22-bookworm-slim";
@@ -370,7 +375,7 @@ export class DockerHealthRunner implements HealthRunner {
       let result: ProcessResult;
       try {
         const args = [
-          "run",
+          "create",
           "--rm",
           "--init",
           "--name",
@@ -407,28 +412,9 @@ export class DockerHealthRunner implements HealthRunner {
           args.push(...dependencyCacheEnvironment());
         }
         args.push("--workdir", "/workspace", image, "/bin/sh", "-lc", input.command);
-        result = await this.processRunner(this.dockerBinary, args, {
-          timeoutMs: this.timeoutMs,
-          maxBuffer: MAX_LOG_BYTES,
-          ...(input.signal ? { signal: input.signal } : {}),
-          onTimeout: async () => {
-            await this.processRunner(this.dockerBinary, ["kill", containerName], {
-              timeoutMs: 5_000,
-              maxBuffer: 8192,
-            });
-          },
-          onAbort: async () => {
-            await this.processRunner(this.dockerBinary, ["kill", containerName], {
-              timeoutMs: 5_000,
-              maxBuffer: 8192,
-            });
-          },
-        });
+        result = await this.runContainer(containerName, args, input.signal);
       } finally {
-        await this.processRunner(this.dockerBinary, ["rm", "-f", containerName], {
-          timeoutMs: 5_000,
-          maxBuffer: 8192,
-        }).catch(() => ({ code: null, timedOut: false, output: "" }));
+        await this.removeContainer(containerName);
       }
       const status: HealthStatus =
         result.aborted || result.timedOut || result.code === null
@@ -659,7 +645,7 @@ export class DockerHealthRunner implements HealthRunner {
       const credential = createHealthInstallProxyCredential(installId, this.egressProxySecret);
       const proxyUrl = `http://${encodeURIComponent(installId)}:${encodeURIComponent(credential)}@${this.egressProxyContainer}:${this.egressProxyPort}`;
       const args = [
-        "run",
+        "create",
         "--rm",
         "--init",
         "--name",
@@ -695,18 +681,9 @@ export class DockerHealthRunner implements HealthRunner {
         args.push("--env", `${name}=${value}`);
       args.push("--workdir", "/workspace", image, "/bin/sh", "-lc", install.command);
       try {
-        processResult = await this.processRunner(this.dockerBinary, args, {
-          timeoutMs: this.timeoutMs,
-          maxBuffer: MAX_LOG_BYTES,
-          ...(signal ? { signal } : {}),
-          onTimeout: () => this.killContainer(containerName),
-          onAbort: () => this.killContainer(containerName),
-        });
+        processResult = await this.runContainer(containerName, args, signal);
       } finally {
-        await this.processRunner(this.dockerBinary, ["rm", "-f", containerName], {
-          timeoutMs: 5_000,
-          maxBuffer: 8192,
-        }).catch(() => ({ code: null, timedOut: false, output: "" }));
+        await this.removeContainer(containerName);
       }
       const succeeded =
         !processResult.aborted && !processResult.timedOut && processResult.code === 0;
@@ -975,6 +952,64 @@ export class DockerHealthRunner implements HealthRunner {
       maxBuffer: 64 * 1024,
     });
     if (result.code !== 0) throw new Error(`${description}: ${result.output}`);
+  }
+
+  /**
+   * Run a health container as `docker create` followed by `docker start --attach` instead of
+   * `docker run` (T1517). Once create has returned the container exists, so whatever happens
+   * next, the caller's `docker rm -f` by name removes it. With `docker run`, a timeout or abort
+   * that fired while the daemon was still creating the container found nothing to kill, and the
+   * `rm -f` ran before the create landed, leaving a running container behind. A create already
+   * in flight is waited for, never interrupted; `timeoutMs` counts from the start.
+   */
+  private async runContainer(
+    name: string,
+    createArgs: readonly string[],
+    signal?: AbortSignal,
+  ): Promise<ProcessResult> {
+    const created = await this.processRunner(this.dockerBinary, createArgs, {
+      timeoutMs: CREATE_TIMEOUT_MS,
+      maxBuffer: 64 * 1024,
+    });
+    if (created.code !== 0) return created;
+    if (signal?.aborted) return { code: null, timedOut: false, aborted: true, output: "" };
+    return this.processRunner(this.dockerBinary, ["start", "--attach", name], {
+      timeoutMs: this.timeoutMs,
+      maxBuffer: MAX_LOG_BYTES,
+      ...(signal ? { signal } : {}),
+      onTimeout: () => this.killContainer(name),
+      onAbort: () => this.killContainer(name),
+    });
+  }
+
+  /**
+   * Remove a health container and return only once it is gone (T1517). The container is
+   * created with `--rm`, so after a kill the daemon removes it too, and `docker rm -f` then
+   * fails with "removal already in progress" while the container is still listed. That is the
+   * leftover container CI saw 1.5 s into the timeout case: not a slow start, a removal that had
+   * not finished.
+   */
+  private async removeContainer(name: string): Promise<void> {
+    const failed = { code: null, timedOut: false, output: "" };
+    const removed = await this.processRunner(this.dockerBinary, ["rm", "-f", name], {
+      timeoutMs: 5_000,
+      maxBuffer: 8192,
+    }).catch(() => failed);
+    if (removed.code === 0) return;
+    const deadline = Date.now() + REMOVAL_WAIT_MS;
+    while (Date.now() < deadline) {
+      const listed = await this.processRunner(
+        this.dockerBinary,
+        ["ps", "--all", "--quiet", "--filter", `name=^${name}$`],
+        { timeoutMs: 5_000, maxBuffer: 8192 },
+      ).catch(() => failed);
+      if (listed.code === 0 && listed.output.trim() === "") return;
+      await new Promise((resolve) => setTimeout(resolve, REMOVAL_POLL_MS));
+      await this.processRunner(this.dockerBinary, ["rm", "-f", name], {
+        timeoutMs: 5_000,
+        maxBuffer: 8192,
+      }).catch(() => failed);
+    }
   }
 
   private async killContainer(name: string): Promise<void> {
