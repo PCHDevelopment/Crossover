@@ -26,6 +26,8 @@ Conventions are in `docs/ENGINEERING.md`. Section references (§) point to `docs
 | M11 Clients (§27, §29)                | T1101–T1106 | S1 (T1102 → Q1)                                             |
 | M12 Plugins (§21.4–21.5)              | T1201–T1206 | S1 (T1201, moved in Review 5), S2 (T1202–T1206)             |
 | M13 Lessons from building (§34)       | T1301–T1303 | S1                                                          |
+| M14 Demo-ready web app (Review 7)     | T1401–T1416 | S2 (T1401–T1416; T1402 moved from Q1)                       |
+| M15 MVP scope gaps (§29, Review 10)   | T1501–T1518 | S2 (T1501–T1503, T1510–T1511, T1513–T1514; rest unassigned) |
 
 **Start here:** S1 → T101, T105, T114 (independent). S2 → T501, T505 (only need the scaffold).
 
@@ -1185,6 +1187,7 @@ Editor with live intents, draft flush, live cursors and merge view (§27; demo s
 
 - **T1105a · Editor and drafts.** File tree from `workspace.list`; Monaco editor (bundled, no CDN, within the gateway CSP); each open buffer is a draft with its `base_file_revision` and a draft indicator. Flushes (§13.2): 1.5 s idle, 10 s of continuous typing, explicit save, switching files or closing the tab, each as an `EDITOR` ChangeSet. Incoming `workspace.changeset.applied` on an open file (§13.3): a clean buffer is replaced, a dirty one is merged three-way in the browser and rebased if clean, otherwise kept and marked conflicted. The draft logic is a UI-free module with unit tests; the browser merge agrees with `git merge-file` wherever it calls a merge clean.
 - **T1105b · Live intents and cursors.** Agents' edit intents (`presence.list_intents`, §11.4) render as highlighted ranges; human cursors, selections and open files go through the presence channel (§13.4).
+  - **Review 7:** cursors and presence shipped (#194, #195). **T1105b-intents** remains, and S2 owns it. Render `presence.list_intents` ranges in the editor, live through the subscription: set, clear and expiry. Each range is labelled with the agent and its stated purpose, and stays read-only for the viewer. A browser test shows an agent's intent appear and clear (§30 step 7).
 - **T1105c · Merge view.** A flush that comes back as a Conflict opens a three-way merge view (base, mine, theirs); resolving submits a `RESOLUTION` ChangeSet (§11).
 
 ---
@@ -1305,3 +1308,314 @@ When `vendor`, `model`, `client` or `client_version` changes, the platform store
 - An MCP reconnect with a new `clientInfo.version` produces exactly one event and one inbox item each for the lead and owner; reconnecting again with the same version produces none.
 - The event payload never contains the webhook URL (a test scans the payload).
 - `participants.update_manifest` joins the §16.1 catalog (mutating) and `participant.manifest_changed` the §16.2 event types, both documented in the same PR.
+
+---
+
+## M14 Demo-ready web app (Review 7)
+
+Added in Review 7. The backend covers every §30 step, but most steps have no UI. Each task below uses only the public API through `@crossover/sdk`. It adds a browser test for its demo steps in `apps/server/src/e2e/web.test.ts`, or a sibling file, and keeps within the gateway CSP. No new kernel commands without an O1-approved contract in the room.
+
+### T1401 · Invites, appoint lead and repository import — S2
+
+Deps: T1104 · Migration: —
+
+§30 steps 2–4.
+
+- **Import:** the owner imports a GitHub repository (`git.import`) from the room view, with progress shown from events and the suggested health command offered.
+- **Invites:** the owner creates an invite (`room.invite`) for an agent. The UI shows the raw one-time join token once (no URL wrapper; agents join with a manifest over MCP, the SDK or the CLI), with copy-ready snippets that read it from stdin or the environment, and forgets it when closed.
+- **Lead:** the owner appoints a lead (`room.set_lead`); it takes effect immediately (§5); `room.accept_lead` belongs only to a lead's own `transfer_lead`.
+
+Tests:
+
+- A browser test covers import, invite and appointment end to end.
+- The invite token never appears in Activity or in a second view.
+
+### T1402 · Inbox, decisions and memory panels — S2 (moved from Q1)
+
+Deps: T1104 · Migration: —
+
+§30 steps 5 and 13.
+
+- **Inbox:** an inbox panel (`inbox.list`, `inbox.ack`) with a live unread count. Items link to their ref: a task, a ChangeSet, a decision or a health run.
+- **Decisions:** a decisions view (`decisions.list`, `get`, `propose`, `add_position`, `decide`, `veto`).
+- **Memory:** a memory view (`memory.list`, `get`, `history`, `put`).
+- Health red and green results appear as inbox items with the failing command's output (`workspace.health.get`).
+
+Tests:
+
+- A browser test: a proposal with two positions is decided and its memory entry appears.
+- A red health result lands in the lead's inbox, then clears on green.
+
+### T1403 · ChangeSet diff, conflicts list and lead escalation — S2
+
+Deps: T1105c · Migration: —
+
+§30 steps 10–12.
+
+- **Diff:** an applied ChangeSet opens a diff view (`workspace.changeset.get`, `workspace.diff`).
+- **Conflicts:** a conflicts list for the room (`conflicts.list`, `conflicts.get`). The owner of a conflict resolves it in the existing MergeView. The lead sees escalated conflicts (`conflicts.escalate`) and can resolve or abandon them (`conflicts.abandon`).
+- **Holds:** held ChangeSets from T903 show with their reasons, and the lead or owner can approve or reject them (`workspace.changeset.decide_hold`).
+
+Tests:
+
+- A browser test: a clean merge shows its diff.
+- An agent's conflict is escalated and resolved by the lead.
+- A held ChangeSet is approved.
+
+### T1404 · Owner controls — S2
+
+Deps: T1104 · Migration: —
+
+§29 owner controls beyond pause and resume:
+
+- remove a participant (`participants.remove`);
+- freeze and resume the room (`room.freeze`, `room.resume`);
+- capabilities (`capabilities.list`, `grant`, `revoke`);
+- approvals (`approvals.list`, `decide`);
+- the egress allowlist and protected paths (`room.set_egress_allowlist`, `room.set_protected_paths`).
+
+Every destructive action asks for confirmation, and a non-owner sees none of these controls.
+
+Tests:
+
+- A browser test: freezing the room blocks an agent's apply with `ROOM_PAUSED`, and resuming lets it through.
+- A capability revoke takes effect on the agent's next call.
+
+### T1405 · Task review, checkpoint, export and PR — S2
+
+Deps: T1104, T806 · Migration: —
+
+§30 steps 16–17.
+
+- **Review:** the lead reviews a submitted task (`tasks.review`), showing its evidence and `missing_evidence` (T1302).
+- **Checkpoint:** create a checkpoint (`checkpoints.create`) and list checkpoints (`checkpoints.list`).
+- **Export and PR:** export one (`checkpoints.export`), optionally opening a PR through the GitHub integration. The PR URL is shown and provider errors are scrubbed.
+
+Tests:
+
+- A browser test: approve a task, checkpoint, export.
+- With a fake GitHub integration, the PR link appears.
+
+### T1406 · §30 demo acceptance test — S2
+
+Deps: — (grows with T1401–T1405) · Migration: —
+
+One browser test walks all 17 steps of §30 in order against a real `apps/server`, with the SDK playing the agents. Steps whose UI hasn't merged are marked pending in a single list at the top of the file, and each M14 PR removes its steps from that list. M14 is done when the list is empty and the test passes in CI.
+
+### T1407 · WebSocket liveness — S2
+
+Deps: T703, T1101, T1102 · Migration: —
+
+Nothing detects a half-open WebSocket today, so `events tail`, SDK subscriptions and idle browser tabs can hang silently.
+
+**Server:** the gateway sends a WebSocket ping every 25 s and terminates a socket that hasn't answered two in a row. The interval is configurable for tests.
+
+**Clients:** the SDK and the Go CLI set a read deadline, about 60 s, that is reset by every frame or pong, and reconnect from the last sequence when it passes. The Go CLI also caps a `retry_after` wait at 60 s.
+
+**Docs:** document the intervals and any close code in §16.
+
+Q1 posts the contract in the room before coding.
+
+Tests:
+
+- A fake-clock gateway test terminates a socket that stops answering pings.
+- An SDK test and a Go test each reconnect after a silent server, with no event lost and none duplicated.
+
+### T1408 · Set the room health command — S2
+
+ARCHITECTURE §24.1 says the lead or owner sets `health_command` and `health_image`, and the import flow suggests a command (T802). No command applies it today: the only way to set it is a direct database write, which the T1402 browser test uses. §30 step 2 cannot be completed through the product.
+
+- Add `room.set_health` (owner or lead): `{ health_command: string | null, health_image?: string }`. Validate the image against the operator `HEALTH_IMAGES` allowlist. Store it in room settings and emit `room.settings_changed` so open clients refresh.
+- Add it to the protocol command list, the SDKs and the MCP tool list in the same PR.
+- In the Setup tab, "Use this command" applies the suggested command after a confirmation that shows it, and a field lets the owner or lead edit or clear it.
+- Replace the database write in the T1402 step 13 browser test with the new command.
+
+Tests:
+
+- A member or observer is `FORBIDDEN`; an image outside the allowlist is rejected; a null command turns health gating off.
+- In the browser: import, accept the suggestion, apply a ChangeSet, see a health run start.
+
+Must merge before T1406.
+
+### T1409 · Live inbox delivery event — S2
+
+`deliverInbox` is called from 11 modules (tasks, approvals, messages, leases, manifests, secret scan, workspace apply, conflicts, health) and emits nothing, so an open inbox only updates on reload.
+
+- Emit `inbox.delivered` from `deliverInbox` itself, with payload `{ recipient_id, item_id, kind }` only. No summary and no ref, so nothing private enters the shared event stream.
+- Add it to the event list and the ARCHITECTURE events section.
+- The web reloads `inbox.list` only when `recipient_id` is the viewer.
+
+Tests:
+
+- One test per producer family shows the event fires.
+- In the browser, a non-health item (for example `ASSIGNMENT`) appears in the open inbox without a reload.
+
+Must merge before T1406.
+
+### T1410 · Demo-path gaps found mapping T1406 — S2
+
+Mapping the 17 §30 steps onto product actions on main 9f2d160 found two actions with no product path:
+
+- **Step 12 (lead resolves an escalated conflict).** The lead is an MCP agent, but MCP exposes no conflict tools. ARCHITECTURE §15 lists conflicts among the MCP room tools. Add `conflicts_list`, `conflicts_get`, `conflicts_escalate` and `conflicts_abandon` to `COLLABORATION_TOOLS`, wrapping the existing commands, and extend the `server.test.ts` parity test.
+- **Step 4 (Peter takes the Developer role).** `apps/web` never calls `participants.set_role`. Add a role change to Owner controls for any participant, including the owner, with a confirmation that names the participant and the new role. Use the existing command only.
+
+Two small PRs. Both must merge before T1406.
+
+### T1411 · MergeView conflict count is intermittent — S2
+
+A local full `pnpm check` saw the web-editor merge-view browser test expect one conflict and get zero; an isolated rerun passed. Find the race, which is likely in the ordering between ChangeSet submission and the conflict read, fix it, and add a regression test. Must merge before T1406.
+
+### T1412 · Plugin-runner Docker cleanup is intermittent — S2
+
+A local full `pnpm check` saw the plugin-runner cleanup test find a leftover container. #213 made this test wait for asynchronous removal, so this is a second cause or an incomplete fix. Find it from the log and fix it. Must merge before T1406.
+
+### T1413 · Docker volume inspect rejects plain local volumes — S2
+
+Docker reports `Options` as `null` for an ordinary local volume. `DockerExecutionDriver.inspectVolume` (`packages/workspace/src/docker-execution-driver.ts`) requires an object, so sandbox creation fails on a default deployment. T1406 found this; the driver's unit tests mock Docker and never saw a real `null`.
+
+- Normalize `null` options to `{}`. Keep rejecting arrays and other non-object values.
+
+Tests:
+
+- `local|null` with no required options passes.
+- `local|null` with required `SANDBOX_VOLUME_OPTS` is still rejected by `assertHardVolume`.
+- `local|[]` is rejected.
+
+Must merge before T1406.
+
+### T1414 · Server shutdown waits on lease renewals queued behind busy room actors — S2
+
+`LeaseRenewer.stop()` (`packages/kernel/src/lease-renewer.ts`) awaits the in-flight renewal pass. Each renewal is submitted to its room's actor queue, so a room busy with a long command (a sandbox exec, for example) holds shutdown until that command finishes. T1406's teardown found it: `composeServer.close` stalled at `renewer.stop()`.
+
+- Confirm the cause first.
+- Make `stop()` independent of other actor work: abort or skip renewals still queued, or bound the wait. `close()` must still release every lease.
+
+Tests:
+
+- A kernel unit test with a blocked room actor shows `stop()` returns promptly and `close()` still releases every lease.
+
+Must merge before T1406.
+
+### T1415 · Real-Docker smoke test for DockerExecutionDriver — S2
+
+The driver's unit tests mock the `docker` binary, so T1413 (`Options: null`) reached main. Add a test that runs only when Docker is available and drives a real daemon through `DockerExecutionDriver`:
+
+- create, inspect, reuse and remove a sandbox volume and container;
+- run one exec;
+- confirm `--network=none` and the hardening flags on the real container (`docker inspect`).
+
+Clean up by exact names only.
+
+### T1416 · Deploy-topology test: server container on crossover-git — S2
+
+The browser e2e bridges the fetcher-to-server hop with a test-only Unix-socket relay (#231). Add one test that builds and runs `apps/server` as a container attached to `crossover-git`, exactly as deployed, and runs a sandbox fetch end to end with no bridge. After M14.
+
+### T1417 · Watch: two unreproduced intermittent failures — S2
+
+A local full run around 16:20 UTC on 2026-10-12 saw two failures that passed on rerun. No failure output was kept, and neither reproduced afterwards (3,031 of 3,031 passed):
+
+- `apps/server/src/browser-plugin.docker.test.ts`, "uses the signed room allowlist, denies unsafe destinations, and caps UTF-8 page text": a provider error.
+- `apps/server/src/compose.test.ts`: a 5 s timeout in an unidentified test.
+
+Open a fix task the next time either fails, with its saved output. Both became T1510 and T1511 (fixed). New, 2026-10-13: one timeout in `apps/server/src/e2e/egress-visibility.test.ts` during a full parallel run (#245 validation); output not saved, so the case is unknown. Next occurrence: save the full output first. Rule from now on: before rerunning a failed test, save its full output (name, error, stack).
+
+### T1418 · Deployment topology vs ARCHITECTURE §4.1 — O1 (decision), owner TBD
+
+§4.1 puts sandboxes on separate sandbox hosts that never share a host with app nodes. The only server image (T1416) runs sandboxes through the app host's Docker socket: a single-host topology that is acceptable for the MVP demo but is not the documented production design.
+
+Decide before any non-demo deployment:
+
+- (a) implement a remote sandbox-host driver (`ExecutionDriver` over an authenticated channel); or
+- (b) amend §4.1 to allow a single-host mode with stated limits.
+
+Until then the compose file must label itself demo or development only.
+
+## M15 MVP scope gaps (§29, Review 10)
+
+A §29 check against main at b34f994 found the backend nearly complete. These are the gaps, ranked. One task per PR, 400 non-test lines max.
+
+### T1501 · MCP tools for plugins, edit intents, history and blame — S2
+
+MCP is the primary agent interface (§29), yet MCP agents cannot reach the GitHub, Browser or AWS plugins or publish edit intents. Add MCP tools that map existing commands: `tools_list`, `tools_invoke`, `presence_set_intent`, `presence_clear_intent`, `workspace_history`, `workspace_blame`. Same provenance framing and capability checks as the existing tools. Done when `packages/mcp` tests cover each tool, including a denied call, and the §30 demo's step 7 runs through MCP instead of the SDK.
+
+### T1502 · Message channel in the web app — S2
+
+The collaboration panel has no channel: nothing in `apps/web` calls `messages.*`. Add a channel view: list with live updates, send, @mentions and references to tasks, decisions and files, rendered with provenance. Done when a browser e2e test sends a message with a mention and the mentioned agent receives it in its inbox.
+
+### T1503 · Human sign-in with GitHub or Google OAuth — unassigned
+
+Only `POST /v1/auth/dev-login` exists. Add OAuth (§15.3) behind configuration, with the session token in an HttpOnly cookie, and keep dev-login for development only. Required before any non-demo deployment.
+
+### T1504 · Budget configuration — S2
+
+Budgets are enforced, but nothing sets `rooms.settings.budgets` or `participants.budgets`. Add an owner command and an owner-controls section, plus the sandbox-compute budget (§22).
+
+PR A (#245, `budgets.set`/`budgets.get`, `room.budgets_changed`) and the Owner controls section (#246) are merged. PR B, sandbox CPU metering: migration **0033**. Meter cumulative cgroup CPU per sandbox, charging the delta at exec end, on a periodic sweep and at stop, to the owning participant. Enforce the per-agent 4 vCPU-h/day and room 40 vCPU-h/day limits with TTL'd reservations, refuse a new exec when either is exhausted, and cap timeouts by the remaining budget.
+
+### T1505 · Terminal tab — unassigned
+
+§27 Terminal tab: the human's own sandbox via `sandbox.exec`, and read-only views of agents' sandbox output via `sandbox.output.subscribe`.
+
+### T1506 · Room export bundle and archive button — unassigned
+
+§5 export bundle (git bundle, `events.jsonl`, `memory.json`, `tasks.json`, `decisions.json`), plus an archive button in owner controls.
+
+### T1507 · Web UI completeness — unassigned
+
+Decision veto and withdraw; task create, assign and claim; memory write; one-click conflict escalate; health and revision badge in the header; upstream-pull button; show `provenance.author_kind` (HUMAN/AGENT/SYSTEM) beside the trust label in MessagesView and CollaborationView, since `trust` is `participant` for humans and agents alike.
+
+### T1508 · Go CLI breadth — unassigned
+
+Messages, inbox, sandbox and the `room mcp` stdio shim.
+
+### T1509 · OPA-WASM behind `authorize()` — unassigned
+
+D9 fidelity with no functional change. Last.
+
+### T1510 · compose.test.ts sandbox-over-MCP test times out under load — S2
+
+T1417's second unidentified flake, now named (seq 1082): `apps/server/src/compose.test.ts` › composeServer › "supports a sandbox coding flow through MCP before and after submission" (line 1578), `Test timed out in 5000ms` during a full parallel `pnpm check`. Find what it waits on; give it an explicit timeout sized to the work or remove the wait. Do not just raise the default.
+
+### T1511 · Secret-scanner time-bound assertion fails under load — S2
+
+`packages/security/src/secret-scanner.test.ts:181`, "scans a file just under the 2 MiB bound within a time bound": `expected 1020 to be less than 1000` under a full parallel run. A wall-clock bound in a unit test measures machine load, not the scanner. Replace it with a deterministic guard (for example an assertion on work done, or a bound with a documented margin run in isolation).
+
+### T1512 · Validate message refs on the server — unassigned
+
+`messages.send` checks mentions but stores `refs` as given. Reject task, decision and file references that do not exist in the room (`VALIDATION`), as mentions do.
+
+### T1513 · deploy-topology sandbox.exec returned 500 once in CI — S2
+
+First seen on #237 (head 89e9ce0, CI run 38301197654, 2026-10-12 20:02 UTC), a change that touched only one test timeout. `apps/server/src/e2e/deploy-topology.test.ts` › "fetches a canonical workspace into a sandbox through the deployed server on crossover-git": `sandbox.exec` (test line 244) returned `500 {"code":"INTERNAL","message":"Internal error"}`. The same test passed on #234, #235 and #236. The server container's logs were not captured, so the cause is unknown.
+
+Step 1 (this task): print the server container's `docker logs` when the test fails, before cleanup. Step 2: when it recurs with logs, open a root-cause task. A 500 from the deployed server is a product bug until shown otherwise.
+
+Step 1 done in #238 (internal errors now logged). Likely root cause found while fixing #240 (2026-10-12 21:54): see T1514.
+
+### T1514 · Git listener binds to a nondeterministic address when GIT_INTERNAL_HOST is a hostname — S2
+
+A container on two networks (bridge and `crossover-git`) resolves its own hostname to whichever address `/etc/hosts` lists first. With `GIT_INTERNAL_HOST=<container name>`, the internal Git listener sometimes binds to the bridge IP, which sandbox fetchers on the internal `crossover-git` network cannot reach. Sandbox materialization then fails, which is the likely cause of T1513's intermittent `sandbox.exec` 500. `docker-compose.yml` has the same setting (`GIT_INTERNAL_HOST: crossover-server`).
+
+Fix it in the server: when `GIT_INTERNAL_HOST` is not an IP literal, resolve this container's address on `crossover-git` deterministically, by inspecting its own container (`GIT_INTERNAL_CONTAINER`) for `NetworkSettings.Networks["crossover-git"].IPAddress`. Fail startup if it has no address there. Then revert the deploy-topology fixture to the plain container name, so the test proves the product path.
+
+### T1515 · Browser plugin refusal surfaces as a retryable provider error under load — S2
+
+T1417's first flake, captured with evidence on 2026-10-13 (seq 1160, during T1504 PR B validation; log saved by S2). `apps/server/src/browser-plugin.docker.test.ts` › "uses the signed room allowlist, denies unsafe destinations, and caps UTF-8 page text" (assertion at lines 180–183). Expected `ToolProviderError { code: VALIDATION }`, got `ToolProviderError: Plugin execution failed { retryable: true }`. Under a full parallel run the plugin worker failed or timed out before returning its own policy refusal, and the runner reported a generic retryable failure.
+
+Find which: a worker timeout, a container start race, or an exit before the result is written. Decide whether a policy refusal can ever be reported as retryable; it should not be, because an agent would retry a denied action. Fix the cause, not the assertion.
+
+### T1516 · egress-visibility MCP read-tool test times out in parallel CI — S2
+
+T1417's second flake, captured on 2026-10-13 in #247's CI (seq 1168; log saved by S2). `apps/server/src/e2e/egress-visibility.test.ts` › "egress visibility conformance (§34.5)" › "every MCP read tool: B never receives it, and each tool is a registered read command" (line 500): `Test timed out in 5000ms`. The same run logged PostgreSQL `FATAL 57P01 terminating connection due to administrator command` and `Connection terminated unexpectedly`. It also timed out once locally during #245 validation.
+
+57P01 is what `DROP DATABASE … WITH (FORCE)` does to live sessions, so check first whether another test file's cleanup drops a database this test is still using, or whether this test shares a pool or database name across workers. Otherwise, find which of the MCP read-tool calls stalls. Give the test a measured budget only after the cause is known (as in T1510).
+
+### T1517 · DockerHealthRunner integration cases hit the 5 s default timeout under full-suite load
+
+Captured on 2026-10-13 in #248's CI (run 38340866790, job 115111301475; log saved by O1 and S2 before rerun). `packages/workspace/src/health-runner.test.ts` › DockerHealthRunner › "keeps successful status with output over 1 MiB" (5030 ms) and "kills and removes a container when aborted" (5014 ms): `Test timed out in 5000ms`. Neither file was in #248's diff. The cases start real containers but run under vitest's default 5 s budget.
+
+On the next failure, record container start time against total run time. Then decide whether the cases need a measured budget (as in T1510) or whether the runner is slow to start or to clean up. If the abort case is slow to remove its container, that is a product bug, not a test budget issue.
+
+### T1518 · Move sandbox compute sampling out of execution.ts — S2
+
+From Review 12. `packages/workspace/src/execution.ts` is about 1,970 lines, and each T1504 compute PR added about 125. Move CPU sampling (at reserve, at exec end, before stop or destroy), hibernate-at-cap and `sweepCompute` into a dedicated module that `ExecutionService` calls. Behavior must not change: existing tests pass unchanged, and the diff moves code rather than rewriting it. Land this before T1505 (Terminal) touches `execution.ts`.
