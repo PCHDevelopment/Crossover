@@ -37,7 +37,8 @@ export function registerWebCollaborationStart(fixture: WebFixture): void {
     });
     page.on("pageerror", (e) => problems.push(`pageerror: ${e.message}`));
     page.on("console", (m) => {
-      if (m.type() === "error") problems.push(`console: ${m.text()} @ ${m.location().url}`);
+      if (m.type() === "error" && !m.text().includes("status of 403"))
+        problems.push(`console: ${m.text()} @ ${m.location().url}`);
     });
 
     // 1. Peter signs in and creates Project Alpha.
@@ -74,6 +75,16 @@ export function registerWebCollaborationStart(fixture: WebFixture): void {
     await expect
       .poll(async () => page.getByTestId("import-status").textContent())
       .toContain("Repository import synced at revision 1.");
+    const finishPullRefusal = await refuseNextCommand(page, "git.pull_upstream");
+    await page.getByTestId("upstream-pull").click();
+    await expect
+      .poll(() => page.getByTestId("upstream-pull-error").textContent())
+      .toContain("The server refused this action");
+    await finishPullRefusal();
+    await page.getByTestId("upstream-pull").click();
+    await expect
+      .poll(async () => page.getByTestId("upstream-pull-status").textContent())
+      .toContain("already up to date");
     await expect
       .poll(async () => page.getByTestId("workspace-revision").textContent())
       .toContain("1");
@@ -200,6 +211,24 @@ export function registerWebCollaborationStart(fixture: WebFixture): void {
       .poll(async () => page.getByTestId("column-OPEN").getByTestId("task").count())
       .toBe(2);
     expect(await page.getByTestId("board").textContent()).toContain("Session tokens");
+
+    await page.getByTestId("task-title").fill("Browser-created task");
+    await page.getByTestId("task-requirements").fill("Visible from the room board");
+    await page.getByTestId("task-create").click();
+    const browserTask = page.getByTestId("task").filter({ hasText: "Browser-created task" });
+    await expect.poll(async () => browserTask.count()).toBe(1);
+    await browserTask.getByTestId("task-assignee").selectOption(agentA.id);
+    await browserTask.getByTestId("task-assign").click();
+    await expect.poll(async () => browserTask.textContent()).toContain("AgentA");
+    const claimable = page.getByTestId("task").filter({ hasText: "Docs" });
+    const finishClaimRefusal = await refuseNextCommand(page, "tasks.claim");
+    await claimable.getByTestId("task-claim").click();
+    await expect
+      .poll(() => page.getByTestId("notice").textContent())
+      .toContain("The server refused this action");
+    await finishClaimRefusal();
+    await claimable.getByTestId("task-claim").click();
+    await expect.poll(async () => claimable.textContent()).toContain("Peter");
 
     // 14. AgentB tries something it may not do; Peter sees the denial, live.
     await expect(
@@ -738,6 +767,27 @@ export function registerWebDecisionsAndInbox(fixture: WebFixture): void {
       .toContain("JWT is the best fit");
     await expect.poll(() => page.getByTestId("memory-history").textContent()).toContain("system");
     await expect.poll(() => page.getByTestId("memory-detail").textContent()).toContain("SYSTEM");
+
+    const finishMemoryRefusal = await refuseNextCommand(page, "memory.put");
+    await page.getByTestId("memory-write-key").fill("notes/browser-auth");
+    await page.getByTestId("memory-write-value").fill("Keep the browser session short-lived.");
+    await page.getByTestId("memory-write-type").selectOption("text/markdown");
+    await page.getByTestId("memory-source-refs").fill(`decision:${decisionId}`);
+    await page.getByTestId("memory-write").click();
+    await expect
+      .poll(() => page.getByTestId("collaboration-notice").textContent())
+      .toContain("The server refused this action");
+    await finishMemoryRefusal();
+    await page.getByTestId("memory-write").click();
+    await expect
+      .poll(() => page.getByTestId("memory-detail").textContent())
+      .toContain("Keep the browser session short-lived.");
+    await page.getByTestId("memory-write-value").fill("Refresh the browser session carefully.");
+    await page.getByTestId("memory-write").click();
+    await expect
+      .poll(() => page.getByTestId("memory-detail").textContent())
+      .toContain("Refresh the browser session carefully.");
+    await expect.poll(() => page.getByTestId("memory-history").textContent()).toContain("r2");
 
     await page.getByTestId("collab-decisions").click();
     await page
