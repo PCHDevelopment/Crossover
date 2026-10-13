@@ -207,10 +207,13 @@ function tarStream(
 
 /** Builds a disk-staged archive and streams tar output without buffering repository contents. */
 export class RoomExportService implements RoomExportSource {
-  constructor(private readonly pool: Pool) {}
+  constructor(
+    private readonly pool: Pool,
+    private readonly tempRoot = tmpdir(),
+  ) {}
 
   async create(roomId: string, signal: AbortSignal): Promise<RoomExportArchive> {
-    const directory = await mkdtemp(join(tmpdir(), "crossover-room-export-"));
+    const directory = await mkdtemp(join(this.tempRoot, "crossover-room-export-"));
     let child: ChildProcess | undefined;
     try {
       const client = await this.pool.connect();
