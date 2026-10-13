@@ -169,6 +169,8 @@ describe("role bundles (§6.1)", () => {
     for (const c of [
       "room.freeze",
       "room.archive",
+      "rooms.set_retention",
+      "rooms.unarchive",
       "capabilities.grant_tier3",
       "events.redact",
       "integrations.manage",
@@ -199,6 +201,8 @@ describe("authority powers (§6.2)", () => {
     "room.freeze",
     "room.resume",
     "room.archive",
+    "rooms.set_retention",
+    "rooms.unarchive",
     "conflicts.abandon",
     "capabilities.grant_tier3",
     "events.redact",

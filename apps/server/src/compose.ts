@@ -59,6 +59,7 @@ import {
   registerEventsRedactCommand,
   registerRoomEventsCommand,
   registerRoomLifecycleCommands,
+  registerRoomRetentionCommands,
   registerRoomProtectedPathsCommand,
   registerRoomHealthSettingsCommand,
   registerTaskCommands,
@@ -665,6 +666,7 @@ function registerCommands(
       if (to === "ARCHIVED") return execution.destroyRoom(room_id);
     },
   });
+  registerRoomRetentionCommands(dispatcher);
   registerRoomEventsCommand(dispatcher);
   registerEventsRedactCommand(dispatcher);
   registerRoomDigestCommand(dispatcher);

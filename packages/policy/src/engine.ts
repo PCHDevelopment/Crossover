@@ -11,6 +11,8 @@ import type { Tier } from "./tiers.js";
  * type.
  */
 export interface AuthzFacts {
+  /** The command being authorized; archived rooms allow only retention controls. */
+  method: string;
   /** The resource belongs to the principal's room. */
   room_match: boolean;
   /**

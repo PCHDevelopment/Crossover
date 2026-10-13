@@ -492,7 +492,7 @@ export function registerWebCollaborationStart(fixture: WebFixture): void {
         expect.stringContaining("Revoke tasks.create from ObserverAgent"),
         expect.stringContaining("ObserverAgent"),
         expect.stringContaining("Project Alpha"),
-        "Archive Project Alpha? This cannot be undone; the room will become read-only.",
+        "Archive Project Alpha? It will become read-only and its data will be permanently deleted after 365 days, following a 7-day notice.",
       ]),
     );
     await guestPage.close();

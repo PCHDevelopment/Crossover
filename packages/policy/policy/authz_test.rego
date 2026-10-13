@@ -7,6 +7,7 @@ import rego.v1
 
 # An active developer member of an active room whose role bundle covers the action.
 base := {
+	"method": "messages.send",
 	"room_match": true,
 	"participant": {"status": "ACTIVE", "authority": "MEMBER", "role": "DEVELOPER"},
 	"room_status": "ACTIVE",
@@ -70,10 +71,21 @@ test_deleted_room_is_not_found_even_for_a_read if {
 	refused(input_, "NOT_FOUND", "room_deleted")
 }
 
-test_archived_room_refuses_mutations_even_from_the_owner if {
+test_archived_room_refuses_other_mutations_even_from_the_owner if {
 	owner := object.union(base.participant, {"authority": "OWNER"})
 	input_ := object.union(base, {"room_status": "ARCHIVED", "participant": owner})
 	refused(input_, "ROOM_PAUSED", "room_not_active")
+}
+
+test_archived_room_allows_only_owner_retention_controls if {
+	owner := object.union(base.participant, {"authority": "OWNER"})
+	input_ := object.union(base, {"room_status": "ARCHIVED", "participant": owner,
+		"method": "rooms.set_retention"})
+	decide(input_) == {"allow": true}
+	decide(object.union(input_, {"method": "rooms.unarchive"})) == {"allow": true}
+	refused(object.union(input_, {"method": "room.archive"}), "ROOM_PAUSED", "room_not_active")
+	member := object.union(base.participant, {"authority": "MEMBER"})
+	refused(object.union(input_, {"participant": member}), "ROOM_PAUSED", "room_not_active")
 }
 
 test_frozen_room_refuses_mutations_except_from_the_owner if {
