@@ -669,6 +669,98 @@ export function registerWebTaskReview(fixture: WebFixture): void {
     expect(problems).toEqual([]);
     await page.close();
   }, 120_000);
+
+  it("lets a task owner block, unblock and release work from the board", async () => {
+    const page = await fixture.browser!.newPage();
+    const confirmations: string[] = [];
+    const pageErrors: string[] = [];
+    let acceptRelease = false;
+    page.on("dialog", (dialog) => {
+      confirmations.push(dialog.message());
+      void (acceptRelease ? dialog.accept() : dialog.dismiss());
+    });
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+
+    await page.goto(fixture.baseUrl);
+    await page.getByTestId("login-name").fill("Task controls owner");
+    await page.getByTestId("login-submit").click();
+    await page.getByTestId("room-name").fill("Task controls");
+    await page.getByTestId("room-objective").fill("Exercise task block, unblock and release");
+    await page.getByTestId("room-create").click();
+    await expect
+      .poll(async () => page.getByTestId("room-title").textContent())
+      .toBe("Task controls");
+    const roomId = /\/rooms\/([^/]+)/.exec(new URL(page.url()).pathname)![1]!;
+
+    const client = new CrossoverClient({ baseUrl: fixture.baseUrl });
+    const login = await client.devLogin({
+      subject: "Task controls owner",
+      display_name: "Task controls owner",
+    });
+    const owner = client.room(
+      roomId,
+      (await client.roomSession(login.session_token, roomId)).tokens.access_token,
+    );
+
+    await page.getByTestId("tab-tasks").click();
+    await page.getByTestId("task-title").fill("Browser task controls");
+    await page.getByTestId("task-requirements").fill("Exercise lifecycle controls");
+    await page.getByTestId("task-create").click();
+    const taskCard = page.getByTestId("task").filter({ hasText: "Browser task controls" });
+    await expect.poll(async () => taskCard.count()).toBe(1);
+    await taskCard.getByTestId("task-claim").click();
+    await expect.poll(() => page.getByTestId("column-CLAIMED").getByTestId("task").count()).toBe(1);
+
+    const pageTasks = await owner.api.tasks.list<{
+      tasks: { id: string; title: string; version: number }[];
+    }>({ limit: 100 });
+    const task = pageTasks.response.tasks.find((entry) => entry.title === "Browser task controls");
+    expect(task).toBeDefined();
+    if (!task) throw new Error("The browser-created task was not returned by tasks.list");
+    await owner.api.tasks.start({
+      task_id: task.id,
+      expected_version: task.version,
+    });
+    await expect
+      .poll(() => page.getByTestId("column-IN_PROGRESS").getByTestId("task").count())
+      .toBe(1);
+
+    await taskCard.getByTestId("task-block-reason").fill("Waiting for a dependency");
+    await taskCard.getByTestId("task-block").click();
+    await expect.poll(() => page.getByTestId("column-BLOCKED").getByTestId("task").count()).toBe(1);
+    await expect
+      .poll(() => taskCard.getByTestId("task-blocked-reason").textContent())
+      .toContain("Waiting for a dependency");
+    await taskCard.getByTestId("task-unblock").click();
+    await expect
+      .poll(() => page.getByTestId("column-IN_PROGRESS").getByTestId("task").count())
+      .toBe(1);
+
+    await taskCard.getByTestId("task-block-reason").fill("Releasing blocked work");
+    await taskCard.getByTestId("task-block").click();
+    await expect.poll(() => page.getByTestId("column-BLOCKED").getByTestId("task").count()).toBe(1);
+    await taskCard.getByTestId("task-release").click();
+    expect(confirmations).toContain(
+      "Release “Browser task controls” back to the board? Its owner and blocked reason will be cleared.",
+    );
+    await expect.poll(() => page.getByTestId("column-BLOCKED").getByTestId("task").count()).toBe(1);
+    acceptRelease = true;
+    await taskCard.getByTestId("task-release").click();
+    await expect.poll(() => page.getByTestId("column-OPEN").getByTestId("task").count()).toBe(1);
+    await expect.poll(async () => (await taskCard.textContent()) ?? "").toContain("unassigned");
+    const released = await owner.api.tasks.get<{
+      status: string;
+      owner_id: string | null;
+      blocked_reason: string | null;
+    }>({ task_id: task.id });
+    expect(released.response).toMatchObject({
+      status: "OPEN",
+      owner_id: null,
+      blocked_reason: null,
+    });
+    expect(pageErrors).toEqual([]);
+    await page.close();
+  }, 60_000);
 }
 
 export function registerWebDecisionsAndInbox(fixture: WebFixture): void {

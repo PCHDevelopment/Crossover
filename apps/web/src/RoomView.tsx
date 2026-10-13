@@ -114,6 +114,7 @@ export function RoomView(props: { roomId: string; onBack: () => void; onSignedOu
   const [taskTitle, setTaskTitle] = useState("");
   const [taskRequirements, setTaskRequirements] = useState("");
   const [taskAssignees, setTaskAssignees] = useState<Record<string, string>>({});
+  const [taskBlockReasons, setTaskBlockReasons] = useState<Record<string, string>>({});
   const [taskBusy, setTaskBusy] = useState<string>();
   const roomRef = useRef<RoomClient>(undefined);
   const listeners = useRef(new Set<(event: SdkEvent) => void>());
@@ -333,13 +334,26 @@ export function RoomView(props: { roomId: string; onBack: () => void; onSignedOu
     }
   };
 
-  const taskAction = async (task: Task, action: "claim" | "assign") => {
+  const mayManageTask = (task: Task) => mayAssignTasks || task.owner_id === me.participant_id;
+
+  const taskAction = async (
+    task: Task,
+    action: "claim" | "assign" | "block" | "unblock" | "release",
+    reason?: string,
+  ) => {
+    if (
+      action === "release" &&
+      !window.confirm(
+        `Release “${task.title}” back to the board? Its owner and blocked reason will be cleared.`,
+      )
+    )
+      return;
     setTaskBusy(task.id);
     setNotice(undefined);
     try {
       if (action === "claim") {
         await open.room.api.tasks.claim({ task_id: task.id, expected_version: task.version });
-      } else {
+      } else if (action === "assign") {
         const participantId =
           taskAssignees[task.id] ??
           participants.find((participant) => participant.status === "ACTIVE")?.id;
@@ -349,6 +363,17 @@ export function RoomView(props: { roomId: string; onBack: () => void; onSignedOu
           expected_version: task.version,
           participant_id: participantId,
         });
+      } else if (action === "block") {
+        await open.room.api.tasks.block({
+          task_id: task.id,
+          expected_version: task.version,
+          reason: reason ?? "",
+        });
+        setTaskBlockReasons((current) => ({ ...current, [task.id]: "" }));
+      } else if (action === "unblock") {
+        await open.room.api.tasks.unblock({ task_id: task.id, expected_version: task.version });
+      } else {
+        await open.room.api.tasks.release({ task_id: task.id, expected_version: task.version });
       }
       await reload();
     } catch (err) {
@@ -493,6 +518,11 @@ export function RoomView(props: { roomId: string; onBack: () => void; onSignedOu
                     <div key={t.id} className="task" data-testid="task" data-id={t.id}>
                       <div>{t.title}</div>
                       <div className="muted">{t.owner_id ? names(t.owner_id) : "unassigned"}</div>
+                      {t.status === "BLOCKED" && t.blocked_reason && (
+                        <div className="muted" data-testid="task-blocked-reason">
+                          Blocked: {t.blocked_reason}
+                        </div>
+                      )}
                       {t.status === "OPEN" && mayClaimTasks && (
                         <button
                           disabled={taskBusy !== undefined}
@@ -540,6 +570,62 @@ export function RoomView(props: { roomId: string; onBack: () => void; onSignedOu
                           </button>
                         </span>
                       )}
+                      {t.status === "IN_PROGRESS" && mayManageTask(t) && (
+                        <form
+                          className="task-actions"
+                          data-testid="task-block-form"
+                          onSubmit={(event) => {
+                            event.preventDefault();
+                            const reason = taskBlockReasons[t.id]?.trim() ?? "";
+                            if (!reason) {
+                              setNotice("Enter a reason before blocking this task.");
+                              return;
+                            }
+                            void taskAction(t, "block", reason);
+                          }}
+                        >
+                          <label>
+                            Block reason
+                            <textarea
+                              value={taskBlockReasons[t.id] ?? ""}
+                              maxLength={2000}
+                              required
+                              disabled={taskBusy !== undefined}
+                              data-testid="task-block-reason"
+                              onChange={(event) =>
+                                setTaskBlockReasons((current) => ({
+                                  ...current,
+                                  [t.id]: event.target.value,
+                                }))
+                              }
+                            />
+                          </label>
+                          <button disabled={taskBusy !== undefined} data-testid="task-block">
+                            {taskBusy === t.id ? "Blocking…" : "Block"}
+                          </button>
+                        </form>
+                      )}
+                      {t.status === "BLOCKED" && mayManageTask(t) && (
+                        <button
+                          disabled={taskBusy !== undefined}
+                          data-testid="task-unblock"
+                          onClick={() => void taskAction(t, "unblock")}
+                        >
+                          {taskBusy === t.id ? "Unblocking…" : "Unblock"}
+                        </button>
+                      )}
+                      {(t.status === "CLAIMED" ||
+                        t.status === "IN_PROGRESS" ||
+                        t.status === "BLOCKED") &&
+                        mayManageTask(t) && (
+                          <button
+                            disabled={taskBusy !== undefined}
+                            data-testid="task-release"
+                            onClick={() => void taskAction(t, "release")}
+                          >
+                            Release
+                          </button>
+                        )}
                     </div>
                   ))}
               </div>
