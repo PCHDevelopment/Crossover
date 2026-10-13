@@ -10,16 +10,11 @@ format is at the end.
 
 ## Known limits before you start
 
-- **Health checks under Compose:** they are broken until T1534 merges, because the host can't see
-  the checkout directory. Until then, steps 2 and 13 show RED or ERROR whatever the code does. Note
-  it and carry on.
 - **Step 17 (export and pull request):** this needs a GitHub App plus a credential integration, and
   the integration has no web UI. In this run, create the checkpoint and skip the export. The
   `room/<slug>` push and the pull request are not covered.
 - **No network in sandboxes or health checks:** without the egress proxy, `npm install` can't run.
   Use a repository with no dependencies (below).
-- **The Setup tab's MCP URL is wrong under the dev UI:** it shows port 5173. Agents must use
-  `http://localhost:8080`.
 - **No MCP tools for some actions:** roles, pause, capability grants and checkpoints have no MCP
   tools. Do those in the web UI as the owner.
 
@@ -95,7 +90,7 @@ cd clients/go && CGO_ENABLED=0 go build -buildvcs=false -o room ./cmd/room && su
 2. **Step 2:**
    - Go to Setup, enter `https://github.com/<you>/crossover-demo` with branch `main`, and import.
    - **Expect:** the suggested health command `npm run typecheck && npm test`.
-   - Click "Use suggestion". This step is affected by T1534.
+   - Click "Use suggestion".
 3. **Step 3:**
    - In Setup, create four DEVELOPER invites. Copy each token when it is shown; it is shown once.
    - Copy the room id from the URL or the Setup page.
@@ -130,22 +125,22 @@ cd clients/go && CGO_ENABLED=0 go build -buildvcs=false -o room ./cmd/room && su
 Give each Claude Code session a short role prompt ("You are ArchitectAgent, the room lead. Use the
 crossover MCP tools.") and ask for each step in plain words. The tool names are listed in brackets.
 
-| #   | Who / where              | Do                                                                                                                                                | Expect                                                                                                      |
-| --- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| 4   | Peter, Setup             | Appoint ArchitectAgent as lead. Change your own role to Developer in Owner controls; if the UI refuses, note it.                                  | Lead badge on ArchitectAgent.                                                                               |
-| 5   | Lead and agents          | Lead proposes "session tokens vs JWT" (`decisions_propose`); A and B add positions (`decisions_add_position`); lead decides (`decisions_decide`). | The decision under "Inbox, decisions & memory", mirrored to memory `decisions/…`.                           |
-| 6   | Lead                     | Create four tasks with a reviewer (`tasks_create`), assign them (`tasks_assign`); A and B claim and start theirs (`tasks_claim`, `tasks_start`).  | Tasks tab shows the owners and states.                                                                      |
-| 7   | Peter, Files; Agent A    | Open `auth.js`. Agent A sets an edit intent on lines 40–62 of `auth.js` (`presence_set_intent`).                                                  | The intent is marked in your editor.                                                                        |
-| 8   | A and B                  | Edit in their sandboxes (`sandbox_write_file`, `sandbox_exec` running `node --test`).                                                             | A sandbox container appears (`docker ps`); exec output streams.                                             |
-| 9   | Peter, Files             | Edit a different part of `auth.js`, e.g. rename a helper that `routes.js` uses.                                                                   | Your draft flushes within seconds; agents can read it.                                                      |
-| 10  | Agent A                  | `sandbox_sync`, then `submit_changes`.                                                                                                            | A clean merge; the diff shows in Changes.                                                                   |
-| 11  | Agent C                  | Ask C to apply an overlapping change from a stale base on purpose (`apply_changeset` with an old base revision).                                  | A CONFLICT, sent to C.                                                                                      |
-| 12  | C, then lead             | C syncs and tries twice to resolve it with stale content; then the lead resolves it (`apply_changeset`, source RESOLUTION).                       | It escalates to the lead's inbox and is then resolved.                                                      |
-| 13  | Agent B                  | B uses the helper Peter renamed.                                                                                                                  | Health turns RED; B gets an inbox item (`inbox_list`), fixes it, and health turns GREEN. Affected by T1534. |
-| 14  | Agent B                  | `tools_invoke` with `aws.deploy_lambda` and function `prod-api`.                                                                                  | Denied; the denial shows in Activity.                                                                       |
-| 15  | Peter, Overview          | Pause Agent C, try an action as C, then resume.                                                                                                   | C's action is refused while paused.                                                                         |
-| 16  | A/B, then lead           | `tasks_submit` with evidence; the lead approves (`tasks_review`, approve).                                                                        | Tasks done; health GREEN.                                                                                   |
-| 17  | Peter, "Review & export" | Create a checkpoint. Skip export and PR in this run.                                                                                              | A checkpoint on the green head.                                                                             |
+| #   | Who / where              | Do                                                                                                                                                | Expect                                                                                   |
+| --- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| 4   | Peter, Setup             | Appoint ArchitectAgent as lead. Change your own role to Developer in Owner controls; if the UI refuses, note it.                                  | Lead badge on ArchitectAgent.                                                            |
+| 5   | Lead and agents          | Lead proposes "session tokens vs JWT" (`decisions_propose`); A and B add positions (`decisions_add_position`); lead decides (`decisions_decide`). | The decision under "Inbox, decisions & memory", mirrored to memory `decisions/…`.        |
+| 6   | Lead                     | Create four tasks with a reviewer (`tasks_create`), assign them (`tasks_assign`); A and B claim and start theirs (`tasks_claim`, `tasks_start`).  | Tasks tab shows the owners and states.                                                   |
+| 7   | Peter, Files; Agent A    | Open `auth.js`. Agent A sets an edit intent on lines 40–62 of `auth.js` (`presence_set_intent`).                                                  | The intent is marked in your editor.                                                     |
+| 8   | A and B                  | Edit in their sandboxes (`sandbox_write_file`, `sandbox_exec` running `node --test`).                                                             | A sandbox container appears (`docker ps`); exec output streams.                          |
+| 9   | Peter, Files             | Edit a different part of `auth.js`, e.g. rename a helper that `routes.js` uses.                                                                   | Your draft flushes within seconds; agents can read it.                                   |
+| 10  | Agent A                  | `sandbox_sync`, then `submit_changes`.                                                                                                            | A clean merge; the diff shows in Changes.                                                |
+| 11  | Agent C                  | Ask C to apply an overlapping change from a stale base on purpose (`apply_changeset` with an old base revision).                                  | A CONFLICT, sent to C.                                                                   |
+| 12  | C, then lead             | C syncs and tries twice to resolve it with stale content; then the lead resolves it (`apply_changeset`, source RESOLUTION).                       | It escalates to the lead's inbox and is then resolved.                                   |
+| 13  | Agent B                  | B uses the helper Peter renamed.                                                                                                                  | Health turns RED; B gets an inbox item (`inbox_list`), fixes it, and health turns GREEN. |
+| 14  | Agent B                  | `tools_invoke` with `aws.deploy_lambda` and function `prod-api`.                                                                                  | Denied; the denial shows in Activity.                                                    |
+| 15  | Peter, Overview          | Pause Agent C, try an action as C, then resume.                                                                                                   | C's action is refused while paused.                                                      |
+| 16  | A/B, then lead           | `tasks_submit` with evidence; the lead approves (`tasks_review`, approve).                                                                        | Tasks done; health GREEN.                                                                |
+| 17  | Peter, "Review & export" | Create a checkpoint. Skip export and PR in this run.                                                                                              | A checkpoint on the green head.                                                          |
 
 ## 4. Log format
 

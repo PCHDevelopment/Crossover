@@ -1768,7 +1768,7 @@ From T1418, after T1509 3c. Every deployment today is single-host, because `Dock
 
 From T1418. An `ExecutionDriver` that runs sandboxes on separate sandbox hosts over an authenticated channel (mutual TLS or signed requests), with host registration, health checks and capacity, and the same lifecycle, output streaming and compute accounting as `DockerExecutionDriver`. It is required before any multi-tenant or untrusted deployment. It is not needed for the MVP demo. Scope and split it into a milestone when it is scheduled.
 
-### T1533 · Stop wasted CI runs — S1
+### T1533 · Stop wasted CI runs — S2 (moved from S1)
 
 From Peter, 2026-10-13. The repository is private and CI runs on one self-hosted runner, so every unneeded run delays the ones people are waiting for. O1 has already investigated, so this is the whole change.
 
@@ -1786,7 +1786,7 @@ Change nothing else: no trigger, `runs-on`, port or service changes. A PR run jo
 
 **Proof, in the PR text, with run links:** (a) two pushes to the PR a minute apart, where the first run shows `cancelled`; (b) after merge, two pushes to `main` in quick succession, where both run to completion. O1 checks the history as well.
 
-### T1534 · Health checks under Docker Compose mount a path the host cannot see — S2 (moved from S1, Review 16)
+### T1534 · Health checks under Docker Compose mount a path the host cannot see — S2 (moved from S1, Review 16) · done
 
 Found by O1 while preparing Peter's hands-on run (17:50). This is a product bug, and it blocks demo steps 2 and 13 under the Compose stack.
 
@@ -1805,7 +1805,7 @@ Do this first: it goes ahead of T1533 and 3b. The exact change:
    - Give the new e2e case a measured timeout, as T1529 does.
 5. No other changes.
 
-### T1535 · Dev UI proxies `/mcp` — S2
+### T1535 · Dev UI proxies `/mcp` — S2 · done
 
 Found by O1 while preparing Peter's hands-on run. In development the web app runs on Vite (:5173), which proxies only `/v1` to the server (:8080). The Setup tab's MCP example (`apps/web/src/RoomSetupView.tsx`, `mcpConfigExample`) builds its URL from `window.location.origin`, so under Vite it points agents at `http://localhost:5173/mcp`, which returns the web app. In production the server serves both, so the URL is right there.
 
