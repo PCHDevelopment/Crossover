@@ -42,6 +42,7 @@ export class PluginResourceSweeper {
   constructor(
     private readonly dockerBinary: string,
     private readonly invoke: PluginDockerInvoker,
+    private readonly pluginRunLabelValue = "true",
   ) {}
 
   start(): void {
@@ -89,7 +90,12 @@ export class PluginResourceSweeper {
     const resourceArgs = kind === "container" ? ["container", "ls", "--all"] : ["network", "ls"];
     const list = await this.invoke(
       this.dockerBinary,
-      [...resourceArgs, "--quiet", "--filter", `label=${PLUGIN_RUN_LABEL}=true`],
+      [
+        ...resourceArgs,
+        "--quiet",
+        "--filter",
+        `label=${PLUGIN_RUN_LABEL}=${this.pluginRunLabelValue}`,
+      ],
       sweepOptions(),
     );
     if (list.code !== 0) throw new Error("Docker resource listing failed");
@@ -146,9 +152,17 @@ export class PluginResourceSweeper {
       await new Promise((resolve) => setTimeout(resolve, NETWORK_RETRY_DELAY_MS));
       const retry = await this.invoke(this.dockerBinary, args, sweepOptions());
       if (isSuccessfulCleanup(retry)) return;
+      throw cleanupError(kind, retry);
     }
-    throw new Error(`Docker ${kind} cleanup failed`);
+    throw cleanupError(kind, result);
   }
+}
+
+function cleanupError(kind: "container" | "network", result: PluginDockerResult): Error {
+  const stderr = Buffer.from(result.stderr, "utf8").subarray(0, 500).toString("utf8");
+  return new Error(
+    `Docker ${kind} cleanup failed (exit code: ${result.code}, timed out: ${result.timedOut === true}, stderr: ${JSON.stringify(stderr)})`,
+  );
 }
 
 function isSuccessfulCleanup(result: PluginDockerResult): boolean {
