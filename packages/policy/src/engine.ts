@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { CrossoverError } from "@crossover/protocol";
 import { loadPolicy } from "@open-policy-agent/opa-wasm";
+import type { Tier } from "./tiers.js";
 
 /**
  * The facts the authorization policy (policy/authz.rego) decides from. `authorize()` loads them
@@ -54,7 +56,15 @@ export class PolicyEngineError extends Error {
 
 export interface PolicyEngine {
   decide(facts: AuthzFacts): Decision;
+  /**
+   * The risk tier (§21.2) of a capability's base and optional concrete scope, from
+   * policy/tiers.rego.
+   */
+  tier(base: string, scope: string | undefined): Tier;
 }
+
+const DECISION_ENTRYPOINT = "crossover/authz/decision";
+const TIER_ENTRYPOINT = "crossover/tiers/tier";
 
 /** Where the compiled policy lives: next to `src/` and `dist/`, so it is found from both. */
 const POLICY_WASM = new URL("../policy/policy.wasm", import.meta.url);
@@ -74,12 +84,20 @@ export async function createPolicyEngine(wasm: Uint8Array): Promise<PolicyEngine
   return {
     decide(facts) {
       try {
-        return parseDecision(policy.evaluate(facts));
+        return parseDecision(policy.evaluate(facts, DECISION_ENTRYPOINT));
       } catch (error) {
         if (error instanceof PolicyEngineError) throw error;
         throw new PolicyEngineError("The authorization policy failed to evaluate", {
           cause: error,
         });
+      }
+    },
+    tier(base, scope) {
+      try {
+        return parseTier(policy.evaluate({ base, scope: scope ?? null }, TIER_ENTRYPOINT));
+      } catch (error) {
+        if (error instanceof PolicyEngineError) throw error;
+        throw new PolicyEngineError("The tier policy failed to evaluate", { cause: error });
       }
     },
   };
@@ -103,6 +121,14 @@ export function parseDecision(result: unknown): Decision {
   throw new PolicyEngineError("The authorization policy returned no decision");
 }
 
+/** The one tier (0 to 3) in a policy result; anything else is an error, never a lower tier. */
+export function parseTier(result: unknown): Tier {
+  const answer = Array.isArray(result) && result.length === 1 ? (result[0] as unknown) : undefined;
+  const value = isRecord(answer) ? answer["result"] : undefined;
+  if (value === 0 || value === 1 || value === 2 || value === 3) return value;
+  throw new PolicyEngineError("The tier policy returned no tier");
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -114,18 +140,36 @@ export interface PolicyInfo {
 }
 
 let shared: Promise<{ engine: PolicyEngine; info: PolicyInfo }> | undefined;
+/** The shipped engine once it has loaded, for the callers that cannot wait for it (`loadedPolicy`). */
+let loaded: PolicyEngine | undefined;
 
 /** The shipped policy, loaded once; a failed load is tried again by the next command. */
 function shippedPolicy() {
-  shared ??= readFile(POLICY_WASM).then(async (wasm) => ({
-    engine: await createPolicyEngine(wasm),
-    info: { sha256: createHash("sha256").update(wasm).digest("hex"), bytes: wasm.length },
-  }));
+  shared ??= readFile(POLICY_WASM).then(async (wasm) => {
+    const engine = await createPolicyEngine(wasm);
+    loaded = engine;
+    return {
+      engine,
+      info: { sha256: createHash("sha256").update(wasm).digest("hex"), bytes: wasm.length },
+    };
+  });
   shared.catch(() => (shared = undefined));
   return shared;
 }
 
-export const policyEngine = async (): Promise<PolicyEngine> => (await shippedPolicy()).engine;
+/**
+ * The shipped policy if `initPolicy()` (or a command) has loaded it; otherwise `UNAVAILABLE`,
+ * never a guess: the callers are synchronous (`tierOf` runs inside validation), so they cannot
+ * load it themselves, and a server loads it before it listens.
+ */
+export function loadedPolicy(): PolicyEngine {
+  if (loaded) return loaded;
+  throw new CrossoverError("UNAVAILABLE", "The authorization policy is not loaded");
+}
+
+/** What `authorize()` asks of the shipped policy: the decision (not the tier). */
+export const policyEngine = async (): Promise<Pick<PolicyEngine, "decide">> =>
+  (await shippedPolicy()).engine;
 
 /**
  * Load the policy now instead of at the first command, so a server with a missing or broken
