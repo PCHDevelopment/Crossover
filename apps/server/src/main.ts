@@ -1,4 +1,5 @@
 import { createPool, migrate } from "@crossover/db";
+import { initPolicy } from "@crossover/policy";
 import { assertGitVersion, DEFAULT_GIT_INTERNAL_NETWORK } from "@crossover/workspace";
 import { composeServer } from "./compose.js";
 import { loadConfig } from "./config.js";
@@ -20,6 +21,11 @@ async function main(): Promise<void> {
   } finally {
     await migrationPool.end();
   }
+
+  // The authorization policy (D9) is loaded before anything is served; its digest in the log
+  // tells a deploy which policy it runs.
+  const policy = await initPolicy();
+  console.warn(`Authorization policy policy.wasm sha256=${policy.sha256} (${policy.bytes} bytes)`);
 
   const server = await composeServer(config);
   if (config.gitInternalTokenSecret) {
