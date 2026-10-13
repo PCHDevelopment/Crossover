@@ -27,7 +27,7 @@ Conventions are in `docs/ENGINEERING.md`. Section references (§) point to `docs
 | M12 Plugins (§21.4–21.5)              | T1201–T1206 | S1 (T1201, moved in Review 5), S2 (T1202–T1206)             |
 | M13 Lessons from building (§34)       | T1301–T1303 | S1                                                          |
 | M14 Demo-ready web app (Review 7)     | T1401–T1416 | S2 (T1401–T1416; T1402 moved from Q1)                       |
-| M15 MVP scope gaps (§29, Review 10)   | T1501–T1514 | S2 (T1501–T1503, T1510–T1511, T1513–T1514; rest unassigned) |
+| M15 MVP scope gaps (§29, Review 10)   | T1501–T1515 | S2 (T1501–T1503, T1510–T1511, T1513–T1514; rest unassigned) |
 
 **Start here:** S1 → T101, T105, T114 (independent). S2 → T501, T505 (only need the scaffold).
 
@@ -1597,3 +1597,9 @@ Step 1 done in #238 (internal errors now logged). Likely root cause found while 
 A container on two networks (bridge and `crossover-git`) resolves its own hostname to whichever address `/etc/hosts` lists first. With `GIT_INTERNAL_HOST=<container name>`, the internal Git listener sometimes binds to the bridge IP, which sandbox fetchers on the internal `crossover-git` network cannot reach. Sandbox materialization then fails, which is the likely cause of T1513's intermittent `sandbox.exec` 500. `docker-compose.yml` has the same setting (`GIT_INTERNAL_HOST: crossover-server`).
 
 Fix it in the server: when `GIT_INTERNAL_HOST` is not an IP literal, resolve this container's address on `crossover-git` deterministically, by inspecting its own container (`GIT_INTERNAL_CONTAINER`) for `NetworkSettings.Networks["crossover-git"].IPAddress`. Fail startup if it has no address there. Then revert the deploy-topology fixture to the plain container name, so the test proves the product path.
+
+### T1515 · Browser plugin refusal surfaces as a retryable provider error under load — S2
+
+T1417's first flake, captured with evidence on 2026-10-13 (seq 1160, during T1504 PR B validation; log saved by S2). `apps/server/src/browser-plugin.docker.test.ts` › "uses the signed room allowlist, denies unsafe destinations, and caps UTF-8 page text" (assertion at lines 180–183). Expected `ToolProviderError { code: VALIDATION }`, got `ToolProviderError: Plugin execution failed { retryable: true }`. Under a full parallel run the plugin worker failed or timed out before returning its own policy refusal, and the runner reported a generic retryable failure.
+
+Find which: a worker timeout, a container start race, or an exit before the result is written. Decide whether a policy refusal can ever be reported as retryable; it should not be, because an agent would retry a denied action. Fix the cause, not the assertion.
