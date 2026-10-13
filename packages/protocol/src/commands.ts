@@ -29,6 +29,8 @@ export const METHODS = {
   "room.freeze": { mutating: true },
   "room.resume": { mutating: true },
   "room.archive": { mutating: true },
+  "rooms.set_retention": { mutating: true },
+  "rooms.unarchive": { mutating: true },
   "room.invite": { mutating: true },
 
   "participants.list": { mutating: false },

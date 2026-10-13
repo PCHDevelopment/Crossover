@@ -16,6 +16,7 @@ const GENERATED = new URL("../policy/bundles.gen.rego", import.meta.url);
 /** Everything but the role, authority and capability lets the command through. */
 function facts(role: string, authority: string, capability: string): AuthzFacts {
   return {
+    method: "messages.send",
     room_match: true,
     participant: { status: "ACTIVE", authority, role },
     room_status: "ACTIVE",

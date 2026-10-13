@@ -108,6 +108,7 @@ describe("room.get_state (summary)", () => {
       lead_participant_id: c.owner.participant_id,
       settings: {},
       archived_at: null,
+      retention_days: 365,
     });
     expect(typeof (state.sections["room"] as { created_at: unknown }).created_at).toBe("string");
     const participants = state.sections["participants"] as Record<string, unknown>[];

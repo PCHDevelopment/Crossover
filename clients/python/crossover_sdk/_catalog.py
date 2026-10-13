@@ -72,6 +72,8 @@ METHODS: dict[str, bool] = {
     "room.set_lead": True,
     "room.set_protected_paths": True,
     "room.transfer_lead": True,
+    "rooms.set_retention": True,
+    "rooms.unarchive": True,
     "sandbox.exec": True,
     "sandbox.exec.cancel": True,
     "sandbox.file.read": False,

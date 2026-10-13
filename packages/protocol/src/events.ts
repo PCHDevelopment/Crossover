@@ -6,6 +6,8 @@ export const EVENT_TYPES = [
   "room.paused",
   "room.resumed",
   "room.archived",
+  "room.retention_changed",
+  "room.unarchived",
   "room.exported",
   "room.egress_allowlist_changed",
   "room.protected_paths_changed",

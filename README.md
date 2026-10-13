@@ -43,3 +43,7 @@ pnpm --filter @crossover/web dev                # web UI on http://localhost:517
 This stack is for development and demos only. Sandboxes share this host through its Docker socket
 (ARCHITECTURE §4.1). For the full walkthrough and its known limits, see the
 [demo runbook](docs/DEMO-RUNBOOK.md).
+
+## Deployment
+
+Every deployment today is single-host mode: the app and sandboxes share one host through Docker. It is allowed only for one organisation whose users all trust each other, with `SANDBOX_RUNTIME=runsc` (gVisor) and the Docker socket reachable only by the server process. The Compose file and startup log say `single-host mode: not for multi-tenant or untrusted use (ARCHITECTURE §4.1)`. Separate sandbox hosts are required before any deployment where users do not trust each other (ARCHITECTURE §4.1). The Compose stack is for development and demos only and explicitly enables the local no-gVisor exception.

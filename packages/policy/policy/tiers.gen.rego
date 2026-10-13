@@ -85,6 +85,8 @@ catalog_mutating := {
 	"room.freeze": true,
 	"room.resume": true,
 	"room.archive": true,
+	"rooms.set_retention": true,
+	"rooms.unarchive": true,
 	"capabilities.grant_tier3": true,
 	"events.redact": true,
 	"integrations.manage": true,
