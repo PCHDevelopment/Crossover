@@ -5,6 +5,8 @@ import type {
   SandboxOutputUpdate,
   SdkEvent,
 } from "@crossover/sdk";
+import type { Participant } from "./model.js";
+import AgentOutputView from "./AgentOutputView.js";
 import { sanitizeTerminalText } from "./terminal-output.js";
 
 const MAX_DISPLAY_BYTES = 1024 * 1024;
@@ -76,9 +78,10 @@ function summariesFromEvents(events: SdkEvent[], selfId: string): ExecutionSumma
 export default function TerminalView(props: {
   room: RoomClient;
   selfId: string;
+  participants: Participant[];
   events: SdkEvent[];
 }) {
-  const { room, selfId, events } = props;
+  const { room, selfId, participants, events } = props;
   const [command, setCommand] = useState("");
   const [cwd, setCwd] = useState("");
   const [selectedExecId, setSelectedExecId] = useState("");
@@ -412,6 +415,7 @@ export default function TerminalView(props: {
           </div>
         </div>
       )}
+      <AgentOutputView room={room} participants={participants} events={events} />
     </section>
   );
 }

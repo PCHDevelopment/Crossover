@@ -229,6 +229,11 @@ td {
 .terminal-command {
   margin: 16px 0;
 }
+.agent-output-view {
+  margin-top: 32px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
 .terminal-command-actions,
 .terminal-output-header {
   display: flex;
