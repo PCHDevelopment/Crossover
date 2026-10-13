@@ -22,5 +22,5 @@ export interface OpenRoom {
 /** Enter a room as the signed-in user. */
 export async function openRoom(roomId: string): Promise<OpenRoom> {
   const { tokens, ...me } = await client.roomSession(undefined, roomId);
-  return { room: client.room(roomId, tokens.access_token), me };
+  return { room: client.room(roomId, tokens), me };
 }

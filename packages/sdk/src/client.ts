@@ -290,6 +290,30 @@ export class RoomClient {
     }
   }
 
+  /** Fetch a streamed room archive with the current bearer token, refreshing once if it expired. */
+  async exportArchive(signal?: AbortSignal): Promise<Response> {
+    const url = `${this.client.options.baseUrl}/v1/rooms/${encodeURIComponent(this.roomId)}/export`;
+    for (let renewed = false; ; renewed = true) {
+      const token = this.tokens.access;
+      const response = await this.fetchImpl(url, {
+        method: "GET",
+        credentials: "same-origin",
+        headers: { authorization: `Bearer ${token}` },
+        ...(signal ? { signal } : {}),
+      });
+      if (response.ok) return response;
+
+      const error = errorFromBody(await response.json().catch(() => null), response.status);
+      if (
+        !(error instanceof CrossoverError && error.code === "UNAUTHENTICATED") ||
+        renewed ||
+        !(await this.tokens.refreshAfter(token))
+      ) {
+        throw error;
+      }
+    }
+  }
+
   private wsConfig(): WsConfig {
     const o = this.client.options;
     const WebSocket = o.WebSocket ?? (globalThis as { WebSocket?: WebSocketCtor }).WebSocket;
