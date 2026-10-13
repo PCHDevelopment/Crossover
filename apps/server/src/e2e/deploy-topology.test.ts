@@ -13,6 +13,13 @@ const image = process.env["CROSSOVER_SERVER_IMAGE"];
 const GIT_NETWORK = "crossover-git";
 const DOCKER_TIMEOUT_MS = 15_000;
 const TEST_TIMEOUT_MS = 120_000;
+// Ordinary requests answer in 10-150 ms on an idle runner; 10 s leaves two orders of magnitude.
+const REQUEST_BUDGET_MS = 10_000;
+// The first sandbox.exec creates the sandbox and fetches the workspace through crossover-git in the
+// one request: about 3.7 s on an idle runner, over 10 s on a busy one (T1522). The command's own
+// timeout_s is 30, so the request may run that long plus 15 s of setup before the test calls it hung.
+const FIRST_EXEC_TIMEOUT_S = 30;
+const FIRST_EXEC_BUDGET_MS = (FIRST_EXEC_TIMEOUT_S + 15) * 1000;
 const run = (binary: string, args: string[]) =>
   execFileAsync(binary, args, {
     timeout: DOCKER_TIMEOUT_MS,
@@ -39,6 +46,25 @@ async function requestJson<T>(
   body?: unknown,
   token?: string,
   expectedStatus = 200,
+  budgetMs = REQUEST_BUDGET_MS,
+): Promise<T> {
+  const startedAt = Date.now();
+  try {
+    return await requestJsonWithin<T>(path, body, token, expectedStatus, budgetMs);
+  } finally {
+    // In the CI log, so the next budget is set from measurements and not from a guess.
+    console.error(
+      `[deploy-topology] ${path} took ${Date.now() - startedAt} ms (budget ${budgetMs})`,
+    );
+  }
+}
+
+async function requestJsonWithin<T>(
+  path: string,
+  body: unknown,
+  token: string | undefined,
+  expectedStatus: number,
+  budgetMs: number,
 ): Promise<T> {
   const headers = {
     ...(body === undefined ? {} : { "content-type": "application/json" }),
@@ -53,7 +79,7 @@ async function requestJson<T>(
           body: JSON.stringify(body),
         }),
     ...(Object.keys(headers).length ? { headers } : {}),
-    signal: AbortSignal.timeout(10_000),
+    signal: AbortSignal.timeout(budgetMs),
   });
   const text = await response.text();
   if (response.status !== expectedStatus)
@@ -254,8 +280,10 @@ describe.skipIf(!image)("deployed server topology", () => {
       );
       await requestJson(
         `/v1/rooms/${roomId}/commands`,
-        envelope("sandbox.exec", { command: "cat README.md", timeout_s: 30 }),
+        envelope("sandbox.exec", { command: "cat README.md", timeout_s: FIRST_EXEC_TIMEOUT_S }),
         token,
+        200,
+        FIRST_EXEC_BUDGET_MS,
       );
 
       const inspection = JSON.parse(
