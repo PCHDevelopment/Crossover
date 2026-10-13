@@ -391,7 +391,12 @@ export function RoomView(props: { roomId: string; onBack: () => void; onSignedOu
       )}
       {tab === "terminal" && (
         <Suspense fallback={<p className="muted">Loading terminal…</p>}>
-          <TerminalView room={open.room} selfId={me.participant_id} events={feed} />
+          <TerminalView
+            room={open.room}
+            selfId={me.participant_id}
+            participants={participants}
+            events={feed}
+          />
         </Suspense>
       )}
       {tab === "changes" && (
