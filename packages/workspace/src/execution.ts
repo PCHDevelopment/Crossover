@@ -1,7 +1,5 @@
 import type { Pool } from "@crossover/db";
-import type { EditIntent } from "@crossover/kernel";
 import { CrossoverError } from "@crossover/protocol";
-import type { SandboxFileChanges } from "./sandbox-status.js";
 import { ExecutionCore, SANDBOX_VCPU_COUNT } from "./execution/core.js";
 import type {
   ExecutionDriver,
@@ -32,15 +30,15 @@ import {
 } from "./execution/lifecycle.js";
 import {
   advanceWorkingCopy as advanceWorkingCopyImpl,
-  advanceWorkingCopyLocked as advanceWorkingCopyLockedImpl,
+  advanceWorkingCopyLocked,
   changedWorkspacePaths,
   filterSnapshotDelta,
-  filteredIntents as filteredIntentsImpl,
+  filteredIntents,
   pathsOverlap,
   readSnapshotFiles as readSnapshotFilesImpl,
-  readablePaths as readablePathsImpl,
-  rebaseHumanWorkingCopy as rebaseHumanWorkingCopyImpl,
-  snapshotChanges as snapshotChangesImpl,
+  readablePaths,
+  rebaseHumanWorkingCopy,
+  snapshotChanges,
   snapshotDelta,
   snapshotInventory as snapshotInventoryImpl,
   status as statusImpl,
@@ -443,23 +441,6 @@ export class ExecutionService {
   async syncWorkingCopy(roomId: string, participantId: string): Promise<SandboxSyncResult> {
     return syncWorkingCopyImpl(this.core, roomId, participantId);
   }
-  private async advanceWorkingCopyLocked(
-    sandbox: SandboxRecord,
-    expectedBaseRevision: number,
-    nextBaseRevision: number,
-    files: readonly Pick<SandboxSnapshotFile, "path" | "mode" | "content">[],
-    deletePaths: readonly string[],
-  ): Promise<"advanced" | "process_running"> {
-    return advanceWorkingCopyLockedImpl(
-      this.core,
-      sandbox,
-      expectedBaseRevision,
-      nextBaseRevision,
-      files,
-      deletePaths,
-    );
-  }
-
   private async reconcileRoomSandboxes(
     roomId: string,
     requestedRevision: number,
@@ -532,18 +513,24 @@ export class ExecutionService {
         base.commit_sha,
         head.commit_sha,
       );
-      const visibleChanged = await this.readablePaths(
+      const visibleChanged = await readablePaths(
+        this.core,
         row.room_id,
         row.participant_id,
         changedPaths,
       );
-      const working = await this.snapshotChanges(sandbox, base.repo_path, base.commit_sha);
+      const working = await snapshotChanges(this.core, sandbox, base.repo_path, base.commit_sha);
       const localPaths = [...working.modified, ...working.added, ...working.deleted];
-      const visibleLocal = await this.readablePaths(row.room_id, row.participant_id, localPaths);
+      const visibleLocal = await readablePaths(
+        this.core,
+        row.room_id,
+        row.participant_id,
+        localPaths,
+      );
       const overlaps = visibleChanged.some((path) =>
         visibleLocal.some((local) => pathsOverlap(path, local)),
       );
-      const intents = await this.filteredIntents(row.room_id, row.participant_id);
+      const intents = await filteredIntents(this.core, row.room_id, row.participant_id);
       const behindPayload = {
         participant_id: row.participant_id,
         behind_by: Math.max(0, head.revision - sandbox.base_revision),
@@ -565,7 +552,7 @@ export class ExecutionService {
       let delta: { files: SandboxSnapshotFile[]; delete_paths: string[] };
       let conflictedPaths: string[] = [];
       if (row.kind === "HUMAN" && localPaths.length > 0) {
-        const rebased = await this.rebaseHumanWorkingCopy(sandbox, base, head, working);
+        const rebased = await rebaseHumanWorkingCopy(this.core, sandbox, base, head, working);
         if (!rebased) return [behind("unsupported_local_change")];
         delta = filterSnapshotDelta(rebased.delta, new Set([...visibleChanged, ...visibleLocal]));
         conflictedPaths = rebased.conflicted_paths;
@@ -577,7 +564,8 @@ export class ExecutionService {
       }
       let advanced: "advanced" | "process_running";
       try {
-        advanced = await this.advanceWorkingCopyLocked(
+        advanced = await advanceWorkingCopyLocked(
+          this.core,
           sandbox,
           sandbox.base_revision,
           head.revision,
@@ -608,31 +596,6 @@ export class ExecutionService {
       ];
     });
   }
-  private async rebaseHumanWorkingCopy(
-    sandbox: SandboxRecord,
-    base: { repo_path: string; commit_sha: string },
-    head: { repo_path: string; revision: number; commit_sha: string },
-    changes: SandboxFileChanges,
-  ): Promise<
-    | {
-        delta: { files: SandboxSnapshotFile[]; delete_paths: string[] };
-        conflicted_paths: string[];
-      }
-    | undefined
-  > {
-    return rebaseHumanWorkingCopyImpl(this.core, sandbox, base, head, changes);
-  }
-  private async readablePaths(
-    roomId: string,
-    participantId: string,
-    paths: readonly string[],
-  ): Promise<string[]> {
-    return readablePathsImpl(this.core, roomId, participantId, paths);
-  }
-  private async filteredIntents(roomId: string, participantId: string): Promise<EditIntent[]> {
-    return filteredIntentsImpl(this.core, roomId, participantId);
-  }
-
   private scheduleLatestCanonical(roomId: string): void {
     void this.core
       .canonicalHead(roomId)
@@ -663,14 +626,6 @@ export class ExecutionService {
   ): Promise<void> {
     return writeWorkingCopyFileImpl(this.core, roomId, participantId, path, content);
   }
-  private async snapshotChanges(
-    sandbox: SandboxRecord,
-    repoPath: string,
-    baseCommit: string,
-  ): Promise<SandboxFileChanges> {
-    return snapshotChangesImpl(this.core, sandbox, repoPath, baseCommit);
-  }
-
   /** Hibernate idle sandboxes; the container stops while its Docker volume is retained. */
   async sweepIdle(now = new Date()): Promise<number> {
     return sweepIdleLifecycle(this.core, now);
