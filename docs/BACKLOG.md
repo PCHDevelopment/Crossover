@@ -10,24 +10,24 @@ Conventions are in `docs/ENGINEERING.md`. Section references (§) point to `docs
 
 ## Ownership at a glance
 
-| Milestone                             | Tasks       | Owner                                                       |
-| ------------------------------------- | ----------- | ----------------------------------------------------------- |
-| M0 Foundation                         | T000        | O1                                                          |
-| M1 Persistence, ledger, commands      | T101–T118   | S1                                                          |
-| M2 Rooms, participants, auth, policy  | T201–T215   | S1                                                          |
-| M3 Tasks                              | T301–T312   | S1                                                          |
-| M4 Messages, inbox, decisions, memory | T401–T412   | S1 (moved from S2 for T404–T409, T411–T412 in Review 3)     |
-| M5 Workspace engine                   | T501–T520   | S2                                                          |
-| M6 Conflicts and health               | T601–T610   | S2                                                          |
-| M7 Gateway, MCP, end-to-end           | T701–T713   | S1 (T701–T709, T713), S2 (T710), Q1 (T705, T711), O1 (T712) |
-| M8 Git interoperability (§24)         | T801–T807   | S1 (moved from S2 in Review 4)                              |
-| M9 Safety controls (§22–23)           | T901–T906   | S1 (T904–T906), Q1 (T901–T902), S2 (T903)                   |
-| M10 Execution sandboxes (§14)         | T1001–T1008 | S2 (T1007 split into T1007 + T1007b in Review 5)            |
-| M11 Clients (§27, §29)                | T1101–T1106 | S1 (T1102 → Q1)                                             |
-| M12 Plugins (§21.4–21.5)              | T1201–T1206 | S1 (T1201, moved in Review 5), S2 (T1202–T1206)             |
-| M13 Lessons from building (§34)       | T1301–T1303 | S1                                                          |
-| M14 Demo-ready web app (Review 7)     | T1401–T1416 | S2 (T1401–T1416; T1402 moved from Q1)                       |
-| M15 MVP scope gaps (§29, Review 10)   | T1501–T1518 | S2 (T1501–T1503, T1510–T1511, T1513–T1514; rest unassigned) |
+| Milestone                             | Tasks       | Owner                                                                                        |
+| ------------------------------------- | ----------- | -------------------------------------------------------------------------------------------- |
+| M0 Foundation                         | T000        | O1                                                                                           |
+| M1 Persistence, ledger, commands      | T101–T118   | S1                                                                                           |
+| M2 Rooms, participants, auth, policy  | T201–T215   | S1                                                                                           |
+| M3 Tasks                              | T301–T312   | S1                                                                                           |
+| M4 Messages, inbox, decisions, memory | T401–T412   | S1 (moved from S2 for T404–T409, T411–T412 in Review 3)                                      |
+| M5 Workspace engine                   | T501–T520   | S2                                                                                           |
+| M6 Conflicts and health               | T601–T610   | S2                                                                                           |
+| M7 Gateway, MCP, end-to-end           | T701–T713   | S1 (T701–T709, T713), S2 (T710), Q1 (T705, T711), O1 (T712)                                  |
+| M8 Git interoperability (§24)         | T801–T807   | S1 (moved from S2 in Review 4)                                                               |
+| M9 Safety controls (§22–23)           | T901–T906   | S1 (T904–T906), Q1 (T901–T902), S2 (T903)                                                    |
+| M10 Execution sandboxes (§14)         | T1001–T1008 | S2 (T1007 split into T1007 + T1007b in Review 5)                                             |
+| M11 Clients (§27, §29)                | T1101–T1106 | S1 (T1102 → Q1)                                                                              |
+| M12 Plugins (§21.4–21.5)              | T1201–T1206 | S1 (T1201, moved in Review 5), S2 (T1202–T1206)                                              |
+| M13 Lessons from building (§34)       | T1301–T1303 | S1                                                                                           |
+| M14 Demo-ready web app (Review 7)     | T1401–T1416 | S2 (T1401–T1416; T1402 moved from Q1)                                                        |
+| M15 MVP scope gaps (§29, Review 10)   | T1501–T1522 | S2 (T1501–T1505, T1510–T1511, T1513–T1516, T1518); S1 (T1508, T1512, T1517); rest unassigned |
 
 **Start here:** S1 → T101, T105, T114 (independent). S2 → T501, T505 (only need the scaffold).
 
@@ -1552,23 +1552,23 @@ Budgets are enforced, but nothing sets `rooms.settings.budgets` or `participants
 
 PR A (#245, `budgets.set`/`budgets.get`, `room.budgets_changed`) and the Owner controls section (#246) are merged. PR B, sandbox CPU metering: migration **0033**. Meter cumulative cgroup CPU per sandbox, charging the delta at exec end, on a periodic sweep and at stop, to the owning participant. Enforce the per-agent 4 vCPU-h/day and room 40 vCPU-h/day limits with TTL'd reservations, refuse a new exec when either is exhausted, and cap timeouts by the remaining budget.
 
-### T1505 · Terminal tab — unassigned
+### T1505 · Terminal tab — S2
 
 §27 Terminal tab: the human's own sandbox via `sandbox.exec`, and read-only views of agents' sandbox output via `sandbox.output.subscribe`.
 
-### T1506 · Room export bundle and archive button — unassigned
+### T1506 · Room export bundle and archive button — S2
 
 §5 export bundle (git bundle, `events.jsonl`, `memory.json`, `tasks.json`, `decisions.json`), plus an archive button in owner controls.
 
-### T1507 · Web UI completeness — unassigned
+### T1507 · Web UI completeness — S2
 
 Decision veto and withdraw; task create, assign and claim; memory write; one-click conflict escalate; health and revision badge in the header; upstream-pull button; show `provenance.author_kind` (HUMAN/AGENT/SYSTEM) beside the trust label in MessagesView and CollaborationView, since `trust` is `participant` for humans and agents alike.
 
-### T1508 · Go CLI breadth — unassigned
+### T1508 · Go CLI breadth — S1
 
 Messages, inbox, sandbox and the `room mcp` stdio shim.
 
-### T1509 · OPA-WASM behind `authorize()` — unassigned
+### T1509 · OPA-WASM behind `authorize()` — S1
 
 D9 fidelity with no functional change. Last.
 
@@ -1580,7 +1580,7 @@ T1417's second unidentified flake, now named (seq 1082): `apps/server/src/compos
 
 `packages/security/src/secret-scanner.test.ts:181`, "scans a file just under the 2 MiB bound within a time bound": `expected 1020 to be less than 1000` under a full parallel run. A wall-clock bound in a unit test measures machine load, not the scanner. Replace it with a deterministic guard (for example an assertion on work done, or a bound with a documented margin run in isolation).
 
-### T1512 · Validate message refs on the server — unassigned
+### T1512 · Validate message refs on the server — S1
 
 `messages.send` checks mentions but stores `refs` as given. Reject task, decision and file references that do not exist in the room (`VALIDATION`), as mentions do.
 
@@ -1610,12 +1610,56 @@ T1417's second flake, captured on 2026-10-13 in #247's CI (seq 1168; log saved b
 
 57P01 is what `DROP DATABASE … WITH (FORCE)` does to live sessions, so check first whether another test file's cleanup drops a database this test is still using, or whether this test shares a pool or database name across workers. Otherwise, find which of the MCP read-tool calls stalls. Give the test a measured budget only after the cause is known (as in T1510).
 
-### T1517 · DockerHealthRunner integration cases hit the 5 s default timeout under full-suite load
+### T1517 · DockerHealthRunner integration cases hit the 5 s default timeout under full-suite load — S1
 
 Captured on 2026-10-13 in #248's CI (run 38340866790, job 115111301475; log saved by O1 and S2 before rerun). `packages/workspace/src/health-runner.test.ts` › DockerHealthRunner › "keeps successful status with output over 1 MiB" (5030 ms) and "kills and removes a container when aborted" (5014 ms): `Test timed out in 5000ms`. Neither file was in #248's diff. The cases start real containers but run under vitest's default 5 s budget.
 
 On the next failure, record container start time against total run time. Then decide whether the cases need a measured budget (as in T1510) or whether the runner is slow to start or to clean up. If the abort case is slow to remove its container, that is a product bug, not a test budget issue.
 
+Second capture (2026-10-13, S2's local full suite, seq 1197): "kills and removes a container on timeout" failed with `expected no container IDs, got eb5493cb3dca`, and "kills and removes a container when aborted" hit the 5 s timeout. The full suite took 77.9 s; both passed in isolation in 2.9 s. A container left behind after a timeout kill is a cleanup race in `DockerHealthRunner` and a product bug. Fix the race first, then measure whether the abort case still needs a budget.
+
 ### T1518 · Move sandbox compute sampling out of execution.ts — S2
 
 From Review 12. `packages/workspace/src/execution.ts` is about 1,970 lines, and each T1504 compute PR added about 125. Move CPU sampling (at reserve, at exec end, before stop or destroy), hibernate-at-cap and `sweepCompute` into a dedicated module that `ExecutionService` calls. Behavior must not change: existing tests pass unchanged, and the diff moves code rather than rewriting it. Land this before T1505 (Terminal) touches `execution.ts`.
+
+### T1519 · Decide archived-room retention — Peter
+
+Raised by S2 during T1506 planning. ARCHITECTURE §5 says archived data is kept for one year by default, but the lifecycle diagram shows `ARCHIVED → DELETED` after 30 days. The code has no unarchive and no purge. T1506 ships the existing one-way, read-only archive with no deletion. Peter decides the retention period, and whether archive can be undone, before anyone builds a purge job. Fix the spec afterwards so the two statements agree.
+
+### T1520 · Test fixtures drop the database while an injected pool is open — S1
+
+Found by S2 (seq 1227–1228). In `apps/server/src/e2e/web.test.ts`, all 14 assertions passed, then Vitest exited 1 on an unhandled `Connection terminated unexpectedly` from `pg/lib/client.js:204`. The web fixture calls `server.close()`, which deliberately leaves an injected pool open. Then `db.drop()` runs `DROP DATABASE … WITH (FORCE)` before `pool.end()`. End injected pools before dropping, in this fixture and in any other fixture with the same order, and check whether this explains T1516's 57P01. No assertion changes.
+
+### T1521 · Owner-controls budget e2e reads before the save lands — S1
+
+#261's CI (run 38362177263, job 115178717905; log saved by S1 before one rerun) failed in `apps/server/src/e2e/web.test.ts` at `web-collaboration.ts:253`: it expected `room_budgets` `{ messages: 8 }` and got `{}`. The test polls `owner-controls-notice` for "complete", which a notice from an earlier action can already satisfy, and then reads `budgets.get` straight away. Wait for the saved state instead: poll `budgets.get` until it matches, or wait on a notice tied to that save. Do the same for the compute-budget save that follows. No assertion is weakened.
+
+### T1522 · Deploy-topology first sandbox.exec has no time margin — S1
+
+`apps/server/src/e2e/deploy-topology.test.ts:255` gives the first `sandbox.exec` a 10 s per-request abort (`requestJson`, line 47). That first request runs `ensureSandbox`, container create and a git fetch over `crossover-git`, all inside one request, under full-suite load. The whole test took 9.95 s (#257), 10.15 s (#261) and 14.9 s (#269). On #273 (run 38379543415, job 115236242740) the exec request alone went past 10 s. Time each phase of the first exec in CI, then give that one request a measured budget, as in T1510. If one phase dominates, for example the image pull or the fetch, decide whether it should be warmed before the test.
+
+### T1523 · Glob `*` is compared literally against a `*` in the text — S1
+
+Found by S1 (seq 1300) while checking the T1509 2b Rego matcher against TypeScript over 118,482 cases. In `glob.ts`, `wildcardMatch` treats a pattern `*` as a literal when the text has a `*` at that position. So pattern `*` does not match text `**`, and a grant `workspace.write:src/*` does not cover the path `src/*.ts`. It fails closed: it causes false denies, never allows. But it contradicts the documented meaning, where `*` matches any run of characters. Fix it in its own PR, before 2b, because the fix widens access. Include:
+
+- a regression test for both cases;
+- an audit of every caller and test of `wildcardMatch` and `glob.ts`;
+- one line in ARCHITECTURE stating what `*` means.
+
+In #279, S1 found that the bug also left a gap in the circuit breaker's protected-path check: `secrets/*` did not match a file named `secrets/*key`. The fix closes that gap too, with a regression test.
+
+### T1524 · Move the room-export route out of gateway server.ts — S1
+
+From Reviews 13 and 14. `packages/gateway/src/server.ts` is 676 lines, and the export route (about 110 lines) is inline. Move it next to `room-export.ts` and register it from `server.ts`, as was done for `execution.ts`. Behaviour must not change: existing tests pass unchanged, and the diff moves code rather than rewriting it. Document beside the endpoint that exports refuse with `UNAVAILABLE` when Redis is down.
+
+### T1525 · Split kernel dispatcher.ts by command family — S1
+
+From the tech-debt register (Reviews 11–14). `packages/kernel/src/dispatcher.ts` is 1,793 lines and every new command adds to it. Move the handlers into modules by command family (tasks, messages, decisions, memory, workspace and so on), keeping registration, the transaction wrapper and authorization in `dispatcher.ts`. Behaviour must not change: existing tests pass unchanged, and the diff moves code rather than rewriting it, as in T1518 and T1524. Post the module split before writing code, and ship it as more than one PR if any one PR would be over 400 non-test lines.
+
+### T1526 · Split workspace execution.ts by concern — S2
+
+From the tech-debt register. T1518 (#253) moved compute sampling out, but `packages/workspace/src/execution.ts` is still 1,921 lines. Split the rest of `ExecutionService` by concern (for example sandbox lifecycle, exec and cancel, output streaming, workspace materialization), keeping `ExecutionService` as the public facade so no import outside the file changes. Behaviour must not change: existing tests pass unchanged, and the diff moves code rather than rewriting it. Prove it the way T1525 did: a TypeScript-parser declaration comparison after only the allowed edits, plus a check that the package's exported names are identical on main and on the branch. Post the module split before any code. Ship more than one PR if needed; pure moves with that proof may go over 400 lines.
+
+### T1527 · Scope-oracle test exceeds the 5 s default under full-suite load — S1
+
+#287's CI (run 38421887493, job 115381065803; log saved by O1 before any rerun) failed in `packages/policy/src/scope-oracle.test.ts:168`, "covers a requested capability exactly as capabilityMatches() does": `Test timed out in 5000ms`. The file took 8.8 s in a 79 s parallel run. #287 does not touch the policy package. The exhaustive oracle from #280 is deterministic and CPU-bound, so it needs a measured budget, as in T1510: time it in isolation and under `pnpm check`, then set an explicit per-test timeout with the measurements in a comment. Keep every case. Do not sample the corpus or weaken an assertion. Check the other oracle tests (`bundles-oracle.test.ts`) at the same time.
