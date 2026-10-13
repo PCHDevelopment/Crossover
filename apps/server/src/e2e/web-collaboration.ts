@@ -242,36 +242,53 @@ export function registerWebCollaborationStart(fixture: WebFixture): void {
     await page.getByTestId("tab-owner-controls").click();
     await page.getByTestId("owner-controls").waitFor();
 
+    // The notice below can still show the previous action's "... complete." right after a click,
+    // so each save is awaited by polling the state it writes, then the notice is checked.
+    interface BudgetState {
+      room_budgets: Record<string, number | null>;
+      compute_budgets: Record<string, number | null>;
+      room_compute: { limit_vcpu_hours_per_day: number | null };
+      agents: {
+        participant_id: string;
+        budgets: Record<string, number | null>;
+        compute_budgets: Record<string, number | null>;
+      }[];
+    }
+    const budgetState = async () => (await owner.api.budgets.get<BudgetState>({})).response;
+
     await page.getByTestId("room-budget-messages").fill("8");
     await page.getByTestId("save-room-budgets").click();
+    await expect.poll(async () => (await budgetState()).room_budgets).toEqual({ messages: 8 });
     await expect
       .poll(() => page.getByTestId("owner-controls-notice").textContent())
       .toContain("complete");
-    const roomBudgetState = await owner.api.budgets.get<{
-      room_budgets: Record<string, number | null>;
-    }>({});
-    expect(roomBudgetState.response.room_budgets).toEqual({ messages: 8 });
 
     await page.getByTestId("compute-budget-agent_vcpu_hours_per_day").fill("3");
     await page.getByTestId("compute-budget-room_vcpu_hours_per_day").fill("12");
     await page.getByTestId("save-compute-budgets").click();
     await expect
+      .poll(async () => (await budgetState()).compute_budgets)
+      .toEqual({
+        agent_vcpu_hours_per_day: 3,
+        room_vcpu_hours_per_day: 12,
+      });
+    await expect
       .poll(() => page.getByTestId("owner-controls-notice").textContent())
       .toContain("complete");
-    const computeBudgetState = await owner.api.budgets.get<{
-      compute_budgets: Record<string, number | null>;
-      room_compute: { limit_vcpu_hours_per_day: number | null };
-    }>({});
-    expect(computeBudgetState.response.compute_budgets).toEqual({
-      agent_vcpu_hours_per_day: 3,
-      room_vcpu_hours_per_day: 12,
-    });
-    expect(computeBudgetState.response.room_compute.limit_vcpu_hours_per_day).toBe(12);
+    expect((await budgetState()).room_compute.limit_vcpu_hours_per_day).toBe(12);
 
     await page.getByTestId("budget-agent").selectOption(agentA.id);
     await page.getByTestId("agent-budget-messages").fill("2");
     await page.getByTestId("agent-compute-budget-agent_vcpu_hours_per_day").fill("2");
     await page.getByTestId("save-agent-budgets").click();
+    await expect
+      .poll(async () =>
+        (await budgetState()).agents.find((agent) => agent.participant_id === agentA.id),
+      )
+      .toMatchObject({
+        budgets: { messages: 2 },
+        compute_budgets: { agent_vcpu_hours_per_day: 2 },
+      });
     await expect
       .poll(() => page.getByTestId("owner-controls-notice").textContent())
       .toContain("complete");
