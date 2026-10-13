@@ -16,6 +16,15 @@ import { createPolicyEngine, type AuthzFacts, type PolicyEngine } from "./engine
  */
 const WASM = new URL("../policy/policy.wasm", import.meta.url);
 
+/**
+ * The three big comparisons run about 24,000, 11,000 and 6,000 policy decisions. Measured on a 4-core
+ * machine (T1527): 2.2 s, 0.6 s and 0.6 s alone, and the same inside the whole parallel `pnpm test`;
+ * 4.3 s, 1.7 s and 1.6 s with the CPUs oversubscribed three times over. On the shared CI runner the
+ * first one took more than vitest's default 5 s (the file 8.8 s), which failed unrelated PRs. Every
+ * case stays; the budget is 30 s, seven times the oversubscribed run.
+ */
+const ORACLE_TIMEOUT_MS = 30_000;
+
 const SCOPES = [
   "",
   "*",
@@ -165,110 +174,122 @@ function expectNoMismatch(mismatches: string[], total: number): void {
 }
 
 describe("scope matching in the compiled policy equals the TypeScript", () => {
-  it("covers a requested capability exactly as capabilityMatches() does", async () => {
-    const engine = await createPolicyEngine(await readFile(WASM));
-    const mismatches: string[] = [];
-    let total = 0;
-    for (const granted of CAPABILITIES) {
-      for (const requested of REQUESTS) {
-        total++;
-        const policy = covered(engine, facts(requested, null, granted));
-        const expected = expectedCover(granted, requested, null);
-        if (policy !== expected) {
-          mismatches.push(
-            `${JSON.stringify({ granted, requested })}: policy ${policy}, ts ${expected}`,
-          );
-        }
-      }
-    }
-    expectNoMismatch(mismatches, total);
-  });
-
-  it("covers a workspace path exactly as capabilityMatchesPath() does, and refuses unsafe paths", async () => {
-    const engine = await createPolicyEngine(await readFile(WASM));
-    const mismatches: string[] = [];
-    let total = 0;
-    for (const granted of CAPABILITIES) {
-      for (const base of ["workspace.write", "tasks.read"]) {
-        for (const path of PATHS) {
+  it(
+    "covers a requested capability exactly as capabilityMatches() does",
+    async () => {
+      const engine = await createPolicyEngine(await readFile(WASM));
+      const mismatches: string[] = [];
+      let total = 0;
+      for (const granted of CAPABILITIES) {
+        for (const requested of REQUESTS) {
           total++;
-          const policy = covered(engine, facts(base, path, granted));
-          const expected = expectedCover(granted, base, path);
+          const policy = covered(engine, facts(requested, null, granted));
+          const expected = expectedCover(granted, requested, null);
           if (policy !== expected) {
             mismatches.push(
-              `${JSON.stringify({ granted, base, path })}: policy ${policy}, ts ${expected}`,
+              `${JSON.stringify({ granted, requested })}: policy ${policy}, ts ${expected}`,
             );
           }
         }
       }
-    }
-    expectNoMismatch(mismatches, total);
-  });
+      expectNoMismatch(mismatches, total);
+    },
+    ORACLE_TIMEOUT_MS,
+  );
 
-  it("agrees on a seeded random corpus of patterns and texts", async () => {
-    const engine = await createPolicyEngine(await readFile(WASM));
-    let seed = 20261013;
-    const next = (): number => {
-      seed = (seed * 1664525 + 1013904223) >>> 0;
-      return seed / 2 ** 32;
-    };
-    const pick = <T>(items: readonly T[]): T => items[Math.floor(next() * items.length)]!;
-    const ALPHABET = [
-      "a",
-      "b",
-      "c",
-      ".",
-      "+",
-      "(",
-      ")",
-      "|",
-      "^",
-      "$",
-      "[",
-      "]",
-      "{",
-      "}",
-      "\\",
-      "!",
-      "*",
-      "*",
-      "?",
-      "-",
-      "é",
-    ];
-    const SEGMENT_JOINERS = ["/", "/", "/**/", "/**"];
-    const word = (n: number): string => Array.from({ length: n }, () => pick(ALPHABET)).join("");
-    const text = (): string => {
-      const segments = Array.from({ length: 1 + Math.floor(next() * 4) }, () =>
-        word(1 + Math.floor(next() * 3)).replace(/\*/g, pick(["*", "a"])),
-      );
-      return segments.join("/");
-    };
-    const mismatches: string[] = [];
-    let total = 0;
-    for (let i = 0; i < 3000; i++) {
-      const pattern = text() + (next() < 0.3 ? pick(SEGMENT_JOINERS) + word(2) : "");
-      const subject =
-        next() < 0.5
-          ? text()
-          : pattern
-              .replace(/\*+/g, () => word(1 + Math.floor(next() * 3)).replace(/[*/]/g, "a"))
-              .replace(/\?/g, "a");
-      for (const base of ["workspace.write", "github.create_pull_request"]) {
-        const granted = `${base}:${pattern}`;
-        const requested = `${base}:${subject}`;
-        total++;
-        const policy = covered(engine, facts(requested, null, granted));
-        const expected = expectedCover(granted, requested, null);
-        if (policy !== expected) {
-          mismatches.push(
-            `${JSON.stringify({ granted, requested })}: policy ${policy}, ts ${expected}`,
-          );
+  it(
+    "covers a workspace path exactly as capabilityMatchesPath() does, and refuses unsafe paths",
+    async () => {
+      const engine = await createPolicyEngine(await readFile(WASM));
+      const mismatches: string[] = [];
+      let total = 0;
+      for (const granted of CAPABILITIES) {
+        for (const base of ["workspace.write", "tasks.read"]) {
+          for (const path of PATHS) {
+            total++;
+            const policy = covered(engine, facts(base, path, granted));
+            const expected = expectedCover(granted, base, path);
+            if (policy !== expected) {
+              mismatches.push(
+                `${JSON.stringify({ granted, base, path })}: policy ${policy}, ts ${expected}`,
+              );
+            }
+          }
         }
       }
-    }
-    expectNoMismatch(mismatches, total);
-  });
+      expectNoMismatch(mismatches, total);
+    },
+    ORACLE_TIMEOUT_MS,
+  );
+
+  it(
+    "agrees on a seeded random corpus of patterns and texts",
+    async () => {
+      const engine = await createPolicyEngine(await readFile(WASM));
+      let seed = 20261013;
+      const next = (): number => {
+        seed = (seed * 1664525 + 1013904223) >>> 0;
+        return seed / 2 ** 32;
+      };
+      const pick = <T>(items: readonly T[]): T => items[Math.floor(next() * items.length)]!;
+      const ALPHABET = [
+        "a",
+        "b",
+        "c",
+        ".",
+        "+",
+        "(",
+        ")",
+        "|",
+        "^",
+        "$",
+        "[",
+        "]",
+        "{",
+        "}",
+        "\\",
+        "!",
+        "*",
+        "*",
+        "?",
+        "-",
+        "é",
+      ];
+      const SEGMENT_JOINERS = ["/", "/", "/**/", "/**"];
+      const word = (n: number): string => Array.from({ length: n }, () => pick(ALPHABET)).join("");
+      const text = (): string => {
+        const segments = Array.from({ length: 1 + Math.floor(next() * 4) }, () =>
+          word(1 + Math.floor(next() * 3)).replace(/\*/g, pick(["*", "a"])),
+        );
+        return segments.join("/");
+      };
+      const mismatches: string[] = [];
+      let total = 0;
+      for (let i = 0; i < 3000; i++) {
+        const pattern = text() + (next() < 0.3 ? pick(SEGMENT_JOINERS) + word(2) : "");
+        const subject =
+          next() < 0.5
+            ? text()
+            : pattern
+                .replace(/\*+/g, () => word(1 + Math.floor(next() * 3)).replace(/[*/]/g, "a"))
+                .replace(/\?/g, "a");
+        for (const base of ["workspace.write", "github.create_pull_request"]) {
+          const granted = `${base}:${pattern}`;
+          const requested = `${base}:${subject}`;
+          total++;
+          const policy = covered(engine, facts(requested, null, granted));
+          const expected = expectedCover(granted, requested, null);
+          if (policy !== expected) {
+            mismatches.push(
+              `${JSON.stringify({ granted, requested })}: policy ${policy}, ts ${expected}`,
+            );
+          }
+        }
+      }
+      expectNoMismatch(mismatches, total);
+    },
+    ORACLE_TIMEOUT_MS,
+  );
 
   it("differs only for astral characters, where Rego counts code points and the TypeScript UTF-16 units", async () => {
     const engine = await createPolicyEngine(await readFile(WASM));
