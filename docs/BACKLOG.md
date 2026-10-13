@@ -1655,3 +1655,7 @@ From Reviews 13 and 14. `packages/gateway/src/server.ts` is 676 lines, and the e
 ### T1525 · Split kernel dispatcher.ts by command family — S1
 
 From the tech-debt register (Reviews 11–14). `packages/kernel/src/dispatcher.ts` is 1,793 lines and every new command adds to it. Move the handlers into modules by command family (tasks, messages, decisions, memory, workspace and so on), keeping registration, the transaction wrapper and authorization in `dispatcher.ts`. Behaviour must not change: existing tests pass unchanged, and the diff moves code rather than rewriting it, as in T1518 and T1524. Post the module split before writing code, and ship it as more than one PR if any one PR would be over 400 non-test lines.
+
+### T1526 · Split workspace execution.ts by concern — S2
+
+From the tech-debt register. T1518 (#253) moved compute sampling out, but `packages/workspace/src/execution.ts` is still 1,921 lines. Split the rest of `ExecutionService` by concern (for example sandbox lifecycle, exec and cancel, output streaming, workspace materialization), keeping `ExecutionService` as the public facade so no import outside the file changes. Behaviour must not change: existing tests pass unchanged, and the diff moves code rather than rewriting it. Prove it the way T1525 did: a TypeScript-parser declaration comparison after only the allowed edits, plus a check that the package's exported names are identical on main and on the branch. Post the module split before any code. Ship more than one PR if needed; pure moves with that proof may go over 400 lines.
