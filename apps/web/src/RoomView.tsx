@@ -33,6 +33,9 @@ const FilesView = lazy(() => import("./FilesView.js"));
 const ChangesView = lazy(() => import("./ChangesView.js"));
 const TaskReviewView = lazy(() => import("./TaskReviewView.js"));
 const CheckpointExportView = lazy(() => import("./CheckpointExportView.js"));
+const RoomExportView = lazy(() =>
+  import("./RoomExportView.js").then((m) => ({ default: m.RoomExportView })),
+);
 const RoomSetupView = lazy(() =>
   import("./RoomSetupView.js").then((m) => ({ default: m.RoomSetupView })),
 );
@@ -558,6 +561,10 @@ export function RoomView(props: { roomId: string; onBack: () => void; onSignedOu
                 me.authority === "OWNER" || me.authority === "ADMIN" || me.role === "LEAD"
               }
               onEvent={onEvent}
+            />
+            <RoomExportView
+              room={open.room}
+              mayExportRoom={me.authority === "OWNER" || me.authority === "ADMIN"}
             />
             <CheckpointExportView
               room={open.room}

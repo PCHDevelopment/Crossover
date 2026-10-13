@@ -428,6 +428,34 @@ export function registerWebCollaborationStart(fixture: WebFixture): void {
     await expect.poll(() => page.getByTestId("owner-room-status").textContent()).toBe("PAUSED");
     await page.getByTestId("resume-room").click();
     await expect.poll(() => page.getByTestId("owner-room-status").textContent()).toBe("ACTIVE");
+
+    await page.getByTestId("tab-delivery").click();
+    const activeDownloadPromise = page.waitForEvent("download");
+    await page.getByTestId("export-room").click();
+    expect((await activeDownloadPromise).suggestedFilename()).toContain("export.tar.gz");
+    await expect
+      .poll(() => page.getByTestId("room-export-notice").textContent())
+      .toBe("Room export downloaded.");
+    await page.getByTestId("tab-owner-controls").click();
+    await page.getByTestId("archive-room").click();
+    await expect.poll(() => page.getByTestId("owner-room-status").textContent()).toBe("ARCHIVED");
+    await expect.poll(() => page.getByTestId("archive-room").count()).toBe(0);
+    await page.getByTestId("tab-delivery").click();
+    const archivedDownloadPromise = page.waitForEvent("download");
+    await page.getByTestId("export-room").click();
+    expect((await archivedDownloadPromise).suggestedFilename()).toContain("export.tar.gz");
+    await expect
+      .poll(() => page.getByTestId("room-export-notice").textContent())
+      .toBe("Room export downloaded.");
+    await expect
+      .poll(async () => {
+        const exports = await fixture.db.pool.query<{ count: number }>(
+          "SELECT count(*)::int AS count FROM events WHERE room_id = $1 AND type = 'room.exported'",
+          [roomId],
+        );
+        return exports.rows[0]?.count;
+      })
+      .toBe(2);
     expect(confirmationMessages).toEqual(
       expect.arrayContaining([
         expect.stringContaining("Use this command for room health checks?"),
@@ -441,6 +469,7 @@ export function registerWebCollaborationStart(fixture: WebFixture): void {
         expect.stringContaining("Revoke tasks.create from ObserverAgent"),
         expect.stringContaining("ObserverAgent"),
         expect.stringContaining("Project Alpha"),
+        "Archive Project Alpha? This cannot be undone; the room will become read-only.",
       ]),
     );
     await guestPage.close();

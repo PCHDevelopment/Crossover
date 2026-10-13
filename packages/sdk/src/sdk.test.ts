@@ -86,6 +86,39 @@ describe("REST transport", () => {
     expect(seen[3]!.body["idempotency_key"]).toBe("mine-1");
   });
 
+  it("downloads a room archive with a header and refreshes an expired room token", async () => {
+    const requests: {
+      url: string;
+      auth: string | undefined;
+      credentials: string | undefined;
+    }[] = [];
+    const room = clientWith(async (input, init) => {
+      const url = String(input);
+      requests.push({
+        url,
+        auth: new Headers(init?.headers).get("authorization") ?? undefined,
+        credentials: init?.credentials,
+      });
+      if (url.endsWith("/v1/auth/refresh"))
+        return json(200, { access_token: "new", refresh_token: "next" });
+      if (requests.at(-1)?.auth === "Bearer old")
+        return json(401, {
+          error: { code: "UNAUTHENTICATED", message: "expired", retryable: false },
+        });
+      return new Response("archive bytes");
+    }).room("room_1", { access_token: "old", refresh_token: "refresh" });
+
+    const response = await room.exportArchive();
+    expect(await response.text()).toBe("archive bytes");
+    expect(requests.map(({ auth }) => auth)).toEqual(["Bearer old", undefined, "Bearer new"]);
+    expect(requests.map(({ url }) => url)).toEqual([
+      "http://server.test/v1/rooms/room_1/export",
+      "http://server.test/v1/auth/refresh",
+      "http://server.test/v1/rooms/room_1/export",
+    ]);
+    expect(requests[0]?.credentials).toBe("same-origin");
+  });
+
   it("retries a lost connection, a 429 and a 503 with the very same request, and nothing else", async () => {
     const bodies: string[] = [];
     let n = 0;
