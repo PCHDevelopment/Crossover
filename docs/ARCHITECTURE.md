@@ -877,6 +877,7 @@ ROOM
   room.set_egress_allowlist hosts (owner/admin; exact hosts or *.suffix, max 100; §14.7)
   room.set_protected_paths patterns (owner only; max 100; §22.4)
   room.set_health {health_command, health_image?} (lead/owner; null clears the command or resets the image to the server default; image must be in HEALTH_IMAGES; §12.1)
+  budgets.get / budgets.set          owner/admin; set the room's agent defaults or one agent's limits (§22.3)
   events.redact            sequence, reason (owner only; §19.6)
   room.set_lead            owner/admin
   room.transfer_lead / room.accept_lead
@@ -1197,6 +1198,7 @@ If the node crashes between steps 2 and 3, the new owner reconciles on startup b
 ```text
 room.created / room.paused / room.resumed / room.archived
 room.egress_allowlist_changed / room.protected_paths_changed / room.health_settings_changed
+room.budgets_changed
 lead.changed / lead.transfer_offered
 
 participant.invited / participant.joined / participant.left
@@ -1363,7 +1365,7 @@ Per-agent defaults (owner can change per room or per agent):
 
 Exceeding a budget returns `BUDGET_EXCEEDED` with `retry_after` and emits `budget.exceeded`.
 
-Budgets apply to agents (humans have none) and are counted per participant in fixed windows (a count resets when the next window starts), before the command's transaction. Every command counts as a command; `messages.send` also as a message, `workspace.apply_changeset` and `changes.submit` as a ChangeSet, `tools.invoke` as a tool invocation. The owner overrides a limit with `settings.budgets` (the room) or `participants.budgets` (one agent), keyed `commands`, `messages`, `changesets`, `tool_invocations`; a count of at least 1, or `null` for no limit; the participant's setting wins. `retry_after` is in seconds (also the HTTP `Retry-After` header), and `budget.exceeded` is appended for the first refusal of a window only. If Redis is down, commands go ahead and a warning is logged.
+Count budgets apply to agents (humans have none) and are counted per participant in fixed windows (a count resets when the next window starts), before the command's transaction. Every command counts as a command; `messages.send` also as a message, `workspace.apply_changeset` and `changes.submit` as a ChangeSet, `tools.invoke` as a tool invocation. `budgets.set { participant_id?, budgets }` replaces the room's agent defaults in `settings.budgets`, or one same-room agent's overrides in `participants.budgets`; omitted keys inherit the room value or platform default, and `null` means unlimited. When both the room and an agent set a limit, the tighter cap applies, so a participant cannot raise a room cap; when only one scope sets a limit, that value replaces the platform default. Values are positive safe integers. `budgets.get` returns each agent's effective limits and current counts to owners and admins. A change appends `room.budgets_changed` with the old and new maps. `retry_after` is in seconds (also the HTTP `Retry-After` header), and `budget.exceeded` is appended for the first refusal of a window only. If Redis is down, commands go ahead and a warning is logged.
 
 ## 22.4 Circuit breakers
 

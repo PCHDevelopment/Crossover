@@ -116,7 +116,7 @@ describe("budget rules", () => {
     });
   });
 
-  it("the participant's setting beats the room's, which beats the default; null is unlimited; junk is ignored", () => {
+  it("the tighter configured limit wins, omitted keys inherit, and null is unlimited", () => {
     const room = readOverrides({
       messages: 4,
       commands: null,
@@ -124,9 +124,15 @@ describe("budget rules", () => {
       tool_invocations: "x",
     });
     const mine = readOverrides({ messages: 7 });
-    expect(limitFor("messages", room, mine)).toBe(7);
+    expect(limitFor("messages", room, mine)).toBe(4);
+    expect(limitFor("messages", room, { messages: 2 })).toBe(2);
+    expect(limitFor("messages", room, { messages: null })).toBe(4);
     expect(limitFor("messages", room, {})).toBe(4);
     expect(limitFor("commands", room, {})).toBeNull();
+    expect(limitFor("commands", {}, { commands: 5 })).toBe(5);
+    expect(limitFor("messages", {}, { messages: null })).toBeNull();
+    expect(limitFor("messages", { messages: null }, { messages: 3 })).toBe(3);
+    expect(limitFor("messages", {}, {})).toBe(10);
     expect(limitFor("changesets", room, {})).toBe(60);
     expect(limitFor("tool_invocations", room, {})).toBe(100);
     expect(readOverrides("nope")).toEqual({});
@@ -192,16 +198,21 @@ describe("budgets in the dispatcher (§22.3, T904)", () => {
     for (let i = 0; i < 15; i++) await s.send(h);
   });
 
-  it("the owner's overrides apply: the participant's over the room's, and null removes the limit", async () => {
+  it("a tighter room cap cannot be raised by a participant override", async () => {
     const s = await setup({ settings: { budgets: { messages: 2 } } });
     const roomLimited = await s.add("AGENT");
     const generous = await s.add("AGENT", { messages: 4 });
     const unlimited = await s.add("AGENT", { messages: null });
     for (let i = 0; i < 2; i++) await s.send(roomLimited);
     await exceeded(s.send(roomLimited));
-    for (let i = 0; i < 4; i++) await s.send(generous);
+    for (let i = 0; i < 2; i++) await s.send(generous);
     await exceeded(s.send(generous));
-    for (let i = 0; i < 12; i++) await s.send(unlimited);
+    for (let i = 0; i < 2; i++) await s.send(unlimited);
+    await exceeded(s.send(unlimited));
+
+    const noRoomCap = await setup();
+    const explicitlyUnlimited = await noRoomCap.add("AGENT", { messages: null });
+    for (let i = 0; i < 12; i++) await noRoomCap.send(explicitlyUnlimited);
   });
 
   it("a retry of a command that already ran is replayed without being charged or refused", async () => {

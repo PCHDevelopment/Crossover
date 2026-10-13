@@ -42,15 +42,25 @@ export function readOverrides(raw: unknown): BudgetOverrides {
   return found;
 }
 
-/** The limit in force: the participant's own setting, else the room's, else the default. `null` is unlimited. */
+/** Combine configured limits by the tighter cap; an omitted value inherits, and `null` is unlimited. */
 export function limitFor(
   name: BudgetName,
   room: BudgetOverrides,
   participant: BudgetOverrides,
 ): number | null {
-  if (name in participant) return participant[name] ?? null;
-  if (name in room) return room[name] ?? null;
-  return BUDGET_DEFAULTS[name].limit;
+  const hasRoomLimit = Object.hasOwn(room, name);
+  const hasParticipantLimit = Object.hasOwn(participant, name);
+  if (!hasRoomLimit && !hasParticipantLimit) return BUDGET_DEFAULTS[name].limit;
+  if (!hasRoomLimit) return participant[name] ?? null;
+  if (!hasParticipantLimit) return room[name] ?? null;
+
+  const roomLimit = room[name];
+  const participantLimit = participant[name];
+  if (roomLimit === null) return participantLimit ?? null;
+  if (participantLimit === null) return roomLimit ?? null;
+  if (roomLimit === undefined) return participantLimit ?? null;
+  if (participantLimit === undefined) return roomLimit;
+  return Math.min(roomLimit, participantLimit);
 }
 
 export interface BudgetKey {

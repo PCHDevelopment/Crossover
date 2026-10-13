@@ -6,6 +6,8 @@ METHODS: dict[str, bool] = {
     "approvals.decide": True,
     "approvals.list": False,
     "approvals.withdraw": True,
+    "budgets.get": False,
+    "budgets.set": True,
     "capabilities.grant": True,
     "capabilities.list": False,
     "capabilities.revoke": True,
