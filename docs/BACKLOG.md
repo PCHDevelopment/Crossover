@@ -1729,11 +1729,19 @@ From T1519. Plan before code, and split if any PR goes over 400 non-test lines:
 2. An owner-only `rooms.set_retention` command, and `rooms.unarchive`. Unarchive is only allowed while `ARCHIVED` and within retention. It returns the room to `ACTIVE`, does not recreate sandboxes, and emits `room.unarchived`.
 3. A purge sweeper on the room-lease holder:
    - 7 days before deletion it sends one inbox notice to the owner (idempotent);
-   - at the end it hard-deletes the room's repository, events, memory, tasks, decisions and stored exports, recording a `room.deleted` audit row outside the room;
+   - at the end it hard-deletes the room's repository, workspace data, events, memory, tasks and decisions, recording a `room.deleted` audit row outside the room;
    - it is safe to run on two nodes at once.
 4. The owner-controls UI: a retention selector and an Unarchive button.
 
 The tests must cover: unarchive after retention has ended is refused; the notice is sent exactly once; and a purge that is interrupted part-way finishes on the next sweep.
+
+**Decisions (O1, 17:34):**
+
+- Retention can be changed while `ARCHIVED`, but only if the new deadline (`archived_at` + `retention_days`) is at least 7 days from now. Otherwise the command fails with `VALIDATION` "retention would end within the 7-day notice period".
+- Any successful change clears `retention_notice_sent_at`.
+- There is no persistent export store, so purge phases are `WORKSPACE` (bare repository, workspace directories, remaining sandbox volumes) and then `DATABASE`.
+- Events are `room.unarchived` and `room.retention_changed`.
+- Unarchive clears `archived_at`, so re-archiving starts a new retention period.
 
 ### T1531 · Single-host mode guardrails — S1
 
