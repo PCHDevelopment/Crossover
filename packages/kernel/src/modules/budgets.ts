@@ -68,7 +68,11 @@ interface AgentRow {
 }
 
 /** Register budget configuration and its owner/admin read surface (§22.3, T1504). */
-export function registerBudgetCommands(dispatcher: Dispatcher, limiter: BudgetLimiter): void {
+export function registerBudgetCommands(
+  dispatcher: Dispatcher,
+  limiter: BudgetLimiter,
+  now: () => Date = () => new Date(),
+): void {
   dispatcher.registerCommand({
     method: "budgets.set",
     action: "budgets.set",
@@ -220,7 +224,7 @@ export function registerBudgetCommands(dispatcher: Dispatcher, limiter: BudgetLi
       const settings = asRecord(room.settings) ? room.settings : {};
       const roomBudgets = readOverrides(settings["budgets"]);
       const computeBudgets = readComputeOverrides(settings["compute_budgets"]);
-      const usageDate = new Date().toISOString().slice(0, 10);
+      const usageDate = now().toISOString().slice(0, 10);
       const roomComputeUsageResult = await ctx.client.query<{
         used_cpu_usec: string;
         reserved_cpu_usec: string;

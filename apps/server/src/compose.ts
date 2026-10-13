@@ -122,6 +122,8 @@ export interface ComposeOverrides {
   leaseTtlMs?: number;
   /** How often agents' lapsed task claims are swept back to OPEN. Default 30 s. */
   leaseSweepIntervalMs?: number;
+  /** Shared clock for sandbox compute accounting and budget usage reads (tests). */
+  now?: () => Date;
   /** Sandbox runtime seam for lifecycle tests; production uses the Docker driver. */
   executionDriver?: ExecutionDriver;
   /** Use this limiter for agents' budgets (§22.3) instead of Redis at `redisUrl` (tests); not closed by `close()`. */
@@ -201,6 +203,7 @@ export async function composeServer(
   const presenceSubscriber = new RedisPresenceSubscriber(config.redisUrl);
   const ownBudgets = overrides.budgets ? undefined : new RedisBudgetLimiter(config.redisUrl);
   const budgets = overrides.budgets ?? ownBudgets!;
+  const now = overrides.now ?? (() => new Date());
   const authRouteLimiter: RouteRateLimiter = {
     hit: async (key, limit, windowMs) => {
       const d = await budgets.consume(
@@ -305,6 +308,7 @@ export async function composeServer(
       diskEnforcement: config.sandboxDiskEnforcement ?? "soft",
       readablePaths: readableSandboxPaths,
       listIntents: (roomId) => intentStore.list(roomId),
+      now,
     });
     executionService.startSweeper();
 
@@ -456,6 +460,7 @@ export async function composeServer(
       budgets,
       upstream,
       integrationOptions,
+      now,
     );
 
     const renewer = new LeaseRenewer({ leases: dispatcher.leases, actors: dispatcher.actors });
@@ -619,13 +624,14 @@ function registerCommands(
   budgets: BudgetLimiter,
   upstream?: UpstreamDeps,
   integrationOptions: IntegrationCommandsOptions = {},
+  now: () => Date = () => new Date(),
 ): void {
   registerRoomCommands(dispatcher, {
     provision: async ({ client, room_id }) => {
       await provisionWorkspace(client, room_id, config.workspaceRoot);
     },
   });
-  registerBudgetCommands(dispatcher, budgets);
+  registerBudgetCommands(dispatcher, budgets, now);
   registerRoomProtectedPathsCommand(dispatcher);
   registerRoomHealthSettingsCommand(dispatcher, {
     allowedImages: config.healthImages,
