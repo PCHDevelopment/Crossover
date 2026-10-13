@@ -79,8 +79,10 @@ test_archived_room_refuses_other_mutations_even_from_the_owner if {
 
 test_archived_room_allows_only_owner_retention_controls if {
 	owner := object.union(base.participant, {"authority": "OWNER"})
-	input_ := object.union(base, {"room_status": "ARCHIVED", "participant": owner,
-		"method": "rooms.set_retention"})
+	input_ := object.union(base, {
+		"room_status": "ARCHIVED", "participant": owner,
+		"method": "rooms.set_retention",
+	})
 	decide(input_) == {"allow": true}
 	decide(object.union(input_, {"method": "rooms.unarchive"})) == {"allow": true}
 	refused(object.union(input_, {"method": "room.archive"}), "ROOM_PAUSED", "room_not_active")
