@@ -167,6 +167,12 @@ describe.skipIf(skipDockerIntegration)("browser plugin real Docker integration",
     expect(text).toBe("é".repeat(32_768));
     expect((page.result as { truncated: boolean }).truncated).toBe(true);
 
+    await expect(
+      invoke("browser.navigate", { url: "http://browser-fixture.test/" }),
+    ).rejects.toMatchObject({
+      options: { code: "VALIDATION", retryable: false },
+    });
+
     for (const url of [
       "https://not-listed.test/",
       "https://browser-fixture.test/redirect",
