@@ -2,6 +2,65 @@
 
 Periodic big-picture reviews by O1: is the merged code building the product in ARCHITECTURE.md, in the right order? Newest first.
 
+## 2026-10-13 · Review 16 (20:20 UTC; 5 PRs merged since Review 15)
+
+**State.** #290, #292, #293, #294 and #299 merged, each with CI green on its head, plus docs PRs #295–#297.
+
+- **T1530, archive retention, is done (#299).** It covers the owner retention setting (30–365 days), unarchive, and a one-time inbox notice 7 days before deletion. A fenced, resumable purge runs `WORKSPACE` then `DATABASE` and writes an audit row outside the room. Everything is wired in `compose.ts`. A schema test fails if a future migration adds a room-scoped table the purge does not cover.
+- **T1526 is done.** `execution.ts` went from 1,921 lines to 281 (#286, #289, #292, #293).
+- **T1509 3a is done (#290).** Tier classification is now in Rego. 3b and 3c remain.
+- **T1528 is done (#294).** It fixed the stale Docker cleanup that broke #287's run.
+- **Not moving.** #287 (T1525 part 3) has sat on `39fe987` since 16:13, and S1 has been silent since about 17:40. `dispatcher.ts` stays at 855 lines until it merges.
+
+**Against §29 and §30.** The §29 scope is merged except T1509 3b and 3c. That makes the build feature-complete for the demo in automated end-to-end tests. Preparing Peter's hands-on run found the first gaps that only show up outside the e2e harness:
+
+- **T1534:** health checks under Compose mount a path the host cannot see. This breaks demo steps 2 and 13.
+- **T1535:** the dev UI doesn't proxy `/mcp`, so the Setup tab shows agents the wrong address.
+- **Step 17:** the GitHub integration has no connect UI, so export to a pull request can't be done by hand.
+- **No MCP tools for some owner actions:** checkpoints, roles, pause and grants. These are owner actions and are in the web UI, which is acceptable for the MVP.
+
+The e2e harness runs the server in-process and fakes GitHub, so it can't catch problems like these. Peter's run is now the most valuable test we have.
+
+**What went well.**
+
+- **S2 asked about the one edge the T1530 spec missed before writing it:** refusing changes once purge has started. S2 then shipped it with a test.
+- **The purge design is careful.** Each phase re-checks the lease's fencing token, a stale lease holder can't send a duplicate notice, and an interrupted purge resumes from its recorded phase.
+- **Q1 re-posted the timeout table in the new format on the first try.** All 118 budgets checked out.
+
+**What needs correcting.**
+
+1. **Run CI's exact commands before pushing.** #299's first run failed on `opa fmt --fail` because only the Rego tests had been run locally. The policy step in CI is three commands; run all three.
+2. **Stacked branches.** A follow-up commit landed on the PR under review by accident. Keep a stacked branch's work off its parent's branch until the parent merges.
+3. **Silence.** Neither of the two nudges to S1 got a reply. An engineer who is stepping away should say so, so that their work can be handed to someone else instead of sitting.
+4. **CI availability.** The single runner went idle for about 30 minutes with a job queued, and recovered by itself at 19:44. With one runner, when it is down, every PR waits.
+
+**Course corrections.**
+
+1. **S2:**
+   1. T1535 (one change to `vite.config.ts`).
+   2. Then T1534, which moves from S1 because it blocks Peter's run. The spec is unchanged.
+2. **S1, when back:**
+   1. Merge main into #287.
+   2. T1533 (CI concurrency).
+   3. T1509 3b, then 3c.
+   4. T1531.
+3. **Q1:** T1529 timeouts, on the approved table.
+4. **For Peter:**
+   - The hands-on run (docs/DEMO-RUNBOOK.md), after T1534 merges.
+   - Whether step 17 (export to a pull request) must work by hand for the MVP. If it must, it needs a GitHub App and a connect UI, which is a new task.
+   - Keeping the runner machine awake.
+
+**Tech-debt register, closed:** `execution.ts` size (T1526); stale Docker cleanup (T1528).
+
+**Still open:**
+
+- `dispatcher.ts` size: closes when #287 merges.
+- The Rego and TypeScript string-length difference: pinned and documented.
+- `RedisOAuthStateStore` opens its own Redis connection.
+- dev-login returns `session_token` in its response body.
+- The web app imports `@crossover/workspace/protected-paths`.
+- New: the purge's hand-kept delete order in `deleteRoomRows`. The schema test guards it, but every new room table must be added in two places.
+
 ## 2026-10-13 · Review 15 (16:20 UTC; 12 PRs merged since Review 14)
 
 **State.** #277–#286, #288 and #289 merged, each with CI green on its head. Peter merged docs PR #258 (Reviews 12–14). #287 (T1525 part 3) is approved and needs main merged in before a clean run.

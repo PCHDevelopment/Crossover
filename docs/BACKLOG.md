@@ -1697,7 +1697,7 @@ From Reviews 13 and 14. `packages/gateway/src/server.ts` is 676 lines, and the e
 
 From the tech-debt register (Reviews 11–14). `packages/kernel/src/dispatcher.ts` is 1,793 lines and every new command adds to it. Move the handlers into modules by command family (tasks, messages, decisions, memory, workspace and so on), keeping registration, the transaction wrapper and authorization in `dispatcher.ts`. Behaviour must not change: existing tests pass unchanged, and the diff moves code rather than rewriting it, as in T1518 and T1524. Post the module split before writing code, and ship it as more than one PR if any one PR would be over 400 non-test lines.
 
-### T1526 · Split workspace execution.ts by concern — S2
+### T1526 · Split workspace execution.ts by concern — S2 · done
 
 From the tech-debt register. T1518 (#253) moved compute sampling out, but `packages/workspace/src/execution.ts` is still 1,921 lines. Split the rest of `ExecutionService` by concern (for example sandbox lifecycle, exec and cancel, output streaming, workspace materialization), keeping `ExecutionService` as the public facade so no import outside the file changes. Behaviour must not change: existing tests pass unchanged, and the diff moves code rather than rewriting it. Prove it the way T1525 did: a TypeScript-parser declaration comparison after only the allowed edits, plus a check that the package's exported names are identical on main and on the branch. Post the module split before any code. Ship more than one PR if needed; pure moves with that proof may go over 400 lines.
 
@@ -1705,7 +1705,7 @@ From the tech-debt register. T1518 (#253) moved compute sampling out, but `packa
 
 #287's CI (run 38421887493, job 115381065803; log saved by O1 before any rerun) failed in `packages/policy/src/scope-oracle.test.ts:168`, "covers a requested capability exactly as capabilityMatches() does": `Test timed out in 5000ms`. The file took 8.8 s in a 79 s parallel run. #287 does not touch the policy package. The exhaustive oracle from #280 is deterministic and CPU-bound, so it needs a measured budget, as in T1510: time it in isolation and under `pnpm check`, then set an explicit per-test timeout with the measurements in a comment. Keep every case. Do not sample the corpus or weaken an assertion. Check the other oracle tests (`bundles-oracle.test.ts`) at the same time.
 
-### T1528 · Plugin-runner stale-resource cleanup fails without saying why — S2
+### T1528 · Plugin-runner stale-resource cleanup fails without saying why — S2 · done
 
 #287's second CI run (run 38428716074, job 115404900246; log saved by O1 before any rerun) failed in `apps/server/src/plugin-runner.docker.test.ts` › "removes stale labeled containers and networks during startup cleanup" with `Error: Docker container cleanup failed`, thrown from `PluginResourceSweeper.remove` (`plugin-runner-docker.ts:150`). #287 changes only kernel files. The error drops Docker's exit code and stderr, so the cause cannot be told from the log. It could be a sweep timeout under load, a container another parallel Docker test is still using, or a Docker message that `isSuccessfulCleanup` does not recognise.
 
@@ -1721,7 +1721,7 @@ Review 15's rule: a test that takes over 2 s gets an explicit timeout with its m
 4. After O1 approves the table: for each row, pass the budget as the test's timeout argument. Add a one-line comment above the test: `// Measured (T1529): idle <x> ms, 3x load <y> ms; budget 7x.` Change nothing else: no assertions, no cases, no product code.
 5. One PR per package, at most 400 changed lines each.
 
-### T1530 · Archive retention, unarchive and purge — S2
+### T1530 · Archive retention, unarchive and purge — S2 · done
 
 From T1519. Plan before code, and split if any PR goes over 400 non-test lines:
 
@@ -1786,7 +1786,7 @@ Change nothing else: no trigger, `runs-on`, port or service changes. A PR run jo
 
 **Proof, in the PR text, with run links:** (a) two pushes to the PR a minute apart, where the first run shows `cancelled`; (b) after merge, two pushes to `main` in quick succession, where both run to completion. O1 checks the history as well.
 
-### T1534 · Health checks under Docker Compose mount a path the host cannot see — S1
+### T1534 · Health checks under Docker Compose mount a path the host cannot see — S2 (moved from S1, Review 16)
 
 Found by O1 while preparing Peter's hands-on run (17:50). This is a product bug, and it blocks demo steps 2 and 13 under the Compose stack.
 
