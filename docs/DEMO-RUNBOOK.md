@@ -74,7 +74,7 @@ Then:
 ```sh
 docker compose --profile server up --build -d       # Postgres, Redis, server on :8080; migrations run at start
 docker compose logs -f server                       # watch for errors throughout the run
-pnpm --filter @crossover/web dev                    # web UI on http://localhost:5173 (proxies /v1 to :8080)
+pnpm --filter @crossover/web dev                    # web UI on http://localhost:5173 (proxies /v1 and /mcp to :8080)
 ```
 
 Build the agent CLI:
