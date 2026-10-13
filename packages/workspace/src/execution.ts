@@ -14,6 +14,7 @@ import { createSandboxFileChangesAccumulator } from "./sandbox-status.js";
 import type { Operation } from "./operations.js";
 import type { SandboxFileChanges } from "./sandbox-status.js";
 import { SandboxComputeBudgetMeter } from "./sandbox-compute-budget.js";
+import { SandboxComputeSweeper } from "./sandbox-compute-sweeper.js";
 
 const SANDBOX_IDLE_MS = 30 * 60 * 1000;
 const SWEEP_INTERVAL_MS = 60 * 1000;
@@ -226,8 +227,8 @@ export class ExecutionService {
   private readonly diskEnforcement: DiskEnforcementMode;
   private readonly now: () => Date;
   private readonly computeBudgetMeter: SandboxComputeBudgetMeter;
+  private readonly computeSweeper: SandboxComputeSweeper;
   private sweepTimer: NodeJS.Timeout | undefined;
-  private computeSweepCursor: string | undefined;
   private readonly ensureLocks = new Map<string, Promise<void>>();
   private readonly activeExecs = new Map<
     string,
@@ -251,6 +252,19 @@ export class ExecutionService {
     this.now = options.now ?? (() => new Date());
     this.computeBudgetMeter =
       options.computeBudgetMeter ?? new SandboxComputeBudgetMeter(pool, this.now);
+    this.computeSweeper = new SandboxComputeSweeper({
+      pool,
+      meter: this.computeBudgetMeter,
+      readCpuUsage: this.driver.cpuUsage
+        ? (sandbox) =>
+            this.driver.cpuUsage!({
+              sandbox_id: sandbox.id,
+              resources: this.resources(sandbox),
+            })
+        : undefined,
+      hibernate: (roomId, participantId) => this.hibernateOne(roomId, participantId),
+      now: this.now,
+    });
     if (this.diskEnforcement === "soft" && !softEnforcementWarningLogged) {
       console.warn(
         "[execution] SANDBOX_DISK_ENFORCEMENT=soft; Docker quotas are disabled until T1006 adds volume usage checks",
@@ -359,7 +373,7 @@ export class ExecutionService {
       if (this.pendingExecs.has(execId) || this.activeExecs.has(execId))
         throw new CrossoverError("CONFLICT_VERSION", "Sandbox execution id is already reserved");
       this.assertExecCapacityFor(sandbox.id);
-      await this.sampleSandboxCpu(sandbox);
+      await this.computeSweeper.sample(sandbox);
       const timeoutMs = await this.computeBudgetMeter.reserve({
         room_id: roomId,
         participant_id: participantId,
@@ -497,7 +511,7 @@ export class ExecutionService {
         .catch(() => undefined)
         .then(async () => {
           try {
-            await this.sampleSandboxCpu(sandbox);
+            await this.computeSweeper.sample(sandbox);
             await this.computeBudgetMeter.release(input.exec_id);
           } catch (error) {
             console.error("Failed to reconcile sandbox CPU usage", error);
@@ -1141,7 +1155,7 @@ export class ExecutionService {
       const running = await this.recordRunning(sandbox.id, roomId, resources);
       if (running) {
         const active = normalizeSandbox(running);
-        if (this.driver.cpuUsage) await this.sampleSandboxCpu(active);
+        if (this.driver.cpuUsage) await this.computeSweeper.sample(active);
         return active;
       }
 
@@ -1404,49 +1418,6 @@ export class ExecutionService {
     return destroyed;
   }
 
-  /** Sample running containers and retire abandoned reservations on the shared UTC budget day. */
-  async sweepCompute(now = this.now()): Promise<number> {
-    const loadBatch = (afterId?: string) =>
-      this.pool.query<SandboxRow>(
-        `SELECT s.id, s.room_id, s.participant_id, s.status, s.limits, s.base_revision,
-                s.volume_ref, s.container_ref, s.last_active_at, s.updated_at
-           FROM sandboxes s
-          WHERE s.status = 'RUNNING' AND s.container_ref IS NOT NULL
-            AND ($2::text IS NULL OR s.id > $2)
-          ORDER BY s.id LIMIT $1`,
-        [SWEEP_BATCH_SIZE, afterId ?? null],
-      );
-    let { rows } = await loadBatch(this.computeSweepCursor);
-    if (rows.length === 0 && this.computeSweepCursor !== undefined) {
-      this.computeSweepCursor = undefined;
-      rows = (await loadBatch()).rows;
-    }
-    if (rows.length > 0) this.computeSweepCursor = rows[rows.length - 1]!.id;
-    let sampled = 0;
-    for (const row of rows) {
-      const sandbox = normalizeSandbox(row);
-      try {
-        await this.sampleSandboxCpu(sandbox, now);
-        sampled++;
-        if (await this.computeBudgetMeter.isLimitReached(sandbox, now))
-          await this.hibernateOne(sandbox.room_id, sandbox.participant_id);
-      } catch (error) {
-        console.error("[execution] sandbox CPU sweep failed", {
-          room_id: sandbox.room_id,
-          participant_id: sandbox.participant_id,
-          sandbox_id: sandbox.id,
-          error,
-        });
-      }
-    }
-    try {
-      await this.computeBudgetMeter.sweepExpired(now);
-    } catch (error) {
-      console.error("[execution] sandbox CPU reservation sweep failed", error);
-    }
-    return sampled;
-  }
-
   /** Stop every sandbox in a room, optionally limiting the operation to agents (§5). */
   async hibernateRoom(roomId: string, agentsOnly = false): Promise<void> {
     const { rows } = await this.pool.query<Pick<SandboxRow, "participant_id">>(
@@ -1479,9 +1450,9 @@ export class ExecutionService {
       void this.sweepCleanup().catch((error: unknown) =>
         console.error("[execution] sandbox cleanup sweep failed", error),
       );
-      void this.sweepCompute(this.now()).catch((error: unknown) =>
-        console.error("[execution] sandbox CPU sweep failed", error),
-      );
+      void this.computeSweeper
+        .sweep(this.now())
+        .catch((error: unknown) => console.error("[execution] sandbox CPU sweep failed", error));
     }, this.sweepIntervalMs);
     this.sweepTimer.unref();
   }
@@ -1747,7 +1718,7 @@ export class ExecutionService {
     await Promise.all(cancelling);
     if (sandbox.container_ref && this.driver.cpuUsage) {
       try {
-        await this.sampleSandboxCpu(sandbox);
+        await this.computeSweeper.sample(sandbox);
       } catch (error) {
         if (failOnSample) throw error;
         console.error("[execution] unable to sample sandbox CPU before destroy", {
@@ -1758,22 +1729,6 @@ export class ExecutionService {
     }
     await terminateSandbox?.();
     await Promise.all(active.map((run) => run.process.finished.catch(() => undefined)));
-  }
-
-  private async sampleSandboxCpu(sandbox: SandboxRecord, sampledAt = this.now()): Promise<bigint> {
-    if (!this.driver.cpuUsage || !sandbox.container_ref || !sandbox.volume_ref) return 0n;
-    const usage = await this.driver.cpuUsage({
-      sandbox_id: sandbox.id,
-      resources: this.resources(sandbox),
-    });
-    return this.computeBudgetMeter.sample({
-      room_id: sandbox.room_id,
-      participant_id: sandbox.participant_id,
-      sandbox_id: sandbox.id,
-      usage_usec: usage.usage_usec,
-      generation: usage.generation,
-      sampled_at: sampledAt,
-    });
   }
 
   private resources(sandbox: SandboxRow): SandboxResources {
