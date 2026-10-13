@@ -15,6 +15,7 @@ import {
   type RoomLifecycleOptions,
   type RoomStatus,
 } from "./lifecycle.js";
+import { registerRoomRetentionCommands } from "./retention.js";
 
 let db: TestDatabase;
 let pool: Pool;
@@ -66,6 +67,7 @@ async function setup(
     ...(options.onAfterCommitError ? { onAfterCommitError: options.onAfterCommitError } : {}),
   });
   registerRoomLifecycleCommands(d, options.lifecycle);
+  registerRoomRetentionCommands(d);
   registerInviteCommands(d);
   registerJoinCommand(d);
   d.registerCommand({
@@ -264,6 +266,100 @@ describe("room.freeze / room.resume / room.archive", () => {
     ]);
     expect(errors).toHaveLength(1);
     expect(await statusOf(s.room)).toBe("ARCHIVED");
+  });
+});
+
+describe("rooms.set_retention / rooms.unarchive", () => {
+  it("lets only the owner set a valid retention period and emits the change event", async () => {
+    const s = await setup();
+    const out = await run(s, s.owner, "rooms.set_retention", { retention_days: 30 });
+    expect(out.response).toEqual({ room_id: s.room, retention_days: 30, changed: true });
+    expect(out.events).toMatchObject([
+      { type: "room.retention_changed", payload: { retention_days: 30 } },
+    ]);
+    await rejects(run(s, s.admin, "rooms.set_retention", { retention_days: 90 }), "FORBIDDEN");
+    await rejects(run(s, s.owner, "rooms.set_retention", { retention_days: 29 }), "VALIDATION");
+    expect(
+      (await pool.query("SELECT retention_days FROM rooms WHERE id = $1", [s.room])).rows[0],
+    ).toEqual({ retention_days: 30 });
+  });
+
+  it("allows the owner to extend an archived deadline and clears a previous notice", async () => {
+    const s = await setup();
+    await run(s, s.owner, "room.archive");
+    await pool.query(
+      "UPDATE rooms SET retention_notice_sent_at = clock_timestamp() WHERE id = $1",
+      [s.room],
+    );
+    const out = await run(s, s.owner, "rooms.set_retention", { retention_days: 180 });
+    expect(out.response).toMatchObject({ retention_days: 180, changed: true });
+    const { rows } = await pool.query(
+      "SELECT retention_days, retention_notice_sent_at FROM rooms WHERE id = $1",
+      [s.room],
+    );
+    expect(rows[0]).toEqual({ retention_days: 180, retention_notice_sent_at: null });
+  });
+
+  it("refuses an archived deadline inside seven days", async () => {
+    const s = await setup();
+    await run(s, s.owner, "room.archive");
+    await pool.query(
+      "UPDATE rooms SET archived_at = clock_timestamp() - interval '24 days' WHERE id = $1",
+      [s.room],
+    );
+    const err = await rejects(
+      run(s, s.owner, "rooms.set_retention", { retention_days: 30 }),
+      "VALIDATION",
+    );
+    expect(err.message).toBe("retention would end within the 7-day notice period");
+  });
+
+  it("unarchives only before expiry, clears the retention clock and does not create sandboxes", async () => {
+    const s = await setup("ARCHIVED");
+    await pool.query("UPDATE rooms SET archived_at = clock_timestamp() WHERE id = $1", [s.room]);
+    const out = await run(s, s.owner, "rooms.unarchive");
+    expect(out.response).toEqual({
+      room_id: s.room,
+      status: "ACTIVE",
+      previous_status: "ARCHIVED",
+    });
+    expect(out.events).toMatchObject([{ type: "room.unarchived" }]);
+    expect(await statusOf(s.room)).toBe("ACTIVE");
+    expect(
+      (await pool.query("SELECT archived_at FROM rooms WHERE id = $1", [s.room])).rows[0]
+        .archived_at,
+    ).toBeNull();
+    expect(
+      (await pool.query("SELECT id FROM sandboxes WHERE room_id = $1", [s.room])).rows,
+    ).toEqual([]);
+  });
+
+  it("refuses unarchive after the stored deadline", async () => {
+    const s = await setup("ARCHIVED");
+    await pool.query(
+      "UPDATE rooms SET archived_at = clock_timestamp() - interval '366 days' WHERE id = $1",
+      [s.room],
+    );
+    await rejects(run(s, s.owner, "rooms.unarchive"), "VALIDATION");
+    expect(await statusOf(s.room)).toBe("ARCHIVED");
+  });
+
+  it("refuses retention changes and unarchive once purge has started", async () => {
+    const s = await setup("ARCHIVED");
+    await pool.query(
+      `UPDATE rooms SET archived_at = clock_timestamp() - interval '31 days',
+                        retention_days = 30, purge_started_at = clock_timestamp(),
+                        purge_phase = 'WORKSPACE'
+        WHERE id = $1`,
+      [s.room],
+    );
+    const retentionError = await rejects(
+      run(s, s.owner, "rooms.set_retention", { retention_days: 180 }),
+      "CONFLICT_VERSION",
+    );
+    const unarchiveError = await rejects(run(s, s.owner, "rooms.unarchive"), "CONFLICT_VERSION");
+    expect(retentionError.message).toBe("room deletion is in progress");
+    expect(unarchiveError.message).toBe("room deletion is in progress");
   });
 });
 

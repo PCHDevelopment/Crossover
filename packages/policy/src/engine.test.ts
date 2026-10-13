@@ -13,6 +13,7 @@ const WASM = new URL("../policy/policy.wasm", import.meta.url);
 
 /** An active member of an active room whose role bundle covers the action. */
 const allowed: AuthzFacts = {
+  method: "messages.send",
   room_match: true,
   participant: { status: "ACTIVE", authority: "MEMBER", role: "DEVELOPER" },
   room_status: "ACTIVE",

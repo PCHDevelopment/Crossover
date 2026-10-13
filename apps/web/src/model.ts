@@ -19,6 +19,8 @@ export interface RoomInfo {
   owner_id: string;
   lead_participant_id: string | null;
   settings: Record<string, unknown> | null;
+  archived_at: string | null;
+  retention_days: number;
 }
 
 export interface Task {

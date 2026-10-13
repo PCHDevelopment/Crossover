@@ -100,6 +100,7 @@ async function loadFacts(
 ): Promise<{ facts: AuthzFacts; row: ParticipantRow | undefined }> {
   const base = typeof action === "string" ? (action.split(":", 1)[0] ?? "") : "";
   const facts: AuthzFacts = {
+    method: context.method,
     room_match: resource.room_id === principal.room_id,
     participant: null,
     room_status: "",

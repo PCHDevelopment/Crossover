@@ -68,7 +68,7 @@ export function defaultStateSections(): StateSectionRegistry {
     async load({ client, room_id }) {
       const { rows } = await client.query(
         `SELECT id, slug, name, objective, status, owner_id, lead_participant_id,
-                settings, created_at, archived_at
+                settings, created_at, archived_at, retention_days
            FROM rooms WHERE id = $1`,
         [room_id],
       );

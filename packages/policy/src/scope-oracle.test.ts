@@ -133,6 +133,7 @@ const PATHS = [
  * "revoked" reason: it tells whether the policy found the grant to cover the request. */
 function facts(action: string, resourcePath: string | null, covering: string): AuthzFacts {
   return {
+    method: "workspace.search",
     room_match: true,
     participant: { status: "ACTIVE", authority: "MEMBER", role: "OBSERVER" },
     room_status: "ACTIVE",

@@ -91,6 +91,8 @@ export const CAPABILITIES = {
   "room.freeze": { mutating: true },
   "room.resume": { mutating: true },
   "room.archive": { mutating: true },
+  "rooms.set_retention": { mutating: true },
+  "rooms.unarchive": { mutating: true },
   /** Granting Tier 3 capabilities (§21.2): owner only. */
   "capabilities.grant_tier3": { mutating: true },
   "events.redact": { mutating: true },
@@ -232,6 +234,8 @@ const OWNER_POWERS = [
   "room.freeze",
   "room.resume",
   "room.archive",
+  "rooms.set_retention",
+  "rooms.unarchive",
   "conflicts.abandon",
   "capabilities.grant_tier3",
   "events.redact",

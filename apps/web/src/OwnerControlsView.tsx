@@ -181,6 +181,8 @@ export function OwnerControlsView(props: {
   selfId: string;
   leadParticipantId: string | null;
   roomStatus: string;
+  archivedAt: string | null;
+  retentionDays: number;
   settings: Settings;
   onEvent: EventListener;
   onRefresh: () => Promise<void>;
@@ -192,11 +194,14 @@ export function OwnerControlsView(props: {
     selfId,
     leadParticipantId,
     roomStatus,
+    archivedAt,
+    retentionDays,
     settings,
     onEvent,
     onRefresh,
   } = props;
   const [busy, setBusy] = useState(false);
+  const [retentionDaysInput, setRetentionDaysInput] = useState(String(retentionDays));
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const egressServerValue = list(settings?.["egress_allowlist"]).join("\n");
@@ -226,6 +231,8 @@ export function OwnerControlsView(props: {
     computeBudgetForm({}),
   );
   const [budgetLoading, setBudgetLoading] = useState(false);
+
+  useEffect(() => setRetentionDaysInput(String(retentionDays)), [retentionDays]);
 
   const refreshCapabilities = useCallback(async () => {
     if (!targetId) {
@@ -486,11 +493,39 @@ export function OwnerControlsView(props: {
   const archive = () => {
     if (roomStatus !== "ACTIVE" && roomStatus !== "PAUSED") return;
     if (
-      !window.confirm(`Archive ${roomName}? This cannot be undone; the room will become read-only.`)
+      !window.confirm(
+        `Archive ${roomName}? It will become read-only and its data will be permanently deleted after ${retentionDays} days, following a 7-day notice.`,
+      )
     )
       return;
     void perform("Archive room", async () => {
       await room.api.room.archive({});
+    });
+  };
+
+  const submitRetention = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const nextDays = Number(retentionDaysInput);
+    if (!Number.isSafeInteger(nextDays) || nextDays < 30 || nextDays > 365) {
+      setError("Retention must be a whole number from 30 to 365 days.");
+      return;
+    }
+    if (nextDays === retentionDays) return;
+    void perform("Save room retention", async () => {
+      await room.api.rooms.set_retention({ retention_days: nextDays });
+    });
+  };
+
+  const unarchive = () => {
+    if (
+      roomStatus !== "ARCHIVED" ||
+      !window.confirm(
+        `Unarchive ${roomName}? The room will become active. Its existing sandbox data will not be recreated.`,
+      )
+    )
+      return;
+    void perform("Unarchive room", async () => {
+      await room.api.rooms.unarchive({});
     });
   };
 
@@ -521,6 +556,10 @@ export function OwnerControlsView(props: {
           <button data-testid="resume-room" disabled={busy} onClick={resume}>
             Resume room
           </button>
+        ) : roomStatus === "ARCHIVED" ? (
+          <button data-testid="unarchive-room" disabled={busy} onClick={unarchive}>
+            Unarchive room
+          </button>
         ) : (
           <p className="muted">Lifecycle controls are unavailable for this room status.</p>
         )}
@@ -528,6 +567,38 @@ export function OwnerControlsView(props: {
           <button data-testid="archive-room" disabled={busy} onClick={archive}>
             Archive room
           </button>
+        )}
+        <form onSubmit={submitRetention}>
+          <label>
+            Retain archived room for
+            <select
+              data-testid="room-retention-days"
+              value={retentionDaysInput}
+              onChange={(event) => setRetentionDaysInput(event.target.value)}
+              disabled={busy}
+            >
+              {[30, 60, 90, 180, 365].map((days) => (
+                <option key={days} value={days}>
+                  {days} days
+                </option>
+              ))}
+              {![30, 60, 90, 180, 365].includes(retentionDays) && (
+                <option value={retentionDays}>{retentionDays} days (current)</option>
+              )}
+            </select>
+          </label>
+          <button
+            data-testid="save-room-retention"
+            disabled={busy || Number(retentionDaysInput) === retentionDays}
+          >
+            Save retention
+          </button>
+        </form>
+        {roomStatus === "ARCHIVED" && archivedAt && (
+          <p data-testid="room-retention-deadline">
+            Scheduled deletion:{" "}
+            {new Date(Date.parse(archivedAt) + retentionDays * 86_400_000).toLocaleString()}
+          </p>
         )}
       </section>
 

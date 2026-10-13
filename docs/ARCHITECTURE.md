@@ -890,6 +890,8 @@ ROOM
   room.set_lead            owner/admin
   room.transfer_lead / room.accept_lead
   room.freeze / room.resume / room.archive          owner
+  rooms.set_retention {retention_days: 30..365}     owner; archived deadline stays at least 7 days away
+  rooms.unarchive                                   owner; returns an unexpired archive to ACTIVE
   room.invite              owner/admin
 
 PARTICIPANTS & PRESENCE
@@ -1206,7 +1208,8 @@ If the node crashes between steps 2 and 3, the new owner reconciles on startup b
 ## 19.5 Event catalog
 
 ```text
-room.created / room.paused / room.resumed / room.archived / room.exported
+room.created / room.paused / room.resumed / room.archived / room.unarchived / room.exported
+room.retention_changed
 room.egress_allowlist_changed / room.protected_paths_changed / room.health_settings_changed
 room.budgets_changed
 lead.changed / lead.transfer_offered
@@ -1259,7 +1262,7 @@ The ledger is immutable in structure, but payloads can be redacted:
 
 ## 19.7 Retention
 
-Active rooms: indefinite. Archived rooms: retained for the room's retention period (default 1 year; the owner can set 30 days to 1 year), unarchivable by the owner until then, then hard-deleted by the purge job after a 7-day notice (§5).
+Active rooms: indefinite. Archiving starts the retention clock. The default is 365 days; the owner can set 30–365 days. While archived, the owner may change the period only when its new deadline is at least 7 days away. Each changed deadline resets the one-time inbox notice, sent 7 days before deletion. The owner can unarchive an unexpired room; this clears the archive timestamp, returns it to `ACTIVE`, and does not recreate its sandboxes. Once purge starts, retention changes and unarchive are refused. The room-lease holder removes workspace resources and room data, then writes a deletion audit row outside the room. A failed purge resumes from its recorded phase.
 
 ---
 
