@@ -2,6 +2,53 @@
 
 Periodic big-picture reviews by O1: is the merged code building the product in ARCHITECTURE.md, in the right order? Newest first.
 
+## 2026-10-13 · Review 11 (00:20 UTC; 8 PRs merged since Review 10)
+
+**State.** #237–#244 merged, all by S2, each with CI green on the merged head:
+
+- **Diagnosability and the intermittent 500:**
+  - T1513 (#238): internal gateway errors are now logged as one redacted stderr line, and deploy-topology prints the server logs.
+  - T1514 (#241): the root cause. A two-network container resolved its own hostname nondeterministically, so the Git listener sometimes bound to the bridge address, where fetchers could not reach it. The server now binds to its own address on the configured Git network, and the test proves the product path.
+- **The last two named intermittent tests:** T1510 (#237) and T1511 (#239), each fixed with a measured budget.
+- **Real sign-in (T1503), finished in five PRs:**
+  - GitHub OAuth with PKCE, one-use state and cookie sessions limited to human routes (#240).
+  - Hardening (#242): a per-address limit on OAuth starts, Secure derived from the HTTPS origin, and `__Host-` cookie names.
+  - Google OIDC (#243): verified ID tokens (RS256, exact issuers, audience and azp, server-side nonce, 60 s tolerance); no email is read.
+  - The web app on cookie sessions (#244): provider discovery, sign-in buttons, logout that also drops room tokens and closes the socket, and no token in storage or URLs, proved by a browser e2e.
+
+**Against §29.** The deployable-MVP blocker from Review 10 is gone: humans sign in with GitHub or Google, and dev-login is refused in production unless explicitly overridden. T1501, T1502 and T1503 are done. Remaining M15 work, in order:
+
+- T1504: budget configuration plus the sandbox-compute budget.
+- T1505: the Terminal tab.
+- T1506: export and archive.
+- T1507: UI completeness, including author_kind.
+- T1512: server-side message ref validation.
+- T1508: Go CLI breadth.
+- T1509: OPA.
+
+**What went well.** Two process changes paid off in this stretch. The rule that containers leave evidence (Review 10) produced the stack-trace logging, and fixing #240's CI exposed the real T1514 bug instead of masking it. Plans posted before code, with conditions attached up front, cut review rounds: #243 and #244 met every condition first time.
+
+**Course corrections.**
+
+1. **Task order for S2:**
+   1. T1504 budgets (owner command, owner-controls section, sandbox-compute budget)
+   2. T1505 Terminal
+   3. T1506 export/archive
+   4. T1507 UI completeness
+   5. T1512
+   6. T1508
+   7. T1509
+2. **Before any non-demo deployment,** Peter still has to decide T1418 (remote sandbox-host driver vs. amending §4.1). With sign-in done, this is now the main architectural blocker to a real deployment.
+3. **Staffing.** Q1 has been silent about 22 hours, and S2 has made every merge since Review 7 (29 PRs). Decision still needed from Peter.
+
+**Tech-debt register, new:**
+
+- `RedisOAuthStateStore` opens its own Redis connection from a URL, while the kernel stores accept a shared client. Accept the same `source` so a process does not grow one connection per store.
+- `POST /v1/auth/dev-login` still returns `session_token` in its JSON body as well as the cookie. That is acceptable only because dev-login is development-only and production-guarded; drop the body token once nothing reads it.
+- The web app still imports a constant from `@crossover/workspace` (carried over from Review 10).
+
+**Closed since Review 10:** T1513 (fixed by T1514), the last named intermittent tests (T1510, T1511), and the deployable-MVP sign-in gap (T1503).
+
 ## 2026-10-12 · Review 10 (20:20 UTC; 5 PRs merged since Review 9)
 
 **State.** #232–#236 merged, all by S2, each with CI green on the merged head:
