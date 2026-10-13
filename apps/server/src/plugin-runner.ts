@@ -148,16 +148,27 @@ export class DockerToolRunner implements ToolRunner {
     const execution = definition?.execution;
     if (!definition || !execution) throw new Error("Plugin runtime is not configured");
     if (signal.aborted) throw new Error("Plugin invocation was aborted");
+    const parsed = definition.input.safeParse(invocation.args);
+    if (!parsed.success) {
+      throw new ToolProviderError("Plugin arguments are invalid", {
+        retryable: false,
+        code: "VALIDATION",
+      });
+    }
+    const validatedInvocation = {
+      ...invocation,
+      args: parsed.data as Record<string, unknown>,
+    };
     const outputLimit = Math.min(
       execution.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES,
       this.maxOutputBytes,
     );
 
     const roomHosts = execution.roomEgressAllowlist
-      ? await this.readRoomEgressHosts(invocation)
+      ? await this.readRoomEgressHosts(validatedInvocation)
       : [];
     const regionalHosts = execution.awsRegionalEgress
-      ? resolveAwsRegionalHosts(invocation, execution.awsRegionalEgress)
+      ? resolveAwsRegionalHosts(validatedInvocation, execution.awsRegionalEgress)
       : [];
     const hosts = normalizeHosts([...execution.egressHosts, ...regionalHosts, ...roomHosts]);
     if (execution.roomEgressAllowlist === true && hosts.length === 0) {
@@ -183,7 +194,7 @@ export class DockerToolRunner implements ToolRunner {
 
     try {
       try {
-        const supplied = await this.credentials(invocation, execution);
+        const supplied = await this.credentials(validatedInvocation, execution);
         if (isCredentialLease(supplied)) {
           lease = supplied;
           credentials = validateCredentialEnvironment(supplied.environment);
@@ -220,9 +231,9 @@ export class DockerToolRunner implements ToolRunner {
       if (networkName) {
         const proxyCredential = createPluginProxyCredential(
           {
-            invocationId: invocation.invocation_id,
-            roomId: invocation.room_id,
-            participantId: invocation.participant_id,
+            invocationId: validatedInvocation.invocation_id,
+            roomId: validatedInvocation.room_id,
+            participantId: validatedInvocation.participant_id,
             hosts,
             expiresAt: Date.now() + this.timeoutMs + 30_000,
           },
@@ -276,7 +287,7 @@ export class DockerToolRunner implements ToolRunner {
         timeoutMs: this.timeoutMs,
         maxOutputBytes: outputLimit,
         maxStderrBytes: MAX_STDERR_BYTES,
-        input: `${JSON.stringify({ invocation })}\n`,
+        input: `${JSON.stringify({ invocation: validatedInvocation })}\n`,
         signal,
       });
       if (result.timedOut) {
