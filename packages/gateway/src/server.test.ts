@@ -15,6 +15,7 @@ import {
 import { authorize } from "@crossover/policy";
 import { CrossoverError, ERROR_CODES, newId } from "@crossover/protocol";
 import type { FastifyInstance } from "fastify";
+import { Readable } from "node:stream";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { HTTP_STATUS, toHttpError } from "./errors.js";
@@ -141,6 +142,110 @@ const errorShape = (body: unknown, code: string, status: number, res: { statusCo
   );
   expect(Object.keys(body as object)).toEqual(["error"]);
 };
+
+describe("GET /v1/rooms/:roomId/export", () => {
+  it("pipes the archive and audits an archived-room export with actor, size and snapshot head", async () => {
+    const stream = Readable.from([Buffer.from("bundle"), Buffer.from("-data")]);
+    const pipe = vi.spyOn(stream, "pipe");
+    const cleanup = vi.fn(async () => {});
+    const release = vi.fn(async () => {});
+    const source = {
+      create: vi.fn(async (roomId: string) => {
+        const head = await pool.query<{ last_sequence: string }>(
+          "SELECT last_sequence FROM rooms WHERE id = $1",
+          [roomId],
+        );
+        return {
+          filename: "room-export.tar.gz",
+          ledgerHead: head.rows[0]!.last_sequence,
+          stream,
+          cleanup,
+        };
+      }),
+    };
+    const limiter = { acquire: vi.fn(async () => release), close: vi.fn(async () => {}) };
+    const s = await setup(undefined, false, { roomExport: { source, limiter } });
+    await pool.query("UPDATE rooms SET status = 'ARCHIVED' WHERE id = $1", [s.room]);
+    const response = await s.app.inject({
+      method: "GET",
+      url: `/v1/rooms/${s.room}/export`,
+      headers: { authorization: `Bearer ${s.owner.access_token}` },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toBe("bundle-data");
+    expect(response.headers["cache-control"]).toBe("no-store");
+    expect(response.headers["content-disposition"]).toBe(
+      'attachment; filename="room-export.tar.gz"',
+    );
+    expect(pipe).toHaveBeenCalled();
+    expect(source.create).toHaveBeenCalledWith(s.room, expect.any(AbortSignal));
+    await vi.waitFor(() => expect(cleanup).toHaveBeenCalledOnce());
+    expect(release).toHaveBeenCalledOnce();
+    const owner = await pool.query<{ id: string }>(
+      "SELECT id FROM participants WHERE room_id = $1 AND authority = 'OWNER'",
+      [s.room],
+    );
+    const events = await pool.query<{ type: string; actor_id: string; payload: unknown }>(
+      "SELECT type, actor_id, payload FROM events WHERE room_id = $1 ORDER BY sequence DESC LIMIT 1",
+      [s.room],
+    );
+    expect(events.rows[0]).toMatchObject({
+      type: "room.exported",
+      actor_id: owner.rows[0]!.id,
+      payload: { byte_count: 11, ledger_head: "2" },
+    });
+  });
+
+  it("does not create an archive when the limiter rejects the request", async () => {
+    const source = { create: vi.fn() };
+    const limiter = {
+      acquire: vi.fn(async () => {
+        throw new CrossoverError("RATE_LIMITED", "Export rate limit exceeded", {
+          details: { retry_after_ms: 12_500 },
+        });
+      }),
+      close: vi.fn(async () => {}),
+    };
+    const s = await setup(undefined, false, { roomExport: { source, limiter } });
+    const response = await s.app.inject({
+      method: "GET",
+      url: `/v1/rooms/${s.room}/export`,
+      headers: { authorization: `Bearer ${s.owner.access_token}` },
+    });
+    errorShape(response.json(), "RATE_LIMITED", 429, response);
+    expect(response.headers["retry-after"]).toBe("13");
+    expect(source.create).not.toHaveBeenCalled();
+  });
+
+  it("does not append an audit event when the archive stream fails", async () => {
+    const stream = new Readable({
+      read() {
+        this.destroy(new Error("test stream failed"));
+      },
+    });
+    const cleanup = vi.fn(async () => {});
+    const limiter = { acquire: vi.fn(async () => vi.fn(async () => {})), close: vi.fn() };
+    const source = {
+      create: vi.fn(async () => ({ filename: "export.tar.gz", ledgerHead: "2", stream, cleanup })),
+    };
+    const s = await setup(undefined, false, { roomExport: { source, limiter } });
+
+    await s.app
+      .inject({
+        method: "GET",
+        url: `/v1/rooms/${s.room}/export`,
+        headers: { authorization: `Bearer ${s.owner.access_token}` },
+      })
+      .catch(() => undefined);
+    await vi.waitFor(() => expect(cleanup).toHaveBeenCalledOnce());
+    const exported = await pool.query(
+      "SELECT 1 FROM events WHERE room_id = $1 AND type = 'room.exported'",
+      [s.room],
+    );
+    expect(exported.rows).toHaveLength(0);
+  });
+});
 
 describe("POST /v1/rooms/:roomId/commands", () => {
   it("runs a command and returns response, events and replayed, uncached", async () => {
