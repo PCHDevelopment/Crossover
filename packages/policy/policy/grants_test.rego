@@ -24,3 +24,22 @@ test_non_tier3_does_not_get_the_tier3_lifetime_limit if {
 	grants.grant_check == {"allow": true} with input as {"base": "messages.send", "scope": null, "expires_in_ms": null}
 	grants.grant_check == {"allow": true} with input as {"base": "aws.deploy_lambda", "scope": "staging-x", "expires_in_ms": 86400001}
 }
+
+test_holds_gated_scope_matches_exact_and_scoped_grants if {
+	grants.holds_gated_scope == true with input as {"capability": "tools.invoke", "grants": [{"capability": "tools.invoke", "requires_approval": true}], "denies": []}
+	grants.holds_gated_scope == true with input as {"capability": "tools.invoke", "grants": [{"capability": "tools.invoke:repo/main", "requires_approval": true}], "denies": []}
+}
+
+test_holds_gated_scope_requires_a_gated_grant if {
+	grants.holds_gated_scope == false with input as {"capability": "tools.invoke", "grants": [{"capability": "tools.invoke:repo/main", "requires_approval": false}], "denies": []}
+}
+
+test_holds_gated_scope_does_not_match_lookalike_prefixes if {
+	grants.holds_gated_scope == false with input as {"capability": "tools.invoke", "grants": [{"capability": "tools.invoke2", "requires_approval": true}], "denies": []}
+	grants.holds_gated_scope == true with input as {"capability": "tools.invoke", "grants": [{"capability": "tools.invoke:", "requires_approval": true}], "denies": []}
+}
+
+test_holds_gated_scope_exact_deny_blocks_but_scoped_deny_does_not if {
+	grants.holds_gated_scope == false with input as {"capability": "tools.invoke", "grants": [{"capability": "tools.invoke:repo/main", "requires_approval": true}], "denies": [{"capability": "tools.invoke"}]}
+	grants.holds_gated_scope == true with input as {"capability": "tools.invoke", "grants": [{"capability": "tools.invoke:repo/main", "requires_approval": true}], "denies": [{"capability": "tools.invoke:repo/main"}]}
+}

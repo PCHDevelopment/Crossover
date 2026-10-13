@@ -1,6 +1,10 @@
 import type { Pool, PoolClient } from "@crossover/db";
 import { IDEMPOTENCY_TTL_HOURS } from "@crossover/ledger";
-import { loadLiveGrants, tierOf } from "@crossover/policy";
+import {
+  holdsGatedScope as policyHoldsGatedScope,
+  loadLiveGrants,
+  tierOf,
+} from "@crossover/policy";
 import { CrossoverError, type ErrorCode } from "@crossover/protocol";
 import { z } from "zod";
 import type { Dispatcher, EmittedEvent } from "../../dispatcher.js";
@@ -235,11 +239,7 @@ async function holdsGatedScope(
   capability: string,
 ): Promise<boolean> {
   const { grants, denies } = await loadLiveGrants(db, room_id, participant_id);
-  const covers = (c: string) => c === capability || c.startsWith(`${capability}:`);
-  return (
-    grants.some((g) => g.requires_approval && covers(g.capability)) &&
-    !denies.some((d) => d.capability === capability)
-  );
+  return policyHoldsGatedScope(capability, grants, denies);
 }
 
 /**

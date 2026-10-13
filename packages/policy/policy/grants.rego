@@ -51,3 +51,40 @@ valid_expiry if {
 else if {
 	is_number(input.expires_in_ms)
 }
+
+holds_gated_scope if {
+	valid_gated_input
+	some grant in input.grants
+	grant.requires_approval
+	grant_covers(input.capability, grant.capability)
+	not exact_gated_deny
+}
+
+else := false if valid_gated_input
+
+grant_covers(capability, candidate) if candidate == capability
+
+else if {
+	startswith(candidate, sprintf("%s:", [capability]))
+}
+
+exact_gated_deny if {
+	some deny in input.denies
+	deny.capability == input.capability
+}
+
+valid_gated_input if {
+	is_object(input)
+	is_string(input.capability)
+	is_array(input.grants)
+	every grant in input.grants {
+		is_object(grant)
+		is_string(grant.capability)
+		is_boolean(grant.requires_approval)
+	}
+	is_array(input.denies)
+	every deny in input.denies {
+		is_object(deny)
+		is_string(deny.capability)
+	}
+}

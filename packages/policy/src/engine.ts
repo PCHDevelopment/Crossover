@@ -55,6 +55,8 @@ export const GRANT_CHECK_REASONS = [
 ] as const;
 export type GrantCheckReason = (typeof GRANT_CHECK_REASONS)[number];
 export type GrantCheckResult = { allow: true } | { allow: false; reason: GrantCheckReason };
+export type GatedGrant = AuthzFacts["grants"][number];
+export type GatedDeny = AuthzFacts["denies"][number];
 
 /** The policy could not be loaded or did not answer with a decision: the command is refused. */
 export class PolicyEngineError extends Error {
@@ -73,11 +75,14 @@ export interface PolicyEngine {
   tier(base: string, scope: string | undefined): Tier;
   /** Whether a capability grant and its lifetime satisfy the policy in policy/grants.rego. */
   grantCheck(base: string, scope: string | undefined, expiresInMs: number | null): GrantCheckResult;
+  /** Whether live grants include a gated grant covering a capability without an exact deny. */
+  holdsGatedScope(capability: string, grants: GatedGrant[], denies: GatedDeny[]): boolean;
 }
 
 const DECISION_ENTRYPOINT = "crossover/authz/decision";
 const TIER_ENTRYPOINT = "crossover/tiers/tier";
 const GRANT_CHECK_ENTRYPOINT = "crossover/grants/grant_check";
+const HOLDS_GATED_SCOPE_ENTRYPOINT = "crossover/grants/holds_gated_scope";
 
 /** Where the compiled policy lives: next to `src/` and `dist/`, so it is found from both. */
 const POLICY_WASM = new URL("../policy/policy.wasm", import.meta.url);
@@ -124,6 +129,26 @@ export async function createPolicyEngine(wasm: Uint8Array): Promise<PolicyEngine
       } catch (error) {
         if (error instanceof PolicyEngineError) throw error;
         throw new PolicyEngineError("The grant policy failed to evaluate", { cause: error });
+      }
+    },
+    holdsGatedScope(capability, grants, denies) {
+      try {
+        return parseHoldsGatedScope(
+          policy.evaluate(
+            {
+              capability,
+              grants: grants.map(({ capability, requires_approval }) => ({
+                capability,
+                requires_approval,
+              })),
+              denies: denies.map(({ capability }) => ({ capability })),
+            },
+            HOLDS_GATED_SCOPE_ENTRYPOINT,
+          ),
+        );
+      } catch (error) {
+        if (error instanceof PolicyEngineError) throw error;
+        throw new PolicyEngineError("The gated-scope policy failed to evaluate", { cause: error });
       }
     },
   };
@@ -174,6 +199,19 @@ export function parseGrantCheck(result: unknown): GrantCheckResult {
   throw new PolicyEngineError("The grant policy returned no decision");
 }
 
+/** The one well-formed boolean answer from the gated-scope policy. */
+export function parseHoldsGatedScope(result: unknown): boolean {
+  const answer = Array.isArray(result) && result.length === 1 ? (result[0] as unknown) : undefined;
+  if (
+    isRecord(answer) &&
+    Object.keys(answer).length === 1 &&
+    typeof answer["result"] === "boolean"
+  ) {
+    return answer["result"];
+  }
+  throw new PolicyEngineError("The gated-scope policy returned no decision");
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -219,6 +257,15 @@ export function grantCheck(
   expiresInMs: number | null,
 ): GrantCheckResult {
   return loadedPolicy().grantCheck(base, scope, expiresInMs);
+}
+
+/** Synchronously check whether a caller holds a gated grant for a capability. */
+export function holdsGatedScope(
+  capability: string,
+  grants: GatedGrant[],
+  denies: GatedDeny[],
+): boolean {
+  return loadedPolicy().holdsGatedScope(capability, grants, denies);
 }
 
 /** What `authorize()` asks of the shipped policy: the decision (not the tier). */
