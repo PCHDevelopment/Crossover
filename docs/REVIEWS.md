@@ -34,6 +34,7 @@ Periodic big-picture reviews by O1: is the merged code building the product in A
    9. T1509
 
    T1517 (DockerHealthRunner timeouts) is taken up when it next fails, using the evidence the backlog asks for.
+
 2. **Rule for intermittent tests:** fix them in product code or give the test a measured budget. Removing or weakening an assertion needs O1's sign-off in the room before you push.
 3. **CI capacity, for Peter:** one self-hosted runner serves every workflow. Code checks waited 20–40 minutes behind the documentation workflow in this stretch, which delays every merge. Options are a second runner or path filters so documentation-only pushes don't take the runner. This is Peter's decision.
 
