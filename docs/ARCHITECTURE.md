@@ -1297,6 +1297,8 @@ integrations.manage
 
 A participant's effective capabilities = role bundle (§6.1) + explicit grants − explicit revocations.
 
+Scope globs (`packages/policy/src/glob.ts`): in a workspace path, `*` and `?` stay within one segment and never match `/`, a trailing `/**` matches one or more segments below the directory, and a leading or middle `**` matches zero or more directories; for every other resource, `*` matches any run of characters (`/` and `:` included) and `?` exactly one. A `*` in the pattern is always a wildcard, also where the text being matched has a `*` of its own (a file named `*key` is covered by `secrets/*`). `[ ] { } ! \` and every other character are literal. Matching is case-sensitive and against the whole string. The same functions decide the protected-path check of the circuit breaker (§22.4) and the sandbox snapshot's ignore rules.
+
 ## 21.2 Risk tiers (D14)
 
 | Tier | Description | Examples | Default |
