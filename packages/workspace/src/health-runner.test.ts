@@ -474,6 +474,45 @@ describe("DockerHealthRunner", () => {
     expect(daemon.calls).toEqual(["create", "rm"]);
   });
 
+  it("returns only once a container the daemon is auto-removing is gone (T1517)", async () => {
+    const { repository, revision } = await makeRepo();
+    // After the kill the daemon removes the --rm container itself and takes 300 ms to finish;
+    // `docker rm -f` meanwhile fails with "removal already in progress" and the container is
+    // still listed. This is what CI saw 1.5 s into the real timeout case (run 38354265644).
+    let goneAt = Infinity;
+    const listed = () => Date.now() < goneAt;
+    const invoke = vi.fn(
+      async (
+        _binary: string,
+        args: readonly string[],
+        options?: { onTimeout?: () => Promise<void> },
+      ) => {
+        if (args[0] === "start") {
+          await options?.onTimeout?.();
+          goneAt = Date.now() + 300;
+          return { code: null, timedOut: true, output: "" };
+        }
+        if (args[0] === "rm" && listed())
+          return {
+            code: 1,
+            timedOut: false,
+            output: "removal of container is already in progress",
+          };
+        if (args[0] === "ps") return { code: 0, timedOut: false, output: listed() ? "abc123" : "" };
+        return { code: 0, timedOut: false, output: "" };
+      },
+    );
+
+    const result = await new DockerHealthRunner({ timeoutMs: 50 }, invoke).run({
+      repository,
+      revision,
+      command: "sleep 30",
+    });
+
+    expect(result.status).toBe("ERROR");
+    expect(listed()).toBe(false); // gone by the time run() returns
+  });
+
   it("validates runner configuration", () => {
     expect(() => new DockerHealthRunner({ image: "  " })).toThrow(/allowlist/);
     expect(() => new DockerHealthRunner({ allowedImages: [] })).toThrow(/allowlist/);

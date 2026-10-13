@@ -13,6 +13,9 @@ const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
 const INSTALL_EXPIRY_MARGIN_MS = 60 * 1000;
 /** `docker create` is quick; this only bounds a hung daemon. */
 const CREATE_TIMEOUT_MS = 60_000;
+/** How long to wait for the daemon to finish removing a container, and how often to look. */
+const REMOVAL_WAIT_MS = 10_000;
+const REMOVAL_POLL_MS = 200;
 const INSTALL_SETUP_STALE_MS = 2 * 60 * 1000;
 const MAX_LOG_BYTES = 1024 * 1024;
 export const DEFAULT_HEALTH_IMAGE = "node:22-bookworm-slim";
@@ -411,10 +414,7 @@ export class DockerHealthRunner implements HealthRunner {
         args.push("--workdir", "/workspace", image, "/bin/sh", "-lc", input.command);
         result = await this.runContainer(containerName, args, input.signal);
       } finally {
-        await this.processRunner(this.dockerBinary, ["rm", "-f", containerName], {
-          timeoutMs: 5_000,
-          maxBuffer: 8192,
-        }).catch(() => ({ code: null, timedOut: false, output: "" }));
+        await this.removeContainer(containerName);
       }
       const status: HealthStatus =
         result.aborted || result.timedOut || result.code === null
@@ -683,10 +683,7 @@ export class DockerHealthRunner implements HealthRunner {
       try {
         processResult = await this.runContainer(containerName, args, signal);
       } finally {
-        await this.processRunner(this.dockerBinary, ["rm", "-f", containerName], {
-          timeoutMs: 5_000,
-          maxBuffer: 8192,
-        }).catch(() => ({ code: null, timedOut: false, output: "" }));
+        await this.removeContainer(containerName);
       }
       const succeeded =
         !processResult.aborted && !processResult.timedOut && processResult.code === 0;
@@ -983,6 +980,36 @@ export class DockerHealthRunner implements HealthRunner {
       onTimeout: () => this.killContainer(name),
       onAbort: () => this.killContainer(name),
     });
+  }
+
+  /**
+   * Remove a health container and return only once it is gone (T1517). The container is
+   * created with `--rm`, so after a kill the daemon removes it too, and `docker rm -f` then
+   * fails with "removal already in progress" while the container is still listed. That is the
+   * leftover container CI saw 1.5 s into the timeout case: not a slow start, a removal that had
+   * not finished.
+   */
+  private async removeContainer(name: string): Promise<void> {
+    const failed = { code: null, timedOut: false, output: "" };
+    const removed = await this.processRunner(this.dockerBinary, ["rm", "-f", name], {
+      timeoutMs: 5_000,
+      maxBuffer: 8192,
+    }).catch(() => failed);
+    if (removed.code === 0) return;
+    const deadline = Date.now() + REMOVAL_WAIT_MS;
+    while (Date.now() < deadline) {
+      const listed = await this.processRunner(
+        this.dockerBinary,
+        ["ps", "--all", "--quiet", "--filter", `name=^${name}$`],
+        { timeoutMs: 5_000, maxBuffer: 8192 },
+      ).catch(() => failed);
+      if (listed.code === 0 && listed.output.trim() === "") return;
+      await new Promise((resolve) => setTimeout(resolve, REMOVAL_POLL_MS));
+      await this.processRunner(this.dockerBinary, ["rm", "-f", name], {
+        timeoutMs: 5_000,
+        maxBuffer: 8192,
+      }).catch(() => failed);
+    }
   }
 
   private async killContainer(name: string): Promise<void> {
