@@ -1744,7 +1744,7 @@ The tests must cover: unarchive after retention has ended is refused; the notice
 - Once `purge_started_at` is set, `rooms.set_retention` and `rooms.unarchive` are refused with `CONFLICT_VERSION` "room deletion is in progress", with one test each.
 - Unarchive clears `archived_at`, so re-archiving starts a new retention period.
 
-### T1531 · Single-host mode guardrails — S2 (moved from S1)
+### T1531 · Single-host mode guardrails — S2 (moved from S1) · done
 
 From T1418, after T1509 3c. Every deployment today is single-host, because `DockerExecutionDriver` is the only driver. Exact change:
 
