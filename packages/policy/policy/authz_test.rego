@@ -5,20 +5,22 @@ package crossover.authz_test
 import data.crossover.authz
 import rego.v1
 
-# An active member of an active room whose role bundle covers the action.
+# An active developer member of an active room whose role bundle covers the action.
 base := {
 	"room_match": true,
-	"participant": {"status": "ACTIVE", "authority": "MEMBER", "valid": true},
+	"participant": {"status": "ACTIVE", "authority": "MEMBER", "role": "DEVELOPER"},
+	"capability": "messages.send",
 	"room_status": "ACTIVE",
 	"mutating": true,
 	"path_invalid": false,
 	"denied": false,
 	"covering": {"any": false, "ungated": false},
 	"approved": false,
-	"in_bundle": true,
 	"per_path_gate": false,
-	"known_capability": true,
 }
+
+# In the catalog, but not in a developer's bundle and not an authority power a member has.
+not_in_bundle := "room.freeze"
 
 with_fact(key, value) := object.union(base, {key: value})
 
@@ -49,8 +51,10 @@ test_other_statuses_name_the_status if {
 }
 
 test_invalid_participant if {
-	odd := object.union(base.participant, {"valid": false})
-	refused(with_fact("participant", odd), "FORBIDDEN", "invalid_participant")
+	for_odd_role := object.union(base.participant, {"role": "WIZARD"})
+	refused(with_fact("participant", for_odd_role), "FORBIDDEN", "invalid_participant")
+	odd_authority := object.union(base.participant, {"authority": "KING"})
+	refused(with_fact("participant", odd_authority), "FORBIDDEN", "invalid_participant")
 }
 
 test_deleted_room_is_not_found_even_for_a_read if {
@@ -87,7 +91,7 @@ test_a_revocation_beats_the_role_bundle_and_every_grant if {
 }
 
 test_an_ungated_grant_allows_without_the_bundle if {
-	input_ := object.union(base, {"in_bundle": false, "covering": {"any": true, "ungated": true}})
+	input_ := object.union(base, {"capability": not_in_bundle, "covering": {"any": true, "ungated": true}})
 	decide(input_) == {"allow": true}
 }
 
@@ -107,27 +111,27 @@ test_approval_never_overrides_a_revocation if {
 }
 
 test_the_per_path_gate_lets_a_scoped_grant_reach_the_handler if {
-	input_ := object.union(base, {"in_bundle": false, "per_path_gate": true})
+	input_ := object.union(base, {"capability": not_in_bundle, "per_path_gate": true})
 	decide(input_) == {"allow": true}
 }
 
 test_unknown_capability if {
-	input_ := object.union(base, {"in_bundle": false, "known_capability": false})
+	input_ := object.union(base, {"capability": "tasks.*"})
 	refused(input_, "FORBIDDEN", "unknown_capability")
 }
 
-test_missing_capability if refused(with_fact("in_bundle", false), "FORBIDDEN", "missing_capability")
+test_missing_capability if refused(with_fact("capability", not_in_bundle), "FORBIDDEN", "missing_capability")
 
 # Facts that are missing or of the wrong type decide nothing: always a refusal.
 test_missing_facts_are_refused if {
-	every fact in ["room_match", "mutating", "path_invalid", "denied", "approved", "in_bundle", "per_path_gate", "known_capability", "room_status", "covering", "participant"] {
+	every fact in ["room_match", "mutating", "path_invalid", "denied", "approved", "per_path_gate", "capability", "room_status", "covering", "participant"] {
 		input_ := object.remove(base, [fact])
 		refused(input_, "FORBIDDEN", "invalid_input")
 	}
 }
 
 test_wrongly_typed_facts_are_refused if {
-	refused(with_fact("in_bundle", "true"), "FORBIDDEN", "invalid_input")
+	refused(with_fact("capability", true), "FORBIDDEN", "invalid_input")
 	refused(with_fact("mutating", 1), "FORBIDDEN", "invalid_input")
 	refused(with_fact("covering", {"any": "yes", "ungated": true}), "FORBIDDEN", "invalid_input")
 }
@@ -135,4 +139,30 @@ test_wrongly_typed_facts_are_refused if {
 test_no_input_at_all_is_refused if {
 	d := authz.decision with input as {}
 	d.allow == false
+}
+
+# What a role and an authority cover together (effectiveCapabilities in bundles.ts). The
+# exhaustive comparison with the TypeScript is in src/bundles-oracle.test.ts.
+covers(role, authority, capability) if {
+	participant := {"status": "ACTIVE", "authority": authority, "role": role}
+	d := decide(object.union(base, {"participant": participant, "capability": capability}))
+	d == {"allow": true}
+}
+
+test_owners_and_admins_manage_tasks_whatever_their_role if {
+	covers("OBSERVER", "OWNER", "tasks.assign")
+	covers("OBSERVER", "ADMIN", "tasks.assign")
+	not covers("OBSERVER", "MEMBER", "tasks.assign")
+}
+
+test_only_owners_get_the_git_capabilities_without_the_lead_role if {
+	covers("OBSERVER", "OWNER", "git.import")
+	not covers("OBSERVER", "ADMIN", "git.import")
+	covers("LEAD", "MEMBER", "git.import")
+}
+
+test_authority_powers_are_not_in_the_role_bundles if {
+	covers("LEAD", "OWNER", "room.freeze")
+	not covers("LEAD", "ADMIN", "room.freeze")
+	not covers("LEAD", "MEMBER", "room.freeze")
 }

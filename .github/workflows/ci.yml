@@ -87,9 +87,10 @@ jobs:
           tar -xzf "$dir/rg.tar.gz" -C "$dir" --strip-components=1
           echo "$dir" >> "$GITHUB_PATH"
       # The authorization policy (D9) is Rego compiled to packages/policy/policy/policy.wasm, which is
-      # committed. A pinned, checksum-verified opa binary kept under the job's temp dir (nothing is
-      # installed system-wide) runs the Rego unit tests and checks that the committed module is what
-      # the source builds, so a changed policy cannot ship with an old module. The version also
+      # committed together with the role bundles it is built from (policy/bundles.gen.rego, generated from
+      # bundles.ts). A pinned, checksum-verified opa binary kept under the job's temp dir (nothing is
+      # installed system-wide) runs the Rego unit tests and checks that the committed module and bundles are what
+      # the sources build, so a changed policy cannot ship with an old module. The version also
       # appears in packages/policy/src/wasm-cli.ts.
       - name: Test the authorization policy (OPA)
         run: |

@@ -257,7 +257,7 @@ export const AUTHORITY_POWERS: Readonly<Record<Authority, ReadonlySet<Capability
  * cancel and reopen tasks whatever their project role. Unlike {@link AUTHORITY_POWERS} these
  * are ordinary capabilities that can also be granted to anyone, so they are not in that set.
  */
-const GOVERNING_TASK_CAPABILITIES = [
+export const GOVERNING_TASK_CAPABILITIES = [
   "tasks.assign",
   "tasks.cancel",
   "tasks.reopen",
@@ -269,7 +269,7 @@ const GOVERNING_TASK_CAPABILITIES = [
  * whatever their project role (the owner who handed the lead to an agent still overrides). Ordinary
  * capabilities, so they stay grantable to others; admins don't get them from authority alone.
  */
-const OWNER_GIT_CAPABILITIES = [
+export const OWNER_GIT_CAPABILITIES = [
   "git.import",
   "git.pull_upstream",
   "checkpoints.create",

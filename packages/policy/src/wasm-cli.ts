@@ -1,17 +1,19 @@
-// Compile policy/authz.rego to policy/policy.wasm (`gen:wasm`), or with `--check` fail if the
-// committed module is stale. Needs `opa` (OPA_BIN, or on PATH) at the version pinned here and in
+// Generate policy/bundles.gen.rego from bundles.ts and compile it with policy/authz.rego to
+// policy/policy.wasm (`gen:wasm`), or with `--check` fail if either committed file is stale. Needs `opa` (OPA_BIN, or on PATH) at the version pinned here and in
 // .github/workflows/ci.yml.
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
+import { renderBundlesRego } from "./bundles-rego.js";
 
 const OPA_VERSION = "1.21.2";
 const root = fileURLToPath(new URL("..", import.meta.url));
 const opa = process.env["OPA_BIN"] ?? "opa";
-const target = join(root, "policy", "policy.wasm");
+const policyDir = join(root, "policy");
+const SOURCES = ["authz.rego", "bundles.gen.rego"];
 
 main();
 
@@ -29,37 +31,49 @@ function main(): void {
 
   const work = mkdtempSync(join(tmpdir(), "crossover-policy-"));
   try {
+    // Built in a scratch directory so the generated file never has to be on disk first, and so
+    // `--check` compares what the sources produce with what is committed.
+    copyFileSync(join(policyDir, "authz.rego"), join(work, "authz.rego"));
+    writeFileSync(join(work, "bundles.gen.rego"), renderBundlesRego());
+    // CI requires every file in policy/ to be `opa fmt` clean, this one included.
+    execFileSync(opa, ["fmt", "--write", "bundles.gen.rego"], { cwd: work, stdio: "inherit" });
     const bundle = join(work, "bundle.tar.gz");
     execFileSync(
       opa,
       [
         "build",
         ...["-t", "wasm", "-e", "crossover/authz/decision", "-o", bundle],
-        // Relative to the working directory: the module embeds the source path it was built from,
-        // so an absolute one would make it differ from machine to machine.
-        "authz.rego",
+        // Relative to the working directory: the module embeds the source paths it was built
+        // from, so absolute ones would make it differ from machine to machine.
+        ...SOURCES,
       ],
-      { cwd: join(root, "policy"), stdio: "inherit" },
+      { cwd: work, stdio: "inherit" },
     );
-    const built = fileFromTar(gunzipSync(readFileSync(bundle)), "policy.wasm");
+    const outputs: [string, Buffer][] = [
+      ["bundles.gen.rego", readFileSync(join(work, "bundles.gen.rego"))],
+      ["policy.wasm", fileFromTar(gunzipSync(readFileSync(bundle)), "policy.wasm")],
+    ];
     if (!process.argv.includes("--check")) {
-      writeFileSync(target, built);
-      process.stdout.write(`wrote policy/policy.wasm (${built.length} bytes)\n`);
+      for (const [name, content] of outputs) {
+        writeFileSync(join(policyDir, name), content);
+        process.stdout.write(`wrote policy/${name} (${content.length} bytes)\n`);
+      }
       return;
     }
-    let current = Buffer.alloc(0);
-    try {
-      current = readFileSync(target);
-    } catch {
-      // Missing counts as stale.
-    }
-    if (!current.equals(built)) {
+    const stale = outputs.filter(([name, content]) => {
+      try {
+        return !readFileSync(join(policyDir, name)).equals(content);
+      } catch {
+        return true; // Missing counts as stale.
+      }
+    });
+    if (stale.length > 0) {
       console.error(
-        "policy/policy.wasm is out of date: run `pnpm --filter @crossover/policy gen:wasm`",
+        `${stale.map(([name]) => `policy/${name}`).join(", ")} out of date: run \`pnpm --filter @crossover/policy gen:wasm\``,
       );
       process.exit(1);
     }
-    process.stdout.write("policy/policy.wasm is up to date\n");
+    process.stdout.write("policy/bundles.gen.rego and policy/policy.wasm are up to date\n");
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
