@@ -8,6 +8,7 @@ import {
   PATH_SCOPED_RESOURCES,
 } from "./capability.js";
 import { loadLiveGrants } from "./grants.js";
+import { policyEngine, type AuthzFacts, type Decision } from "./engine.js";
 import {
   AUTHORITIES,
   CAPABILITIES,
@@ -74,67 +75,82 @@ export async function authorize(
   resource: PolicyResource,
   context: PolicyContext,
 ): Promise<void> {
-  if (resource.room_id !== principal.room_id) {
-    throw forbidden(action, { reason: "room_mismatch" });
-  }
+  const { facts, row } = await loadFacts(principal, action, resource, context);
+  const decision = await decide(facts);
+  if (decision.allow) return;
+  throw refusal(decision, { principal, action, row });
+}
 
-  const { rows } = await context.client.query<{
-    authority: string;
-    role: string;
-    status: string;
-    room_status: string;
-  }>(
+/** Ask the policy (policy/authz.rego); a policy that cannot answer refuses the command. */
+async function decide(facts: AuthzFacts): Promise<Decision> {
+  try {
+    return (await policyEngine()).decide(facts);
+  } catch (error) {
+    console.error("[policy] authorization failed closed", error);
+    throw new CrossoverError("UNAVAILABLE", "The authorization policy is unavailable");
+  }
+}
+
+interface ParticipantRow {
+  authority: string;
+  role: string;
+  status: string;
+  room_status: string;
+}
+
+/**
+ * Read what the policy decides from, in the command's transaction, so a revocation or a pause
+ * applies to the very next command. The principal is only a snapshot from when the token was
+ * checked: the participant's role, authority and status are re-read here, and those win.
+ *
+ * Commands that act on a path call `authorize("workspace.write", { path })` with the path in the
+ * resource, not in the action. Scoped grants and denies are matched against that path, so
+ * `workspace.write:secrets/**` applies to it just as to `workspace.write:secrets/k`.
+ */
+async function loadFacts(
+  principal: PolicyPrincipal,
+  action: string,
+  resource: PolicyResource,
+  context: PolicyContext,
+): Promise<{ facts: AuthzFacts; row: ParticipantRow | undefined }> {
+  const base = typeof action === "string" ? (action.split(":", 1)[0] ?? "") : "";
+  const facts: AuthzFacts = {
+    room_match: resource.room_id === principal.room_id,
+    participant: null,
+    room_status: "",
+    mutating: isMutating(context.method, base),
+    path_invalid: false,
+    denied: false,
+    covering: { any: false, ungated: false },
+    approved: context.approved === true,
+    in_bundle: false,
+    per_path_gate: false,
+    known_capability: isCapability(base),
+  };
+  if (!facts.room_match) return { facts, row: undefined };
+
+  const { rows } = await context.client.query<ParticipantRow>(
     `SELECT p.authority, p.role, p.status, r.status AS room_status
      FROM participants p JOIN rooms r ON r.id = p.room_id
      WHERE p.id = $1 AND p.room_id = $2`,
     [principal.participant_id, principal.room_id],
   );
-  const participant = rows[0];
-  if (!participant) throw forbidden(action, { reason: "not_a_participant" });
-  if (participant.status === "PAUSED") {
-    throw new CrossoverError("PARTICIPANT_PAUSED", "Participant is paused", {
-      details: { participant_id: principal.participant_id },
-    });
-  }
-  if (participant.status !== "ACTIVE") {
-    throw forbidden(action, { reason: `participant_${participant.status.toLowerCase()}` });
-  }
-  if (!isRole(participant.role) || !isAuthority(participant.authority)) {
-    // The database CHECKs make this unreachable; refuse rather than guess.
-    throw forbidden(action, { reason: "invalid_participant" });
-  }
+  const row = rows[0];
+  if (!row) return { facts, row };
+  const role = isRole(row.role) ? row.role : undefined;
+  const authority = isAuthority(row.authority) ? row.authority : undefined;
+  facts.participant = {
+    status: row.status,
+    authority: row.authority,
+    valid: role !== undefined && authority !== undefined,
+  };
+  facts.room_status = row.room_status;
 
-  const base = typeof action === "string" ? (action.split(":", 1)[0] ?? "") : "";
-
-  // The room's own state (§5): a frozen room accepts mutations from its owner only; an
-  // archived room accepts none, from anyone. Reads always pass this gate.
-  if (participant.room_status !== "ACTIVE") {
-    if (participant.room_status === "DELETED") {
-      throw new CrossoverError("NOT_FOUND", "Room not found");
-    }
-    const ownerMayAct = participant.room_status === "PAUSED" && participant.authority === "OWNER";
-    if (isMutating(context.method, base) && !ownerMayAct) {
-      throw new CrossoverError(
-        "ROOM_PAUSED",
-        participant.room_status === "ARCHIVED" ? "Room is archived" : "Room is paused",
-        { details: { room_status: participant.room_status } },
-      );
-    }
-  }
-
-  const inBundle =
-    isCapability(base) && effectiveCapabilities(participant.role, participant.authority).has(base);
-
-  // Effective = role bundle + live grants - live denies (§21.1), read now so a revocation
-  // applies to the very next command.
-  //
-  // Commands that act on a path call `authorize("workspace.write", { path })` with the path in
-  // the resource, not in the action. Scoped grants and denies are matched against that path,
-  // so `workspace.write:secrets/**` applies to it just as to `workspace.write:secrets/k`.
   const path = pathOf(action, base, resource);
   // "" names the workspace root (listing it): not a path to test against scopes, but fine.
   if (path !== undefined && path !== "" && !isSafeRequestPath(path)) {
-    throw forbidden(action, { reason: "invalid_path" });
+    facts.path_invalid = true;
+    return { facts, row };
   }
   const covers = (capability: string): boolean =>
     path === undefined
@@ -145,33 +161,72 @@ export async function authorize(
     principal.room_id,
     principal.participant_id,
   );
-  if (denies.some((d) => covers(d.capability))) {
-    throw forbidden(action, { reason: "revoked" });
-  }
   const covering = grants.filter((g) => covers(g.capability));
-  if (covering.length > 0) {
-    if (context.approved || covering.some((g) => !g.requires_approval)) return;
-    // An approval gate (§22.2) makes the action wait for a human, even when the role bundle
-    // would allow it: the dispatcher queues the command (T905) and answers with the approval's id.
-    throw new CrossoverError("APPROVAL_REQUIRED", `Approval required for ${action}`, {
-      details: { capability: action },
-    });
-  }
-  if (inBundle) return;
+  facts.denied = denies.some((d) => covers(d.capability));
+  facts.covering = {
+    any: covering.length > 0,
+    ungated: covering.some((g) => !g.requires_approval),
+  };
+  facts.in_bundle =
+    role !== undefined &&
+    authority !== undefined &&
+    isCapability(base) &&
+    effectiveCapabilities(role, authority).has(base);
   // A per-path command's gate (T218): holding an ungated scoped grant of the capability is
-  // enough to reach the handler, which authorizes each path itself. A DENY covering the whole
-  // capability already refused above.
-  if (
+  // enough to reach the handler, which authorizes each path itself.
+  facts.per_path_gate =
     context.perPath === true &&
     path === undefined &&
     action === base &&
-    grants.some((g) => !g.requires_approval && hasScopeOf(g.capability, base))
-  ) {
-    return;
-  }
-  if (!isCapability(base)) throw forbidden(action, { reason: "unknown_capability" });
-  throw forbidden(action, { role: participant.role, authority: participant.authority });
+    grants.some((g) => !g.requires_approval && hasScopeOf(g.capability, base));
+  return { facts, row };
 }
+
+/** The §16.3 error for a refusal, with the details the clients and the ledger rely on. */
+function refusal(
+  decision: Extract<Decision, { allow: false }>,
+  input: { principal: PolicyPrincipal; action: string; row: ParticipantRow | undefined },
+): CrossoverError {
+  const { principal, action, row } = input;
+  switch (decision.code) {
+    case "PARTICIPANT_PAUSED":
+      return new CrossoverError("PARTICIPANT_PAUSED", "Participant is paused", {
+        details: { participant_id: principal.participant_id },
+      });
+    case "NOT_FOUND":
+      return new CrossoverError("NOT_FOUND", "Room not found");
+    case "ROOM_PAUSED":
+      return new CrossoverError(
+        "ROOM_PAUSED",
+        row?.room_status === "ARCHIVED" ? "Room is archived" : "Room is paused",
+        { details: { room_status: row?.room_status } },
+      );
+    case "APPROVAL_REQUIRED":
+      return new CrossoverError("APPROVAL_REQUIRED", `Approval required for ${action}`, {
+        details: { capability: action },
+      });
+    case "FORBIDDEN":
+      if (decision.reason === "missing_capability" && row) {
+        return forbidden(action, { role: row.role, authority: row.authority });
+      }
+      if (FORBIDDEN_REASONS.has(decision.reason) || decision.reason.startsWith("participant_")) {
+        return forbidden(action, { reason: decision.reason });
+      }
+  }
+  // A reason this code does not know (or `invalid_input`) is a bug here or in the policy: refuse
+  // loudly instead of dressing it up as a missing capability.
+  console.error("[policy] unexpected refusal", decision);
+  return new CrossoverError("UNAVAILABLE", "The authorization policy is unavailable");
+}
+
+const FORBIDDEN_REASONS = new Set([
+  "room_mismatch",
+  "not_a_participant",
+  "invalid_participant",
+  "invalid_path",
+  "revoked",
+  "unknown_capability",
+]);
 
 /**
  * The workspace path a check is about, when it is named in the resource rather than the

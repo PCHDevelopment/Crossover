@@ -4,8 +4,6 @@
 # policy: the first rule that applies wins, so a paused participant is refused before any
 # capability is looked at, and a revocation beats every grant.
 #
-# (Step 1a of T1509: nothing calls this yet; step 1b makes authorize() evaluate it.)
-#
 # `decision` is `{"allow": true}` or `{"allow": false, "code": <§16.3 code>, "reason": <string>}`.
 # The compiled module is policy.wasm; regenerate it with `pnpm --filter @crossover/policy gen:wasm`.
 package crossover.authz
