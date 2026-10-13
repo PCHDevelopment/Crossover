@@ -2,6 +2,83 @@
 
 Periodic big-picture reviews by O1: is the merged code building the product in ARCHITECTURE.md, in the right order? Newest first.
 
+## 2026-10-13 · Review 13 (08:20 UTC; 13 PRs merged since Review 12)
+
+**State.** S1 rejoined at 05:40, so there are two engineers again. Between them, #249, #250, #252–#254, #256, #257, #259, #260 and #262–#264 merged, and #266 makes thirteen. Each merged with CI green on its head.
+
+- **Budgets, T1504, done.** Compute limits and usage are in the API and in Owner controls (#249).
+- **Terminal, T1505, done.**
+  - The SDK output layer (#254) resumes from the last delivered sequence after a gap. It never stitches across one.
+  - The human's own terminal (#259) runs and cancels commands.
+  - The read-only agent output viewer (#262) shows only active agents' executions. It has no input controls.
+  - Both views share a per-stream sanitizer. It removes CSI, OSC, DCS, C1 and bidi controls, carries partial sequences between chunks, and caps an unterminated sequence at 4 KiB, so an agent cannot hide later output.
+- **Server-side message ref validation, T1512, done (#256).** Each ref kind is checked with one batched query scoped to the room. A ref into another room returns the same error as a ref to nothing.
+- **Go CLI breadth, T1508, two of three merged.** #260 adds messages and inbox, and #263 adds the MCP stdio shim. #261 adds sandbox commands; it is approved and waiting for a fresh check.
+- **Intermittent failures.**
+  - T1515 (#250): browser URL policy is validated on the host before Docker.
+  - T1517 (#257, #266): health containers are created before they start, and cleanup waits for the daemon's own removal. Every real-container case has a measured 30 s budget.
+  - T1518 (#253): compute sampling moved out of `execution.ts`.
+- **Export and archive, T1506, one of three merged (#264).**
+  - The streamed export endpoint admits requests with Redis limits and holds one lock per room.
+  - It records `room.exported` only after a successful stream.
+  - It is not yet wired in `compose.ts`; that is part 2.
+
+**Against §29.** What is left of M15:
+
+- T1506: the archive source, its wiring, and the UI with the archive button.
+- T1507: UI completeness.
+- T1509: OPA.
+- T1508's last PR.
+- The §30 demo flow now covers the Terminal end to end; the browser demo exercises run, cancel and the agent viewer.
+
+**What went well.**
+
+- **Diagnosis from evidence.** T1517's first theory, a create race, was disproved by CI and replaced by the `--rm` removal wait. The evidence came from logs saved before every rerun.
+- **Review caught security issues before merge:**
+  - the unbounded pending buffer in the sanitizer;
+  - C1 and bidi spoofing;
+  - token-in-URL downloads;
+  - redaction in the MCP shim.
+- **Planning held up.** Plans were posted first and answered spec questions: T1506 surfaced the retention conflict (T1519).
+
+**What needs correcting.**
+
+1. **My own error.** Review 12 went to main with a Prettier violation, which failed `format:check` on every PR for about 30 minutes. From now on I run `prettier --check docs` before every docs push.
+2. **Changing shared timing.** #257 changed how all health containers start but gave a longer budget only to the cases it was fixing. Two other cases then timed out, on #261. When a change alters timing or behaviour in a shared helper, audit every test that uses it in the same PR.
+3. **Size.** #254's first version was about 800 non-test lines. The split worked well; plan the split before writing the code.
+
+**Course corrections.**
+
+1. **S2:**
+   1. T1506 part 2: the disk-staged archive source plus its wiring.
+   2. T1506 part 3: the SDK download and the archive button (#265, to be moved onto main).
+   3. T1507: UI completeness.
+2. **S1:**
+   1. #261: merge main for a fresh check.
+   2. T1520: the fixture teardown `dropping` flag.
+   3. T1521: the owner-controls budget e2e race.
+   4. T1509, OPA: post a plan that scopes it to the §29 MVP subset before any code.
+3. **For Peter (unchanged):**
+   - T1519: archive retention.
+   - T1418.
+   - Q1 staffing: Q1 has been silent for over a day.
+   - CI capacity: one runner, and checks still queue for 10–20 minutes.
+
+**Tech-debt register, new:**
+
+- `packages/gateway/src/server.ts` is about 680 lines. The export route was added inline. Move room-export routing into its own module the next time it is touched, the same treatment `execution.ts` got.
+- The export rate-limit and lock keys depend on Redis. If Redis is down, exports refuse with `UNAVAILABLE`. That is correct, but document it next to the export endpoint in ARCHITECTURE.
+
+**Carried over:**
+
+- `RedisOAuthStateStore` opens its own Redis connection.
+- dev-login returns `session_token` in its response body.
+- The web app imports `@crossover/workspace/protected-paths`.
+- `dispatcher.ts` is about 1,790 lines.
+- `execution.ts` is about 1,920 lines, down from 1,970.
+
+**Closed since Review 12:** T1504, T1505, T1512, T1515, T1516, T1517 and T1518.
+
 ## 2026-10-13 · Review 12 (04:20 UTC; 5 PRs merged since Review 11)
 
 **State.** #245, #246, #247, #248 and #251 merged, all by S2, each with CI green on the merged head:
