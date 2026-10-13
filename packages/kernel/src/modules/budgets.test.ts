@@ -32,7 +32,10 @@ interface Room {
   human: Principal;
 }
 
-async function setup(settings?: Record<string, unknown>): Promise<Room> {
+async function setup(
+  settings?: Record<string, unknown>,
+  now: () => Date = () => new Date(),
+): Promise<Room> {
   const id = newId("room");
   const ownerId = newId("part");
   const adminId = newId("part");
@@ -68,7 +71,7 @@ async function setup(settings?: Record<string, unknown>): Promise<Room> {
   ): Principal => ({ participant_id, room_id: id, kind, authority, role });
   const limiter = new MemoryBudgetLimiter(() => 9_000_000);
   const d = new Dispatcher({ pool, authorize, nodeId: `node-budgets-${++n}` });
-  registerBudgetCommands(d, limiter);
+  registerBudgetCommands(d, limiter, now);
   return {
     d,
     limiter,
@@ -344,6 +347,26 @@ describe("budgets.set and budgets.get", () => {
         compute_budgets: { room_vcpu_hours_per_day: 5 },
       }),
     ).rejects.toMatchObject({ code: "VALIDATION" });
+  });
+
+  it("uses the injected UTC day for daily compute usage", async () => {
+    const room = await setup(undefined, () => new Date("2040-01-02T00:30:00Z"));
+    await pool.query(
+      `INSERT INTO sandbox_compute_room_daily
+         (room_id, usage_date, used_cpu_usec, reserved_cpu_usec)
+       VALUES ($1, '2040-01-02'::date, 7200000000, 1800000000),
+              ($1, '2040-01-01'::date, 3600000000, 900000000)`,
+      [room.id],
+    );
+
+    const result = await dispatch(room, room.owner, "budgets.get");
+    expect(
+      (
+        result.response as {
+          room_compute: { used_vcpu_hours: number; reserved_vcpu_hours: number };
+        }
+      ).room_compute,
+    ).toMatchObject({ used_vcpu_hours: 2, reserved_vcpu_hours: 0.5 });
   });
 
   it("shows effective limits and current counts to owners and admins only", async () => {
