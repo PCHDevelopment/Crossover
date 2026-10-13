@@ -1,4 +1,5 @@
 import { execFile, spawn } from "node:child_process";
+import { request as httpRequest } from "node:http";
 import { isAbsolute } from "node:path";
 import type { Readable } from "node:stream";
 import {
@@ -33,16 +34,122 @@ const DEFAULT_GIT_FETCHER_IMAGE = "crossover-git-fetcher:latest";
 export const DEFAULT_GIT_INTERNAL_NETWORK = "crossover-git";
 const FETCH_TIMEOUT_MS = 4 * 60 * 1000;
 const MAX_SNAPSHOT_OUTPUT_BYTES = 96 * 1024 * 1024;
-const CGROUP_CPU_USAGE_SCRIPT =
-  "if [ -r /sys/fs/cgroup/cpu.stat ]; then awk '$1 == \"usage_usec\" { print $2; found = 1 } END { if (!found) exit 3 }' /sys/fs/cgroup/cpu.stat; " +
-  'elif [ -r /sys/fs/cgroup/cpuacct/cpuacct.usage ]; then usage_ns=$(cat /sys/fs/cgroup/cpuacct/cpuacct.usage) && printf "%s\\n" "$((usage_ns / 1000))"; ' +
-  "else exit 4; fi";
+const DOCKER_API_REQUEST_TIMEOUT_MS = 5_000;
+const MAX_DOCKER_API_RESPONSE_BYTES = 1024 * 1024;
 
-export function parseCgroupCpuUsageUsec(value: string): bigint {
-  const trimmed = value.trim();
-  if (!/^(0|[1-9][0-9]*)$/.test(trimmed))
-    throw new Error("ERROR: Docker returned invalid cgroup CPU usage");
-  return BigInt(trimmed);
+function extractJsonObject(source: string, property: string): string {
+  const propertyMatch = new RegExp(`"${property}"\\s*:\\s*\\{`).exec(source);
+  if (!propertyMatch) throw new Error(`Docker stats response is missing ${property}`);
+
+  const objectStart = propertyMatch.index + propertyMatch[0].lastIndexOf("{");
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = objectStart; index < source.length; index += 1) {
+    const character = source[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') inString = false;
+      continue;
+    }
+    if (character === '"') inString = true;
+    else if (character === "{") depth += 1;
+    else if (character === "}" && --depth === 0) return source.slice(objectStart, index + 1);
+  }
+  throw new Error(`Docker stats response has an incomplete ${property} object`);
+}
+
+export function parseDockerCpuUsageUsec(statsJson: string): bigint {
+  try {
+    JSON.parse(statsJson);
+  } catch {
+    throw new Error("ERROR: Docker returned invalid container stats JSON");
+  }
+
+  const cpuUsage = extractJsonObject(extractJsonObject(statsJson, "cpu_stats"), "cpu_usage");
+  const totalUsage = /"total_usage"\s*:\s*(0|[1-9][0-9]*)/.exec(cpuUsage)?.[1];
+  if (totalUsage === undefined)
+    throw new Error("ERROR: Docker stats response is missing CPU total_usage");
+  return BigInt(totalUsage) / 1_000n;
+}
+
+function dockerSocketPath(configuredPath?: string): string {
+  if (configuredPath) {
+    if (!isAbsolute(configuredPath) || configuredPath.includes("\0"))
+      throw new Error("Docker CPU stats socket path must be absolute");
+    return configuredPath;
+  }
+
+  const dockerHost = process.env["DOCKER_HOST"] ?? "unix:///var/run/docker.sock";
+  if (!dockerHost.startsWith("unix://"))
+    throw new Error("Docker CPU stats require DOCKER_HOST to use a Unix socket");
+  const path = dockerHost.slice("unix://".length);
+  if (!isAbsolute(path) || path.includes("\0"))
+    throw new Error("Docker CPU stats require an absolute Unix socket path");
+  return path;
+}
+
+function requestDockerApi(socketPath: string, path: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let responseBytes = 0;
+    const chunks: Buffer[] = [];
+    const request = httpRequest(
+      { socketPath, path, method: "GET", timeout: DOCKER_API_REQUEST_TIMEOUT_MS },
+      (response) => {
+        response.on("data", (chunk: Buffer | string) => {
+          const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          responseBytes += buffer.length;
+          if (responseBytes > MAX_DOCKER_API_RESPONSE_BYTES) {
+            request.destroy(new Error("Docker API response exceeded the size limit"));
+            return;
+          }
+          chunks.push(buffer);
+        });
+        response.on("end", () => {
+          const body = Buffer.concat(chunks).toString("utf8");
+          if (
+            response.statusCode === undefined ||
+            response.statusCode < 200 ||
+            response.statusCode >= 300
+          ) {
+            reject(
+              new Error(`Docker API ${path} returned HTTP ${response.statusCode ?? "unknown"}`),
+            );
+            return;
+          }
+          resolve(body);
+        });
+        response.on("error", reject);
+      },
+    );
+    request.on("timeout", () => request.destroy(new Error("Docker API request timed out")));
+    request.on("error", reject);
+    request.end();
+  });
+}
+
+async function readDockerCpuUsageUsec(containerRef: string, socketPath: string): Promise<bigint> {
+  const versionBody = await requestDockerApi(socketPath, "/version");
+  let apiVersion: unknown;
+  try {
+    apiVersion = (JSON.parse(versionBody) as { ApiVersion?: unknown }).ApiVersion;
+  } catch {
+    throw new Error("ERROR: Docker returned invalid API version JSON");
+  }
+  if (typeof apiVersion !== "string" || !/^\d+\.\d+$/.test(apiVersion))
+    throw new Error("ERROR: Docker returned an invalid API version");
+
+  const [majorText, minorText] = apiVersion.split(".");
+  const supportsOneShot =
+    Number(majorText) > 1 || (Number(majorText) === 1 && Number(minorText) >= 41);
+  const oneShot = supportsOneShot ? "&one-shot=true" : "";
+  const encodedContainerRef = encodeURIComponent(containerRef);
+  const stats = await requestDockerApi(
+    socketPath,
+    `/v${apiVersion}/containers/${encodedContainerRef}/stats?stream=false${oneShot}`,
+  );
+  return parseDockerCpuUsageUsec(stats);
 }
 
 export interface DockerInvocationOptions {
@@ -67,6 +174,8 @@ export type DockerInvoker = (
 
 export interface DockerExecutionDriverOptions {
   dockerBinary?: string;
+  /** Docker Engine Unix socket used for host-side resource stats. */
+  dockerSocketPath?: string;
   image?: string;
   /** Required with hard enforcement; passed directly as Docker --opt values. */
   volumeDriver?: string;
@@ -226,9 +335,11 @@ export class DockerExecutionDriver implements ExecutionDriver {
   private readonly gitInternalTokenSecret: string | undefined;
   private readonly gitFetcherImage: string;
   private readonly invoke: DockerInvoker;
+  private readonly dockerStatsSocketPath: string | undefined;
 
   constructor(options: DockerExecutionDriverOptions = {}) {
     this.dockerBinary = options.dockerBinary ?? "docker";
+    this.dockerStatsSocketPath = options.dockerSocketPath;
     this.image = options.image ?? DEFAULT_IMAGE;
     this.volumeDriver = options.volumeDriver?.trim() || undefined;
     this.volumeOptions = options.volumeOptions ?? {};
@@ -349,7 +460,7 @@ export class DockerExecutionDriver implements ExecutionDriver {
     }
   }
 
-  /** Read cumulative container CPU time from cgroupfs, keyed by the container start generation. */
+  /** Read cumulative CPU time from Docker's host-side stats API, keyed by container generation. */
   async cpuUsage(input: {
     sandbox_id: string;
     resources: SandboxResources;
@@ -368,13 +479,32 @@ export class DockerExecutionDriver implements ExecutionDriver {
     if (running !== "true" || !generation)
       throw new Error(`ERROR: Docker sandbox ${input.sandbox_id} is not running for CPU sampling`);
 
-    const usage = await this.invoke(
-      ["exec", input.resources.container_ref, "sh", "-c", CGROUP_CPU_USAGE_SCRIPT],
-      { timeoutMs: 5_000, maxBuffer: 1_024 },
-    );
-    if (usage.code !== 0)
-      throw new Error(`ERROR: Docker cgroup CPU read failed: ${usage.stderr.trim()}`);
-    return { usage_usec: parseCgroupCpuUsageUsec(usage.stdout), generation };
+    let usage_usec: bigint;
+    try {
+      usage_usec = await readDockerCpuUsageUsec(
+        input.resources.container_ref,
+        dockerSocketPath(this.dockerStatsSocketPath),
+      );
+    } catch (error) {
+      throw new Error(
+        `ERROR: Docker host CPU stats read failed: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
+      );
+    }
+
+    const afterStats = await this.invoke([
+      "container",
+      "inspect",
+      "--format",
+      "{{.State.Running}}|{{.State.StartedAt}}",
+      input.resources.container_ref,
+    ]);
+    if (afterStats.code !== 0)
+      throw new Error(`ERROR: Docker CPU generation check failed: ${afterStats.stderr.trim()}`);
+    const [stillRunning, currentGeneration] = afterStats.stdout.trim().split("|");
+    if (stillRunning !== "true" || currentGeneration !== generation)
+      throw new Error(`ERROR: Docker sandbox ${input.sandbox_id} changed during CPU sampling`);
+    return { usage_usec, generation };
   }
 
   /** Run a shell command in a fresh process group and capture stdout and stderr separately. */
