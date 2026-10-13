@@ -358,6 +358,30 @@ function registerWebDemoFlow(fixture: WebFixture): void {
         expect(tools.tools.map((tool) => tool.name)).toContain("decisions_propose");
       });
 
+      await demoStep("T1505: Peter views AgentA output without controls", async () => {
+        const execution = await agentA.room.api.sandbox.exec<{ exec_id: string }>({
+          command: "printf 'agent-terminal-output-marker\\n'",
+        });
+        await page.getByTestId("tab-terminal").click();
+        await waitForStep(
+          "T1505: agent execution appears in the read-only viewer",
+          () =>
+            page
+              .getByTestId("agent-output-execution")
+              .locator(`option[value="${execution.response.exec_id}"]`)
+              .count(),
+          (count) => count === 1,
+        );
+        await page.getByTestId("agent-output-execution").selectOption(execution.response.exec_id);
+        await waitForStep(
+          "T1505: agent output appears in the viewer",
+          () => page.getByTestId("agent-output-output").textContent(),
+          (text) => text?.includes("agent-terminal-output-marker") ?? false,
+        );
+        expect(await page.getByTestId("agent-output-panel").getByRole("button").count()).toBe(0);
+        await page.getByTestId("tab-setup").click();
+      });
+
       // 4. Peter appoints the lead in the UI and changes his project role through the SDK.
       await demoStep("step 4: Peter appoints ArchitectAgent and takes Developer role", async () => {
         await page.getByTestId("tab-setup").click();
