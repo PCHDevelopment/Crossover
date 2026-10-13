@@ -87,10 +87,15 @@ const rejects = async (p: Promise<unknown>, code: string) => {
 describe("messages.send", () => {
   it("posts a message and emits message.sent carrying it", async () => {
     const s = await setup();
+    const taskId = newId("task");
+    await pool.query(
+      `INSERT INTO tasks (id, room_id, title, created_by) VALUES ($1, $2, 'T', $3)`,
+      [taskId, s.room, s.a.participant_id],
+    );
     const out = await send(s, s.a, {
       body: "Please look at this",
       mentions: [s.b.participant_id],
-      refs: [{ kind: "task", id: "task_1" }],
+      refs: [{ kind: "task", id: taskId }],
     });
     const m = out.response as MessageView;
     expect(m).toMatchObject({
@@ -98,7 +103,7 @@ describe("messages.send", () => {
       author_id: s.a.participant_id,
       body: "Please look at this",
       mentions: [s.b.participant_id],
-      refs: [{ kind: "task", id: "task_1" }],
+      refs: [{ kind: "task", id: taskId }],
       reply_to: null,
       edited_at: null,
     });
@@ -224,10 +229,135 @@ describe("messages.send", () => {
       ).getTime() - Date.now();
     await send(s, s.b, { refs: [{ kind: "task", id: taskId }] }); // someone else
     expect(await lease()).toBeLessThan(2 * 60 * 1000);
-    await send(s, s.a, { refs: [{ kind: "file", id: taskId }] }); // not a task ref
+    await pool.query(
+      `INSERT INTO memory_entries (room_id, key, value, content_type, author_id, revision)
+       VALUES ($1, $2, 'v', 'text/markdown', $3, 1)`,
+      [s.room, taskId, s.a.participant_id],
+    );
+    await send(s, s.a, { refs: [{ kind: "memory", id: taskId }] }); // not a task ref
     expect(await lease()).toBeLessThan(2 * 60 * 1000);
     await send(s, s.a, { refs: [{ kind: "task", id: taskId }] });
     expect(await lease()).toBeGreaterThan(14 * 60 * 1000);
+  });
+
+  /** One of everything a message can refer to, in `room`. */
+  async function targets(s: Setup) {
+    const ids = {
+      task: newId("task"),
+      decision: newId("dec"),
+      message: ((await send(s, s.a, {})).response as MessageView).id,
+      changeset: newId("cs"),
+      conflict: newId("conf"),
+      memory: `notes/${newId("mem")}`,
+      file: `src/f${++n}.ts`,
+      removed_file: `src/gone${++n}.ts`,
+      removed_memory: `notes/gone${++n}`,
+    };
+    const author = s.a.participant_id;
+    const ws = newId("ws");
+    await pool.query(
+      `INSERT INTO tasks (id, room_id, title, created_by) VALUES ($1, $2, 'T', $3)`,
+      [ids.task, s.room, author],
+    );
+    await pool.query(
+      `INSERT INTO decisions (id, room_id, title, options, proposed_by)
+       VALUES ($1, $2, 'D', '[{"id":"a","summary":"A"},{"id":"b","summary":"B"}]', $3)`,
+      [ids.decision, s.room, author],
+    );
+    await pool.query(`INSERT INTO workspaces (id, room_id, repo_path) VALUES ($1, $2, '/r')`, [
+      ws,
+      s.room,
+    ]);
+    await pool.query(
+      `INSERT INTO workspace_revisions (workspace_id, room_id, revision, commit_sha)
+       VALUES ($1, $2, 1, 'c1'), ($1, $2, 2, 'c2')`,
+      [ws, s.room],
+    );
+    await pool.query(
+      `INSERT INTO changesets (id, workspace_id, room_id, actor_id, idempotency_key, source,
+                               message, base_workspace_revision, payload)
+       VALUES ($1, $2, $3, $4, $1, 'API', 'm', 0, '{}')`,
+      [ids.changeset, ws, s.room, author],
+    );
+    await pool.query(
+      `INSERT INTO conflicts (id, workspace_id, room_id, changeset_id, submitter_id, base_revision,
+                              head_revision_at_detection, files)
+       VALUES ($1, $2, $3, $4, $5, 0, 1, '[]')`,
+      [ids.conflict, ws, s.room, ids.changeset, author],
+    );
+    await pool.query(
+      `INSERT INTO file_revisions (workspace_id, room_id, path, revision, workspace_revision,
+                                   blob_sha, actor_id)
+       VALUES ($1, $2, $3, 1, 1, 'b1', $5), ($1, $2, $4, 1, 1, 'b1', $5),
+              ($1, $2, $4, 2, 2, NULL, $5)`,
+      [ws, s.room, ids.file, ids.removed_file, author],
+    );
+    await pool.query(
+      `INSERT INTO memory_entries (room_id, key, value, content_type, author_id, revision, deleted)
+       VALUES ($1, $2, 'v', 'text/markdown', $4, 1, false),
+              ($1, $3, '', 'text/markdown', $4, 2, true)`,
+      [s.room, ids.memory, ids.removed_memory, author],
+    );
+    return ids;
+  }
+
+  it("takes refs to things of every kind that exist in the room, and stores them", async () => {
+    const s = await setup();
+    const t = await targets(s);
+    const refs = [
+      { kind: "task", id: t.task },
+      { kind: "decision", id: t.decision },
+      { kind: "message", id: t.message },
+      { kind: "changeset", id: t.changeset },
+      { kind: "conflict", id: t.conflict },
+      { kind: "memory", id: t.memory },
+      { kind: "file", id: t.file },
+    ];
+    const sent = (await send(s, s.a, { refs })).response as MessageView;
+    expect(sent.refs).toEqual(refs);
+    await send(s, s.a, { refs: [refs[0], refs[0]] }); // the same thing twice
+  });
+
+  it("rejects refs to unknown kinds and to things that aren't in the room", async () => {
+    const s = await setup();
+    const t = await targets(s);
+    const other = await setup();
+    const there = await targets(other);
+    for (const kind of [
+      "task",
+      "decision",
+      "message",
+      "changeset",
+      "conflict",
+      "memory",
+    ] as const) {
+      // Another room's thing is as unknown as nothing; a valid ref alongside doesn't save it.
+      const err = await send(s, s.a, {
+        refs: [
+          { kind: "task", id: t.task },
+          { kind, id: there[kind] },
+        ],
+      }).then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+      expect(err).toBeInstanceOf(CrossoverError);
+      expect((err as CrossoverError).code).toBe("VALIDATION");
+      expect((err as CrossoverError).details).toEqual({
+        unknown_refs: [{ kind, id: there[kind] }],
+      });
+      await rejects(send(s, s.a, { refs: [{ kind, id: "nope" }] }), "VALIDATION");
+    }
+    await rejects(send(s, s.a, { refs: [{ kind: "file", id: there.file }] }), "VALIDATION");
+    await rejects(send(s, s.a, { refs: [{ kind: "file", id: "src/never.ts" }] }), "VALIDATION");
+    await rejects(send(s, s.a, { refs: [{ kind: "file", id: t.removed_file }] }), "VALIDATION");
+    await rejects(send(s, s.a, { refs: [{ kind: "memory", id: t.removed_memory }] }), "VALIDATION");
+    // The kind is checked too: a task's id isn't a decision, and a made-up kind is unknown.
+    await rejects(send(s, s.a, { refs: [{ kind: "decision", id: t.task }] }), "VALIDATION");
+    await rejects(send(s, s.a, { refs: [{ kind: "toString", id: t.task }] }), "VALIDATION");
+    await rejects(send(s, s.a, { refs: [{ kind: "widget", id: t.task }] }), "VALIDATION");
+    const { rows } = await pool.query("SELECT 1 FROM messages WHERE room_id = $1", [s.room]);
+    expect(rows).toHaveLength(1); // only the one `targets` posted
   });
 
   it("is idempotent per key", async () => {

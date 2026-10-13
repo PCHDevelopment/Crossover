@@ -5,6 +5,8 @@ import { errorFromBody, getJson, postJson, type FetchLike, type RetryOptions } f
 import {
   RoomSocket,
   Subscription,
+  SandboxOutputSubscription,
+  type SandboxOutputSubscribeOptions,
   type SubscribeOptions,
   type WebSocketCtor,
   type WsConfig,
@@ -242,6 +244,7 @@ export class RoomClient {
   /** Every command of the catalog as a typed call: `room.api.tasks.create({ … })`. */
   readonly api: Api;
   private readonly subscriptions = new Set<Subscription>();
+  private readonly outputSubscriptions = new Set<SandboxOutputSubscription>();
   private readonly sockets = new Set<RoomSocket>();
   private closed = false;
 
@@ -324,13 +327,25 @@ export class RoomClient {
     return subscription;
   }
 
+  /** Subscribe to one private execution log, replaying from `after` and resuming after drops. */
+  subscribeSandboxOutput(
+    execId: string,
+    options: SandboxOutputSubscribeOptions = {},
+  ): SandboxOutputSubscription {
+    const subscription = new SandboxOutputSubscription(this.wsConfig(), execId, options);
+    this.outputSubscriptions.add(subscription);
+    return subscription;
+  }
+
   /** Close every live connection for this room. */
   close(): void {
     if (this.closed) return;
     this.closed = true;
     for (const subscription of this.subscriptions) subscription.close();
+    for (const subscription of this.outputSubscriptions) subscription.close();
     for (const socket of this.sockets) socket.close();
     this.subscriptions.clear();
+    this.outputSubscriptions.clear();
     this.sockets.clear();
     this.onClose(this);
   }

@@ -32,6 +32,7 @@ const OwnerControlsView = lazy(() =>
 );
 const CollaborationView = lazy(() => import("./CollaborationView.js"));
 const MessagesView = lazy(() => import("./MessagesView.js"));
+const TerminalView = lazy(() => import("./TerminalView.js"));
 
 const FEED_LIMIT = 200;
 const BACKLOG = 50;
@@ -45,6 +46,7 @@ type Tab =
   | "collaboration"
   | "activity"
   | "files"
+  | "terminal"
   | "changes"
   | "delivery";
 const TABS: { id: Tab; label: string }[] = [
@@ -56,6 +58,7 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "collaboration", label: "Inbox, decisions & memory" },
   { id: "activity", label: "Activity" },
   { id: "files", label: "Files" },
+  { id: "terminal", label: "Terminal" },
   { id: "changes", label: "Changes" },
   { id: "delivery", label: "Review & export" },
 ];
@@ -383,6 +386,16 @@ export function RoomView(props: { roomId: string; onBack: () => void; onSignedOu
             selfId={me.participant_id}
             nameOf={names}
             purposeOf={purposeOf}
+          />
+        </Suspense>
+      )}
+      {tab === "terminal" && (
+        <Suspense fallback={<p className="muted">Loading terminal…</p>}>
+          <TerminalView
+            room={open.room}
+            selfId={me.participant_id}
+            participants={participants}
+            events={feed}
           />
         </Suspense>
       )}

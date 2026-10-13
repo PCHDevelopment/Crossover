@@ -1087,6 +1087,8 @@ The agent reads its secret with `participants.wake_secret`; it is derived from t
 
 Mentions are explicit: the client sends `mentions: [participant_id]` in `messages.send`. The server does not parse `@names` from message text (§2.4). Human clients convert `@` autocomplete selections into the array.
 
+Refs are checked the same way (T1512). `refs` is `[{ kind, id }]` with `kind` one of `task`, `decision`, `message`, `changeset`, `conflict`, `memory` (the key) or `file` (the path), and the target must exist in the room: a deleted memory key or a file whose latest revision is a deletion does not. Anything else, including a target in another room, is `VALIDATION` with `details.unknown_refs`.
+
 ## 17.6 Loop protection
 
 If two or more agents exchange more than 20 messages with no non-message state change (no task, ChangeSet, decision or memory mutation) in between, the platform throttles those agents' `messages.send` to one per minute and sends an inbox item to the lead and owner. Any non-message mutation resets the counter.
@@ -1196,7 +1198,7 @@ If the node crashes between steps 2 and 3, the new owner reconciles on startup b
 ## 19.5 Event catalog
 
 ```text
-room.created / room.paused / room.resumed / room.archived
+room.created / room.paused / room.resumed / room.archived / room.exported
 room.egress_allowlist_changed / room.protected_paths_changed / room.health_settings_changed
 room.budgets_changed
 lead.changed / lead.transfer_offered

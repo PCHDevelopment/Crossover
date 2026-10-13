@@ -3,7 +3,7 @@ import { EVENT_TYPES, eventTypeSchema, roomEventSchema, type EventType } from ".
 
 // Copied from docs/ARCHITECTURE.md §19.5. Update both together.
 const CATALOG = `
-room.created / room.paused / room.resumed / room.archived
+room.created / room.paused / room.resumed / room.archived / room.exported
 room.egress_allowlist_changed
 room.protected_paths_changed
 room.health_settings_changed
@@ -65,7 +65,7 @@ const valid = {
 
 describe("EVENT_TYPES", () => {
   it("contains every type in the §19.5 catalog, and nothing else", () => {
-    expect(catalogTypes).toHaveLength(74);
+    expect(catalogTypes).toHaveLength(75);
     expect([...EVENT_TYPES].sort()).toEqual([...catalogTypes].sort());
   });
 

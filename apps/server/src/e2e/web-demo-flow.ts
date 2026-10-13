@@ -248,6 +248,41 @@ function registerWebDemoFlow(fixture: WebFixture): void {
         },
       );
 
+      await demoStep("T1505: Peter runs and cancels commands in the Terminal tab", async () => {
+        await page.getByTestId("tab-terminal").click();
+        await page
+          .getByTestId("terminal-command")
+          .fill("printf 'terminal-stdout\\n'; printf 'terminal-stderr\\n' >&2; exit 0");
+        await page.getByRole("button", { name: "Run command" }).click();
+        await waitForStep(
+          "T1505: stdout and stderr appear in the terminal",
+          () => page.getByTestId("terminal-output").textContent(),
+          (text) =>
+            (text?.includes("terminal-stdout") && text.includes("terminal-stderr")) ?? false,
+        );
+        await waitForStep(
+          "T1505: command exit status appears",
+          () => page.getByTestId("terminal-status").textContent(),
+          (status) => status?.includes("finished") ?? false,
+        );
+        expect(await page.getByTestId("terminal-result").textContent()).toContain("exit 0");
+
+        await page.getByTestId("terminal-command").fill("sleep 30; printf 'should-not-finish\\n'");
+        await page.getByRole("button", { name: "Run command" }).click();
+        await waitForStep(
+          "T1505: long-running command is active",
+          () => page.getByTestId("terminal-status").textContent(),
+          (status) => status?.includes("running") ?? false,
+        );
+        await page.getByTestId("terminal-stop").click();
+        await waitForStep(
+          "T1505: cancelled command reports completion",
+          () => page.getByTestId("terminal-result").textContent(),
+          (result) => result?.includes("cancelled") ?? false,
+        );
+        await page.getByTestId("tab-setup").click();
+      });
+
       // 3. Peter creates invites. ArchitectAgent joins over HTTP for real MCP; A/B/C use the SDK.
       const inviteTokens: string[] = [];
       await demoStep(
@@ -321,6 +356,34 @@ function registerWebDemoFlow(fixture: WebFixture): void {
         );
         const tools = await mcp.listTools();
         expect(tools.tools.map((tool) => tool.name)).toContain("decisions_propose");
+      });
+
+      await demoStep("T1505: Peter views AgentA output without controls", async () => {
+        const execution = await agentA.room.api.sandbox.exec<{ exec_id: string }>({
+          command: "printf 'agent-terminal-output-marker\\n'",
+        });
+        await page.getByTestId("tab-terminal").click();
+        await waitForStep(
+          "T1505: agent execution appears in the read-only viewer",
+          () =>
+            page
+              .getByTestId("agent-output-execution")
+              .locator(`option[value="${execution.response.exec_id}"]`)
+              .count(),
+          (count) => count === 1,
+        );
+        await page.getByTestId("agent-output-execution").selectOption(execution.response.exec_id);
+        await waitForStep(
+          "T1505: agent output appears in the viewer",
+          () => page.getByTestId("agent-output-output").textContent(),
+          (text) => text?.includes("agent-terminal-output-marker") ?? false,
+        );
+        const agentOutput = page.getByTestId("agent-output-panel");
+        expect(await agentOutput.locator("input, textarea, button").count()).toBe(0);
+        expect(await page.getByText("Read-only output from agent sandbox commands.").count()).toBe(
+          1,
+        );
+        await page.getByTestId("tab-setup").click();
       });
 
       // 4. Peter appoints the lead in the UI and changes his project role through the SDK.
