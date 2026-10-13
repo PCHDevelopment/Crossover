@@ -9,7 +9,7 @@ import {
   principalKinds,
 } from "../provenance.js";
 import { z } from "zod";
-import type { Dispatcher } from "../../dispatcher.js";
+import type { Dispatcher, EmittedEvent } from "../../dispatcher.js";
 
 export const MAX_MEMORY_VALUE_BYTES = 64 * 1024;
 export const MAX_MEMORY_SOURCE_REFS = 20;
@@ -203,10 +203,18 @@ export function registerMemoryCommands(dispatcher: Dispatcher): void {
       }
       // T902: scan the whole new value; a high-confidence secret rejects, a
       // low-confidence match is flagged to the author and the room owner.
-      await scanTextForSecrets(ctx.client, ctx.room_id, ctx.principal.participant_id, p.value, {
-        kind: "memory",
-        key: p.key,
-      });
+      const inboxEvents: EmittedEvent[] = [];
+      await scanTextForSecrets(
+        ctx.client,
+        ctx.room_id,
+        ctx.principal.participant_id,
+        p.value,
+        {
+          kind: "memory",
+          key: p.key,
+        },
+        inboxEvents,
+      );
       const entry = await putMemory(ctx.client, ctx.room_id, ctx.principal.participant_id, p);
       return {
         response: labelMemory(entry, principalKinds(ctx.principal)),
@@ -223,6 +231,7 @@ export function registerMemoryCommands(dispatcher: Dispatcher): void {
               source_refs: entry.source_refs,
             },
           },
+          ...inboxEvents,
         ],
       };
     },

@@ -1,7 +1,7 @@
 import type { PoolClient } from "@crossover/db";
 import { CrossoverError, newId } from "@crossover/protocol";
 import { z } from "zod";
-import type { Dispatcher } from "../../dispatcher.js";
+import type { Dispatcher, EmittedEvent } from "../../dispatcher.js";
 import { loadAuthorKinds, provenanceOf, type AuthorKinds, type Provenance } from "../provenance.js";
 
 /** What an inbox item asks for (§17.2). */
@@ -56,13 +56,15 @@ export interface InboxItem {
  * Put an item in a participant's inbox (T402). Internal: the commands that cause something
  * for someone to look at call it inside their own transaction (so the item exists exactly when
  * the change does), with the room's `roomId`; the recipient must be a participant of that room
- * (a foreign key enforces it). Returns the new item's id.
+ * (a foreign key enforces it). Adds a minimal `inbox.delivered` event to `events` and returns the
+ * new item's id. The event intentionally omits the private summary and reference.
  */
 export async function deliverInbox(
   client: PoolClient,
   roomId: string,
   participantId: string,
   item: InboxItemInput,
+  events: EmittedEvent[],
 ): Promise<string> {
   const id = newId("inbox");
   await client.query(
@@ -82,6 +84,11 @@ export async function deliverInbox(
       item.author_id,
     ],
   );
+  events.push({
+    type: "inbox.delivered",
+    actor_id: "system",
+    payload: { recipient_id: participantId, item_id: id, kind: item.kind },
+  });
   return id;
 }
 

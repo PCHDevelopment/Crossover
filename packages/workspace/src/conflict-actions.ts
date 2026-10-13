@@ -3,7 +3,7 @@ import { deliverInbox, type Dispatcher, type EmittedEvent } from "@crossover/ker
 import { CrossoverError } from "@crossover/protocol";
 import { z } from "zod";
 
-const abandonParamsSchema = z.strictObject({ conflict_id: z.string().min(1) });
+export const conflictsActionParamsSchema = z.strictObject({ conflict_id: z.string().min(1) });
 
 interface EscalationTarget {
   id: string;
@@ -21,6 +21,7 @@ export async function escalateOpenConflict(
   roomId: string,
   conflict: EscalationTarget,
   trigger: "attempts" | "timeout" | "manual",
+  inboxEvents: EmittedEvent[],
 ): Promise<EmittedEvent | undefined> {
   if (conflict.status !== "OPEN") return undefined;
   const recipient =
@@ -32,12 +33,18 @@ export async function escalateOpenConflict(
      WHERE id = $1 AND room_id = $2 AND status = 'OPEN'`,
     [conflict.id, roomId],
   );
-  await deliverInbox(client, roomId, recipient, {
-    kind: "ESCALATION",
-    ref: { kind: "conflict", id: conflict.id },
-    summary: "Conflict requires your decision.",
-    author_id: "system",
-  });
+  await deliverInbox(
+    client,
+    roomId,
+    recipient,
+    {
+      kind: "ESCALATION",
+      ref: { kind: "conflict", id: conflict.id },
+      summary: "Conflict requires your decision.",
+      author_id: "system",
+    },
+    inboxEvents,
+  );
   return {
     type: "workspace.conflict.escalated",
     payload: {
@@ -56,7 +63,7 @@ export function registerWorkspaceConflictActions(dispatcher: Dispatcher): void {
     method: "conflicts.escalate",
     action: "conflicts.escalate",
     mutating: true,
-    params: abandonParamsSchema,
+    params: conflictsActionParamsSchema,
     execute: async (ctx, params) => {
       const { rows } = await ctx.client.query<
         EscalationTarget & {
@@ -89,10 +96,17 @@ export function registerWorkspaceConflictActions(dispatcher: Dispatcher): void {
         conflict.created_at.getTime() <= conflict.observed_at.getTime() - 10 * 60 * 1000;
       const trigger =
         conflict.attempts >= 2 ? "attempts" : expiredAgentWindow ? "timeout" : "manual";
-      const event = await escalateOpenConflict(ctx.client, ctx.room_id, conflict, trigger);
+      const inboxEvents: EmittedEvent[] = [];
+      const event = await escalateOpenConflict(
+        ctx.client,
+        ctx.room_id,
+        conflict,
+        trigger,
+        inboxEvents,
+      );
       return {
         response: { conflict_id: conflict.id, status: "ESCALATED" as const },
-        events: event ? [event] : [],
+        events: [...(event ? [event] : []), ...inboxEvents],
       };
     },
   });
@@ -101,7 +115,7 @@ export function registerWorkspaceConflictActions(dispatcher: Dispatcher): void {
     method: "conflicts.abandon",
     action: "conflicts.abandon",
     mutating: true,
-    params: abandonParamsSchema,
+    params: conflictsActionParamsSchema,
     execute: async (ctx, params) => {
       const { rows } = await ctx.client.query<{
         id: string;

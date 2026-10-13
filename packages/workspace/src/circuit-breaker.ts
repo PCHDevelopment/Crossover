@@ -2,12 +2,7 @@ import { pathGlobMatch } from "@crossover/policy";
 import { GitError, git } from "./git.js";
 import { treeChanges } from "./tree-changes.js";
 
-export const DEFAULT_PROTECTED_PATHS = [
-  ".github/workflows/**",
-  "**/*.pem",
-  "**/.env*",
-  "infra/prod/**",
-] as const;
+export { DEFAULT_PROTECTED_PATHS } from "./protected-paths.js";
 
 export type CircuitBreakerReason =
   "mass_delete" | "lines_removed" | "protected_path" | "rejection_streak";

@@ -1,4 +1,5 @@
 import type { Pool } from "@crossover/db";
+import { createHash, randomBytes } from "node:crypto";
 import {
   authenticate,
   authenticateUser,
@@ -6,13 +7,16 @@ import {
   exchangeRoomSession,
   findOrCreateUser,
   listUserRooms,
+  revokeUserSession,
   refresh,
   type Dispatcher,
+  type ProviderIdentity,
 } from "@crossover/kernel";
 import { CrossoverError, newId } from "@crossover/protocol";
 import { z } from "zod";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import { toHttpError } from "./errors.js";
+import { OAUTH_STATE_TTL_MS, type OAuthProvider, type OAuthStateStore } from "./oauth.js";
 import { staticSite } from "./static.js";
 import { attachWebSocket, type WebSocketOptions } from "./ws.js";
 
@@ -38,6 +42,16 @@ export interface GatewayOptions {
    * logins (later) plug into the same `users` table.
    */
   devLogin?: boolean;
+  /** Use Secure and the __Host- session cookie name for browser sessions. */
+  secureCookies?: boolean | undefined;
+  /** Browser OAuth sign-in. Agent endpoints continue to require bearer tokens. */
+  oauth?:
+    | {
+        publicBaseUrl: string;
+        stateStore: OAuthStateStore;
+        providers: Readonly<Record<string, OAuthProvider>>;
+      }
+    | undefined;
   /**
    * Take the client address from `X-Forwarded-For`, trusting only the proxies listed here (addresses
    * or CIDRs, e.g. `["10.0.0.0/8"]`): each hop is checked against the list from the server
@@ -51,6 +65,8 @@ export interface GatewayOptions {
    * `Retry-After`. If the limiter fails, requests go ahead. Off unless given.
    */
   refreshLimit?: { limiter: RouteRateLimiter; perMinute?: number };
+  /** Limit valid OAuth sign-in starts per client address. If the limiter fails, requests go ahead. */
+  oauthStartLimit?: { limiter: RouteRateLimiter; perMinute?: number };
   /**
    * Serve the built web app from this directory (`index.html` and its assets, the app's routes
    * falling back to `index.html`) next to the API. Off unless given; never serves anything under
@@ -70,6 +86,11 @@ const devLoginBody = z.strictObject({
 });
 
 const BEARER = /^Bearer ([^\s]+)$/i;
+const SESSION_COOKIE = "crossover_session";
+const SECURE_SESSION_COOKIE = "__Host-crossover_session";
+const STATE_COOKIE_PREFIX = "crossover_oauth_state_";
+const SECURE_STATE_COOKIE_PREFIX = "__Host-crossover_oauth_state_";
+const OAUTH_STATE = /^[A-Za-z0-9_-]{43}$/;
 
 /** The bearer token from the `Authorization` header, or `UNAUTHENTICATED`. */
 function bearerToken(request: FastifyRequest): string {
@@ -77,6 +98,43 @@ function bearerToken(request: FastifyRequest): string {
   const match = header === undefined ? null : BEARER.exec(header);
   if (!match?.[1]) throw new CrossoverError("UNAUTHENTICATED", "Missing or invalid bearer token");
   return match[1];
+}
+
+function cookieValue(request: FastifyRequest, name: string): string | undefined {
+  for (const part of (request.headers.cookie ?? "").split(";")) {
+    const index = part.indexOf("=");
+    if (index >= 0 && part.slice(0, index).trim() === name) return part.slice(index + 1).trim();
+  }
+  return undefined;
+}
+
+function userToken(
+  request: FastifyRequest,
+  allowCookie: boolean,
+  sessionCookieName: string,
+): { token: string; cookie: boolean } {
+  if (request.headers.authorization !== undefined)
+    return { token: bearerToken(request), cookie: false };
+  const token = allowCookie ? cookieValue(request, sessionCookieName) : undefined;
+  return token ? { token, cookie: true } : { token: bearerToken(request), cookie: false };
+}
+
+function setCookie(name: string, token: string, expiresAt: Date, secure: boolean): string {
+  const maxAge = Math.max(0, Math.floor((expiresAt.getTime() - Date.now()) / 1000));
+  return `${name}=${token}; Path=/; Max-Age=${maxAge}; HttpOnly; SameSite=Lax${secure ? "; Secure" : ""}`;
+}
+
+function clearCookie(name: string, secure: boolean): string {
+  return `${name}=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; SameSite=Lax${secure ? "; Secure" : ""}`;
+}
+
+function requireSameOrigin(request: FastifyRequest, expectedOrigin?: string): void {
+  const origin = request.headers.origin;
+  const expected = expectedOrigin ?? `${request.protocol}://${request.hostname}`;
+  const actual =
+    typeof origin === "string" && URL.canParse(origin) ? new URL(origin).origin : undefined;
+  if (actual !== new URL(expected).origin)
+    throw new CrossoverError("FORBIDDEN", "Invalid request origin");
 }
 
 function expectObject(body: unknown): Record<string, unknown> {
@@ -112,6 +170,11 @@ function expectObject(body: unknown): Record<string, unknown> {
  */
 export function buildGateway(options: GatewayOptions): FastifyInstance {
   const { dispatcher, pool } = options;
+  const secureCookies = options.secureCookies ?? false;
+  const sessionCookieName = secureCookies ? SECURE_SESSION_COOKIE : SESSION_COOKIE;
+  const stateCookiePrefix = secureCookies ? SECURE_STATE_COOKIE_PREFIX : STATE_COOKIE_PREFIX;
+  // Development sign-in uses the same browser cookie even without configured OAuth providers.
+  const cookieAuthEnabled = options.oauth !== undefined || options.devLogin === true;
   const app = Fastify({
     logger: false,
     bodyLimit: options.bodyLimit ?? 1024 * 1024,
@@ -128,6 +191,134 @@ export function buildGateway(options: GatewayOptions): FastifyInstance {
     }
     return reply.status(mapped.status).header("Cache-Control", "no-store").send(mapped.body);
   });
+  async function humanUser(request: FastifyRequest, mutation = false) {
+    const auth = userToken(request, cookieAuthEnabled, sessionCookieName);
+    if (auth.cookie && mutation) requireSameOrigin(request, options.oauth?.publicBaseUrl);
+    return { principal: await authenticateUser(pool, auth.token), ...auth };
+  }
+
+  app.get("/v1/auth/providers", async (_request, reply) => {
+    void reply.header("Cache-Control", "no-store");
+    return { providers: Object.keys(options.oauth?.providers ?? {}) };
+  });
+
+  app.get("/v1/auth/session", async (request, reply) => {
+    void reply.header("Cache-Control", "no-store");
+    const token = cookieAuthEnabled ? cookieValue(request, sessionCookieName) : undefined;
+    if (!token) return { authenticated: false };
+    try {
+      await authenticateUser(pool, token);
+      return { authenticated: true };
+    } catch (error) {
+      if (error instanceof CrossoverError && error.code === "UNAUTHENTICATED")
+        return { authenticated: false };
+      throw error;
+    }
+  });
+
+  if (options.oauth) {
+    const { publicBaseUrl, providers, stateStore } = options.oauth;
+    const providerFor = (name: string) => Object.hasOwn(providers, name) && providers[name];
+    for (const [name, provider] of Object.entries(providers)) {
+      if (!/^[a-z][a-z0-9_-]{0,31}$/.test(name) || provider.name !== name)
+        throw new Error("OAuth providers must use their registered name");
+    }
+    app.get<{ Params: { provider: string } }>(
+      "/v1/auth/oauth/:provider",
+      async (request, reply) => {
+        const selected = providerFor(request.params.provider);
+        if (!selected) throw new CrossoverError("NOT_FOUND", "OAuth provider not found");
+        const limit = options.oauthStartLimit;
+        if (limit) {
+          const decision = await limit.limiter
+            .hit(`oauth-start:${clientKey(request.ip)}`, limit.perMinute ?? 30, 60_000)
+            .catch(() => ({ allowed: true as const }));
+          if (!decision.allowed) {
+            throw new CrossoverError("RATE_LIMITED", "Too many OAuth sign-in attempts", {
+              details: { retry_after: Math.max(1, Math.ceil(decision.retry_after_ms / 1000)) },
+            });
+          }
+        }
+        const state = randomBytes(32).toString("base64url");
+        const verifier = randomBytes(32).toString("base64url");
+        const nonce = randomBytes(32).toString("base64url");
+        const challenge = createHash("sha256").update(verifier).digest("base64url");
+        await stateStore.save(state, { provider: selected.name, verifier, nonce });
+        const cookie = `${stateCookiePrefix}${state}=1; Path=/; Max-Age=${OAUTH_STATE_TTL_MS / 1000}; HttpOnly; SameSite=Lax${secureCookies ? "; Secure" : ""}`;
+        const redirectUri = `${publicBaseUrl}/v1/auth/oauth/${selected.name}/callback`;
+        return reply
+          .header("Cache-Control", "no-store")
+          .header("Referrer-Policy", "no-referrer")
+          .header("Set-Cookie", cookie)
+          .redirect(selected.authorizationUrl({ state, challenge, redirectUri, nonce }));
+      },
+    );
+    app.get<{
+      Params: { provider: string };
+      Querystring: { state?: string; code?: string; error?: string };
+    }>("/v1/auth/oauth/:provider/callback", async (request, reply) => {
+      const selected = providerFor(request.params.provider);
+      const { state, code, error } = request.query;
+      const failed = (clearState?: string) => {
+        const destination = new URL("/", publicBaseUrl);
+        destination.searchParams.set("auth", "failed");
+        const response = reply
+          .status(303)
+          .header("Cache-Control", "no-store")
+          .header("Referrer-Policy", "no-referrer");
+        if (clearState) response.header("Set-Cookie", clearState);
+        return response.header("Location", destination.toString()).send();
+      };
+      if (!selected || typeof state !== "string" || !OAUTH_STATE.test(state)) return failed();
+      const stateCookie = `${stateCookiePrefix}${state}`;
+      if (cookieValue(request, stateCookie) !== "1") return failed();
+      const transaction = await stateStore.consume(state);
+      const clearState = clearCookie(stateCookie, secureCookies);
+      if (
+        !transaction ||
+        transaction.provider !== selected.name ||
+        error ||
+        typeof code !== "string" ||
+        !code ||
+        code.length > 2048
+      ) {
+        return failed(clearState);
+      }
+      let identity: ProviderIdentity;
+      try {
+        identity = await selected.identity({
+          redirectUri: `${publicBaseUrl}/v1/auth/oauth/${selected.name}/callback`,
+          code,
+          verifier: transaction.verifier,
+          ...(transaction.nonce === undefined ? {} : { nonce: transaction.nonce }),
+        });
+      } catch {
+        return failed(clearState);
+      }
+      if (
+        identity.provider !== selected.name ||
+        !identity.subject ||
+        identity.subject.length > 255 ||
+        typeof identity.display_name !== "string" ||
+        !identity.display_name.trim()
+      ) {
+        return failed(clearState);
+      }
+      const user = await findOrCreateUser(pool, identity);
+      const session = await createUserSession(pool, user.id);
+      const destination = new URL("/", publicBaseUrl);
+      return reply
+        .status(303)
+        .header("Cache-Control", "no-store")
+        .header("Referrer-Policy", "no-referrer")
+        .header("Set-Cookie", [
+          setCookie(sessionCookieName, session.session_token, session.expires_at, secureCookies),
+          clearState,
+        ])
+        .header("Location", destination.toString())
+        .send();
+    });
+  }
   const web = options.staticRoot ? staticSite(options.staticRoot) : undefined;
   app.setNotFoundHandler(async (request, reply) => {
     const file = request.method === "GET" ? await web?.(request.url) : undefined;
@@ -148,6 +339,11 @@ export function buildGateway(options: GatewayOptions): FastifyInstance {
         .send(file.body);
     }
     return reply.status(404).send(new CrossoverError("NOT_FOUND", "No such route").toErrorBody());
+  });
+
+  app.get("/health", async (_request, reply) => {
+    await pool.query("SELECT 1");
+    return reply.status(200).send({ status: "ok" });
   });
 
   app.post<{ Params: { roomId: string } }>("/v1/rooms/:roomId/commands", async (request, reply) => {
@@ -230,14 +426,14 @@ export function buildGateway(options: GatewayOptions): FastifyInstance {
   });
 
   app.get("/v1/rooms", async (request, reply) => {
-    const user = await authenticateUser(pool, bearerToken(request));
+    const { principal } = await humanUser(request);
     void reply.header("Cache-Control", "no-store");
-    return { rooms: await listUserRooms(pool, user) };
+    return { rooms: await listUserRooms(pool, principal) };
   });
 
   app.post<{ Params: { roomId: string } }>("/v1/rooms/:roomId/session", async (request, reply) => {
-    const user = await authenticateUser(pool, bearerToken(request));
-    const session = await exchangeRoomSession(pool, user, request.params.roomId);
+    const { principal } = await humanUser(request, true);
+    const session = await exchangeRoomSession(pool, principal, request.params.roomId);
     void reply.header("Cache-Control", "no-store");
     return session;
   });
@@ -266,8 +462,8 @@ export function buildGateway(options: GatewayOptions): FastifyInstance {
   });
 
   app.post("/v1/commands", async (request, reply) => {
-    const user = await authenticateUser(pool, bearerToken(request));
-    const result = await dispatcher.dispatchRoomless(user, expectObject(request.body));
+    const { principal } = await humanUser(request, true);
+    const result = await dispatcher.dispatchRoomless(principal, expectObject(request.body));
     void reply.header("Cache-Control", "no-store");
     return {
       response: result.response,
@@ -275,6 +471,17 @@ export function buildGateway(options: GatewayOptions): FastifyInstance {
       replayed: result.replayed,
     };
   });
+
+  if (cookieAuthEnabled) {
+    app.post("/v1/auth/logout", async (request, reply) => {
+      requireSameOrigin(request, options.oauth?.publicBaseUrl);
+      const token = cookieValue(request, sessionCookieName);
+      if (token) await revokeUserSession(pool, token);
+      void reply.header("Cache-Control", "no-store");
+      void reply.header("Set-Cookie", clearCookie(sessionCookieName, secureCookies));
+      return { ok: true };
+    });
+  }
 
   if (options.devLogin === true) {
     app.post("/v1/auth/dev-login", async (request, reply) => {
@@ -284,6 +491,8 @@ export function buildGateway(options: GatewayOptions): FastifyInstance {
           details: { issues: parsed.error.issues },
         });
       }
+      if (cookieAuthEnabled && request.headers.origin)
+        requireSameOrigin(request, options.oauth?.publicBaseUrl);
       const user = await findOrCreateUser(pool, {
         provider: "dev",
         subject: parsed.data.subject,
@@ -291,6 +500,12 @@ export function buildGateway(options: GatewayOptions): FastifyInstance {
       });
       const session = await createUserSession(pool, user.id);
       void reply.header("Cache-Control", "no-store");
+      if (cookieAuthEnabled) {
+        void reply.header(
+          "Set-Cookie",
+          setCookie(sessionCookieName, session.session_token, session.expires_at, secureCookies),
+        );
+      }
       return {
         user: { id: user.id, display_name: user.display_name },
         session_token: session.session_token,

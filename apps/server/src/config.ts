@@ -2,7 +2,11 @@ import { isIP } from "node:net";
 import { hostname } from "node:os";
 import { resolve } from "node:path";
 import { z } from "zod";
-import { DEFAULT_HEALTH_IMAGE, type DiskEnforcementMode } from "@crossover/workspace";
+import {
+  DEFAULT_GIT_INTERNAL_NETWORK,
+  DEFAULT_HEALTH_IMAGE,
+  type DiskEnforcementMode,
+} from "@crossover/workspace";
 
 const flag = z
   .enum(["true", "false", "1", "0"])
@@ -28,6 +32,14 @@ const envSchema = z.object({
   NODE_ID: z.string().min(1).max(200).optional(),
   /** Serve `POST /v1/auth/dev-login`. Development only; off unless set. */
   DEV_LOGIN: flag,
+  /** Explicitly permit the no-credential development login when NODE_ENV=production. */
+  DEV_LOGIN_ALLOW_PRODUCTION: flag,
+  /** Public origin used for exact OAuth callback URLs; required with OAuth credentials. */
+  OAUTH_PUBLIC_BASE_URL: z.string().url().optional(),
+  GITHUB_OAUTH_CLIENT_ID: z.string().trim().min(1).max(200).optional(),
+  GITHUB_OAUTH_CLIENT_SECRET: z.string().min(1).max(4096).optional(),
+  GOOGLE_OAUTH_CLIENT_ID: z.string().trim().min(1).max(200).optional(),
+  GOOGLE_OAUTH_CLIENT_SECRET: z.string().min(1).max(4096).optional(),
   /** Reverse proxies in front of the server (comma-separated addresses or CIDRs): the client address is the first `X-Forwarded-For` hop that is not one of them. Default: none. */
   TRUST_PROXY: z
     .string()
@@ -49,7 +61,7 @@ const envSchema = z.object({
       }
       return entries;
     }),
-  /** Refresh attempts per client address per minute (`POST /v1/auth/refresh`). Default 30. */
+  /** Refresh requests and OAuth starts per client address per minute. Default 30. */
   REFRESH_PER_MINUTE: z.coerce.number().int().min(1).max(100_000).default(30),
   /** Serve the built web app (`apps/web/dist`) from this directory next to the API. */
   WEB_ROOT: z.string().min(1).optional(),
@@ -102,6 +114,12 @@ const envSchema = z.object({
     .regex(/^[A-Za-z0-9][A-Za-z0-9._/:+-]{0,254}@sha256:[a-f0-9]{64}$/)
     .optional(),
   GIT_INTERNAL_HOST: z.string().trim().min(1).optional(),
+  /** Docker network shared by the server's private Git listener and one-shot fetchers. */
+  GIT_INTERNAL_NETWORK: z
+    .string()
+    .trim()
+    .regex(/^[a-z0-9][a-z0-9_.-]{0,127}$/)
+    .default(DEFAULT_GIT_INTERNAL_NETWORK),
   GIT_INTERNAL_PORT: z.coerce.number().int().min(1).max(65_535).default(8081),
   GIT_INTERNAL_CONTAINER: z
     .string()
@@ -123,7 +141,15 @@ export interface ServerConfig {
   port: number;
   nodeId: string;
   devLogin: boolean;
+  /** Secure cookie mode follows the public HTTPS origin, with production as a safe fallback. */
+  secureCookies?: boolean;
+  oauth?: {
+    publicBaseUrl: string;
+    github?: { clientId: string; clientSecret: string };
+    google?: { clientId: string; clientSecret: string };
+  };
   trustProxy?: string[];
+  /** Per-address limit for refresh requests and OAuth starts. */
   refreshPerMinute?: number;
   /** Directory of the built web app, served next to the API. */
   webRoot?: string;
@@ -156,6 +182,8 @@ export interface ServerConfig {
   gitInternalPort?: number;
   /** Trusted server container connected to crossover-git for one-shot fetchers. */
   gitInternalContainer?: string;
+  /** Docker network shared by the server's private Git listener and one-shot fetchers. */
+  gitInternalNetwork?: string;
   /** HMAC key accepted only by the internal Git listener. */
   gitInternalTokenSecret?: string;
   gitFetcherImage?: string;
@@ -174,6 +202,39 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     throw new Error(`Invalid server configuration:\n  ${problems.join("\n  ")}`);
   }
   const e = parsed.data;
+  const invalidConfig = (message: string): never => {
+    throw new Error(`Invalid server configuration:\n  ${message}`);
+  };
+  if (env.NODE_ENV === "production" && e.DEV_LOGIN && !e.DEV_LOGIN_ALLOW_PRODUCTION) {
+    invalidConfig("DEV_LOGIN is forbidden in production unless DEV_LOGIN_ALLOW_PRODUCTION=true");
+  }
+  const hasGitHubClientId = Boolean(e.GITHUB_OAUTH_CLIENT_ID);
+  const hasGitHubClientSecret = Boolean(e.GITHUB_OAUTH_CLIENT_SECRET);
+  if (
+    hasGitHubClientId !== hasGitHubClientSecret ||
+    (hasGitHubClientId && !e.OAUTH_PUBLIC_BASE_URL)
+  ) {
+    invalidConfig("set both GitHub OAuth credentials and OAUTH_PUBLIC_BASE_URL together");
+  }
+  const hasGoogleClientId = Boolean(e.GOOGLE_OAUTH_CLIENT_ID);
+  const hasGoogleClientSecret = Boolean(e.GOOGLE_OAUTH_CLIENT_SECRET);
+  if (
+    hasGoogleClientId !== hasGoogleClientSecret ||
+    (hasGoogleClientId && !e.OAUTH_PUBLIC_BASE_URL)
+  ) {
+    invalidConfig("set both Google OAuth credentials and OAUTH_PUBLIC_BASE_URL together");
+  }
+  if (e.OAUTH_PUBLIC_BASE_URL) {
+    const base = new URL(e.OAUTH_PUBLIC_BASE_URL);
+    if (base.pathname !== "/" || base.search || base.hash || base.username || base.password) {
+      invalidConfig("OAUTH_PUBLIC_BASE_URL must be an origin without a path, query or fragment");
+    }
+    const localHttp =
+      base.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(base.hostname);
+    if ((env.NODE_ENV === "production" || !localHttp) && base.protocol !== "https:") {
+      invalidConfig("OAUTH_PUBLIC_BASE_URL must use HTTPS except for localhost development");
+    }
+  }
   const sandboxDiskEnforcement =
     e.SANDBOX_DISK_ENFORCEMENT ?? (env.NODE_ENV === "production" ? "hard" : "soft");
   const sandboxVolumeOptions = parseVolumeOptions(e.SANDBOX_VOLUME_OPTS);
@@ -242,6 +303,32 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     port: e.PORT,
     nodeId: e.NODE_ID ?? `${hostname()}-${process.pid}`,
     devLogin: e.DEV_LOGIN,
+    secureCookies: e.OAUTH_PUBLIC_BASE_URL
+      ? new URL(e.OAUTH_PUBLIC_BASE_URL).protocol === "https:"
+      : env.NODE_ENV === "production",
+    ...((hasGitHubClientId || hasGoogleClientId) && e.OAUTH_PUBLIC_BASE_URL
+      ? {
+          oauth: {
+            publicBaseUrl: new URL(e.OAUTH_PUBLIC_BASE_URL).origin,
+            ...(e.GITHUB_OAUTH_CLIENT_ID && e.GITHUB_OAUTH_CLIENT_SECRET
+              ? {
+                  github: {
+                    clientId: e.GITHUB_OAUTH_CLIENT_ID,
+                    clientSecret: e.GITHUB_OAUTH_CLIENT_SECRET,
+                  },
+                }
+              : {}),
+            ...(e.GOOGLE_OAUTH_CLIENT_ID && e.GOOGLE_OAUTH_CLIENT_SECRET
+              ? {
+                  google: {
+                    clientId: e.GOOGLE_OAUTH_CLIENT_ID,
+                    clientSecret: e.GOOGLE_OAUTH_CLIENT_SECRET,
+                  },
+                }
+              : {}),
+          },
+        }
+      : {}),
     trustProxy: e.TRUST_PROXY,
     refreshPerMinute: e.REFRESH_PER_MINUTE,
     ...(e.WEB_ROOT ? { webRoot: resolve(e.WEB_ROOT) } : {}),
@@ -277,6 +364,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     ...(e.BROWSER_PLUGIN_IMAGE ? { browserPluginImage: e.BROWSER_PLUGIN_IMAGE } : {}),
     ...(e.AWS_PLUGIN_IMAGE ? { awsPluginImage: e.AWS_PLUGIN_IMAGE } : {}),
     ...(e.GIT_INTERNAL_HOST ? { gitInternalHost: e.GIT_INTERNAL_HOST } : {}),
+    gitInternalNetwork: e.GIT_INTERNAL_NETWORK,
     gitInternalPort: e.GIT_INTERNAL_PORT,
     ...(e.GIT_INTERNAL_CONTAINER ? { gitInternalContainer: e.GIT_INTERNAL_CONTAINER } : {}),
     ...(e.GIT_INTERNAL_TOKEN_SECRET ? { gitInternalTokenSecret: e.GIT_INTERNAL_TOKEN_SECRET } : {}),

@@ -1,11 +1,16 @@
 import { createPool, withTransaction, type Pool } from "@crossover/db";
 import {
   buildGateway,
+  RedisOAuthStateStore,
+  type RouteRateLimiter,
   type SandboxOutputMetadata,
   type SandboxOutputSource,
+  type OAuthProvider,
 } from "@crossover/gateway";
-import { registerMcp } from "@crossover/mcp";
+import { MCP_TOOLS, registerMcp } from "@crossover/mcp";
 import { buildInternalGitServer } from "./internal-git.js";
+import { githubOAuthProvider } from "./github-oauth.js";
+import { googleOAuthProvider } from "./google-oauth.js";
 import { IntegrationCredentialBroker } from "./integration-broker.js";
 import { GitHubPullRequestProvider } from "./github-pull-request.js";
 import { registerBrowserTools } from "./browser-plugin.js";
@@ -21,6 +26,7 @@ import {
   RedisEventPublisher,
   RedisEventSubscriber,
   RedisPresenceSubscriber,
+  RedisEditIntentSubscriber,
   registerRoomEventsSubscribeCommand,
   registerCapabilityCommands,
   registerDecisionCommands,
@@ -46,11 +52,13 @@ import {
   registerPresenceCommands,
   registerPresenceIntentCommands,
   registerRoomCommands,
+  registerBudgetCommands,
   registerRoomDigestCommand,
   registerEventsRedactCommand,
   registerRoomEventsCommand,
   registerRoomLifecycleCommands,
   registerRoomProtectedPathsCommand,
+  registerRoomHealthSettingsCommand,
   registerTaskCommands,
   registerTaskHeartbeat,
   registerTaskLifecycleCommands,
@@ -73,6 +81,7 @@ import {
   ConflictEscalationSweeper,
   DockerExecutionDriver,
   DockerHealthRunner,
+  DEFAULT_HEALTH_IMAGE,
   ExecutionService,
   HealthCheckQueue,
   workspaceHealthGate,
@@ -96,6 +105,7 @@ import {
   type ExecutionDriver,
   type UpstreamDeps,
   type WorkspaceCommandDeps,
+  DEFAULT_GIT_INTERNAL_NETWORK,
 } from "@crossover/workspace";
 import type { ServerConfig } from "./config.js";
 
@@ -112,6 +122,8 @@ export interface ComposeOverrides {
   leaseTtlMs?: number;
   /** How often agents' lapsed task claims are swept back to OPEN. Default 30 s. */
   leaseSweepIntervalMs?: number;
+  /** Shared clock for sandbox compute accounting and budget usage reads (tests). */
+  now?: () => Date;
   /** Sandbox runtime seam for lifecycle tests; production uses the Docker driver. */
   executionDriver?: ExecutionDriver;
   /** Use this limiter for agents' budgets (§22.3) instead of Redis at `redisUrl` (tests); not closed by `close()`. */
@@ -120,6 +132,8 @@ export interface ComposeOverrides {
   tools?: { registry?: ToolRegistry; runner?: ToolRunner; timeoutMs?: number };
   /** Secret storage and provider verification seams for integration commands. */
   integrations?: IntegrationCommandsOptions;
+  /** OAuth provider injection for isolated composition tests; never populated from server config. */
+  oauthProviders?: Readonly<Record<string, OAuthProvider>>;
   /** How `git.import` reaches an upstream (fetcher, credentials, host check); production: HTTPS clone, no credentials. */
   upstream?: UpstreamDeps;
 }
@@ -164,6 +178,7 @@ export async function composeServer(
   let pluginRunner: DockerToolRunner | undefined;
   let kmsOperations: AwsKmsDataKeyOperations | undefined;
   let gitApp: ReturnType<typeof buildInternalGitServer> | undefined;
+  const oauthStateStore = config.oauth ? new RedisOAuthStateStore(config.redisUrl) : undefined;
   let healthInstallSweepTimer: NodeJS.Timeout | undefined;
   let sandboxLogSweepTimer: NodeJS.Timeout | undefined;
   if (overrides.publisher) {
@@ -183,10 +198,26 @@ export async function composeServer(
   }
 
   const intentStore = new RedisEditIntentStore(config.redisUrl);
+  const intentSubscriber = new RedisEditIntentSubscriber(config.redisUrl);
   const presenceStore = new RedisPresenceStore(config.redisUrl);
   const presenceSubscriber = new RedisPresenceSubscriber(config.redisUrl);
   const ownBudgets = overrides.budgets ? undefined : new RedisBudgetLimiter(config.redisUrl);
   const budgets = overrides.budgets ?? ownBudgets!;
+  const now = overrides.now ?? (() => new Date());
+  const authRouteLimiter: RouteRateLimiter = {
+    hit: async (key, limit, windowMs) => {
+      const d = await budgets.consume(
+        { room_id: "_auth", participant_id: key, budget: "commands" },
+        limit,
+        windowMs,
+      );
+      return d.allowed ? { allowed: true } : { allowed: false, retry_after_ms: d.retry_after_ms };
+    },
+  };
+  const authRouteLimit = {
+    limiter: authRouteLimiter,
+    perMinute: config.refreshPerMinute ?? 30,
+  };
   const sandboxLogStore = new FileLogStore(join(config.workspaceRoot, ".sandbox-exec-logs"));
   const sandboxOutputHub = new SandboxOutputHub();
   const sandboxOutput: SandboxOutputSource = {
@@ -208,6 +239,7 @@ export async function composeServer(
 
   try {
     if (redis) await redis.ready();
+    await oauthStateStore?.ready();
     await intentStore.ready();
     await presenceStore.ready();
     await ownBudgets?.ready();
@@ -236,6 +268,7 @@ export async function composeServer(
         ...(config.gitInternalContainer
           ? { gitInternalContainer: config.gitInternalContainer }
           : {}),
+        gitInternalNetwork: config.gitInternalNetwork ?? DEFAULT_GIT_INTERNAL_NETWORK,
         gitInternalPort: config.gitInternalPort ?? 8081,
         ...(config.gitInternalTokenSecret
           ? { gitInternalTokenSecret: config.gitInternalTokenSecret }
@@ -275,6 +308,7 @@ export async function composeServer(
       diskEnforcement: config.sandboxDiskEnforcement ?? "soft",
       readablePaths: readableSandboxPaths,
       listIntents: (roomId) => intentStore.list(roomId),
+      now,
     });
     executionService.startSweeper();
 
@@ -423,8 +457,10 @@ export async function composeServer(
         registry: toolRegistry,
         runner: toolRunner,
       },
+      budgets,
       upstream,
       integrationOptions,
+      now,
     );
 
     const renewer = new LeaseRenewer({ leases: dispatcher.leases, actors: dispatcher.actors });
@@ -450,26 +486,71 @@ export async function composeServer(
     const app = buildGateway({
       dispatcher,
       pool,
-      devLogin: config.devLogin,
-      trustProxy: config.trustProxy && config.trustProxy.length > 0 ? config.trustProxy : false,
-      refreshLimit: {
-        limiter: {
-          // The budget limiter's counters, under keys no room can have.
-          hit: async (key, limit, windowMs) => {
-            const d = await budgets.consume(
-              { room_id: "_auth", participant_id: key, budget: "commands" },
-              limit,
-              windowMs,
-            );
-            return d.allowed
-              ? { allowed: true }
-              : { allowed: false, retry_after_ms: d.retry_after_ms };
-          },
-        },
-        perMinute: config.refreshPerMinute ?? 30,
+      onInternalError: (error, request) => {
+        const body =
+          typeof request.body === "object" && request.body !== null && !Array.isArray(request.body)
+            ? (request.body as Record<string, unknown>)
+            : undefined;
+        const params =
+          typeof body?.params === "object" && body.params !== null && !Array.isArray(body.params)
+            ? (body.params as Record<string, unknown>)
+            : undefined;
+        const route = request.routeOptions.url;
+        const commandRoute = route === "/v1/commands" || route === "/v1/rooms/:roomId/commands";
+        const candidate = commandRoute
+          ? typeof body?.method === "string"
+            ? body.method
+            : undefined
+          : route === "/mcp" && body?.method === "tools/call" && typeof params?.name === "string"
+            ? MCP_TOOLS.find((tool) => tool.name === params.name)?.method
+            : undefined;
+        const commandMethod =
+          candidate && /^[a-zA-Z][a-zA-Z0-9_./-]{0,127}$/.test(candidate) ? candidate : undefined;
+        const stack =
+          error instanceof Error
+            ? (error.stack ?? `${error.name}: ${error.message}`)
+            : String(error);
+
+        // JSON keeps stack newlines escaped so each failure is a single stderr line. Only the
+        // route pattern and command method are included; never log request URLs, headers, or other body fields.
+        console.error(
+          JSON.stringify({
+            event: "gateway.internal_error",
+            method: request.method,
+            route: request.routeOptions.url ?? "<unmatched>",
+            ...(commandMethod ? { command_method: commandMethod } : {}),
+            stack,
+          }),
+        );
       },
+      devLogin: config.devLogin,
+      secureCookies: config.secureCookies,
+      oauth:
+        config.oauth && oauthStateStore
+          ? {
+              publicBaseUrl: config.oauth.publicBaseUrl,
+              stateStore: oauthStateStore,
+              providers: overrides.oauthProviders ?? {
+                ...(config.oauth.github
+                  ? { github: githubOAuthProvider(config.oauth.github) }
+                  : {}),
+                ...(config.oauth.google
+                  ? { google: googleOAuthProvider(config.oauth.google) }
+                  : {}),
+              },
+            }
+          : undefined,
+      trustProxy: config.trustProxy && config.trustProxy.length > 0 ? config.trustProxy : false,
+      refreshLimit: authRouteLimit,
+      oauthStartLimit: authRouteLimit,
       ...(config.webRoot ? { staticRoot: config.webRoot } : {}),
-      ws: { subscriber, sandboxOutput, presence: presenceSubscriber },
+      ws: {
+        subscriber,
+        sandboxOutput,
+        presence: presenceSubscriber,
+        intents: intentSubscriber,
+        intentStore,
+      },
     });
     gitApp = buildInternalGitServer({
       pool,
@@ -497,9 +578,11 @@ export async function composeServer(
         await redis?.close();
         await redisSubscriber?.close();
         await intentStore.close();
+        await intentSubscriber.close();
         await presenceStore.close();
         await presenceSubscriber.close();
         await ownBudgets?.close();
+        await oauthStateStore?.close();
         if (!overrides.pool) await pool.end();
       })());
 
@@ -517,9 +600,11 @@ export async function composeServer(
     await redis?.close();
     await redisSubscriber?.close();
     await intentStore.close();
+    await intentSubscriber.close();
     await presenceStore.close();
     await presenceSubscriber.close();
     await ownBudgets?.close();
+    await oauthStateStore?.close();
     if (!overrides.pool) await pool.end();
     throw err;
   }
@@ -536,15 +621,22 @@ function registerCommands(
   logs: LogStore,
   outputHub: SandboxOutputHub,
   tools: { registry: ToolRegistry; runner: ToolRunner; timeoutMs?: number },
+  budgets: BudgetLimiter,
   upstream?: UpstreamDeps,
   integrationOptions: IntegrationCommandsOptions = {},
+  now: () => Date = () => new Date(),
 ): void {
   registerRoomCommands(dispatcher, {
     provision: async ({ client, room_id }) => {
       await provisionWorkspace(client, room_id, config.workspaceRoot);
     },
   });
+  registerBudgetCommands(dispatcher, budgets, now);
   registerRoomProtectedPathsCommand(dispatcher);
+  registerRoomHealthSettingsCommand(dispatcher, {
+    allowedImages: config.healthImages,
+    defaultImage: DEFAULT_HEALTH_IMAGE,
+  });
   registerInviteCommands(dispatcher);
   registerJoinCommand(dispatcher);
   registerCapabilityCommands(dispatcher);

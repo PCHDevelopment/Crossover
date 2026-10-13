@@ -1,4 +1,4 @@
-import type { PresenceRecord, PresenceUpdate } from "@crossover/sdk";
+import type { PresenceIntent, PresenceRecord, PresenceUpdate } from "@crossover/sdk";
 
 /**
  * Live presence in the browser (§13.4, T1105b): who has which files open and where their cursor
@@ -19,6 +19,75 @@ export const MAX_OPEN_FILES = 20;
 export const RETRY_MS = 1_000;
 
 export type PresenceMap = ReadonlyMap<string, PresenceRecord>;
+export type IntentMap = ReadonlyMap<string, PresenceIntent>;
+
+export interface RemoteIntentRange {
+  participant_id: string;
+  name: string;
+  color: number;
+  whole_file: boolean;
+  start_line: number;
+  end_line: number;
+  label: string;
+}
+
+/** A subscription snapshot replaces the active intents. */
+export function applyIntentSnapshot(intents: readonly PresenceIntent[]): IntentMap {
+  return new Map(intents.map((intent) => [intent.participant_id, intent]));
+}
+
+/** Intents are not announced when their Redis TTL expires, so drop them locally. */
+export function liveIntents(intents: IntentMap, now: number): IntentMap {
+  let changed = false;
+  const out = new Map<string, PresenceIntent>();
+  for (const [id, intent] of intents) {
+    if (Date.parse(intent.expires_at) > now) out.set(id, intent);
+    else changed = true;
+  }
+  return changed ? out : intents;
+}
+
+/** Other participants' active ranges on `path`, with the task title as the stated purpose. */
+export function intentRangesOn(
+  intents: IntentMap,
+  path: string,
+  selfId: string,
+  nameOf: (id: string) => string,
+  purposeOf: (taskId: string) => string | undefined,
+): RemoteIntentRange[] {
+  const out: RemoteIntentRange[] = [];
+  for (const intent of [...intents.values()].sort((a, b) =>
+    a.participant_id < b.participant_id ? -1 : 1,
+  )) {
+    if (intent.participant_id === selfId || !intent.paths.includes(path)) continue;
+    const name = nameOf(intent.participant_id);
+    const purpose = intent.task_id ? (purposeOf(intent.task_id) ?? "Active edit") : "Active edit";
+    const matching = intent.ranges.filter((range) => range.path === path);
+    for (const range of matching) {
+      out.push({
+        participant_id: intent.participant_id,
+        name,
+        color: colorOf(intent.participant_id),
+        whole_file: false,
+        start_line: range.start_line,
+        end_line: range.end_line,
+        label: `${name} · ${purpose}`,
+      });
+    }
+    if (matching.length === 0) {
+      out.push({
+        participant_id: intent.participant_id,
+        name,
+        color: colorOf(intent.participant_id),
+        whole_file: true,
+        start_line: 0,
+        end_line: 0,
+        label: `${name} · ${purpose}`,
+      });
+    }
+  }
+  return out;
+}
 
 /** Fold an update into the records: a snapshot replaces them all, a record replaces its own. */
 export function applyPresence(records: PresenceMap, update: PresenceUpdate): PresenceMap {

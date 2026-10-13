@@ -18,6 +18,7 @@ export interface RoomInfo {
   status: string;
   owner_id: string;
   lead_participant_id: string | null;
+  settings: Record<string, unknown> | null;
 }
 
 export interface Task {

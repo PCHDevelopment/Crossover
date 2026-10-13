@@ -1,11 +1,16 @@
 import { execFileSync } from "node:child_process";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { CrossoverError, newId } from "@crossover/protocol";
 import { createSandboxProxyCredential, verifySandboxReadToken } from "@crossover/security";
-import { DockerExecutionDriver, type DockerInvoker } from "./docker-execution-driver.js";
+import {
+  DockerExecutionDriver,
+  parseDockerCpuUsageUsec,
+  type DockerInvoker,
+} from "./docker-execution-driver.js";
 
 const hardOptions = {
   volumeDriver: "local",
@@ -40,6 +45,81 @@ function expectMissing(container: string, path: string) {
 }
 
 describe("DockerExecutionDriver", () => {
+  it("charges host Docker CPU stats even if the sandbox shell would report zero", async () => {
+    const root = await mkdtemp(join(tmpdir(), "crossover-docker-cpu-stats-"));
+    const socketPath = join(root, "docker.sock");
+    const sandboxId = newId("sandbox");
+    const containerRef = `crossover-sbx-${sandboxId.toLowerCase()}`;
+    const calls: string[][] = [];
+    const apiPaths: string[] = [];
+    const server = createServer((request, response) => {
+      apiPaths.push(request.url ?? "");
+      response.setHeader("content-type", "application/json");
+      if (request.url === "/version") {
+        response.end('{"ApiVersion":"1.41"}');
+      } else {
+        response.end(
+          '{"cpu_stats":{"cpu_usage":{"total_usage":9007199254740999000,"percpu_usage":[]}}}',
+        );
+      }
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(socketPath, resolve);
+    });
+
+    const driver = new DockerExecutionDriver({
+      dockerSocketPath: socketPath,
+      invoke: async (args) => {
+        calls.push([...args]);
+        if (args[0] === "container" && args[1] === "inspect")
+          return { code: 0, stdout: "true|2026-10-13T01:00:00.000000000Z\n", stderr: "" };
+        // A compromised sandbox could make this command print zero. CPU sampling must never call it.
+        if (args[0] === "exec") return { code: 0, stdout: "0\n", stderr: "" };
+        return { code: 1, stdout: "", stderr: "unexpected Docker invocation" };
+      },
+    });
+
+    try {
+      await expect(
+        driver.cpuUsage({
+          sandbox_id: sandboxId,
+          resources: { volume_ref: containerRef, container_ref: containerRef },
+        }),
+      ).resolves.toEqual({
+        usage_usec: 9_007_199_254_740_999n,
+        generation: "2026-10-13T01:00:00.000000000Z",
+      });
+      expect(calls.map((args) => args.slice(0, 3))).toEqual([
+        ["container", "inspect", "--format"],
+        ["container", "inspect", "--format"],
+      ]);
+      expect(calls.some((args) => args[0] === "exec")).toBe(false);
+      expect(apiPaths).toEqual([
+        "/version",
+        `/v1.41/containers/${encodeURIComponent(containerRef)}/stats?stream=false&one-shot=true`,
+      ]);
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()));
+      });
+      await unlink(socketPath).catch(() => {});
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("parses the Docker CPU counter as nanoseconds without losing integer precision", () => {
+    expect(parseDockerCpuUsageUsec('{"cpu_stats":{"cpu_usage":{"total_usage":0}}}')).toBe(0n);
+    expect(
+      parseDockerCpuUsageUsec('{"cpu_stats":{"cpu_usage":{"total_usage":9007199254740999000}}}'),
+    ).toBe(9_007_199_254_740_999n);
+    expect(() => parseDockerCpuUsageUsec("not JSON")).toThrow(/invalid container stats JSON/);
+    expect(() => parseDockerCpuUsageUsec('{"cpu_stats":{"cpu_usage":{}}}')).toThrow(
+      /missing CPU total_usage/,
+    );
+  });
+
   it("passes command text on stdin, keeps it out of Docker argv, and reports output failures distinctly", async () => {
     const root = await mkdtemp(join(tmpdir(), "crossover-docker-exec-stdin-"));
     try {
@@ -80,7 +160,7 @@ describe("DockerExecutionDriver", () => {
     }
   });
 
-  it("runs the fetcher on crossover-git with a short-lived token and hardening", async () => {
+  it("runs the fetcher on the configured Git network with a short-lived token and hardening", async () => {
     const calls: Array<{ args: string[]; timeoutMs?: number; env?: NodeJS.ProcessEnv }> = [];
     const secret = "a sufficiently long internal Git signing secret";
     let networkExists = false;
@@ -99,11 +179,11 @@ describe("DockerExecutionDriver", () => {
               stdout: `true|${JSON.stringify(serverConnected ? { endpoint: { Name: "crossover-server" } } : {})}`,
               stderr: "",
             }
-          : { code: 1, stdout: "", stderr: "Error: no such network: crossover-git" };
+          : { code: 1, stdout: "", stderr: "Error: no such network: private-git" };
       }
       if (args[0] === "network" && args[1] === "create") {
         networkExists = true;
-        return { code: 0, stdout: "crossover-git", stderr: "" };
+        return { code: 0, stdout: "private-git", stderr: "" };
       }
       if (args[0] === "network" && args[1] === "connect") {
         serverConnected = true;
@@ -117,6 +197,7 @@ describe("DockerExecutionDriver", () => {
     const driver = new DockerExecutionDriver({
       invoke,
       gitInternalContainer: "crossover-server",
+      gitInternalNetwork: "private-git",
       gitInternalPort: 8081,
       gitInternalTokenSecret: secret,
       gitFetcherImage: "crossover-git-fetcher:test",
@@ -141,8 +222,8 @@ describe("DockerExecutionDriver", () => {
     const connect = calls.find(({ args }) => args[0] === "network" && args[1] === "connect")!;
     const runArgs = run.args;
     const credential = run.env?.GIT_CONFIG_VALUE_0?.split("Bearer ")[1];
-    expect(connect.args).toEqual(["network", "connect", "crossover-git", "crossover-server"]);
-    expect(runArgs).toContain("--network=crossover-git");
+    expect(connect.args).toEqual(["network", "connect", "private-git", "crossover-server"]);
+    expect(runArgs).toContain("--network=private-git");
     expect(runArgs).toContain("--read-only");
     expect(runArgs).toContain("GIT_CONFIG_VALUE_0");
     expect(runArgs.some((arg) => arg.includes(credential!))).toBe(false);
@@ -859,6 +940,64 @@ describe("DockerExecutionDriver", () => {
     );
   });
 
+  it("accepts an existing local volume with null options in soft mode", async () => {
+    const driver = new DockerExecutionDriver({
+      invoke: async (args) => {
+        if (args[0] === "volume" && args[1] === "inspect")
+          return { code: 0, stdout: "local|null", stderr: "" };
+        return missingResources(args);
+      },
+    });
+
+    await expect(
+      driver.create({
+        sandbox_id: newId("sandbox"),
+        room_id: newId("room"),
+        participant_id: newId("part"),
+        limits: { disk_enforcement: "soft" },
+      }),
+    ).resolves.toMatchObject({ volume_ref: expect.any(String), container_ref: expect.any(String) });
+  });
+
+  it("rejects an existing local volume with null options when hard options are required", async () => {
+    const driver = new DockerExecutionDriver({
+      ...hardOptions,
+      invoke: async (args) => {
+        if (args[0] === "volume" && args[1] === "inspect")
+          return { code: 0, stdout: "local|null", stderr: "" };
+        return missingResources(args);
+      },
+    });
+
+    await expect(
+      driver.create({
+        sandbox_id: newId("sandbox"),
+        room_id: newId("room"),
+        participant_id: newId("part"),
+        limits: { disk_enforcement: "hard" },
+      }),
+    ).rejects.toThrow("does not match SANDBOX_VOLUME_DRIVER and SANDBOX_VOLUME_OPTS");
+  });
+
+  it("rejects array-valued Docker volume options", async () => {
+    const driver = new DockerExecutionDriver({
+      invoke: async (args) => {
+        if (args[0] === "volume" && args[1] === "inspect")
+          return { code: 0, stdout: "local|[]", stderr: "" };
+        return missingResources(args);
+      },
+    });
+
+    await expect(
+      driver.create({
+        sandbox_id: newId("sandbox"),
+        room_id: newId("room"),
+        participant_id: newId("part"),
+        limits: { disk_enforcement: "soft" },
+      }),
+    ).rejects.toThrow("ERROR: Docker returned invalid volume inspection data");
+  });
+
   it("fails closed with clear errors when Docker rejects either hard quota", async () => {
     const input = {
       sandbox_id: newId("sandbox"),
@@ -913,6 +1052,97 @@ describe("DockerExecutionDriver", () => {
     }
   })();
   const skipDockerIntegration = !dockerImageAvailable && !process.env["CI"];
+
+  it.skipIf(skipDockerIntegration)(
+    "reuses and removes a real default Docker volume with null inspect options",
+    async () => {
+      const driver = new DockerExecutionDriver();
+      const sandboxId = newId("sandbox");
+      const name = `crossover-sbx-${sandboxId.toLowerCase()}`;
+      let resources: Awaited<ReturnType<typeof driver.create>> | undefined;
+      let destroyed = false;
+      try {
+        expect(
+          execFileSync("docker", ["volume", "create", name], {
+            encoding: "utf8",
+            timeout: 20_000,
+          }).trim(),
+        ).toBe(name);
+        expect(
+          execFileSync(
+            "docker",
+            ["volume", "inspect", "--format", "{{.Driver}}|{{json .Options}}", name],
+            { encoding: "utf8", timeout: 10_000 },
+          ).trim(),
+        ).toBe("local|null");
+
+        resources = await driver.create({
+          sandbox_id: sandboxId,
+          room_id: newId("room"),
+          participant_id: newId("part"),
+          limits: { disk_enforcement: "soft" },
+        });
+        expect(resources.volume_ref).toBe(name);
+        await driver.start({ sandbox_id: sandboxId, resources });
+
+        const [container] = JSON.parse(
+          execFileSync("docker", ["container", "inspect", name], {
+            encoding: "utf8",
+            timeout: 10_000,
+          }),
+        ) as Array<{
+          HostConfig: {
+            NetworkMode: string;
+            CapDrop: string[];
+            SecurityOpt: string[];
+          };
+          Config: { User: string };
+        }>;
+        expect(container?.HostConfig.NetworkMode).toBe("none");
+        expect(container?.HostConfig.CapDrop).toContain("ALL");
+        expect(container?.HostConfig.SecurityOpt).toContain("no-new-privileges");
+        expect(container?.Config.User).toMatch(/^[1-9]\d*(?::\d+)?$/);
+
+        let stdout = "";
+        const execution = await driver.exec({
+          sandbox_id: sandboxId,
+          resources,
+          exec_id: newId("exec"),
+          command: "printf T1415-real-docker-smoke",
+          cwd: "/workspace",
+          timeoutMs: 10_000,
+          onOutput: async (stream, chunk) => {
+            if (stream === "stdout") stdout += chunk.toString("utf8");
+          },
+        });
+        await expect(execution.finished).resolves.toMatchObject({ reason: "exit", exit_code: 0 });
+        expect(stdout).toBe("T1415-real-docker-smoke");
+
+        await driver.destroy({ sandbox_id: sandboxId, resources });
+        destroyed = true;
+        expect(() =>
+          execFileSync("docker", ["volume", "inspect", name], { stdio: "ignore" }),
+        ).toThrow();
+        expect(() =>
+          execFileSync("docker", ["container", "inspect", name], { stdio: "ignore" }),
+        ).toThrow();
+      } finally {
+        if (!destroyed) {
+          for (const args of [
+            ["container", "rm", "--force", name],
+            ["volume", "rm", "--force", name],
+          ]) {
+            try {
+              execFileSync("docker", args, { stdio: "ignore", timeout: 10_000 });
+            } catch {
+              // Cleanup is best effort here so the original assertion remains visible.
+            }
+          }
+        }
+      }
+    },
+    30_000,
+  );
 
   it.skipIf(skipDockerIntegration)(
     "creates, hibernates, resumes and removes a soft-mode Docker sandbox",

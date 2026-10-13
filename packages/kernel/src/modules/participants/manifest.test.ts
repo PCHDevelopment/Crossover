@@ -133,7 +133,17 @@ describe("participants.update_manifest (§34.6)", () => {
       },
     });
     expect(await stored(s, s.agent)).toEqual(next);
-    expect(out.events.map((e) => e.type)).toEqual(["participant.manifest_changed"]);
+    expect(out.events.map((e) => e.type)).toEqual([
+      "participant.manifest_changed",
+      "inbox.delivered",
+      "inbox.delivered",
+    ]);
+    expect(out.events.slice(1).map((event) => event.payload)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ recipient_id: s.owner.participant_id, kind: "MANIFEST_CHANGED" }),
+        expect.objectContaining({ recipient_id: s.lead.participant_id, kind: "MANIFEST_CHANGED" }),
+      ]),
+    );
     expect(out.events[0]!.payload).toEqual({
       participant_id: s.agent.participant_id,
       changes: {

@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { RoomClient, SdkEvent } from "@crossover/sdk";
+import type { PresenceIntent, RoomClient, SdkEvent } from "@crossover/sdk";
 import { isUnauthenticated } from "./App.js";
 import {
   affectsState,
@@ -10,26 +10,61 @@ import {
   type Task,
 } from "./model.js";
 import { openRoom, type OpenRoom } from "./session.js";
-import { applyPresence, livePresence, type PresenceMap } from "./presence.js";
+import {
+  applyIntentSnapshot,
+  applyPresence,
+  liveIntents,
+  livePresence,
+  type IntentMap,
+  type PresenceMap,
+} from "./presence.js";
 
 // Monaco is large: it loads with the Files tab, not with the room.
 const FilesView = lazy(() => import("./FilesView.js"));
+const ChangesView = lazy(() => import("./ChangesView.js"));
+const TaskReviewView = lazy(() => import("./TaskReviewView.js"));
+const CheckpointExportView = lazy(() => import("./CheckpointExportView.js"));
+const RoomSetupView = lazy(() =>
+  import("./RoomSetupView.js").then((m) => ({ default: m.RoomSetupView })),
+);
+const OwnerControlsView = lazy(() =>
+  import("./OwnerControlsView.js").then((m) => ({ default: m.OwnerControlsView })),
+);
+const CollaborationView = lazy(() => import("./CollaborationView.js"));
+const MessagesView = lazy(() => import("./MessagesView.js"));
 
 const FEED_LIMIT = 200;
 const BACKLOG = 50;
 
-type Tab = "overview" | "tasks" | "activity" | "files";
+type Tab =
+  | "overview"
+  | "setup"
+  | "owner-controls"
+  | "tasks"
+  | "messages"
+  | "collaboration"
+  | "activity"
+  | "files"
+  | "changes"
+  | "delivery";
+const TABS: { id: Tab; label: string }[] = [
+  { id: "overview", label: "Overview" },
+  { id: "setup", label: "Setup" },
+  { id: "owner-controls", label: "Owner controls" },
+  { id: "tasks", label: "Tasks" },
+  { id: "messages", label: "Messages" },
+  { id: "collaboration", label: "Inbox, decisions & memory" },
+  { id: "activity", label: "Activity" },
+  { id: "files", label: "Files" },
+  { id: "changes", label: "Changes" },
+  { id: "delivery", label: "Review & export" },
+];
 
 const message = (error: unknown): string =>
   error instanceof Error ? error.message : "Something went wrong";
 
-export function RoomView(props: {
-  session: string;
-  roomId: string;
-  onBack: () => void;
-  onSignedOut: () => void;
-}) {
-  const { session, roomId, onBack, onSignedOut } = props;
+export function RoomView(props: { roomId: string; onBack: () => void; onSignedOut: () => void }) {
+  const { roomId, onBack, onSignedOut } = props;
   const [open, setOpen] = useState<OpenRoom>();
   const [error, setError] = useState<string>();
   const [state, setState] = useState<RoomState>();
@@ -39,6 +74,7 @@ export function RoomView(props: {
   const [tab, setTab] = useState<Tab>("overview");
   const [notice, setNotice] = useState<string>();
   const [presence, setPresence] = useState<PresenceMap>(new Map());
+  const [intents, setIntents] = useState<IntentMap>(new Map());
   const roomRef = useRef<RoomClient>(undefined);
   const listeners = useRef(new Set<(event: SdkEvent) => void>());
   const onEvent = useCallback((listener: (event: SdkEvent) => void) => {
@@ -49,9 +85,14 @@ export function RoomView(props: {
   // Enter the room.
   useEffect(() => {
     let cancelled = false;
-    openRoom(session, roomId).then(
+    let activeRoom: RoomClient | undefined;
+    openRoom(roomId).then(
       (entered) => {
-        if (cancelled) return;
+        if (cancelled) {
+          entered.room.close();
+          return;
+        }
+        activeRoom = entered.room;
         roomRef.current = entered.room;
         setOpen(entered);
       },
@@ -62,8 +103,10 @@ export function RoomView(props: {
     );
     return () => {
       cancelled = true;
+      activeRoom?.close();
+      roomRef.current = undefined;
     };
-  }, [session, roomId, onSignedOut]);
+  }, [roomId, onSignedOut]);
 
   const reload = useCallback(async () => {
     const room = roomRef.current;
@@ -92,7 +135,7 @@ export function RoomView(props: {
     let sub: ReturnType<RoomClient["subscribe"]> | undefined;
     void (async () => {
       await reload();
-      if (closed) return;
+      if (closed || open.room.isClosed) return;
       let last = 0;
       try {
         last = (await open.room.api.room.get_state<RoomState>({ view: "summary" })).response
@@ -100,7 +143,7 @@ export function RoomView(props: {
       } catch {
         // the feed then starts from the beginning
       }
-      if (closed) return;
+      if (closed || open.room.isClosed) return;
       sub = open.room.subscribe({
         after: Math.max(0, last - BACKLOG),
         onState: (s) => setLive(s),
@@ -111,10 +154,16 @@ export function RoomView(props: {
         },
         onError: (err) => setError(message(err)),
         onPresence: (update) => setPresence((p) => applyPresence(p, update)),
+        onPresenceIntents: (snapshot: PresenceIntent[]) =>
+          setIntents(applyIntentSnapshot(snapshot)),
       });
     })();
-    // Records aren't announced when they expire: drop them as their time passes.
-    const expiry = setInterval(() => setPresence((p) => livePresence(p, Date.now())), 5_000);
+    // Records and intents aren't announced when they expire: drop them at their deadline.
+    const expiry = setInterval(() => {
+      const now = Date.now();
+      setPresence((p) => livePresence(p, now));
+      setIntents((p) => liveIntents(p, now));
+    }, 5_000);
     return () => {
       closed = true;
       clearTimeout(timer);
@@ -127,6 +176,10 @@ export function RoomView(props: {
     const byId = new Map((state?.sections.participants ?? []).map((p) => [p.id, p.display_name]));
     return (id: string) => (id === "system" ? "System" : (byId.get(id) ?? id.slice(0, 10)));
   }, [state]);
+  const purposeOf = useMemo(() => {
+    const byId = new Map(tasks.map((task) => [task.id, task.title]));
+    return (taskId: string) => byId.get(taskId);
+  }, [tasks]);
 
   if (error && !state) {
     return (
@@ -146,6 +199,11 @@ export function RoomView(props: {
   };
   const me = open.me;
   const mayControl = me.authority === "OWNER" || me.authority === "ADMIN" || me.role === "LEAD";
+  const mayImport = me.authority === "OWNER" || me.role === "LEAD";
+  const maySetHealth = me.authority === "OWNER" || me.role === "LEAD";
+  const mayInvite = me.authority === "OWNER" || me.authority === "ADMIN";
+  const mayAppointLead = me.authority === "OWNER" || me.authority === "ADMIN";
+  const maySetup = mayImport || mayInvite || mayAppointLead;
 
   const control = async (p: Participant, method: "pause" | "resume") => {
     setNotice(undefined);
@@ -170,15 +228,18 @@ export function RoomView(props: {
         </span>
       </p>
       <nav className="tabs" role="tablist">
-        {(["overview", "tasks", "activity", "files"] as const).map((t) => (
+        {TABS.filter(
+          ({ id }) =>
+            (id !== "setup" || maySetup) && (id !== "owner-controls" || me.authority === "OWNER"),
+        ).map(({ id, label }) => (
           <button
-            key={t}
+            key={id}
             role="tab"
-            aria-selected={tab === t}
-            data-testid={`tab-${t}`}
-            onClick={() => setTab(t)}
+            aria-selected={tab === id}
+            data-testid={`tab-${id}`}
+            onClick={() => setTab(id)}
           >
-            {t[0]!.toUpperCase() + t.slice(1)}
+            {label}
           </button>
         ))}
       </nav>
@@ -256,15 +317,105 @@ export function RoomView(props: {
           </div>
         </section>
       )}
+      {tab === "collaboration" && (
+        <Suspense fallback={<p className="muted">Loading inbox, decisions and memory…</p>}>
+          <CollaborationView
+            room={open.room}
+            selfId={me.participant_id}
+            canPropose={me.role !== "OBSERVER"}
+            canPosition={me.role !== "OBSERVER"}
+            canDecide={me.role === "LEAD"}
+            nameOf={names}
+            onEvent={onEvent}
+          />
+        </Suspense>
+      )}
+      {tab === "messages" && (
+        <Suspense fallback={<p className="muted">Loading messages…</p>}>
+          <MessagesView
+            room={open.room}
+            participants={participants}
+            tasks={tasks}
+            selfId={me.participant_id}
+            nameOf={names}
+            onEvent={onEvent}
+          />
+        </Suspense>
+      )}
+      {tab === "setup" && maySetup && (
+        <Suspense fallback={<p className="muted">Loading project setup…</p>}>
+          <RoomSetupView
+            room={open.room}
+            roomId={roomId}
+            participants={participants}
+            leadParticipantId={room.lead_participant_id}
+            mayImport={mayImport}
+            mayInvite={mayInvite}
+            mayAppointLead={mayAppointLead}
+            maySetHealth={maySetHealth}
+            settings={room.settings}
+            onEvent={onEvent}
+          />
+        </Suspense>
+      )}
+      {tab === "owner-controls" && me.authority === "OWNER" && (
+        <Suspense fallback={<p className="muted">Loading owner controls…</p>}>
+          <OwnerControlsView
+            room={open.room}
+            roomName={room.name}
+            participants={participants}
+            selfId={me.participant_id}
+            leadParticipantId={room.lead_participant_id}
+            roomStatus={room.status}
+            settings={room.settings}
+            onEvent={onEvent}
+            onRefresh={reload}
+          />
+        </Suspense>
+      )}
       {tab === "files" && (
         <Suspense fallback={<p className="muted">Loading editor…</p>}>
           <FilesView
             room={open.room}
             onEvent={onEvent}
             presence={presence}
+            intents={intents}
             selfId={me.participant_id}
             nameOf={names}
+            purposeOf={purposeOf}
           />
+        </Suspense>
+      )}
+      {tab === "changes" && (
+        <Suspense fallback={<p className="muted">Loading changes…</p>}>
+          <ChangesView
+            room={open.room}
+            participantId={me.participant_id}
+            mayDecideHolds={me.authority === "OWNER" || me.role === "LEAD"}
+            mayManageConflicts={me.authority === "OWNER" || me.role === "LEAD"}
+            nameOf={names}
+            onEvent={onEvent}
+          />
+        </Suspense>
+      )}
+      {tab === "delivery" && (
+        <Suspense fallback={<p className="muted">Loading review and export…</p>}>
+          <>
+            <TaskReviewView
+              room={open.room}
+              participantId={me.participant_id}
+              mayManageTasks={
+                me.authority === "OWNER" || me.authority === "ADMIN" || me.role === "LEAD"
+              }
+              onEvent={onEvent}
+            />
+            <CheckpointExportView
+              room={open.room}
+              mayManageDelivery={me.authority === "OWNER" || me.role === "LEAD"}
+              nameOf={names}
+              onEvent={onEvent}
+            />
+          </>
         </Suspense>
       )}
       {tab === "activity" && (

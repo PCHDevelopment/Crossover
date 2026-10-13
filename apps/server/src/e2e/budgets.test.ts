@@ -91,26 +91,26 @@ async function newRoom(settings: Record<string, unknown>) {
       owner,
     ),
   );
-  const dev = (
-    await ok(
-      await post(`/v1/rooms/${roomId}/join`, {
-        token: invite.one_time.token,
-        manifest: {
-          name: "Dev",
-          operator: { name: "P", contact: "p@example.com" },
-          vendor: "Anthropic",
-          model: "m",
-          client: "mcp",
-          client_version: "1",
-          description: "d",
-        },
-      }),
-      201,
-    )
-  ).tokens.access_token as string;
+  const joined = await ok(
+    await post(`/v1/rooms/${roomId}/join`, {
+      token: invite.one_time.token,
+      manifest: {
+        name: "Dev",
+        operator: { name: "P", contact: "p@example.com" },
+        vendor: "Anthropic",
+        model: "m",
+        client: "mcp",
+        client_version: "1",
+        description: "d",
+      },
+    }),
+    201,
+  );
+  const dev = joined.tokens.access_token as string;
+  const devParticipantId = joined.participant_id as string;
   const call = (token: string, method: string, params: Record<string, unknown> = {}) =>
     post(`/v1/rooms/${roomId}/commands`, envelope(method, params), token);
-  return { roomId, owner, dev, call };
+  return { roomId, owner, dev, devParticipantId, call };
 }
 
 describe("agent budgets over HTTP", () => {
@@ -144,5 +144,65 @@ describe("agent budgets over HTTP", () => {
     const r = await newRoom({});
     for (let i = 0; i < 10; i++) await ok(await r.call(r.dev, "messages.send", { body: `m${i}` }));
     expect((await r.call(r.dev, "messages.send", { body: "eleventh" })).statusCode).toBe(429);
+  });
+
+  it("owners can configure room and agent overrides through the registered API", async () => {
+    const r = await newRoom({ budgets: { messages: 6 }, keep: "settings" });
+    await ok(
+      await r.call(r.owner, "budgets.set", {
+        budgets: { commands: null, messages: 1 },
+      }),
+    );
+    await ok(
+      await r.call(r.owner, "budgets.set", {
+        participant_id: r.devParticipantId,
+        budgets: { messages: 2 },
+      }),
+    );
+    await ok(await r.call(r.dev, "messages.send", { body: "counted" }));
+    expect((await r.call(r.dev, "messages.send", { body: "over the room cap" })).statusCode).toBe(
+      429,
+    );
+
+    const state = await ok(await r.call(r.owner, "budgets.get"));
+    expect(state.response).toMatchObject({
+      room_budgets: { commands: null, messages: 1 },
+      agents: [
+        {
+          participant_id: r.devParticipantId,
+          budgets: { messages: 2 },
+          effective: { commands: null, messages: 1 },
+          usage: { messages: 2 },
+        },
+      ],
+    });
+    const settings = (
+      await db.pool.query<{ settings: Record<string, unknown> }>(
+        "SELECT settings FROM rooms WHERE id = $1",
+        [r.roomId],
+      )
+    ).rows[0]!.settings;
+    expect(settings).toMatchObject({ keep: "settings", budgets: { commands: null, messages: 1 } });
+
+    const events = (await ok(await r.call(r.owner, "room.events.list", { limit: 500 }))).response
+      .events as { type: string; payload: Record<string, unknown> }[];
+    expect(events.filter((event) => event.type === "room.budgets_changed")).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          payload: {
+            participant_id: null,
+            old_budgets: { messages: 6 },
+            new_budgets: { commands: null, messages: 1 },
+          },
+        }),
+        expect.objectContaining({
+          payload: {
+            participant_id: r.devParticipantId,
+            old_budgets: {},
+            new_budgets: { messages: 2 },
+          },
+        }),
+      ]),
+    );
   });
 });

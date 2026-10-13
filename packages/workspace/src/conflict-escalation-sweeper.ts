@@ -1,5 +1,5 @@
 import type { Pool } from "@crossover/db";
-import type { Dispatcher } from "@crossover/kernel";
+import type { Dispatcher, EmittedEvent } from "@crossover/kernel";
 import { escalateOpenConflict } from "./conflict-actions.js";
 
 const AGENT_ESCALATION_MS = 10 * 60 * 1000;
@@ -89,10 +89,17 @@ export async function sweepConflictEscalations(
               conflict.created_at.getTime() > cutoff.getTime()
             )
               return { result: 0, events: [] };
-            const event = await escalateOpenConflict(client, room_id, conflict, "timeout");
+            const inboxEvents: (EmittedEvent & { actor_id: string })[] = [];
+            const event = await escalateOpenConflict(
+              client,
+              room_id,
+              conflict,
+              "timeout",
+              inboxEvents,
+            );
             return {
               result: event ? 1 : 0,
-              events: event ? [{ ...event, actor_id: "system" }] : [],
+              events: event ? [{ ...event, actor_id: "system" }, ...inboxEvents] : [],
             };
           },
           { whenFrozen: () => 0 }, // a frozen room's conflicts wait for it to resume

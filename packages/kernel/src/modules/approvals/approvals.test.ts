@@ -147,10 +147,30 @@ describe("approval gates (§22.2, T905)", () => {
     expect(await s.inbox(s.admin)).toEqual(["APPROVAL"]);
     expect(await s.inbox(s.lead)).toEqual([]);
     expect(await s.inbox(s.dev)).toEqual([]);
+    const { rows: notifications } = await pool.query<{
+      payload: { recipient_id: string; item_id: string; kind: string };
+    }>("SELECT payload FROM events WHERE room_id = $1 AND type = 'inbox.delivered'", [s.room]);
+    expect(notifications.map((row) => row.payload)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          recipient_id: s.owner.participant_id,
+          item_id: expect.stringMatching(/^inbox_/),
+          kind: "APPROVAL",
+        }),
+        expect.objectContaining({
+          recipient_id: s.admin.participant_id,
+          item_id: expect.stringMatching(/^inbox_/),
+          kind: "APPROVAL",
+        }),
+      ]),
+    );
+    for (const row of notifications)
+      expect(Object.keys(row.payload).sort()).toEqual(["item_id", "kind", "recipient_id"]);
 
     await failsWith(s.decide(s.lead, id), "FORBIDDEN");
     expect(await s.messages()).toEqual([]);
     const out = await s.decide(s.admin, id);
+    expect(out.events.map((event) => event.type)).toContain("inbox.delivered");
     expect(out.response).toMatchObject({
       approval: { status: "APPROVED", decided_by: s.admin.participant_id },
     });

@@ -1,4 +1,5 @@
 import { execFile, spawn } from "node:child_process";
+import { request as httpRequest } from "node:http";
 import { isAbsolute } from "node:path";
 import type { Readable } from "node:stream";
 import {
@@ -9,8 +10,10 @@ import {
 import { CrossoverError, isId } from "@crossover/protocol";
 import { normalizePath } from "./path.js";
 import { ignoredPrunedDirectories } from "./ignore.js";
+import { SANDBOX_VCPU_COUNT } from "./execution.js";
 import type {
   ExecutionDriver,
+  SandboxCpuUsage,
   SandboxLimits,
   SandboxResources,
   SandboxExecOutcome,
@@ -28,9 +31,126 @@ import { SANDBOX_SNAPSHOT_HELPER } from "./sandbox-snapshot-helper.js";
 
 const DEFAULT_IMAGE = "node:22-bookworm-slim";
 const DEFAULT_GIT_FETCHER_IMAGE = "crossover-git-fetcher:latest";
-const GIT_NETWORK = "crossover-git";
+export const DEFAULT_GIT_INTERNAL_NETWORK = "crossover-git";
 const FETCH_TIMEOUT_MS = 4 * 60 * 1000;
 const MAX_SNAPSHOT_OUTPUT_BYTES = 96 * 1024 * 1024;
+const DOCKER_API_REQUEST_TIMEOUT_MS = 5_000;
+const MAX_DOCKER_API_RESPONSE_BYTES = 1024 * 1024;
+
+function extractJsonObject(source: string, property: string): string {
+  const propertyMatch = new RegExp(`"${property}"\\s*:\\s*\\{`).exec(source);
+  if (!propertyMatch) throw new Error(`Docker stats response is missing ${property}`);
+
+  const objectStart = propertyMatch.index + propertyMatch[0].lastIndexOf("{");
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = objectStart; index < source.length; index += 1) {
+    const character = source[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') inString = false;
+      continue;
+    }
+    if (character === '"') inString = true;
+    else if (character === "{") depth += 1;
+    else if (character === "}" && --depth === 0) return source.slice(objectStart, index + 1);
+  }
+  throw new Error(`Docker stats response has an incomplete ${property} object`);
+}
+
+export function parseDockerCpuUsageUsec(statsJson: string): bigint {
+  try {
+    JSON.parse(statsJson);
+  } catch {
+    throw new Error("ERROR: Docker returned invalid container stats JSON");
+  }
+
+  const cpuUsage = extractJsonObject(extractJsonObject(statsJson, "cpu_stats"), "cpu_usage");
+  const totalUsage = /"total_usage"\s*:\s*(0|[1-9][0-9]*)/.exec(cpuUsage)?.[1];
+  if (totalUsage === undefined)
+    throw new Error("ERROR: Docker stats response is missing CPU total_usage");
+  return BigInt(totalUsage) / 1_000n;
+}
+
+function dockerSocketPath(configuredPath?: string): string {
+  if (configuredPath) {
+    if (!isAbsolute(configuredPath) || configuredPath.includes("\0"))
+      throw new Error("Docker CPU stats socket path must be absolute");
+    return configuredPath;
+  }
+
+  const dockerHost = process.env["DOCKER_HOST"] ?? "unix:///var/run/docker.sock";
+  if (!dockerHost.startsWith("unix://"))
+    throw new Error("Docker CPU stats require DOCKER_HOST to use a Unix socket");
+  const path = dockerHost.slice("unix://".length);
+  if (!isAbsolute(path) || path.includes("\0"))
+    throw new Error("Docker CPU stats require an absolute Unix socket path");
+  return path;
+}
+
+function requestDockerApi(socketPath: string, path: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let responseBytes = 0;
+    const chunks: Buffer[] = [];
+    const request = httpRequest(
+      { socketPath, path, method: "GET", timeout: DOCKER_API_REQUEST_TIMEOUT_MS },
+      (response) => {
+        response.on("data", (chunk: Buffer | string) => {
+          const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          responseBytes += buffer.length;
+          if (responseBytes > MAX_DOCKER_API_RESPONSE_BYTES) {
+            request.destroy(new Error("Docker API response exceeded the size limit"));
+            return;
+          }
+          chunks.push(buffer);
+        });
+        response.on("end", () => {
+          const body = Buffer.concat(chunks).toString("utf8");
+          if (
+            response.statusCode === undefined ||
+            response.statusCode < 200 ||
+            response.statusCode >= 300
+          ) {
+            reject(
+              new Error(`Docker API ${path} returned HTTP ${response.statusCode ?? "unknown"}`),
+            );
+            return;
+          }
+          resolve(body);
+        });
+        response.on("error", reject);
+      },
+    );
+    request.on("timeout", () => request.destroy(new Error("Docker API request timed out")));
+    request.on("error", reject);
+    request.end();
+  });
+}
+
+async function readDockerCpuUsageUsec(containerRef: string, socketPath: string): Promise<bigint> {
+  const versionBody = await requestDockerApi(socketPath, "/version");
+  let apiVersion: unknown;
+  try {
+    apiVersion = (JSON.parse(versionBody) as { ApiVersion?: unknown }).ApiVersion;
+  } catch {
+    throw new Error("ERROR: Docker returned invalid API version JSON");
+  }
+  if (typeof apiVersion !== "string" || !/^\d+\.\d+$/.test(apiVersion))
+    throw new Error("ERROR: Docker returned an invalid API version");
+
+  const [majorText, minorText] = apiVersion.split(".");
+  const supportsOneShot =
+    Number(majorText) > 1 || (Number(majorText) === 1 && Number(minorText) >= 41);
+  const oneShot = supportsOneShot ? "&one-shot=true" : "";
+  const encodedContainerRef = encodeURIComponent(containerRef);
+  const stats = await requestDockerApi(
+    socketPath,
+    `/v${apiVersion}/containers/${encodedContainerRef}/stats?stream=false${oneShot}`,
+  );
+  return parseDockerCpuUsageUsec(stats);
+}
 
 export interface DockerInvocationOptions {
   timeoutMs?: number;
@@ -54,6 +174,8 @@ export type DockerInvoker = (
 
 export interface DockerExecutionDriverOptions {
   dockerBinary?: string;
+  /** Docker Engine Unix socket used for host-side resource stats. */
+  dockerSocketPath?: string;
   image?: string;
   /** Required with hard enforcement; passed directly as Docker --opt values. */
   volumeDriver?: string;
@@ -67,6 +189,8 @@ export interface DockerExecutionDriverOptions {
   egressProxySecret?: string;
   /** Name of the server container attached to the private crossover-git network. */
   gitInternalContainer?: string;
+  /** Name of the private network shared by the server and one-shot fetchers. */
+  gitInternalNetwork?: string;
   gitInternalPort?: number;
   /** HMAC secret for five-minute, sandbox-scoped workspace fetch credentials. */
   gitInternalTokenSecret?: string;
@@ -206,13 +330,16 @@ export class DockerExecutionDriver implements ExecutionDriver {
   private readonly egressProxyPort: number;
   private readonly egressProxySecret: string | undefined;
   private readonly gitInternalContainer: string | undefined;
+  private readonly gitInternalNetwork: string;
   private readonly gitInternalPort: number;
   private readonly gitInternalTokenSecret: string | undefined;
   private readonly gitFetcherImage: string;
   private readonly invoke: DockerInvoker;
+  private readonly dockerStatsSocketPath: string | undefined;
 
   constructor(options: DockerExecutionDriverOptions = {}) {
     this.dockerBinary = options.dockerBinary ?? "docker";
+    this.dockerStatsSocketPath = options.dockerSocketPath;
     this.image = options.image ?? DEFAULT_IMAGE;
     this.volumeDriver = options.volumeDriver?.trim() || undefined;
     this.volumeOptions = options.volumeOptions ?? {};
@@ -255,6 +382,10 @@ export class DockerExecutionDriver implements ExecutionDriver {
       !/^[a-z0-9][a-z0-9_.-]*$/.test(this.gitInternalContainer)
     ) {
       throw new Error("GIT_INTERNAL_CONTAINER must be a Docker container name");
+    }
+    this.gitInternalNetwork = options.gitInternalNetwork?.trim() || DEFAULT_GIT_INTERNAL_NETWORK;
+    if (!/^[a-z0-9][a-z0-9_.-]{0,127}$/.test(this.gitInternalNetwork)) {
+      throw new Error("GIT_INTERNAL_NETWORK must be a Docker network name");
     }
     if (
       options.gitInternalPort !== undefined &&
@@ -327,6 +458,53 @@ export class DockerExecutionDriver implements ExecutionDriver {
     } catch (error) {
       if (!(await this.inspectContainer(input.resources.container_ref))?.running) throw error;
     }
+  }
+
+  /** Read cumulative CPU time from Docker's host-side stats API, keyed by container generation. */
+  async cpuUsage(input: {
+    sandbox_id: string;
+    resources: SandboxResources;
+  }): Promise<SandboxCpuUsage> {
+    this.assertResources(input.sandbox_id, input.resources);
+    const inspected = await this.invoke([
+      "container",
+      "inspect",
+      "--format",
+      "{{.State.Running}}|{{.State.StartedAt}}",
+      input.resources.container_ref,
+    ]);
+    if (inspected.code !== 0)
+      throw new Error(`ERROR: Docker CPU inspect failed: ${inspected.stderr.trim()}`);
+    const [running, generation] = inspected.stdout.trim().split("|");
+    if (running !== "true" || !generation)
+      throw new Error(`ERROR: Docker sandbox ${input.sandbox_id} is not running for CPU sampling`);
+
+    let usage_usec: bigint;
+    try {
+      usage_usec = await readDockerCpuUsageUsec(
+        input.resources.container_ref,
+        dockerSocketPath(this.dockerStatsSocketPath),
+      );
+    } catch (error) {
+      throw new Error(
+        `ERROR: Docker host CPU stats read failed: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
+      );
+    }
+
+    const afterStats = await this.invoke([
+      "container",
+      "inspect",
+      "--format",
+      "{{.State.Running}}|{{.State.StartedAt}}",
+      input.resources.container_ref,
+    ]);
+    if (afterStats.code !== 0)
+      throw new Error(`ERROR: Docker CPU generation check failed: ${afterStats.stderr.trim()}`);
+    const [stillRunning, currentGeneration] = afterStats.stdout.trim().split("|");
+    if (stillRunning !== "true" || currentGeneration !== generation)
+      throw new Error(`ERROR: Docker sandbox ${input.sandbox_id} changed during CPU sampling`);
+    return { usage_usec, generation };
   }
 
   /** Run a shell command in a fresh process group and capture stdout and stderr separately. */
@@ -561,7 +739,7 @@ export class DockerExecutionDriver implements ExecutionDriver {
       `crossover.room=${input.room_id}`,
       "--label",
       `crossover.sandbox=${input.sandbox_id}`,
-      `--network=${GIT_NETWORK}`,
+      `--network=${this.gitInternalNetwork}`,
       "--read-only",
       "--user=1000:1000",
       "--cap-drop=ALL",
@@ -1176,7 +1354,7 @@ export class DockerExecutionDriver implements ExecutionDriver {
       "--pids-limit=256",
       "--env",
       "HOME=/tmp",
-      "--cpus=2",
+      `--cpus=${SANDBOX_VCPU_COUNT}`,
       "--memory=4g",
       "--tmpfs",
       "/tmp:rw,nosuid,size=512m",
@@ -1298,7 +1476,14 @@ export class DockerExecutionDriver implements ExecutionDriver {
     if (!inspected) {
       try {
         await this.mustSucceed(
-          ["network", "create", "--internal", "--label", "crossover.git=true", GIT_NETWORK],
+          [
+            "network",
+            "create",
+            "--internal",
+            "--label",
+            "crossover.git=true",
+            this.gitInternalNetwork,
+          ],
           "ERROR: internal Git network creation failed",
         );
       } catch (error) {
@@ -1307,11 +1492,11 @@ export class DockerExecutionDriver implements ExecutionDriver {
       inspected = await this.inspectGitNetwork();
     }
     if (!inspected?.internal)
-      throw new Error(`ERROR: Docker network ${GIT_NETWORK} is not internal`);
+      throw new Error(`ERROR: Docker network ${this.gitInternalNetwork} is not internal`);
     if (inspected.serverConnected) return;
     try {
       await this.mustSucceed(
-        ["network", "connect", GIT_NETWORK, this.gitInternalContainer!],
+        ["network", "connect", this.gitInternalNetwork, this.gitInternalContainer!],
         "ERROR: internal Git server network connection failed",
       );
     } catch (error) {
@@ -1328,7 +1513,7 @@ export class DockerExecutionDriver implements ExecutionDriver {
       "inspect",
       "--format",
       "{{.Internal}}|{{json .Containers}}",
-      GIT_NETWORK,
+      this.gitInternalNetwork,
     ]);
     if (inspected.code !== 0) {
       const message = inspected.stderr.toLowerCase();
@@ -1450,7 +1635,13 @@ export class DockerExecutionDriver implements ExecutionDriver {
     if (separator < 0) throw new Error("ERROR: Docker returned invalid volume inspection data");
     try {
       const options: unknown = JSON.parse(inspected.stdout.slice(separator + 1).trim()) as unknown;
-      if (!options || typeof options !== "object" || Array.isArray(options))
+      if (options === null) {
+        return {
+          driver: inspected.stdout.slice(0, separator).trim(),
+          options: {},
+        };
+      }
+      if (typeof options !== "object" || Array.isArray(options))
         throw new Error("volume options must be an object");
       return {
         driver: inspected.stdout.slice(0, separator).trim(),

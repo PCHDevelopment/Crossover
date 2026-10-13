@@ -1,7 +1,8 @@
 import { createPool, migrate } from "@crossover/db";
-import { assertGitVersion } from "@crossover/workspace";
+import { assertGitVersion, DEFAULT_GIT_INTERNAL_NETWORK } from "@crossover/workspace";
 import { composeServer } from "./compose.js";
 import { loadConfig } from "./config.js";
+import { resolveGitInternalListenHost } from "./git-internal-listener.js";
 
 /**
  * Start Crossover: check Git (≥ 2.40), apply pending migrations, compose, listen. SIGINT and
@@ -22,8 +23,13 @@ async function main(): Promise<void> {
 
   const server = await composeServer(config);
   if (config.gitInternalTokenSecret) {
+    const gitInternalHost = await resolveGitInternalListenHost(
+      config.gitInternalHost!,
+      config.gitInternalContainer!,
+      config.gitInternalNetwork ?? DEFAULT_GIT_INTERNAL_NETWORK,
+    );
     const address = await server.gitApp.listen({
-      host: config.gitInternalHost!,
+      host: gitInternalHost,
       port: config.gitInternalPort ?? 8081,
     });
     console.warn(`Internal Git listener bound on ${address}; do not publish this port`);

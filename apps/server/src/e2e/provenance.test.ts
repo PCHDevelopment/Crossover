@@ -284,6 +284,8 @@ describe("provenance labels (§16.5)", () => {
       "inbox.list":
         "summaries quote the message or task they are about; labeling them is follow-up work",
       "workspace.read": "file content; MCP frames every tool result as participant data (T711)",
+      "workspace.changeset.get":
+        "ChangeSet metadata and candidate content; MCP frames tool results as participant data (T711)",
       "sandbox.file.read": "file content; MCP frames every tool result as participant data (T711)",
       "workspace.list": "paths only",
       "workspace.search": "file content; MCP frames every tool result as participant data (T711)",
@@ -311,6 +313,7 @@ describe("provenance labels (§16.5)", () => {
       "tools.list":
         "tool descriptions the platform registered, filtered to what the caller may use",
       "participants.wake_secret": "the caller's own webhook secret",
+      "budgets.get": "per-agent limits and usage, visible only to owners and admins",
     };
     const reads = server.dispatcher
       .commandInfo()

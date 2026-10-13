@@ -84,3 +84,23 @@ pnpm check             # format, lint, typecheck, test
 pnpm build && DEV_LOGIN=true WEB_ROOT=apps/web/dist/app pnpm --filter @crossover/server start   # migrate, serve the API and the web app on :8080
 pnpm --filter @crossover/web dev   # the web app with hot reload on :5173, proxying /v1 to :8080
 ```
+
+To run the server image with the sandbox Git topology, create the private network and fetcher image,
+then set `GIT_INTERNAL_TOKEN_SECRET` and `DOCKER_GID` in `.env`. Generate the secret with
+`openssl rand -hex 32` and read the socket group with `stat -c '%g' /var/run/docker.sock`.
+
+```sh
+docker network create --internal crossover-git
+docker build -f apps/git-fetcher/Dockerfile -t crossover-git-fetcher:latest .
+stat -c '%g' /var/run/docker.sock   # Set this numeric group ID as DOCKER_GID in .env.
+openssl rand -hex 32                 # Set this value as GIT_INTERNAL_TOKEN_SECRET in .env.
+workspace_root="${CROSSOVER_WORKSPACE_ROOT:-$PWD/.data/workspaces}"
+sudo install -d -o 1000 -g 1000 -m 0750 "$workspace_root"
+docker compose --profile server up --build -d
+```
+
+The server runs as the image's non-root `node` user, with `DOCKER_GID` added for socket access.
+`CROSSOVER_WORKSPACE_ROOT` is mounted at the same absolute path inside and outside the container so
+the host Docker daemon can mount canonical repositories into sandboxes.
+The Compose server is for development and demos on a single host: sandboxes share the app host
+through its Docker socket, unlike the separate sandbox hosts described in ARCHITECTURE §4.1.

@@ -30,7 +30,8 @@ export class LeaseRenewer {
   private readonly onLost: (roomId: string) => void;
   private readonly onError: (error: unknown, roomId: string) => void;
   private timer: ReturnType<typeof setInterval> | undefined;
-  private running: Promise<void> | undefined;
+  private running: { generation: number; promise: Promise<void> } | undefined;
+  private generation = 0;
 
   constructor(options: LeaseRenewerOptions) {
     this.leases = options.leases;
@@ -48,7 +49,10 @@ export class LeaseRenewer {
   /** Begin renewing every `intervalMs`. Calling it twice is harmless. */
   start(): void {
     if (this.timer) return;
-    this.timer = setInterval(() => void this.tick(), this.intervalMs);
+    const generation = this.generation;
+    this.timer = setInterval(() => {
+      if (generation === this.generation) void this.tick();
+    }, this.intervalMs);
     this.timer.unref(); // never keeps the process alive on its own
   }
 
@@ -57,17 +61,14 @@ export class LeaseRenewer {
    * call wait for it instead of starting another.
    */
   tick(): Promise<void> {
-    this.running ??= this.renewAll().finally(() => {
-      this.running = undefined;
-    });
-    return this.running;
+    return this.tickGeneration(this.generation);
   }
 
-  /** Stop the loop and wait for a tick in progress. Leases stay held. */
+  /** Stop scheduling ticks and cancel queued renewals. Leases stay held until close(). */
   async stop(): Promise<void> {
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
-    await this.running;
+    this.generation++;
   }
 
   /** Shutdown: stop, then release every lease (§19). */
@@ -76,18 +77,34 @@ export class LeaseRenewer {
     await this.leases.releaseAll();
   }
 
-  private async renewAll(): Promise<void> {
-    await Promise.all(this.leases.heldRooms().map((roomId) => this.renewOne(roomId)));
+  private tickGeneration(generation: number): Promise<void> {
+    if (generation !== this.generation) return Promise.resolve();
+    if (this.running?.generation === generation) return this.running.promise;
+    const promise = this.renewAll(generation).finally(() => {
+      if (this.running?.promise === promise) this.running = undefined;
+    });
+    this.running = { generation, promise };
+    return promise;
   }
 
-  private async renewOne(roomId: string): Promise<void> {
+  private async renewAll(generation: number): Promise<void> {
+    await Promise.all(this.leases.heldRooms().map((roomId) => this.renewOne(roomId, generation)));
+  }
+
+  private async renewOne(roomId: string, generation: number): Promise<void> {
+    if (generation !== this.generation) return;
     try {
-      const kept = await this.actors.get(roomId).submit(() => this.leases.renew(roomId));
+      const kept = await this.actors
+        .get(roomId)
+        .submit(() => (generation === this.generation ? this.leases.renew(roomId) : undefined));
+      if (kept === undefined || generation !== this.generation) return;
       if (kept) return;
     } catch (error) {
+      if (generation !== this.generation) return;
       this.onError(error, roomId);
       return;
     }
+    if (generation !== this.generation) return;
     // Lost, or already released by a command's own STALE_FENCE handling.
     try {
       this.onLost(roomId);

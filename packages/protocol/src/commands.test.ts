@@ -17,6 +17,8 @@ const CATALOG = `
   room.events.list
   room.set_egress_allowlist
   room.set_protected_paths
+  room.set_health
+  budgets.get / budgets.set
   events.redact
   room.set_lead
   room.transfer_lead / room.accept_lead
@@ -92,6 +94,7 @@ const READ_ONLY = [
   "room.events.list",
   "participants.list",
   "participants.get",
+  "budgets.get",
   "participants.wake_secret",
   "presence.update",
   "presence.set_intent",
@@ -144,7 +147,7 @@ const valid = (extra: Record<string, unknown> = {}) => ({
 
 describe("METHODS", () => {
   it("contains every §16.1 method plus room.create, and nothing else", () => {
-    expect(catalog).toHaveLength(100);
+    expect(catalog).toHaveLength(103);
     expect([...METHOD_NAMES].sort()).toEqual([...catalog].sort());
   });
 
@@ -155,7 +158,7 @@ describe("METHODS", () => {
   it("marks exactly the documented methods read-only", () => {
     const readOnly = METHOD_NAMES.filter((m) => !isMutatingMethod(m));
     expect([...readOnly].sort()).toEqual([...READ_ONLY].sort());
-    expect(Object.keys(METHODS).length - readOnly.length).toBe(60);
+    expect(Object.keys(METHODS).length - readOnly.length).toBe(62);
   });
 
   it("isMutatingMethod takes any string and is false for unknown methods", () => {

@@ -5,6 +5,7 @@ export {
   RoomSocket,
   Subscription,
   type PresenceRecord,
+  type PresenceIntent,
   type PresenceUpdate,
   type SubscribeOptions,
   type WebSocketCtor,

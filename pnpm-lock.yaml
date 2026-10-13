@@ -87,10 +87,16 @@ importers:
       fastify:
         specifier: ^5.12.5
         version: 5.12.5
+      jose:
+        specifier: 6.2.12
+        version: 6.2.12
       zod:
         specifier: ^4.6.5
         version: 4.6.5
     devDependencies:
+      '@modelcontextprotocol/sdk':
+        specifier: ^1.32.1
+        version: 1.32.1(zod@4.6.5)
       '@types/ws':
         specifier: ^8.18.2
         version: 8.18.2
@@ -109,6 +115,9 @@ importers:
       '@crossover/sdk':
         specifier: workspace:*
         version: link:../../packages/sdk
+      '@crossover/workspace':
+        specifier: workspace:*
+        version: link:../../packages/workspace
       monaco-editor:
         specifier: ^0.57.0
         version: 0.57.0
@@ -165,6 +174,9 @@ importers:
       fastify:
         specifier: ^5.12.5
         version: 5.12.5
+      ioredis:
+        specifier: ^6.0.0
+        version: 6.0.0
       ws:
         specifier: ^8.22.0
         version: 8.22.0

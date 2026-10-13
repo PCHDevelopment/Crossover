@@ -1032,7 +1032,11 @@ export class Dispatcher {
         : envelope.method;
     try {
       const queued = await withTransaction(this.pool, async (client) => {
-        const { approval, created } = await queueApproval(client, principal, {
+        const {
+          approval,
+          created,
+          events: inboxEvents,
+        } = await queueApproval(client, principal, {
           method: envelope.method,
           params,
           idempotency_key: idempotency.key,
@@ -1055,6 +1059,15 @@ export class Dispatcher {
                     expires_at: approval.expires_at,
                   },
                 },
+                ...inboxEvents.map((event) => ({
+                  type: event.type,
+                  actor_id: event.actor_id ?? "system",
+                  causation_id: envelope.id,
+                  ...(event.payload !== undefined ? { payload: event.payload } : {}),
+                  ...(event.schema_version !== undefined
+                    ? { schema_version: event.schema_version }
+                    : {}),
+                })),
               ],
               token,
             )
@@ -1159,7 +1172,8 @@ export class Dispatcher {
   /**
    * Count the command against the agent's budgets (§22.3) and refuse it with `BUDGET_EXCEEDED`
    * and `retry_after` (seconds) when one is used up. Agents only; the limits are the defaults
-   * unless the room's `settings.budgets` or the participant's `budgets` say otherwise. The first
+   * unless the room's `settings.budgets` or the participant's `budgets` override them. When both
+   * have a finite value, the tighter limit applies. The first
    * refusal of a window is also recorded as `budget.exceeded`, so a flood of refused calls
    * writes one event, not one each. If the limiter or its overrides can't be read, the command
    * goes ahead.

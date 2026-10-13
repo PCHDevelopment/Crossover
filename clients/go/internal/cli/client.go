@@ -16,7 +16,10 @@ import (
 	"time"
 )
 
-const maxResponseBytes = 64 * 1024 * 1024
+const (
+	maxResponseBytes = 64 * 1024 * 1024
+	maxRetryAfter    = 60 * time.Second
+)
 
 func sleepContext(ctx context.Context, delay time.Duration) bool {
 	timer := time.NewTimer(delay)
@@ -103,11 +106,17 @@ func (c *apiClient) requestJSONRetryable(ctx context.Context, method, path, toke
 
 func parseRetryAfter(raw string) time.Duration {
 	if seconds, err := strconv.ParseFloat(strings.TrimSpace(raw), 64); err == nil && seconds >= 0 {
+		if seconds > maxRetryAfter.Seconds() {
+			return maxRetryAfter
+		}
 		return time.Duration(seconds * float64(time.Second))
 	}
 	if date, err := http.ParseTime(raw); err == nil {
 		delay := time.Until(date)
 		if delay > 0 {
+			if delay > maxRetryAfter {
+				return maxRetryAfter
+			}
 			return delay
 		}
 	}
@@ -149,7 +158,11 @@ func parseProtocolError(status int, data []byte) *cliError {
 	}
 	retryAfter := time.Duration(0)
 	if details.RetryAfter > 0 {
-		retryAfter = time.Duration(details.RetryAfter * float64(time.Second))
+		seconds := details.RetryAfter
+		if seconds > maxRetryAfter.Seconds() {
+			seconds = maxRetryAfter.Seconds()
+		}
+		retryAfter = time.Duration(seconds * float64(time.Second))
 	}
 	return &cliError{
 		exitCode: code, protocolCode: body.Error.Code, body: append([]byte(nil), data...),

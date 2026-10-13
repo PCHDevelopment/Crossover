@@ -13,6 +13,8 @@ import { normalizePath } from "./path.js";
 import { createSandboxFileChangesAccumulator } from "./sandbox-status.js";
 import type { Operation } from "./operations.js";
 import type { SandboxFileChanges } from "./sandbox-status.js";
+import { SandboxComputeBudgetMeter } from "./sandbox-compute-budget.js";
+import { SandboxComputeSweeper } from "./sandbox-compute-sweeper.js";
 
 const SANDBOX_IDLE_MS = 30 * 60 * 1000;
 const SWEEP_INTERVAL_MS = 60 * 1000;
@@ -21,6 +23,7 @@ const DESTROY_RETRY_MS = 60 * 1000;
 const HIBERNATION_RECOVERY_MS = 60 * 1000;
 const TRANSITION_POLL_MS = 10;
 const MAX_AUTO_SYNC_BYTES = 64 * 1024 * 1024;
+export const SANDBOX_VCPU_COUNT = 2;
 
 export type SandboxStatus =
   "CREATING" | "STARTING" | "RUNNING" | "HIBERNATING" | "HIBERNATED" | "DESTROYING" | "DESTROYED";
@@ -43,6 +46,13 @@ export interface SandboxExecProcess {
   cancel(reason: SandboxExecTermination): Promise<void>;
   /** Set when a reserved exec was cancelled before its driver process could start. */
   cancelled_by?: string;
+}
+
+export interface SandboxCpuUsage {
+  /** Cumulative cgroup CPU time, in microseconds. */
+  usage_usec: bigint;
+  /** Docker container start time; changes when its cgroup counter resets. */
+  generation: string;
 }
 
 export interface SandboxRecord {
@@ -154,6 +164,7 @@ export interface ExecutionDriver {
     timeoutMs: number;
     onOutput: (stream: "stdout" | "stderr", chunk: Buffer) => Promise<void>;
   }): Promise<SandboxExecProcess>;
+  cpuUsage?(input: { sandbox_id: string; resources: SandboxResources }): Promise<SandboxCpuUsage>;
   start(input: { sandbox_id: string; resources: SandboxResources }): Promise<void>;
   stop(input: { sandbox_id: string; resources: SandboxResources }): Promise<void>;
   restart?(input: { sandbox_id: string; resources: SandboxResources }): Promise<void>;
@@ -184,6 +195,8 @@ export interface ExecutionServiceOptions {
   ) => Promise<string[]>;
   /** Current room edit intents included in sandbox.behind. */
   listIntents?: (roomId: string) => Promise<EditIntent[]>;
+  computeBudgetMeter?: SandboxComputeBudgetMeter;
+  now?: () => Date;
 }
 
 export interface SandboxAdvanceEvent {
@@ -212,6 +225,9 @@ export class ExecutionService {
   private readonly idleMs: number;
   private readonly sweepIntervalMs: number;
   private readonly diskEnforcement: DiskEnforcementMode;
+  private readonly now: () => Date;
+  private readonly computeBudgetMeter: SandboxComputeBudgetMeter;
+  private readonly computeSweeper: SandboxComputeSweeper;
   private sweepTimer: NodeJS.Timeout | undefined;
   private readonly ensureLocks = new Map<string, Promise<void>>();
   private readonly activeExecs = new Map<
@@ -233,6 +249,22 @@ export class ExecutionService {
     this.idleMs = options.idleMs ?? SANDBOX_IDLE_MS;
     this.sweepIntervalMs = options.sweepIntervalMs ?? SWEEP_INTERVAL_MS;
     this.diskEnforcement = options.diskEnforcement ?? "soft";
+    this.now = options.now ?? (() => new Date());
+    this.computeBudgetMeter =
+      options.computeBudgetMeter ?? new SandboxComputeBudgetMeter(pool, this.now);
+    this.computeSweeper = new SandboxComputeSweeper({
+      pool,
+      meter: this.computeBudgetMeter,
+      readCpuUsage: this.driver.cpuUsage
+        ? (sandbox) =>
+            this.driver.cpuUsage!({
+              sandbox_id: sandbox.id,
+              resources: this.resources(sandbox),
+            })
+        : undefined,
+      hibernate: (roomId, participantId) => this.hibernateOne(roomId, participantId),
+      now: this.now,
+    });
     if (this.diskEnforcement === "soft" && !softEnforcementWarningLogged) {
       console.warn(
         "[execution] SANDBOX_DISK_ENFORCEMENT=soft; Docker quotas are disabled until T1006 adds volume usage checks",
@@ -277,7 +309,7 @@ export class ExecutionService {
   }
 
   supportsSandboxExec(): boolean {
-    return Boolean(this.driver.exec);
+    return Boolean(this.driver.exec && this.driver.cpuUsage);
   }
 
   /** Enqueue the latest canonical revision; one room worker coalesces bursts of commits. */
@@ -326,22 +358,36 @@ export class ExecutionService {
   }
 
   /** Reserve capacity before the command commits its started event. */
-  async reserveExec(roomId: string, participantId: string, execId: string): Promise<string> {
+  async reserveExec(
+    roomId: string,
+    participantId: string,
+    execId: string,
+    requestedTimeoutMs = 600_000,
+  ): Promise<{ sandbox_id: string; timeout_ms: number }> {
     return this.withSandboxLock(roomId, participantId, async (sandbox) => {
-      if (!this.driver.exec)
+      if (!this.driver.exec || !this.driver.cpuUsage)
         throw new CrossoverError(
           "UNAVAILABLE",
-          "Sandbox execution is not supported by this driver",
+          "Sandbox execution requires a cumulative CPU meter",
         );
       if (this.pendingExecs.has(execId) || this.activeExecs.has(execId))
         throw new CrossoverError("CONFLICT_VERSION", "Sandbox execution id is already reserved");
       this.assertExecCapacityFor(sandbox.id);
+      await this.computeSweeper.sample(sandbox);
+      const timeoutMs = await this.computeBudgetMeter.reserve({
+        room_id: roomId,
+        participant_id: participantId,
+        sandbox_id: sandbox.id,
+        exec_id: execId,
+        requested_timeout_ms: requestedTimeoutMs,
+        vcpus: SANDBOX_VCPU_COUNT,
+      });
       this.pendingExecs.set(execId, {
         room_id: roomId,
         participant_id: participantId,
         sandbox_id: sandbox.id,
       });
-      return sandbox.id;
+      return { sandbox_id: sandbox.id, timeout_ms: timeoutMs };
     });
   }
 
@@ -376,7 +422,10 @@ export class ExecutionService {
     const pending = this.pendingExecs.get(execId);
     if (!pending) return;
     await this.withEnsureLock(pending.room_id, pending.participant_id, async () => {
-      if (this.pendingExecs.get(execId) === pending) this.pendingExecs.delete(execId);
+      if (this.pendingExecs.get(execId) === pending) {
+        this.pendingExecs.delete(execId);
+        await this.computeBudgetMeter.release(execId);
+      }
     });
   }
 
@@ -414,6 +463,7 @@ export class ExecutionService {
 
       if (pending.reason !== undefined) {
         this.pendingExecs.delete(input.exec_id);
+        await this.computeBudgetMeter.release(input.exec_id);
         return {
           ...(pending.cancelled_by !== undefined ? { cancelled_by: pending.cancelled_by } : {}),
           finished: Promise.resolve({
@@ -426,11 +476,12 @@ export class ExecutionService {
       }
 
       const run = this.driver.exec;
-      if (!run || !sandbox.volume_ref || !sandbox.container_ref) {
+      if (!run || !this.driver.cpuUsage || !sandbox.volume_ref || !sandbox.container_ref) {
         this.pendingExecs.delete(input.exec_id);
+        await this.computeBudgetMeter.release(input.exec_id);
         throw new CrossoverError(
           "UNAVAILABLE",
-          "Sandbox execution is not supported by this driver",
+          "Sandbox execution requires a cumulative CPU meter",
         );
       }
       let process: SandboxExecProcess;
@@ -446,6 +497,7 @@ export class ExecutionService {
         });
       } catch (error) {
         this.pendingExecs.delete(input.exec_id);
+        await this.computeBudgetMeter.release(input.exec_id);
         throw error;
       }
       this.pendingExecs.delete(input.exec_id);
@@ -457,14 +509,20 @@ export class ExecutionService {
       });
       void process.finished
         .catch(() => undefined)
-        .then(() =>
-          this.withEnsureLock(input.room_id, input.participant_id, async () => {
+        .then(async () => {
+          try {
+            await this.computeSweeper.sample(sandbox);
+            await this.computeBudgetMeter.release(input.exec_id);
+          } catch (error) {
+            console.error("Failed to reconcile sandbox CPU usage", error);
+          }
+          return this.withEnsureLock(input.room_id, input.participant_id, async () => {
             const active = this.activeExecs.get(input.exec_id);
             if (active?.process === process) this.activeExecs.delete(input.exec_id);
             const head = await this.workspaceHead(input.room_id).catch(() => undefined);
             if (head) this.scheduleCanonicalAdvance(input.room_id, head.revision);
-          }),
-        )
+          });
+        })
         .catch((error: unknown) => console.error("Failed to clear completed sandbox exec", error));
       return process;
     });
@@ -1095,7 +1153,11 @@ export class ExecutionService {
       // Always start before handing a sandbox back; this also repairs a stale RUNNING row.
       await this.driver.start({ sandbox_id: sandbox.id, resources });
       const running = await this.recordRunning(sandbox.id, roomId, resources);
-      if (running) return running;
+      if (running) {
+        const active = normalizeSandbox(running);
+        if (this.driver.cpuUsage) await this.computeSweeper.sample(active);
+        return active;
+      }
 
       await this.throwIfDestroyed(sandbox.id, roomId, resources);
       sandbox = await this.claimForStart(roomId, participantId);
@@ -1388,6 +1450,9 @@ export class ExecutionService {
       void this.sweepCleanup().catch((error: unknown) =>
         console.error("[execution] sandbox cleanup sweep failed", error),
       );
+      void this.computeSweeper
+        .sweep(this.now())
+        .catch((error: unknown) => console.error("[execution] sandbox CPU sweep failed", error));
     }, this.sweepIntervalMs);
     this.sweepTimer.unref();
   }
@@ -1557,7 +1622,7 @@ export class ExecutionService {
 
       const resources = this.resources(sandbox);
       try {
-        await this.cancelSandboxExecs(sandbox.id, "sandbox_stopped", () =>
+        await this.cancelSandboxExecs(normalizeSandbox(sandbox), "sandbox_stopped", () =>
           this.driver.stop({ sandbox_id: sandbox.id, resources }),
         );
         const rowCount = await withTransaction(this.pool, async (client) => {
@@ -1610,13 +1675,17 @@ export class ExecutionService {
 
     const destroy = async (): Promise<boolean> => {
       const sandbox = claim.sandbox;
-      await this.cancelSandboxExecs(sandbox.id, "sandbox_stopped", () =>
-        this.driver.destroy({
-          sandbox_id: sandbox.id,
-          ...(sandbox.volume_ref && sandbox.container_ref
-            ? { resources: this.resources(sandbox) }
-            : {}),
-        }),
+      await this.cancelSandboxExecs(
+        sandbox,
+        "sandbox_stopped",
+        () =>
+          this.driver.destroy({
+            sandbox_id: sandbox.id,
+            ...(sandbox.volume_ref && sandbox.container_ref
+              ? { resources: this.resources(sandbox) }
+              : {}),
+          }),
+        false,
       );
       await withTransaction(this.pool, async (client) =>
         client.query(
@@ -1639,14 +1708,26 @@ export class ExecutionService {
   }
 
   private async cancelSandboxExecs(
-    sandboxId: string,
+    sandbox: SandboxRecord,
     reason: SandboxExecTermination,
     terminateSandbox?: () => Promise<void>,
+    failOnSample = true,
   ): Promise<void> {
-    const active = [...this.activeExecs.values()].filter((run) => run.sandbox_id === sandboxId);
+    const active = [...this.activeExecs.values()].filter((run) => run.sandbox_id === sandbox.id);
     const cancelling = active.map((run) => run.process.cancel(reason).catch(() => undefined));
-    await terminateSandbox?.();
     await Promise.all(cancelling);
+    if (sandbox.container_ref && this.driver.cpuUsage) {
+      try {
+        await this.computeSweeper.sample(sandbox);
+      } catch (error) {
+        if (failOnSample) throw error;
+        console.error("[execution] unable to sample sandbox CPU before destroy", {
+          sandbox_id: sandbox.id,
+          error,
+        });
+      }
+    }
+    await terminateSandbox?.();
     await Promise.all(active.map((run) => run.process.finished.catch(() => undefined)));
   }
 

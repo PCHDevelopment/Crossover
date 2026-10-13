@@ -7,6 +7,11 @@ import { BINARY_SIZE } from "./binary.js";
 import { git } from "./git.js";
 import { entries, pathSchema, snapshot } from "./reads.js";
 
+export const workspaceBlameParamsSchema = z.strictObject({
+  path: pathSchema(),
+  revision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
+});
+
 function invalid(path: string, reason: string): never {
   throw new CrossoverError("VALIDATION", `Cannot blame workspace path: ${path}`, {
     details: { path, reason },
@@ -21,10 +26,7 @@ export function registerWorkspaceBlame(dispatcher: Dispatcher): void {
     perPathAuthorize: true,
     mutating: false,
     view: "participant",
-    params: z.strictObject({
-      path: pathSchema(),
-      revision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
-    }),
+    params: workspaceBlameParamsSchema,
     execute: async (ctx, params) => {
       await ctx.authorize("workspace.read", { path: params.path });
       const ws = await snapshot(ctx, params.revision);

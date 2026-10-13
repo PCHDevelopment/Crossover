@@ -80,6 +80,7 @@ export async function postJson(
     try {
       res = await fetchImpl(url, {
         method: "POST",
+        credentials: "same-origin",
         headers: {
           "content-type": "application/json",
           ...(token ? { authorization: `Bearer ${token}` } : {}),
@@ -124,7 +125,10 @@ export async function getJson(
   url: string,
   token: string | undefined,
 ): Promise<unknown> {
-  const res = await fetchImpl(url, { headers: token ? { authorization: `Bearer ${token}` } : {} });
+  const res = await fetchImpl(url, {
+    credentials: "same-origin",
+    headers: token ? { authorization: `Bearer ${token}` } : {},
+  });
   const json: unknown = await res.json().catch(() => null);
   if (!res.ok) throw errorFromBody(json, res.status);
   return json;

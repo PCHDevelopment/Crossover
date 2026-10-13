@@ -28,6 +28,7 @@ export interface TokenOptions {
 export class TokenStore {
   private tokens: RoomTokens;
   private inflight: Promise<void> | undefined;
+  private cleared = false;
 
   constructor(
     tokens: string | RoomTokens,
@@ -44,7 +45,16 @@ export class TokenStore {
   }
 
   get canRefresh(): boolean {
-    return typeof this.tokens.refresh_token === "string" && this.tokens.refresh_token !== "";
+    return (
+      !this.cleared &&
+      typeof this.tokens.refresh_token === "string" &&
+      this.tokens.refresh_token !== ""
+    );
+  }
+
+  clear(): void {
+    this.cleared = true;
+    this.tokens = { access_token: "" };
   }
 
   /**
@@ -52,6 +62,7 @@ export class TokenStore {
    * token is now held (this call's or another's refresh), false when it can't be renewed.
    */
   async refreshAfter(failed: string): Promise<boolean> {
+    if (this.cleared) return false;
     if (this.tokens.access_token !== failed) return true; // already renewed by someone else
     if (!this.canRefresh) return false;
     this.inflight ??= this.doRefresh().finally(() => {
@@ -76,6 +87,7 @@ export class TokenStore {
       // would look like a theft. A failure surfaces as a retryable error, not as "refused".
       { ...this.retry, attempts: 1 },
     );
+    if (this.cleared) return;
     const pair = json as RoomTokens;
     this.tokens = { ...pair };
     await this.options.onTokens?.({ ...pair });

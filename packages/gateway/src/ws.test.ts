@@ -2,6 +2,8 @@ import type { Pool } from "@crossover/db";
 import { createTestDatabase, type TestDatabase } from "@crossover/db/testing";
 import {
   Dispatcher,
+  MemoryBudgetLimiter,
+  BUDGET_DEFAULTS,
   findOrCreateUser,
   issueTokens,
   RedisEventPublisher,
@@ -11,6 +13,9 @@ import {
   registerPresenceCommands,
   registerRoomCommands,
   registerRoomEventsSubscribeCommand,
+  type EditIntent,
+  type EditIntentSubscriber,
+  type BudgetLimiter,
   type EventSubscriber,
   type Presence,
   type PresenceStore,
@@ -87,6 +92,29 @@ class ManualPresence implements PresenceSubscriber {
   }
 }
 
+/** Intent changes carry no paths; the connection reloads the reader-filtered list. */
+class ManualIntents implements EditIntentSubscriber {
+  handlers = new Set<() => void>();
+  onSubscribe: () => void = () => {};
+  async subscribe(_roomId: string, handler: () => void) {
+    this.handlers.add(handler);
+    this.onSubscribe();
+    return async () => void this.handlers.delete(handler);
+  }
+  emit() {
+    for (const handler of this.handlers) handler();
+  }
+}
+
+class ManualIntentStore {
+  current: EditIntent[] = [];
+  failure: unknown;
+  async list(_roomId: string): Promise<EditIntent[]> {
+    if (this.failure !== undefined) throw this.failure;
+    return this.current;
+  }
+}
+
 const record = (participant_id: string, expires_at: string): Presence => ({
   participant_id,
   expires_at,
@@ -107,6 +135,7 @@ interface Env {
 async function setup(
   ws: Partial<WebSocketOptions> & { subscriber?: EventSubscriber } = {},
   withRedis = false,
+  budgets?: BudgetLimiter,
 ): Promise<Env> {
   let publisher: RedisEventPublisher | undefined;
   let redisSub: RedisEventSubscriber | undefined;
@@ -123,6 +152,7 @@ async function setup(
     pool,
     authorize,
     nodeId: `node-${++n}`,
+    ...(budgets ? { budgets } : {}),
     ...(publisher ? { publisher } : {}),
   });
   registerRoomCommands(dispatcher);
@@ -181,10 +211,16 @@ class Client {
   closeCode: number | undefined;
   private waiters: (() => void)[] = [];
   readonly sock: WebSocket;
-  constructor(url: string, token?: string) {
+  constructor(
+    url: string,
+    token?: string,
+    private readonly autoPong = true,
+  ) {
     this.sock = new WebSocket(url, token ? { headers: { authorization: `Bearer ${token}` } } : {});
     this.sock.on("message", (d) => {
-      this.frames.push(JSON.parse(d.toString()));
+      const frame = JSON.parse(d.toString()) as Frame;
+      this.frames.push(frame);
+      if (this.autoPong && frame.type === "ping") this.send({ type: "pong", id: frame.id });
       this.wake();
     });
     this.sock.on("close", (code) => {
@@ -242,8 +278,12 @@ const cmd = (method: string, params: Frame = {}, extra: Frame = {}): Frame => ({
   ...extra,
 });
 
-async function ready(env: Env, token: string = env.owner.access_token): Promise<Client> {
-  const c = new Client(env.url(env.room), token);
+async function ready(
+  env: Env,
+  token: string = env.owner.access_token,
+  autoPong = true,
+): Promise<Client> {
+  const c = new Client(env.url(env.room), token, autoPong);
   await c.open();
   c.send(hello());
   await c.frame("hello_ok");
@@ -398,6 +438,29 @@ describe("hello and negotiation (§16.4)", () => {
     const env = await setup({ helloTimeoutMs: 100 });
     const c = new Client(env.url(env.room), env.owner.access_token);
     await c.open();
+    expect(await c.closed()).toBe(4408);
+  });
+
+  it("pings live connections and resets missed-pong tracking for the matching id", async () => {
+    const env = await setup({ pingIntervalMs: 20, missedPongLimit: 2 });
+    const c = await ready(env, undefined, false);
+    let from = c.frames.length;
+    const first = await c.frame("ping", from);
+    expect(first.id).toBeTypeOf("string");
+    from = c.frames.length;
+    const second = await c.frame("ping", from);
+    c.send({ type: "pong", id: second.id });
+    from = c.frames.length;
+    const third = await c.frame("ping", from);
+    expect(third.id).not.toBe(second.id);
+    expect(c.closeCode).toBeUndefined();
+  });
+
+  it("closes an unresponsive connection with TIMEOUT after two missed pongs", async () => {
+    const env = await setup({ pingIntervalMs: 20, missedPongLimit: 2 });
+    const c = await ready(env, undefined, false);
+    await c.frame("ping");
+    await c.frame("ping", c.frames.length);
     expect(await c.closed()).toBe(4408);
   });
 
@@ -1070,5 +1133,124 @@ describe("presence.subscribe (§13.4)", () => {
     await invite(env);
     await c.until(() => c.sequences().length >= 3, "events after the refusal");
     expect(c.closeCode).toBeUndefined();
+  });
+
+  it("sends intent snapshots on subscribe and after set and clear invalidations", async () => {
+    const intents = new ManualIntents();
+    const store = new ManualIntentStore();
+    const env = await setup({
+      presence: new ManualPresence(),
+      intents,
+      intentStore: store,
+    });
+    const c = await ready(env);
+    c.send({ type: "presence.subscribe" });
+    await c.frame("presence.snapshot");
+    expect(await c.frame("presence.intents.snapshot")).toMatchObject({ intents: [] });
+
+    store.current = [
+      {
+        participant_id: "p_agent",
+        paths: ["src/a.ts"],
+        ranges: [{ path: "src/a.ts", start_line: 4, end_line: 6 }],
+        task_id: "task_a",
+        expires_at: "2026-01-01T00:00:45.000Z",
+      },
+    ];
+    const afterInitial = c.frames.length;
+    intents.emit();
+    const added = await c.frame("presence.intents.snapshot", afterInitial);
+    expect(added.intents).toEqual(store.current);
+
+    store.current = [];
+    const afterAdded = c.frames.length;
+    intents.emit();
+    const cleared = await c.frame("presence.intents.snapshot", afterAdded);
+    expect(cleared.intents).toEqual([]);
+    c.send({ type: "presence.unsubscribe" });
+    await c.until(() => intents.handlers.size === 0, "intent unsubscribe");
+  });
+
+  it("does not spend an agent's five-command budget on ten intent snapshots", async () => {
+    const budgets = new MemoryBudgetLimiter();
+    const intents = new ManualIntents();
+    const store = new ManualIntentStore();
+    const env = await setup(
+      { presence: new ManualPresence(), intents, intentStore: store },
+      false,
+      budgets,
+    );
+    const agentId = newId("part");
+    await pool.query(
+      `INSERT INTO participants (id, room_id, kind, display_name, authority, role, status,
+                                agent_manifest, budgets)
+       VALUES ($1, $2, 'AGENT', 'Observer agent', 'MEMBER', 'DEVELOPER', 'ACTIVE',
+               '{"name":"Observer agent"}'::jsonb, '{"commands":5}'::jsonb)`,
+      [agentId, env.room],
+    );
+    const agent = await issueTokens(pool, agentId);
+    const c = await ready(env, agent.access_token);
+    c.send({ type: "presence.subscribe" });
+    await c.frame("presence.snapshot");
+    await c.frame("presence.intents.snapshot");
+
+    for (let i = 0; i < 10; i++) {
+      store.current = [
+        {
+          participant_id: "another_agent",
+          paths: ["src/a.ts"],
+          ranges: [{ path: "src/a.ts", start_line: i + 1, end_line: i + 1 }],
+          task_id: null,
+          expires_at: new Date(Date.now() + 45_000).toISOString(),
+        },
+      ];
+      const after = c.frames.length;
+      intents.emit();
+      const snapshot = await c.frame("presence.intents.snapshot", after);
+      expect(snapshot.intents[0].ranges[0].start_line).toBe(i + 1);
+    }
+
+    const key = { room_id: env.room, participant_id: agentId, budget: "commands" as const };
+    expect(await budgets.peek(key, BUDGET_DEFAULTS.commands.windowMs)).toBe(1);
+    const remaining = Array.from({ length: 4 }, () => cmd("presence.list"));
+    for (const frame of remaining) c.send(frame);
+    await c.until(
+      () =>
+        remaining.every((frame) =>
+          c.frames.some((reply) => reply.type === "result" && reply.id === frame.id),
+        ),
+      "four remaining budgeted commands",
+    );
+    const final = cmd("presence.list");
+    c.send(final);
+    expect(await c.frame("error")).toMatchObject({
+      id: final.id,
+      error: { code: "BUDGET_EXCEEDED" },
+    });
+  });
+
+  it("sends a presence error frame when an intent refresh fails", async () => {
+    const intents = new ManualIntents();
+    const store = new ManualIntentStore();
+    const internalErrors: unknown[] = [];
+    const env = await setup({
+      presence: new ManualPresence(),
+      intents,
+      intentStore: store,
+      onInternalError: (error) => internalErrors.push(error),
+    });
+    const c = await ready(env);
+    c.send({ type: "presence.subscribe" });
+    await c.frame("presence.snapshot");
+    await c.frame("presence.intents.snapshot");
+
+    store.failure = new Error("redis unavailable");
+    intents.emit();
+    const error = await c.frame("error");
+    expect(error).toMatchObject({
+      subscription: "presence",
+      error: { code: "INTERNAL" },
+    });
+    expect(internalErrors).toHaveLength(1);
   });
 });

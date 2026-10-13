@@ -30,10 +30,17 @@ export interface WsConfig {
   clientVersion: string;
   /** Give up on a connection that hasn't said `hello_ok` after this long. Default 10 s. */
   helloTimeoutMs?: number;
+  /** Close a connected socket that receives no server frames for this long. Default 50 s. */
+  readTimeoutMs?: number;
 }
 
 /** Close codes the server uses (§16.4, application range). */
-export const CLOSE = { UNAUTHENTICATED: 4401, NOT_FOUND: 4404, RESYNC_REQUIRED: 4409 } as const;
+export const CLOSE = {
+  UNAUTHENTICATED: 4401,
+  NOT_FOUND: 4404,
+  TIMEOUT: 4408,
+  RESYNC_REQUIRED: 4409,
+} as const;
 
 type Frame = Record<string, unknown> & { type: string };
 
@@ -42,7 +49,33 @@ export class WsSession {
   private frameHandler: ((frame: Frame) => void) | undefined;
   private closeHandler: ((code: number, reason: string) => void) | undefined;
   private closed = false;
-  private constructor(private readonly socket: WebSocketLike) {}
+  private closedCode = 1006;
+  private closedReason = "";
+  private readDeadline: ReturnType<typeof setTimeout> | undefined;
+  private constructor(
+    private readonly socket: WebSocketLike,
+    private readonly readTimeoutMs: number,
+  ) {}
+
+  private resetReadDeadline(): void {
+    clearTimeout(this.readDeadline);
+    if (this.closed) return;
+    this.readDeadline = setTimeout(() => this.timeout(), this.readTimeoutMs);
+  }
+
+  private timeout(): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.closedCode = CLOSE.TIMEOUT;
+    this.closedReason = "read timeout";
+    clearTimeout(this.readDeadline);
+    try {
+      this.socket.close(CLOSE.TIMEOUT, this.closedReason);
+    } catch {
+      // already closed
+    }
+    this.closeHandler?.(this.closedCode, this.closedReason);
+  }
 
   /** Connect and say hello; resolves once the server has answered `hello_ok`. */
   static open(config: WsConfig): Promise<WsSession> {
@@ -55,7 +88,7 @@ export class WsSession {
           new TransportError("Couldn't open the WebSocket", { retryable: true, cause: error }),
         );
       }
-      const session = new WsSession(socket);
+      const session = new WsSession(socket, config.readTimeoutMs ?? 50_000);
       let greeted = false;
       const timer = setTimeout(() => {
         fail(new TransportError("The server didn't answer hello", { retryable: true }));
@@ -86,16 +119,27 @@ export class WsSession {
           if (frame.type === "hello_ok") {
             greeted = true;
             clearTimeout(timer);
+            session.resetReadDeadline();
             resolve(session);
           } else if (frame.type === "error") {
             fail(frameError(frame));
           }
           return;
         }
+        session.resetReadDeadline();
+        if (frame.type === "ping") {
+          if (typeof frame.id === "string") session.send({ type: "pong", id: frame.id });
+          return;
+        }
         session.frameHandler?.(frame);
       };
       socket.onclose = (event) => {
+        if (session.closed) return;
         session.closed = true;
+        session.closedCode = event.code;
+        session.closedReason = event.reason;
+        clearTimeout(session.readDeadline);
+        clearTimeout(timer);
         fail(
           new TransportError(`The connection closed (${event.code})`, {
             retryable: event.code !== CLOSE.UNAUTHENTICATED && event.code !== CLOSE.NOT_FOUND,
@@ -114,12 +158,13 @@ export class WsSession {
   }
   onClose(handler: (code: number, reason: string) => void): void {
     this.closeHandler = handler;
-    if (this.closed) handler(1006, "");
+    if (this.closed) handler(this.closedCode, this.closedReason);
   }
   send(frame: Record<string, unknown>): void {
     this.socket.send(JSON.stringify(frame));
   }
   close(): void {
+    clearTimeout(this.readDeadline);
     try {
       this.socket.close(1000, "client closing");
     } catch {
@@ -258,6 +303,16 @@ export interface PresenceRecord {
 
 export type PresenceUpdate = { snapshot: PresenceRecord[] } | { record: PresenceRecord };
 
+/** One room-scoped agent edit intent, as the subscriber may see it (§11.4, §13.4). */
+export interface PresenceIntent {
+  participant_id: string;
+  paths: string[];
+  ranges: { path: string; start_line: number; end_line: number }[];
+  task_id: string | null;
+  /** Drop the intent after this unless it is replaced. */
+  expires_at: string;
+}
+
 export interface SubscribeOptions {
   /** Deliver events with a sequence greater than this (the last one you have). Default 0: from the start. */
   after?: number;
@@ -277,9 +332,12 @@ export interface SubscribeOptions {
   scopes?: { tasks?: "mine" | "all"; mentions?: boolean };
   /**
    * Live presence on the same connection: a `snapshot` each time the stream connects, then each
-   * `record` as it changes. A refusal goes to `onPresenceError` and leaves the events flowing.
+   * `record` as it changes. Intent snapshots follow the same subscription and refresh on set or
+   * clear; clients drop them at `expires_at`. A refusal goes to `onPresenceError` and leaves the
+   * events flowing.
    */
   onPresence?: (update: PresenceUpdate) => void;
+  onPresenceIntents?: (intents: PresenceIntent[]) => void;
   onPresenceError?: (error: CrossoverError) => void;
   /** Reconnect waits: first `minMs` (default 100), doubling with jitter up to `maxMs` (default 5000). */
   reconnect?: { minMs?: number; maxMs?: number };
@@ -393,13 +451,17 @@ export class Subscription implements AsyncIterable<SdkEvent> {
                   filtered = profile !== undefined && profile !== "all";
                 }
                 this.options.onState?.("live");
-                if (this.options.onPresence) session.send({ type: "presence.subscribe" });
+                if (this.options.onPresence || this.options.onPresenceIntents)
+                  session.send({ type: "presence.subscribe" });
                 break;
               case "presence.snapshot":
                 this.options.onPresence?.({ snapshot: frame["presence"] as PresenceRecord[] });
                 break;
               case "presence":
                 this.options.onPresence?.({ record: frame["record"] as PresenceRecord });
+                break;
+              case "presence.intents.snapshot":
+                this.options.onPresenceIntents?.(frame["intents"] as PresenceIntent[]);
                 break;
               case "event": {
                 const event = frame["event"] as SdkEvent;

@@ -6,6 +6,8 @@ const CATALOG = `
 room.created / room.paused / room.resumed / room.archived
 room.egress_allowlist_changed
 room.protected_paths_changed
+room.health_settings_changed
+room.budgets_changed
 lead.changed / lead.transfer_offered
 
 participant.invited / participant.joined / participant.left
@@ -13,6 +15,7 @@ participant.role_changed / participant.manifest_changed / participant.paused / p
 
 capability.granted / capability.revoked / capability.denied
 approval.requested / approval.decided
+inbox.delivered
 
 message.sent / message.edited
 
@@ -62,7 +65,7 @@ const valid = {
 
 describe("EVENT_TYPES", () => {
   it("contains every type in the §19.5 catalog, and nothing else", () => {
-    expect(catalogTypes).toHaveLength(71);
+    expect(catalogTypes).toHaveLength(74);
     expect([...EVENT_TYPES].sort()).toEqual([...catalogTypes].sort());
   });
 

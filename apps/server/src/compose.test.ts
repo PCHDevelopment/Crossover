@@ -154,6 +154,9 @@ class RecordingExecutionDriver implements ExecutionDriver {
     };
   }
   async start(_input: { sandbox_id: string }): Promise<void> {}
+  async cpuUsage(): Promise<{ usage_usec: bigint; generation: string }> {
+    return { usage_usec: 0n, generation: "recording-container-start" };
+  }
   async stop(input: { sandbox_id: string }): Promise<void> {
     this.stopped.push(input.sandbox_id);
   }
@@ -175,6 +178,7 @@ function config(extra: Partial<ServerConfig> = {}): ServerConfig {
     port: 0,
     nodeId: `node-${++n}`,
     devLogin: true,
+    secureCookies: false,
     healthImages: ["node:22-bookworm-slim"],
     ...extra,
   };
@@ -312,6 +316,75 @@ async function walkthrough(app: App, withAppliedChange = true) {
 }
 
 describe("composeServer", () => {
+  it("does not accept an HttpOnly browser cookie as MCP agent authorization", async () => {
+    const { server } = await start();
+    const login = await server.app.inject({
+      method: "POST",
+      url: "/v1/auth/dev-login",
+      headers: { "content-type": "application/json" },
+      payload: JSON.stringify({ subject: "mcp-cookie-" + ++n, display_name: "Peter" }),
+    });
+    expect(login.statusCode).toBe(200);
+    const token = (login.json() as { session_token: string }).session_token;
+    const cookie = `crossover_session=${token}`;
+    const response = await server.app.inject({
+      method: "POST",
+      url: "/mcp",
+      headers: {
+        cookie: (cookie ?? "").split(";")[0]!,
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+      },
+      payload: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }),
+    });
+    expect(response.statusCode).toBe(401);
+    expect(response.json()).toMatchObject({ error: { code: "UNAUTHENTICATED" } });
+  });
+
+  it("logs internal gateway failures with the route pattern and without request secrets", async () => {
+    const internalError = new Error("injected internal gateway failure");
+    const { server } = await start();
+    const query = vi.spyOn(db.pool, "query").mockImplementationOnce(async () => {
+      throw internalError;
+    });
+    const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    try {
+      const response = await server.app.inject({
+        method: "POST",
+        url: "/v1/commands?token=query-secret",
+        headers: {
+          authorization: "Bearer us_header-secret",
+          "content-type": "application/json",
+        },
+        payload: JSON.stringify({
+          method: "room.create",
+          params: { slug: "body-secret", name: "Test", objective: "Test" },
+        }),
+      });
+
+      expect(response.statusCode).toBe(500);
+      expect(stderr).toHaveBeenCalledOnce();
+      const line = stderr.mock.calls[0]?.[0];
+      expect(typeof line).toBe("string");
+      const record = JSON.parse(line as string) as Record<string, unknown>;
+      expect(record).toMatchObject({
+        event: "gateway.internal_error",
+        method: "POST",
+        route: "/v1/commands",
+        command_method: "room.create",
+        stack: expect.stringContaining("injected internal gateway failure"),
+      });
+      expect(line).not.toContain("query-secret");
+      expect(line).not.toContain("us_header-secret");
+      expect(line).not.toContain("body-secret");
+      expect(line).not.toContain("objective");
+    } finally {
+      query.mockRestore();
+      stderr.mockRestore();
+    }
+  });
+
   it("stops agent sandboxes on freeze and cleans up on participant removal and archive", async () => {
     const driver = new RecordingExecutionDriver();
     const { server } = await start({}, new RecordingPublisher(), { executionDriver: driver });
@@ -1717,7 +1790,7 @@ describe("composeServer", () => {
       await cmd(envelope("workspace.read", { path: "src/hello.ts" }), token),
     );
     expect(finalFile.response.content).toBe(resolution);
-  });
+  }, 15_000);
 
   it("moves sandbox file writes off the room actor", async () => {
     const driver = new RecordingExecutionDriver();
@@ -2170,6 +2243,28 @@ describe("composeServer", () => {
     await server.close();
     await server.close();
   });
+
+  it("registers Google OAuth from Google-only configuration", async () => {
+    const { server } = await start({
+      secureCookies: true,
+      oauth: {
+        publicBaseUrl: "https://crossover.example.com",
+        google: { clientId: "google-client", clientSecret: "google-secret" },
+      },
+    });
+    const response = await server.app.inject({
+      method: "GET",
+      url: "/v1/auth/oauth/google",
+    });
+    const authorization = new URL(response.headers.location!);
+
+    expect(response.statusCode).toBe(302);
+    expect(authorization.origin + authorization.pathname).toBe(
+      "https://accounts.google.com/o/oauth2/v2/auth",
+    );
+    expect(authorization.searchParams.get("scope")).toBe("openid profile");
+    expect(authorization.searchParams.get("nonce")).toMatch(/^[A-Za-z0-9_-]{43}$/);
+  });
 });
 
 describe("loadConfig", () => {
@@ -2219,6 +2314,83 @@ describe("loadConfig", () => {
     expect(loadConfig({ ...env, DEV_LOGIN: "true" }).devLogin).toBe(true);
     expect(loadConfig({ ...env, DEV_LOGIN: "0" }).devLogin).toBe(false);
     expect(() => loadConfig({ ...env, DEV_LOGIN: "yes" })).toThrow(/DEV_LOGIN/);
+  });
+
+  it("requires an explicit override before enabling dev login in production", () => {
+    const production = {
+      ...env,
+      NODE_ENV: "production",
+      SANDBOX_DISK_ENFORCEMENT: "soft",
+      INTEGRATION_KMS_KEY_ID: "alias/crossover-test",
+      DEV_LOGIN: "true",
+    };
+    expect(() => loadConfig(production)).toThrow(/DEV_LOGIN is forbidden in production/);
+    expect(loadConfig({ ...production, DEV_LOGIN_ALLOW_PRODUCTION: "true" })).toMatchObject({
+      devLogin: true,
+      secureCookies: true,
+    });
+  });
+
+  it("configures OAuth only with a complete provider and a safe public origin", () => {
+    expect(() => loadConfig({ ...env, GITHUB_OAUTH_CLIENT_ID: "id" })).toThrow(
+      /set both GitHub OAuth credentials and OAUTH_PUBLIC_BASE_URL together/,
+    );
+    expect(() =>
+      loadConfig({ ...env, GITHUB_OAUTH_CLIENT_ID: "id", GITHUB_OAUTH_CLIENT_SECRET: "secret" }),
+    ).toThrow(/set both GitHub OAuth credentials and OAUTH_PUBLIC_BASE_URL together/);
+    expect(() => loadConfig({ ...env, GOOGLE_OAUTH_CLIENT_ID: "id" })).toThrow(
+      /set both Google OAuth credentials and OAUTH_PUBLIC_BASE_URL together/,
+    );
+    expect(() =>
+      loadConfig({
+        ...env,
+        GOOGLE_OAUTH_CLIENT_ID: "id",
+        GOOGLE_OAUTH_CLIENT_SECRET: "secret",
+      }),
+    ).toThrow(/set both Google OAuth credentials and OAUTH_PUBLIC_BASE_URL together/);
+    expect(() => loadConfig({ ...env, OAUTH_PUBLIC_BASE_URL: "http://example.com" })).toThrow(
+      /must use HTTPS except for localhost development/,
+    );
+    expect(
+      loadConfig({
+        ...env,
+        GITHUB_OAUTH_CLIENT_ID: "id",
+        GITHUB_OAUTH_CLIENT_SECRET: "secret",
+        OAUTH_PUBLIC_BASE_URL: "http://localhost:8080",
+      }),
+    ).toMatchObject({
+      secureCookies: false,
+      oauth: { publicBaseUrl: "http://localhost:8080", github: { clientId: "id" } },
+    });
+    expect(() => loadConfig({ ...env, OAUTH_PUBLIC_BASE_URL: "https://example.com/path" })).toThrow(
+      /must be an origin without a path/,
+    );
+    expect(
+      loadConfig({
+        ...env,
+        GOOGLE_OAUTH_CLIENT_ID: "google-id",
+        GOOGLE_OAUTH_CLIENT_SECRET: "google-secret",
+        OAUTH_PUBLIC_BASE_URL: "https://crossover.example.com",
+      }),
+    ).toMatchObject({
+      secureCookies: true,
+      oauth: {
+        publicBaseUrl: "https://crossover.example.com",
+        google: { clientId: "google-id", clientSecret: "google-secret" },
+      },
+    });
+  });
+
+  it("sets secure cookies for an HTTPS public origin outside production", () => {
+    expect(
+      loadConfig({
+        ...env,
+        NODE_ENV: "staging",
+        GITHUB_OAUTH_CLIENT_ID: "id",
+        GITHUB_OAUTH_CLIENT_SECRET: "secret",
+        OAUTH_PUBLIC_BASE_URL: "https://staging.example.com",
+      }).secureCookies,
+    ).toBe(true);
   });
 
   it("parses the operator health image allowlist", () => {

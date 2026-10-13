@@ -86,6 +86,7 @@ export const CAPABILITIES = {
   "budgets.set": { mutating: true },
   "egress.set": { mutating: true },
   "protected_paths.set": { mutating: true },
+  "health.set": { mutating: true },
   // owner only
   "room.freeze": { mutating: true },
   "room.resume": { mutating: true },
@@ -182,6 +183,7 @@ const LEAD = [
   "checkpoints.export",
   "git.import",
   "git.pull_upstream",
+  "health.set",
   "workspace.decide_hold",
   "room.transfer_lead",
   // The commands (T211, T212) enforce the limits: an agent lead can't touch humans, and only
@@ -235,6 +237,7 @@ const OWNER_POWERS = [
   "events.redact",
   "integrations.manage",
   "protected_paths.set",
+  "health.set",
   "workspace.decide_hold",
 ] as const satisfies readonly Capability[];
 

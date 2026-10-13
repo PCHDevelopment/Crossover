@@ -11,6 +11,7 @@ on:
 jobs:
   check:
     runs-on: self-hosted
+    timeout-minutes: 20
     services:
       postgres:
         image: postgres:16
@@ -101,6 +102,9 @@ jobs:
       - run: docker build --target test -f plugins/browser/Dockerfile -t crossover-browser-plugin:test .
       - run: docker build -f apps/git-fetcher/Dockerfile -t crossover-git-fetcher:test .
       - run: docker build -f plugins/github/Dockerfile -t crossover-github-plugin:test .
+      - name: Build production server image
+        run: docker build -f apps/server/Dockerfile -t crossover-server:test .
+        timeout-minutes: 10
       - name: Smoke test GitHub plugin stdin/stdout with network disabled
         shell: bash
         run: |
@@ -113,7 +117,12 @@ jobs:
           test "$status" -eq 1
           printf '%s\n' "$output" | node --input-type=module -e 'let input="";for await(const chunk of process.stdin)input+=chunk;const value=JSON.parse(input);if(value.error?.code!=="unavailable"||input.includes("fixture-token"))process.exit(1);'
       - run: docker run --rm --network none --entrypoint git crossover-git-fetcher:test --version
-      - run: pnpm test
+      # Run Chromium-backed web E2E after Docker tests finish changing bridge networks.
+      - name: Test, including deployed server topology
+        run: pnpm test
+        env:
+          CROSSOVER_SERVER_IMAGE: crossover-server:test
+        timeout-minutes: 15
 
   workspace-benchmark:
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || (github.event_name == 'push' && github.ref == 'refs/heads/main')

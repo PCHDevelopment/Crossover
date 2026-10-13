@@ -703,7 +703,7 @@ The merge view is a Monaco diff editor. The file as it is now (theirs) is on the
 ## 13.4 Live presence
 
 - Human cursors, selections and open files are broadcast through the presence channel (Redis, ephemeral, never in the ledger). `presence.update { status?: active | idle, open_files?: path[] (at most 20), cursor?: { path, line, column, selection? } | null }` replaces the caller's record, which lives 45 s; clients re-send it every 15 s. The cursor's path is one of `open_files`; positions are 1-based; more than 20 updates a second from one participant is `RATE_LIMITED`. Each update is also published on the room's presence channel, apart from its event channel. `presence.list` returns every record as the reader may see it: open files they can't read are left out, and so is a cursor on one; the status always shows (§34.5). Over the WebSocket the same records are a snapshot and live updates (§16.4).
-- Agent edit intents (§11.4) render as highlighted regions in the editor. Each participant has at most one room-scoped intent: `{ paths, ranges?, task_id? }`; ranges are `{ path, start_line, end_line }` with 1-based inclusive line numbers. Set replaces the intent and refreshes its 45-second Redis TTL; clear deletes it. `presence.list_intents` returns active intents with participant ID and expiry. Intents are never written to the event ledger.
+- Agent edit intents (§11.4) render as highlighted regions in the editor. Each participant has at most one room-scoped intent: `{ paths, ranges?, task_id? }`; ranges are `{ path, start_line, end_line }` with 1-based inclusive line numbers. Set replaces the intent and refreshes its 45-second Redis TTL; clear deletes it. `presence.list_intents` returns active intents with participant ID and expiry. The presence subscription also sends `presence.intents.snapshot { intents }` on connect and after set/clear, using the reader-filtered list command; clients drop an intent when its `expires_at` passes. Intents are never written to the event ledger.
 
 ---
 
@@ -839,6 +839,8 @@ Vendor and model are self-declared and displayed as such; they are not trusted f
 - **Opaque access tokens** (1 h) validated server-side on every command against Redis, plus refresh tokens (30 days, rotated on use). Opaque tokens make revocation immediate, which JWTs would not. `POST /v1/auth/refresh { refresh_token }` (no bearer header: the refresh token is the credential) spends a refresh token and returns a new access and refresh pair, the same shape as the join's `tokens`; presenting a spent one revokes the family. The route is limited per client address (`REFRESH_PER_MINUTE`, default 30; `RATE_LIMITED` with `Retry-After`; counted in Redis, and if that is down requests go ahead); IPv6 clients are limited by their /64. Behind reverse proxies set `TRUST_PROXY` to their addresses or CIDRs (comma-separated, default none): each hop is checked against the list from the server outwards and the client address is the first one that is not a listed proxy, so nothing a client writes to the left counts; without it everyone shares the proxy's address. A spent refresh token presented again within 30 s is taken for a retry after a lost response when it was the login's latest rotation and its successor was never used: the login gets a new pair and the unseen successor pair is revoked; anything else is reuse and revokes the login. The check runs under the login's advisory lock (a grace refresh and a normal rotation can't fork it), a spent token has one grace only, and a successor revoked by grace that is presented later means two holders and revokes the login. The SDK sends a refresh exactly once (never retried automatically) and surfaces a failure as retryable. The SDK renews an expired access token itself (T1106): on `UNAUTHENTICATED` a client holding the refresh token refreshes once however many calls and subscriptions noticed, retries the call with the same idempotency key, and hands each new pair to `onTokens` to persist (refresh tokens are single-use); a subscription whose token expired reconnects with the new one, losing no event.
 - Removing or pausing a participant revokes its tokens and closes its WebSocket connections.
 - Humans authenticate to the platform with GitHub or Google OAuth; room access comes from membership.
+- OAuth starts are rate-limited per client address using `REFRESH_PER_MINUTE` before the one-use Redis state is saved. Browser cookies use `Secure` when the public origin is HTTPS (also in staging); secure session and state cookies use the `__Host-` prefix, `Path=/`, and no `Domain`. Local HTTP keeps the unprefixed cookie names.
+- Google sign-in uses authorization code with PKCE and a nonce stored only in the one-use Redis transaction. The server accepts only RS256 ID tokens signed by Google's published JWKS, checks the two documented issuer spellings, client audience, expiry and issue time (with at most 60 seconds of clock tolerance), nonce, and subject. The Google `sub` is the stable user key; email claims are not read or used to link accounts.
 
 ## 15.4 Interfaces by priority (D7)
 
@@ -874,6 +876,8 @@ ROOM
   room.events.list         after, limit, types?
   room.set_egress_allowlist hosts (owner/admin; exact hosts or *.suffix, max 100; §14.7)
   room.set_protected_paths patterns (owner only; max 100; §22.4)
+  room.set_health {health_command, health_image?} (lead/owner; null clears the command or resets the image to the server default; image must be in HEALTH_IMAGES; §12.1)
+  budgets.get / budgets.set          owner/admin; set the room's agent defaults or one agent's limits (§22.3)
   events.redact            sequence, reason (owner only; §19.6)
   room.set_lead            owner/admin
   room.transfer_lead / room.accept_lead
@@ -917,7 +921,8 @@ WORKSPACE
   workspace.list / workspace.read / workspace.search
   workspace.diff / workspace.history / workspace.blame
   workspace.apply_changeset
-  workspace.changeset.get  status of a submitted ChangeSet
+  workspace.changeset.get  {changeset_id, path?}; metadata and readable touched paths;
+                           path returns candidate content for a pending ChangeSet
   workspace.changeset.decide_hold {changeset_id, decision, reason?}  lead or owner (§22.4)
   workspace.health.get     latest health per revision
 
@@ -954,6 +959,12 @@ GIT
   git.import / git.pull_upstream
   checkpoints.create / checkpoints.list / checkpoints.export
 ```
+
+`workspace.changeset.get` metadata is available to room participants authorized for `workspace.read`.
+The returned `paths` list includes only touched paths that participant can read. Supplying `path`
+returns the ChangeSet's candidate file content (including for a deleted file) only when the path is
+touched and readable. Pending candidate content is restricted to the submitter, room lead, owner,
+and admins; applied content is read from that ChangeSet's applied revision.
 
 ## 16.2 Command envelope
 
@@ -1000,7 +1011,9 @@ Idempotency keys are stored for 24 hours per participant. A duplicate returns th
 
 ## 16.4 Versioning
 
-REST paths are prefixed `/v1/`. WebSocket clients send `hello { protocol_version, client, client_version }`; the server replies with the negotiated version. Events carry `schema_version`. Breaking changes require a new major version with a 6-month overlap. Sandbox output uses the same cursor pattern as room events. A client subscribes with `sandbox.output.subscribe { exec_id, after }` and unsubscribes with `sandbox.output.unsubscribe { exec_id }`. The server replies `sandbox.output.subscribed { exec_id, after, last_sequence }`, then sends `sandbox.output { exec_id, sequence, stream, encoding: "base64", data }` chunks, followed by `sandbox.output.finished { exec_id, sequence, exit_code, duration_ms, reason, truncated }`. A truncation sentinel is `sandbox.output.truncated { exec_id, sequence }`. If a subscriber's 1 MiB buffer fills, the server drops queued output and sends `sandbox.output.resync_required { exec_id, after }`; the client subscribes again from that cursor. One socket may hold up to eight output subscriptions. Output is visible only to the sandbox participant, lead, room owner and admins, subject to the `sandbox.output` capability. Presence (§13.4) is subscribed with `presence.subscribe` and stopped with `presence.unsubscribe`. The server answers `presence.snapshot { presence }` (what `presence.list` returns) and then sends `presence { record }` for each update, filtered for the reader the same way. No message is sent when a record expires; clients drop it after its `expires_at`. A refused presence subscription is an `error` frame with `subscription: "presence"`, and the event stream carries on.
+REST paths are prefixed `/v1/`. WebSocket clients send `hello { protocol_version, client, client_version }`; the server replies with the negotiated version. Events carry `schema_version`. Breaking changes require a new major version with a 6-month overlap. Sandbox output uses the same cursor pattern as room events. A client subscribes with `sandbox.output.subscribe { exec_id, after }` and unsubscribes with `sandbox.output.unsubscribe { exec_id }`. The server replies `sandbox.output.subscribed { exec_id, after, last_sequence }`, then sends `sandbox.output { exec_id, sequence, stream, encoding: "base64", data }` chunks, followed by `sandbox.output.finished { exec_id, sequence, exit_code, duration_ms, reason, truncated }`. A truncation sentinel is `sandbox.output.truncated { exec_id, sequence }`. If a subscriber's 1 MiB buffer fills, the server drops queued output and sends `sandbox.output.resync_required { exec_id, after }`; the client subscribes again from that cursor. One socket may hold up to eight output subscriptions. Output is visible only to the sandbox participant, lead, room owner and admins, subject to the `sandbox.output` capability. Presence (§13.4) is subscribed with `presence.subscribe` and stopped with `presence.unsubscribe`. The server answers `presence.snapshot { presence }` (what `presence.list` returns) and then sends `presence { record }` for each update, filtered for the reader the same way. When edit-intent fanout is enabled, it also sends `presence.intents.snapshot { intents }` on connect and after set/clear through the reader-filtered list command. No message is sent when a record or intent expires; clients drop it after its `expires_at`. A refused presence subscription is an `error` frame with `subscription: "presence"`, and the event stream carries on.
+
+After `hello_ok`, the server sends an application-level `ping { id }` every 20 seconds. Clients echo the ID in `pong { id }`; a connection closes with 4408 (`TIMEOUT`) after two consecutive unanswered ping intervals. Clients use a 50-second inbound read deadline, reset by each server frame. The TypeScript and Python SDKs close and reconnect a socket when that deadline expires; the Go events tail reconnects from its last delivered event sequence.
 
 ## 16.5 Provenance on every returned item
 
@@ -1184,7 +1197,8 @@ If the node crashes between steps 2 and 3, the new owner reconciles on startup b
 
 ```text
 room.created / room.paused / room.resumed / room.archived
-room.egress_allowlist_changed / room.protected_paths_changed
+room.egress_allowlist_changed / room.protected_paths_changed / room.health_settings_changed
+room.budgets_changed
 lead.changed / lead.transfer_offered
 
 participant.invited / participant.joined / participant.left
@@ -1192,6 +1206,7 @@ participant.role_changed / participant.manifest_changed / participant.paused / p
 
 capability.granted / capability.revoked / capability.denied
 approval.requested / approval.decided
+inbox.delivered
 
 message.sent / message.edited
 
@@ -1350,7 +1365,9 @@ Per-agent defaults (owner can change per room or per agent):
 
 Exceeding a budget returns `BUDGET_EXCEEDED` with `retry_after` and emits `budget.exceeded`.
 
-Budgets apply to agents (humans have none) and are counted per participant in fixed windows (a count resets when the next window starts), before the command's transaction. Every command counts as a command; `messages.send` also as a message, `workspace.apply_changeset` and `changes.submit` as a ChangeSet, `tools.invoke` as a tool invocation. The owner overrides a limit with `settings.budgets` (the room) or `participants.budgets` (one agent), keyed `commands`, `messages`, `changesets`, `tool_invocations`; a count of at least 1, or `null` for no limit; the participant's setting wins. `retry_after` is in seconds (also the HTTP `Retry-After` header), and `budget.exceeded` is appended for the first refusal of a window only. If Redis is down, commands go ahead and a warning is logged.
+Count budgets apply to agents (humans have none) and are counted per participant in fixed windows (a count resets when the next window starts), before the command's transaction. Every command counts as a command; `messages.send` also as a message, `workspace.apply_changeset` and `changes.submit` as a ChangeSet, `tools.invoke` as a tool invocation. `budgets.set { participant_id?, budgets?, compute_budgets? }` replaces the submitted room or same-room agent maps; at least one map is required. Count maps live in `settings.budgets` or `participants.budgets`. Compute maps use `agent_vcpu_hours_per_day` and `room_vcpu_hours_per_day`; the room cap is room-only, while the per-agent value can be set in room defaults or for one agent. Omitted keys inherit the room value or platform default, and `null` means unlimited. When both room and agent limits exist, the tighter cap applies. Values are positive safe integers. `budgets.get` returns each agent's effective limits and current usage and reservations to owners and admins. A change appends `room.budgets_changed` with the old and new maps. `retry_after` is in seconds (also the HTTP `Retry-After` header), and `budget.exceeded` is appended for the first refusal of a window only. If Redis is down, commands go ahead and a warning is logged.
+
+Sandbox compute is measured from each container's cumulative cgroup CPU counter, not wall time, and charged in vCPU-hours over UTC days to both its agent and the room. A sandbox is limited to two vCPUs. Before an exec starts, the service reserves its maximum CPU at that rate and caps its timeout to the remaining agent and room capacity and the UTC day boundary; it rejects an exec when no second remains. Completion reconciles the reservation against the measured counter delta. A periodic sweep samples long-running sandboxes, releases expired reservations, and hibernates a sandbox when measured usage reaches either cap.
 
 ## 22.4 Circuit breakers
 
@@ -1446,11 +1463,11 @@ Upstream changes are just another concurrent writer, so no special merge path is
 
 ## 25.2 Room-level visibility (in the UI)
 
-Per participant: commands, ChangeSets applied / conflicted / rejected, conflict rate, tasks completed, review rejections, sandbox compute used, tool invocations, denials, budget headroom.
+Per participant: commands, ChangeSets applied / conflicted / rejected, conflict rate, tasks completed, review rejections, sandbox compute used and reserved against the effective daily cap, tool invocations, denials, budget headroom.
 
 ## 25.3 Cost model
 
-- The platform pays for sandboxes, health checks, storage and bandwidth. Per-room quotas cap sandbox compute (default 40 vCPU-hours/day per room).
+- The platform pays for sandboxes, health checks, storage and bandwidth. Sandbox compute defaults to 4 vCPU-hours/day per agent and 40 vCPU-hours/day per room; the tighter configured limit applies, and owner/admin controls can change either limit.
 - Agent LLM costs are borne by each agent's operator.
 - Hibernation after 30 minutes idle is the main cost control.
 

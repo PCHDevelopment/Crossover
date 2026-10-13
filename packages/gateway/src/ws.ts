@@ -7,6 +7,10 @@ import {
   type Presence,
   presenceFor,
   type PresenceSubscriber,
+  type EditIntent,
+  type EditIntentStore,
+  type EditIntentSubscriber,
+  filterReadableIntents,
   redactEventFor,
   type Principal,
   type SubscriptionFilter,
@@ -65,6 +69,10 @@ export interface WebSocketOptions {
   maxBufferedBytes?: number;
   /** Close a connection that hasn't said hello within this long. Default 10000. */
   helloTimeoutMs?: number;
+  /** Send an application-level ping this often after hello. Default 20000. */
+  pingIntervalMs?: number;
+  /** Close with TIMEOUT after this many consecutive unanswered ping intervals. Default 2. */
+  missedPongLimit?: number;
   /** Builds the per-subscription event filter. Default: the kernel's (tests substitute one). */
   createMatcher?: typeof createEventMatcher;
   /** Told about a failure that is a bug, not a client error (e.g. a filter that threw). */
@@ -77,6 +85,9 @@ export interface WebSocketOptions {
   maxSandboxOutputBufferedBytes?: number;
   /** Live presence (§13.4, Redis), for `presence.subscribe`. */
   presence?: PresenceSubscriber;
+  /** Intent invalidations and backing store for unbudgeted, reader-filtered refreshes. */
+  intents?: EditIntentSubscriber;
+  intentStore?: Pick<EditIntentStore, "list">;
 }
 
 /** Close codes (4000-range, application defined). */
@@ -118,6 +129,10 @@ interface PresenceStream {
   out: Promise<void>;
   /** The latest update per participant that arrived before the snapshot was sent. */
   pending: Map<string, Presence> | undefined;
+  /** Intent invalidations that arrived while the initial snapshot was loading. */
+  intentsPending: boolean;
+  intentsSyncing: boolean;
+  intentsRefreshQueued: boolean;
   /** `workspace.read` answers per path; forgotten when the token is re-checked. */
   readable: Map<string, boolean>;
   unsubscribe: () => Promise<void>;
@@ -152,12 +167,16 @@ function sandboxUpdateBytes(update: SandboxOutputUpdate): number {
  * - `presence.subscribe`: authorized as `presence.list` (§13.4); the server sends
  *   `presence.snapshot { presence }` and then each update as `presence { record }`, every record
  *   as this participant may see it (open files they can't read and a cursor on one are left out).
- *   Nothing is sent when a record expires: clients drop a record once its `expires_at` passes.
+ *   If intent fanout is available, it also sends `presence.intents.snapshot { intents }` on
+ *   connect and after each set/clear. Each snapshot filters unreadable paths. Nothing is sent
+ *   when a record or intent expires: clients drop it once its `expires_at` passes.
  *   A refusal is an `error` frame with `subscription: "presence"`, which leaves the event stream
  *   alone. `presence.unsubscribe` stops it.
  *
  * A connection that can't keep up (more than 1,000 queued events or 5 MiB) is closed with
  * `resync_required`; the client reconnects with `after = last sequence it saw`.
+ * After hello, the server also sends `ping { id }` every 20 seconds; clients echo `pong { id }`.
+ * Two consecutive unanswered intervals close the connection with `TIMEOUT` (4408).
  */
 export function attachWebSocket(app: FastifyInstance, options: WebSocketOptions): void {
   const wss = new WebSocketServer({ noServer: true });
@@ -200,6 +219,10 @@ class Connection {
   private queue: Promise<void> = Promise.resolve();
   private readonly timers: ReturnType<typeof setTimeout>[] = [];
   private revalidate: ReturnType<typeof setInterval> | undefined;
+  private heartbeat: ReturnType<typeof setInterval> | undefined;
+  private pingSequence = 0;
+  private pendingPingId: string | undefined;
+  private missedPongs = 0;
 
   constructor(
     private readonly ws: WebSocket,
@@ -258,6 +281,14 @@ class Connection {
         type: "error",
         error: new CrossoverError("VALIDATION", "Frames must be JSON objects").toErrorBody().error,
       });
+      return;
+    }
+    // Pongs must not queue behind a command or backfill; a busy room still has to answer heartbeats.
+    if (this.helloDone && frame.type === "pong") {
+      if (typeof frame.id === "string" && frame.id === this.pendingPingId) {
+        this.pendingPingId = undefined;
+        this.missedPongs = 0;
+      }
       return;
     }
     // One at a time, in order: a command frame must not overtake the hello before it.
@@ -348,12 +379,28 @@ class Connection {
         (error: unknown) => this.fail(CLOSE.UNAUTHENTICATED, error),
       );
     }, this.o.revalidateIntervalMs ?? 30_000);
+    this.heartbeat = setInterval(() => this.heartbeatTick(), this.o.pingIntervalMs ?? 20_000);
     this.send({
       type: "hello_ok",
       protocol_version: version,
       participant_id: this.principal.participant_id,
       room_id: this.principal.room_id,
     });
+  }
+
+  private heartbeatTick(): void {
+    if (this.closed || this.ws.readyState !== this.ws.OPEN) return;
+    if (this.pendingPingId !== undefined) {
+      this.missedPongs++;
+      if (this.missedPongs >= (this.o.missedPongLimit ?? 2)) {
+        this.ws.close(CLOSE.TIMEOUT, "heartbeat timeout");
+        void this.cleanup();
+        return;
+      }
+    }
+    const id = String(++this.pingSequence);
+    this.pendingPingId = id;
+    this.send({ type: "ping", id });
   }
 
   private async command(frame: Record<string, unknown>): Promise<void> {
@@ -440,6 +487,9 @@ class Connection {
     const stream: PresenceStream = {
       out: Promise.resolve(),
       pending: new Map(),
+      intentsPending: false,
+      intentsSyncing: this.o.intents !== undefined && this.o.intentStore !== undefined,
+      intentsRefreshQueued: false,
       readable: new Map(),
       unsubscribe: async () => undefined,
     };
@@ -448,14 +498,26 @@ class Connection {
     stream.unsubscribe = await this.o.presence.subscribe(this.roomId, (record) =>
       this.onPresence(stream, record),
     );
+    if (this.o.intents && this.o.intentStore) {
+      const stop = await this.o.intents.subscribe(this.roomId, () => this.onIntentChange(stream));
+      const stopPresence = stream.unsubscribe;
+      stream.unsubscribe = async () => {
+        await Promise.all([stopPresence(), stop()]);
+      };
+    }
     let snapshot: Presence[];
+    let intentSnapshot: EditIntent[] | undefined;
     try {
-      const listed = await this.o.dispatcher.dispatch(this.principal!, {
-        id: newId("cmd"),
-        method: "presence.list",
-        params: {},
-      });
+      const [listed, listedIntents] = await Promise.all([
+        this.o.dispatcher.dispatch(this.principal!, {
+          id: newId("cmd"),
+          method: "presence.list",
+          params: {},
+        }),
+        this.o.intents && this.o.intentStore ? this.listReadableIntents(stream) : undefined,
+      ]);
       snapshot = (listed.response as { presence: Presence[] }).presence;
+      if (listedIntents) intentSnapshot = listedIntents;
     } catch (error) {
       if (this.presenceStream === stream) await this.stopPresence();
       this.send({ type: "error", subscription: "presence", error: toHttpError(error).body.error });
@@ -463,6 +525,11 @@ class Connection {
     }
     if (this.presenceStream !== stream || this.closed) return;
     this.send({ type: "presence.snapshot", presence: snapshot });
+    if (intentSnapshot) {
+      this.send({ type: "presence.intents.snapshot", intents: intentSnapshot });
+      stream.intentsSyncing = false;
+      if (stream.intentsPending) this.queueIntentSnapshot(stream);
+    }
     const listed = new Map(snapshot.map((record) => [record.participant_id, record.expires_at]));
     const pending = stream.pending!;
     stream.pending = undefined;
@@ -471,6 +538,48 @@ class Connection {
       // An update the snapshot already includes (or that it superseded) isn't sent again.
       if (known === undefined || known < record.expires_at) this.sendPresence(stream, record);
     }
+  }
+
+  private onIntentChange(stream: PresenceStream): void {
+    if (this.presenceStream !== stream || this.closed) return;
+    stream.intentsPending = true;
+    if (!stream.intentsSyncing) this.queueIntentSnapshot(stream);
+  }
+
+  /** Coalesce invalidations and read/filter without charging the subscriber's command budget. */
+  private queueIntentSnapshot(stream: PresenceStream): void {
+    if (stream.intentsRefreshQueued || stream.intentsSyncing) return;
+    stream.intentsRefreshQueued = true;
+    stream.out = stream.out
+      .then(async () => {
+        while (stream.intentsPending && this.presenceStream === stream && !this.closed) {
+          stream.intentsPending = false;
+          const intents = await this.listReadableIntents(stream);
+          if (this.presenceStream !== stream || this.closed) return;
+          this.send({ type: "presence.intents.snapshot", intents });
+        }
+      })
+      .catch((error: unknown) => {
+        this.o.onInternalError?.(error);
+        if (this.presenceStream === stream && !this.closed)
+          this.send({
+            type: "error",
+            subscription: "presence",
+            error: toHttpError(error).body.error,
+          });
+      })
+      .finally(() => {
+        stream.intentsRefreshQueued = false;
+        if (stream.intentsPending && !stream.intentsSyncing) this.queueIntentSnapshot(stream);
+      });
+  }
+
+  private async listReadableIntents(stream: PresenceStream): Promise<EditIntent[]> {
+    const store = this.o.intentStore;
+    if (!store) return [];
+    return filterReadableIntents(await store.list(this.roomId), (path) =>
+      this.mayReadPath(stream, path),
+    );
   }
 
   private onPresence(stream: PresenceStream, record: Presence): void {
@@ -503,7 +612,7 @@ class Connection {
         { method: "presence.subscribe", params: {}, client: this.o.pool },
       );
     } catch (error) {
-      if (!(error instanceof CrossoverError)) throw error;
+      if (!(error instanceof CrossoverError) || error.code !== "FORBIDDEN") throw error;
       allowed = false;
     }
     if (stream.readable.size >= MAX_READABLE_CACHE) stream.readable.clear();
@@ -930,6 +1039,7 @@ class Connection {
     this.closed = true;
     for (const t of this.timers) clearTimeout(t);
     if (this.revalidate) clearInterval(this.revalidate);
+    if (this.heartbeat) clearInterval(this.heartbeat);
     await this.stopStream();
     this.stopSandboxOutput();
     await this.stopPresence();

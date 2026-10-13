@@ -26,7 +26,10 @@ export {
   conflictsListParamsSchema,
   registerWorkspaceConflictReads,
 } from "./conflict-reads.js";
-export { registerWorkspaceConflictActions } from "./conflict-actions.js";
+export {
+  conflictsActionParamsSchema,
+  registerWorkspaceConflictActions,
+} from "./conflict-actions.js";
 export {
   ConflictEscalationSweeper,
   sweepConflictEscalations,
@@ -34,7 +37,8 @@ export {
 export type { ConflictEscalationSweeperOptions } from "./conflict-escalation-sweeper.js";
 export { workspaceReadParamsSchema, workspaceListParamsSchema } from "./reads.js";
 export { workspaceSearchParamsSchema } from "./search.js";
-export { workspaceDiffParamsSchema } from "./history.js";
+export { workspaceDiffParamsSchema, workspaceHistoryParamsSchema } from "./history.js";
+export { workspaceBlameParamsSchema } from "./blame.js";
 export { updateCanonicalRef, reconcileRef } from "./reconcile.js";
 export {
   DEFAULT_HEALTH_LOCKFILE_PATHS,
@@ -74,7 +78,7 @@ export type {
   SandboxSyncResponse,
   SandboxSyncResult,
 } from "./execution.js";
-export { DockerExecutionDriver } from "./docker-execution-driver.js";
+export { DEFAULT_GIT_INTERNAL_NETWORK, DockerExecutionDriver } from "./docker-execution-driver.js";
 export type {
   DockerExecutionDriverOptions,
   DockerInvocationOptions,

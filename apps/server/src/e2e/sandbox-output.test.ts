@@ -51,6 +51,9 @@ class OutputExecutionDriver implements ExecutionDriver {
   }
 
   async start(): Promise<void> {}
+  async cpuUsage(): Promise<{ usage_usec: bigint; generation: string }> {
+    return { usage_usec: 0n, generation: "output-container-start" };
+  }
   async stop(): Promise<void> {}
   async destroy(): Promise<void> {}
 
