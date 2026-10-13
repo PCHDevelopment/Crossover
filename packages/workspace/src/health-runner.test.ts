@@ -290,6 +290,12 @@ afterEach(async () => {
   );
 });
 
+/**
+ * Real containers under a loaded full suite need more than vitest's 5 s default (T1517). S2
+ * measured the abort case at 2.9 s in isolation; it timed out at 5 s in #248's CI run.
+ */
+const DOCKER_CASE_TIMEOUT_MS = 30_000;
+
 describe("DockerHealthRunner", () => {
   it("maps root UID/GID to unprivileged 1000:1000 and changes checkout ownership", async () => {
     const checkout = await mkdtemp(join(tmpdir(), "crossover-health-root-test-"));
@@ -1109,47 +1115,59 @@ describe("DockerHealthRunner", () => {
     expect(result.status).toBe("GREEN");
   });
 
-  it.skipIf(skipDockerIntegration)("keeps successful status with output over 1 MiB", async () => {
-    const { repository, revision } = await makeRepo();
-    const result = await new DockerHealthRunner({ allowedImages: [DEFAULT_HEALTH_IMAGE] }).run({
-      repository,
-      revision,
-      command: "node -e \"process.stdout.write('x'.repeat(2*1024*1024))\"",
-    });
-    expect(result.status).toBe("GREEN");
-    expect(Buffer.byteLength(result.log)).toBeLessThanOrEqual(1024 * 1024 + 20);
-  });
+  it.skipIf(skipDockerIntegration)(
+    "keeps successful status with output over 1 MiB",
+    async () => {
+      const { repository, revision } = await makeRepo();
+      const result = await new DockerHealthRunner({ allowedImages: [DEFAULT_HEALTH_IMAGE] }).run({
+        repository,
+        revision,
+        command: "node -e \"process.stdout.write('x'.repeat(2*1024*1024))\"",
+      });
+      expect(result.status).toBe("GREEN");
+      expect(Buffer.byteLength(result.log)).toBeLessThanOrEqual(1024 * 1024 + 20);
+    },
+    DOCKER_CASE_TIMEOUT_MS,
+  );
 
-  it.skipIf(skipDockerIntegration)("kills and removes a container on timeout", async () => {
-    const command = `sleep 30; : ${randomUUID()}`;
-    const before = dockerHealthContainers(command);
-    const { repository, revision } = await makeRepo();
-    const result = await new DockerHealthRunner({
-      allowedImages: [DEFAULT_HEALTH_IMAGE],
-      timeoutMs: 1000,
-    }).run({ repository, revision, command });
-    expect(result.status).toBe("ERROR");
-    expect(dockerHealthContainers(command)).toEqual(before);
-  });
+  it.skipIf(skipDockerIntegration)(
+    "kills and removes a container on timeout",
+    async () => {
+      const command = `sleep 30; : ${randomUUID()}`;
+      const before = dockerHealthContainers(command);
+      const { repository, revision } = await makeRepo();
+      const result = await new DockerHealthRunner({
+        allowedImages: [DEFAULT_HEALTH_IMAGE],
+        timeoutMs: 1000,
+      }).run({ repository, revision, command });
+      expect(result.status).toBe("ERROR");
+      expect(dockerHealthContainers(command)).toEqual(before);
+    },
+    DOCKER_CASE_TIMEOUT_MS,
+  );
 
-  it.skipIf(skipDockerIntegration)("kills and removes a container when aborted", async () => {
-    const command = `sleep 30; : ${randomUUID()}`;
-    const before = dockerHealthContainers(command);
-    const { repository, revision } = await makeRepo();
-    const controller = new AbortController();
-    const running = new DockerHealthRunner({
-      allowedImages: [DEFAULT_HEALTH_IMAGE],
-      timeoutMs: 30_000,
-    }).run({ repository, revision, command, signal: controller.signal });
-    await vi.waitFor(
-      () => expect(dockerHealthContainers(command).length).toBeGreaterThan(before.length),
-      { timeout: 5_000 },
-    );
+  it.skipIf(skipDockerIntegration)(
+    "kills and removes a container when aborted",
+    async () => {
+      const command = `sleep 30; : ${randomUUID()}`;
+      const before = dockerHealthContainers(command);
+      const { repository, revision } = await makeRepo();
+      const controller = new AbortController();
+      const running = new DockerHealthRunner({
+        allowedImages: [DEFAULT_HEALTH_IMAGE],
+        timeoutMs: 30_000,
+      }).run({ repository, revision, command, signal: controller.signal });
+      await vi.waitFor(
+        () => expect(dockerHealthContainers(command).length).toBeGreaterThan(before.length),
+        { timeout: 5_000 },
+      );
 
-    controller.abort();
-    await expect(running).resolves.toMatchObject({ status: "ERROR" });
-    expect(dockerHealthContainers(command)).toEqual(before);
-  });
+      controller.abort();
+      await expect(running).resolves.toMatchObject({ status: "ERROR" });
+      expect(dockerHealthContainers(command)).toEqual(before);
+    },
+    DOCKER_CASE_TIMEOUT_MS,
+  );
 
   it("persists results against the exact room-scoped workspace revision", async () => {
     const id = await storeHealthRun(db.pool, {
