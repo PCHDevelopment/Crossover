@@ -11,8 +11,11 @@ import { loadPolicy } from "@open-policy-agent/opa-wasm";
 export interface AuthzFacts {
   /** The resource belongs to the principal's room. */
   room_match: boolean;
-  /** The participant's row, or null when there is none. */
-  participant: { status: string; authority: string; valid: boolean } | null;
+  /**
+   * The participant's row, or null when there is none. The policy knows which roles and
+   * authorities exist (bundles.gen.rego) and refuses a participant with any other.
+   */
+  participant: { status: string; authority: string; role: string } | null;
   room_status: string;
   /** The command changes state. */
   mutating: boolean;
@@ -24,12 +27,13 @@ export interface AuthzFacts {
   covering: { any: boolean; ungated: boolean };
   /** The command was approved by an owner or admin (T905). */
   approved: boolean;
-  /** The role bundle and the authority include the capability. */
-  in_bundle: boolean;
   /** A per-path command's gate (T218) is satisfied by an ungated scoped grant. */
   per_path_gate: boolean;
-  /** The capability is in the catalog. */
-  known_capability: boolean;
+  /**
+   * The capability asked for, without its scope (`<resource>.<action>`, "" when there is none).
+   * The policy looks it up in the catalog and in what the participant's role and authority cover.
+   */
+  capability: string;
 }
 
 export const DENY_CODES = [

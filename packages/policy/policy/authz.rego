@@ -31,7 +31,7 @@ else := deny("PARTICIPANT_PAUSED", "participant_paused") if input.participant.st
 else := deny("FORBIDDEN", concat("", ["participant_", lower(input.participant.status)])) if input.participant.status != "ACTIVE"
 
 # The database CHECKs make this unreachable; refuse rather than guess.
-else := deny("FORBIDDEN", "invalid_participant") if input.participant.valid == false
+else := deny("FORBIDDEN", "invalid_participant") if not valid_participant
 
 # The room's own state (§5). A deleted room is not there at all, for anyone and for reads too.
 else := deny("NOT_FOUND", "room_deleted") if input.room_status == "DELETED"
@@ -65,15 +65,36 @@ else := {"allow": true} if {
 else := deny("APPROVAL_REQUIRED", "approval_required") if input.covering.any == true
 
 # The role bundle and the authority cover it (§21.1).
-else := {"allow": true} if input.in_bundle == true
+else := {"allow": true} if in_bundle
 
 # A per-path command's gate (T218): an ungated scoped grant of the capability is enough to
 # reach the handler, which then authorizes each path itself.
 else := {"allow": true} if input.per_path_gate == true
 
-else := deny("FORBIDDEN", "unknown_capability") if input.known_capability == false
+else := deny("FORBIDDEN", "unknown_capability") if not input.capability in data.crossover.bundles.capabilities
 
 else := deny("FORBIDDEN", "missing_capability")
+
+# The role and the authority are ones this policy has a bundle for.
+valid_participant if {
+	input.participant.role in object.keys(data.crossover.bundles.roles)
+	input.participant.authority in object.keys(data.crossover.bundles.authorities)
+}
+
+# What a role and an authority cover together (effectiveCapabilities in bundles.ts): the role's
+# bundle, the authority's powers, task management for owners and admins, and the git
+# capabilities for owners. The sets are generated from bundles.ts (bundles.gen.rego).
+in_bundle if input.capability in effective
+
+effective := ((data.crossover.bundles.roles[input.participant.role] | data.crossover.bundles.authorities[input.participant.authority]) | governing_tasks) | owner_git
+
+governing_tasks := data.crossover.bundles.governing_tasks if input.participant.authority != "MEMBER"
+
+default governing_tasks := set()
+
+owner_git := data.crossover.bundles.owner_git if input.participant.authority == "OWNER"
+
+default owner_git := set()
 
 owner_may_act if {
 	input.room_status == "PAUSED"
@@ -81,10 +102,11 @@ owner_may_act if {
 }
 
 well_formed if {
-	every fact in ["room_match", "mutating", "path_invalid", "denied", "approved", "in_bundle", "per_path_gate", "known_capability"] {
+	every fact in ["room_match", "mutating", "path_invalid", "denied", "approved", "per_path_gate"] {
 		is_boolean(input[fact])
 	}
 	is_string(input.room_status)
+	is_string(input.capability)
 	is_boolean(input.covering.any)
 	is_boolean(input.covering.ungated)
 	participant_well_formed
@@ -95,5 +117,5 @@ participant_well_formed if input.participant == null
 participant_well_formed if {
 	is_string(input.participant.status)
 	is_string(input.participant.authority)
-	is_boolean(input.participant.valid)
+	is_string(input.participant.role)
 }

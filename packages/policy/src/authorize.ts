@@ -9,15 +9,7 @@ import {
 } from "./capability.js";
 import { loadLiveGrants } from "./grants.js";
 import { policyEngine, type AuthzFacts, type Decision } from "./engine.js";
-import {
-  AUTHORITIES,
-  CAPABILITIES,
-  effectiveCapabilities,
-  isCapability,
-  ROLES,
-  type Authority,
-  type Role,
-} from "./bundles.js";
+import { CAPABILITIES, isCapability } from "./bundles.js";
 
 /** The fields of an authenticated principal the policy looks at. */
 export interface PolicyPrincipal {
@@ -123,9 +115,8 @@ async function loadFacts(
     denied: false,
     covering: { any: false, ungated: false },
     approved: context.approved === true,
-    in_bundle: false,
     per_path_gate: false,
-    known_capability: isCapability(base),
+    capability: base,
   };
   if (!facts.room_match) return { facts, row: undefined };
 
@@ -137,13 +128,7 @@ async function loadFacts(
   );
   const row = rows[0];
   if (!row) return { facts, row };
-  const role = isRole(row.role) ? row.role : undefined;
-  const authority = isAuthority(row.authority) ? row.authority : undefined;
-  facts.participant = {
-    status: row.status,
-    authority: row.authority,
-    valid: role !== undefined && authority !== undefined,
-  };
+  facts.participant = { status: row.status, authority: row.authority, role: row.role };
   facts.room_status = row.room_status;
 
   const path = pathOf(action, base, resource);
@@ -167,11 +152,6 @@ async function loadFacts(
     any: covering.length > 0,
     ungated: covering.some((g) => !g.requires_approval),
   };
-  facts.in_bundle =
-    role !== undefined &&
-    authority !== undefined &&
-    isCapability(base) &&
-    effectiveCapabilities(role, authority).has(base);
   // A per-path command's gate (T218): holding an ungated scoped grant of the capability is
   // enough to reach the handler, which authorizes each path itself.
   facts.per_path_gate =
@@ -261,12 +241,4 @@ function forbidden(action: string, extra: Record<string, unknown>): CrossoverErr
   return new CrossoverError("FORBIDDEN", `Missing capability ${String(action)}`, {
     details: { missing_capability: action, ...extra },
   });
-}
-
-function isRole(value: string): value is Role {
-  return (ROLES as readonly string[]).includes(value);
-}
-
-function isAuthority(value: string): value is Authority {
-  return (AUTHORITIES as readonly string[]).includes(value);
 }

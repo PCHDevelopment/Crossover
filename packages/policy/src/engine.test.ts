@@ -14,23 +14,22 @@ const WASM = new URL("../policy/policy.wasm", import.meta.url);
 /** An active member of an active room whose role bundle covers the action. */
 const allowed: AuthzFacts = {
   room_match: true,
-  participant: { status: "ACTIVE", authority: "MEMBER", valid: true },
+  participant: { status: "ACTIVE", authority: "MEMBER", role: "DEVELOPER" },
+  capability: "messages.send",
   room_status: "ACTIVE",
   mutating: true,
   path_invalid: false,
   denied: false,
   covering: { any: false, ungated: false },
   approved: false,
-  in_bundle: true,
   per_path_gate: false,
-  known_capability: true,
 };
 
 describe("the compiled policy", () => {
   it("answers the ladder: allow, and a refusal with its code and reason", async () => {
     const engine = await createPolicyEngine(await readFile(WASM));
     expect(engine.decide(allowed)).toEqual({ allow: true });
-    expect(engine.decide({ ...allowed, in_bundle: false })).toEqual({
+    expect(engine.decide({ ...allowed, capability: "room.freeze" })).toEqual({
       allow: false,
       code: "FORBIDDEN",
       reason: "missing_capability",
@@ -38,18 +37,18 @@ describe("the compiled policy", () => {
     expect(
       engine.decide({
         ...allowed,
-        participant: { status: "PAUSED", authority: "MEMBER", valid: true },
+        participant: { status: "PAUSED", authority: "MEMBER", role: "DEVELOPER" },
       }),
     ).toEqual({ allow: false, code: "PARTICIPANT_PAUSED", reason: "participant_paused" });
   });
 
   it("refuses facts that are missing or of the wrong type instead of guessing", async () => {
     const engine = await createPolicyEngine(await readFile(WASM));
-    const { in_bundle: _removed, ...incomplete } = allowed;
+    const { capability: _removed, ...incomplete } = allowed;
     void _removed;
     for (const facts of [
       incomplete,
-      { ...allowed, in_bundle: "true" },
+      { ...allowed, capability: true },
       { ...allowed, covering: null },
       {},
     ]) {
