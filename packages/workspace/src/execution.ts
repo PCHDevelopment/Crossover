@@ -1,6 +1,5 @@
 import type { Pool } from "@crossover/db";
-import { CrossoverError } from "@crossover/protocol";
-import { ExecutionCore, SANDBOX_VCPU_COUNT } from "./execution/core.js";
+import { ExecutionCore } from "./execution/core.js";
 import type {
   ExecutionDriver,
   ExecutionServiceOptions,
@@ -15,6 +14,16 @@ import type {
   SandboxWorkingCopyFile,
   SandboxWorkingCopyStatus,
 } from "./execution/core.js";
+import {
+  assertExecReservation as assertExecReservationImpl,
+  cancelAllExecs as cancelAllExecsImpl,
+  cancelExec as cancelExecImpl,
+  cancelParticipantExecs as cancelParticipantExecsImpl,
+  pendingExec as pendingExecImpl,
+  releaseExecReservation as releaseExecReservationImpl,
+  reserveExec as reserveExecImpl,
+  startExec as startExecImpl,
+} from "./execution/exec.js";
 import {
   scheduleCanonicalAdvance as scheduleCanonicalAdvanceImpl,
   scheduleLatestCanonical as scheduleLatestCanonicalImpl,
@@ -72,7 +81,7 @@ export class ExecutionService {
     const core: ExecutionCore = new ExecutionCore(pool, driver, options, {
       hibernateOne: (roomId, participantId) => hibernateOne(core, roomId, participantId),
       scheduleLatestCanonical: (roomId) => scheduleLatestCanonicalImpl(core, roomId),
-      cancelAllExecs: (reason) => this.cancelAllExecs(reason),
+      cancelAllExecs: (reason) => cancelAllExecsImpl(core, reason),
     });
     this.core = core;
   }
@@ -125,31 +134,7 @@ export class ExecutionService {
     execId: string,
     requestedTimeoutMs = 600_000,
   ): Promise<{ sandbox_id: string; timeout_ms: number }> {
-    return this.withSandboxLock(roomId, participantId, async (sandbox) => {
-      if (!this.core.driver.exec || !this.core.driver.cpuUsage)
-        throw new CrossoverError(
-          "UNAVAILABLE",
-          "Sandbox execution requires a cumulative CPU meter",
-        );
-      if (this.core.pendingExecs.has(execId) || this.core.activeExecs.has(execId))
-        throw new CrossoverError("CONFLICT_VERSION", "Sandbox execution id is already reserved");
-      this.assertExecCapacityFor(sandbox.id);
-      await this.core.computeSweeper.sample(sandbox);
-      const timeoutMs = await this.core.computeBudgetMeter.reserve({
-        room_id: roomId,
-        participant_id: participantId,
-        sandbox_id: sandbox.id,
-        exec_id: execId,
-        requested_timeout_ms: requestedTimeoutMs,
-        vcpus: SANDBOX_VCPU_COUNT,
-      });
-      this.core.pendingExecs.set(execId, {
-        room_id: roomId,
-        participant_id: participantId,
-        sandbox_id: sandbox.id,
-      });
-      return { sandbox_id: sandbox.id, timeout_ms: timeoutMs };
-    });
+    return reserveExecImpl(this.core, roomId, participantId, execId, requestedTimeoutMs);
   }
 
   /** Check that prepare still owns the slot before committing the started event. */
@@ -159,44 +144,17 @@ export class ExecutionService {
     sandboxId: string,
     execId: string,
   ): void {
-    const pending = this.core.pendingExecs.get(execId);
-    if (
-      !pending ||
-      pending.room_id !== roomId ||
-      pending.participant_id !== participantId ||
-      pending.sandbox_id !== sandboxId
-    )
-      throw new CrossoverError(
-        "UNAVAILABLE",
-        "Sandbox execution reservation is no longer available",
-      );
+    return assertExecReservationImpl(this.core, roomId, participantId, sandboxId, execId);
   }
 
   /** Read a pending reservation so cancel can find an exec before its private log exists. */
   pendingExec(execId: string): PendingSandboxExec | undefined {
-    const pending = this.core.pendingExecs.get(execId);
-    return pending ? { ...pending } : undefined;
+    return pendingExecImpl(this.core, execId);
   }
 
   /** Release a slot after commit or rollback; consuming it at start makes this a no-op. */
   async releaseExecReservation(execId: string): Promise<void> {
-    const pending = this.core.pendingExecs.get(execId);
-    if (!pending) return;
-    await this.core.withEnsureLock(pending.room_id, pending.participant_id, async () => {
-      if (this.core.pendingExecs.get(execId) === pending) {
-        this.core.pendingExecs.delete(execId);
-        await this.core.computeBudgetMeter.release(execId);
-      }
-    });
-  }
-
-  private assertExecCapacityFor(sandboxId: string): void {
-    if (!this.core.driver.exec)
-      throw new CrossoverError("UNAVAILABLE", "Sandbox execution is not supported by this driver");
-    if (this.execCount(sandboxId) >= 8)
-      throw new CrossoverError("VALIDATION", "A sandbox may run at most 8 commands at once", {
-        details: { reason: "too_many_execs", maximum: 8 },
-      });
+    return releaseExecReservationImpl(this.core, execId);
   }
 
   /** Start one command while serialized with submit's post-commit working-copy advance. */
@@ -209,84 +167,7 @@ export class ExecutionService {
     timeoutMs: number;
     onOutput: (stream: "stdout" | "stderr", chunk: Buffer) => Promise<void>;
   }): Promise<SandboxExecProcess> {
-    return this.withSandboxLock(input.room_id, input.participant_id, async (sandbox) => {
-      const pending = this.core.pendingExecs.get(input.exec_id);
-      if (
-        !pending ||
-        pending.room_id !== input.room_id ||
-        pending.participant_id !== input.participant_id ||
-        pending.sandbox_id !== sandbox.id
-      )
-        throw new CrossoverError(
-          "UNAVAILABLE",
-          "Sandbox execution reservation is no longer available",
-        );
-
-      if (pending.reason !== undefined) {
-        this.core.pendingExecs.delete(input.exec_id);
-        await this.core.computeBudgetMeter.release(input.exec_id);
-        return {
-          ...(pending.cancelled_by !== undefined ? { cancelled_by: pending.cancelled_by } : {}),
-          finished: Promise.resolve({
-            exit_code: null,
-            duration_ms: 0,
-            reason: pending.reason,
-          }),
-          cancel: async () => undefined,
-        };
-      }
-
-      const run = this.core.driver.exec;
-      if (!run || !this.core.driver.cpuUsage || !sandbox.volume_ref || !sandbox.container_ref) {
-        this.core.pendingExecs.delete(input.exec_id);
-        await this.core.computeBudgetMeter.release(input.exec_id);
-        throw new CrossoverError(
-          "UNAVAILABLE",
-          "Sandbox execution requires a cumulative CPU meter",
-        );
-      }
-      let process: SandboxExecProcess;
-      try {
-        process = await run.call(this.core.driver, {
-          sandbox_id: sandbox.id,
-          resources: this.core.resources(sandbox),
-          exec_id: input.exec_id,
-          command: input.command,
-          cwd: input.cwd,
-          timeoutMs: input.timeoutMs,
-          onOutput: input.onOutput,
-        });
-      } catch (error) {
-        this.core.pendingExecs.delete(input.exec_id);
-        await this.core.computeBudgetMeter.release(input.exec_id);
-        throw error;
-      }
-      this.core.pendingExecs.delete(input.exec_id);
-      this.core.activeExecs.set(input.exec_id, {
-        room_id: input.room_id,
-        participant_id: input.participant_id,
-        sandbox_id: sandbox.id,
-        process,
-      });
-      void process.finished
-        .catch(() => undefined)
-        .then(async () => {
-          try {
-            await this.core.computeSweeper.sample(sandbox);
-            await this.core.computeBudgetMeter.release(input.exec_id);
-          } catch (error) {
-            console.error("Failed to reconcile sandbox CPU usage", error);
-          }
-          return this.core.withEnsureLock(input.room_id, input.participant_id, async () => {
-            const active = this.core.activeExecs.get(input.exec_id);
-            if (active?.process === process) this.core.activeExecs.delete(input.exec_id);
-            const head = await this.core.workspaceHead(input.room_id).catch(() => undefined);
-            if (head) this.scheduleCanonicalAdvance(input.room_id, head.revision);
-          });
-        })
-        .catch((error: unknown) => console.error("Failed to clear completed sandbox exec", error));
-      return process;
-    });
+    return startExecImpl(this.core, input);
   }
 
   async cancelExec(
@@ -296,28 +177,7 @@ export class ExecutionService {
     reason: SandboxExecTermination = "cancelled",
     cancelledBy?: string,
   ): Promise<boolean> {
-    const pending = this.core.pendingExecs.get(execId);
-    const active = this.core.activeExecs.get(execId);
-    const known = pending ?? active;
-    if (!known || known.room_id !== roomId || known.participant_id !== participantId) return false;
-    return this.core.withEnsureLock(roomId, participantId, async () => {
-      const stillPending = this.core.pendingExecs.get(execId);
-      if (stillPending?.room_id === roomId && stillPending.participant_id === participantId) {
-        stillPending.reason = reason;
-        if (cancelledBy !== undefined) stillPending.cancelled_by = cancelledBy;
-        return true;
-      }
-      const stillActive = this.core.activeExecs.get(execId);
-      if (
-        !stillActive ||
-        stillActive.room_id !== roomId ||
-        stillActive.participant_id !== participantId
-      )
-        return false;
-      await stillActive.process.cancel(reason);
-      await stillActive.process.finished.catch(() => undefined);
-      return true;
-    });
+    return cancelExecImpl(this.core, roomId, participantId, execId, reason, cancelledBy);
   }
 
   async cancelParticipantExecs(
@@ -325,41 +185,11 @@ export class ExecutionService {
     participantId: string,
     reason: SandboxExecTermination,
   ): Promise<void> {
-    await this.core.withEnsureLock(roomId, participantId, async () => {
-      const sandbox = await this.core.get(roomId, participantId);
-      const active = [...this.core.activeExecs.values()].filter(
-        (run) => run.room_id === roomId && run.participant_id === participantId,
-      );
-      for (const pending of this.core.pendingExecs.values())
-        if (pending.room_id === roomId && pending.participant_id === participantId)
-          pending.reason = reason;
-      const cancelling = active.map((run) => run.process.cancel(reason).catch(() => undefined));
-      if (reason === "revoked" && sandbox?.status === "RUNNING") {
-        const resources = this.core.resources(sandbox);
-        if (this.core.driver.restart)
-          await this.core.driver.restart({ sandbox_id: sandbox.id, resources });
-        else
-          await this.core.driver
-            .stop({ sandbox_id: sandbox.id, resources })
-            .then(() => this.core.driver.start({ sandbox_id: sandbox.id, resources }));
-      }
-      await Promise.all(cancelling);
-      await Promise.all(active.map((run) => run.process.finished.catch(() => undefined)));
-    });
+    return cancelParticipantExecsImpl(this.core, roomId, participantId, reason);
   }
 
   async cancelAllExecs(reason: SandboxExecTermination): Promise<void> {
-    for (const pending of this.core.pendingExecs.values()) pending.reason = reason;
-    const active = [...this.core.activeExecs.values()];
-    await Promise.all(active.map((run) => run.process.cancel(reason).catch(() => undefined)));
-    await Promise.all(active.map((run) => run.process.finished.catch(() => undefined)));
-  }
-
-  private execCount(sandboxId: string): number {
-    let count = this.core.activeCount(sandboxId);
-    for (const pending of this.core.pendingExecs.values())
-      if (pending.sandbox_id === sandboxId) count++;
-    return count;
+    return cancelAllExecsImpl(this.core, reason);
   }
   async snapshotInventory(
     sandbox: SandboxRecord,
