@@ -2,6 +2,61 @@
 
 Periodic big-picture reviews by O1: is the merged code building the product in ARCHITECTURE.md, in the right order? Newest first.
 
+## 2026-10-13 · Review 15 (16:20 UTC; 12 PRs merged since Review 14)
+
+**State.** #277–#286, #288 and #289 merged, each with CI green on its head. Peter merged docs PR #258 (Reviews 12–14). #287 (T1525 part 3) is approved and needs main merged in before a clean run.
+
+- **Authorization in Rego, T1509, steps 1a–2b done.** #280 moved scope and path-glob matching into `scope.rego`. Every regular-expression metacharacter is escaped, every pattern is anchored, and matching uses RE2. An oracle compares the policy with the TypeScript and stays in CI. With #280, `authorize()` decides entirely in the policy. #279 (T1523) first fixed a TypeScript glob bug that S1's oracle found. That bug had also left a gap in the circuit breaker's protected-path check. The tier rules (PR 3, split into 3a–3c) are planned and approved.
+- **UI completeness, T1507, done.** #278 adds Start and Submit with per-requirement evidence; #282 adds Block, Unblock and Release. The web board now covers the whole task lifecycle.
+- **Debt paid down.**
+  - `dispatcher.ts` went from 1,793 to 855 lines with #283 and #285, and will be 228 after #287.
+  - `execution.ts` went from 1,921 to 659 lines with #286 and #289.
+  - The export route left `gateway/src/server.ts` (#281, now 552 lines).
+  - Every move PR carries a TypeScript-parser proof that the code moved and was not rewritten, plus a check that the package's exported names are unchanged (`scripts/refactor/`, #284). I re-ran the proof on each PR before merging.
+- **Test reliability.** T1522 (#277) gave the first deploy-topology exec a measured 45 s budget. T1527 (#288) did the same for the scope oracle after it failed #287's run.
+
+**Against §29.** All §29 items are merged except T1509 PR 3 (tier rules) and T1519 (Peter's retention decision).
+
+**What went well.**
+
+- **Refactors with proofs.** S1 built `prove-move` and `prove-exports` and shared them, and S2 adopted them. The export check caught two module-private types that would have become public API in #283.
+- **Re-running the proof found a weak one.** On #286 the `--glue` list exempted 11 real functions. Re-running with only the constructor showed the true differences. They were benign and described in the PR, but they were hidden from the proof. From #287 and #289 on, `--glue` lists only facade wrappers.
+- **Fast ownership.** S1 had #288 open within 8 minutes of the #287 failure being flagged, with measurements and every case kept.
+
+**What needs correcting.**
+
+1. **A new heavy test needs a measured budget when it is written, not after it fails someone else's PR.** #280's oracle shipped on vitest's 5 s default and failed #287. Any test that loops over thousands of cases, or starts containers, gets an explicit timeout with its measured time in a comment, in the PR that adds it.
+2. **Backlog status.** S2 picked up T1518, which had been done since #253. Finished task headings now end in `· done`.
+3. **Status posts.** "Still queued, no feedback" posts went out again. Post only when state changes.
+
+**Course corrections.**
+
+1. **S1:**
+   1. Merge main into #287 so it can merge.
+   2. T1509 PR 3a: tier classification in Rego. No top-level await: `tierOf` stays synchronous over the engine that `initPolicy()` loads, and fails closed if the engine is not loaded.
+   3. Then 3b (`grant_check`) and 3c (`holdsGatedScope`).
+2. **S2:**
+   1. T1526's remaining slices, `canonical-advance` and `exec`, with only facade wrappers in `--glue`.
+   2. Watch `authorize.test.ts`: 2.9 s alone, so it is the next candidate for a measured budget.
+3. **For Peter:**
+   - T1519: archive retention.
+   - T1418.
+   - Q1 staffing: Q1 has been silent for over a day.
+   - CI capacity: one runner, and checks queue for 10–30 minutes, which is now the main limit on throughput.
+   - Delete the throwaway branches `s1/diag-deploy-topology` and `s1/diag-deploy-topology-main`.
+
+**Tech-debt register, closed:** the export route inline in `server.ts` (T1524); `dispatcher.ts` size (T1525, once #287 merges); the glob `*` bug (T1523).
+
+**Still open:**
+
+- `execution.ts` facade plus modules (finishing in T1526).
+- The Rego and TypeScript string-length counting difference: pinned and documented.
+- `RedisOAuthStateStore` opens its own Redis connection.
+- dev-login returns `session_token` in its response body. It is development-only, and the SDK needs it.
+- The web app imports `@crossover/workspace/protected-paths`.
+
+**Closed since Review 14:** T1507, T1522, T1523, T1524 and T1527. T1525 closes when #287 merges.
+
 ## 2026-10-13 · Review 14 (12:20 UTC; 10 PRs merged since Review 13)
 
 **State.** #265, #268, #269, #270, #271, #272, #273, #274, #275 and #276 merged, each with CI green on its head. #277 (T1522) is approved and waiting for CI.
