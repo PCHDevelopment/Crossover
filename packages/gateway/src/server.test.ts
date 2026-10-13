@@ -262,7 +262,7 @@ describe("GET /v1/rooms/:roomId/export", () => {
     const s = await setup(undefined, false, { roomExport: { source, limiter } });
     const address = await s.app.listen({ host: "127.0.0.1", port: 0 });
     const response = await fetch(`${address}/v1/rooms/${s.room}/export`, {
-      headers: { authorization: `Bearer ${s.owner.access_token}` },
+      headers: { authorization: `Bearer ${s.owner.access_token}`, connection: "close" },
     });
     const reader = response.body!.getReader();
     expect((await reader.read()).value).toEqual(new TextEncoder().encode("archive chunk"));
