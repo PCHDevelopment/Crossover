@@ -177,24 +177,42 @@ export class SandboxComputeBudgetMeter {
       );
       if (delta === 0n) return delta;
 
-      await ensureUsageRows(client, input.room_id, input.participant_id, usageDate);
-      await lockUsageRows(client, input.room_id, input.participant_id, usageDate);
-      const reservations = await client.query<{
-        exec_id: string;
-        remaining_cpu_usec: string;
-      }>(
-        `SELECT exec_id, remaining_cpu_usec
+      const pendingReservations = await client.query<{ usage_date: string }>(
+        `SELECT usage_date::text FROM sandbox_compute_reservations WHERE sandbox_id = $1`,
+        [input.sandbox_id],
+      );
+      const usageDates = new Set([
+        usageDate,
+        ...pendingReservations.rows.map((reservation) => reservation.usage_date),
+      ]);
+      for (const reservationDate of [...usageDates].sort()) {
+        await ensureUsageRows(client, input.room_id, input.participant_id, reservationDate);
+        await lockUsageRows(client, input.room_id, input.participant_id, reservationDate);
+      }
+      const reservations = await client.query<
+        Pick<ReservationRow, "exec_id" | "usage_date" | "remaining_cpu_usec">
+      >(
+        `SELECT exec_id, usage_date::text, remaining_cpu_usec::text
            FROM sandbox_compute_reservations
-          WHERE sandbox_id = $1 AND usage_date = $2::date AND remaining_cpu_usec > 0
+          WHERE sandbox_id = $1
           ORDER BY created_at, exec_id
           FOR UPDATE`,
-        [input.sandbox_id, usageDate],
+        [input.sandbox_id],
       );
       let chargeAgainstReservations = delta;
-      let released = 0n;
+      const adjustments = new Map<string, { used: bigint; released: bigint }>();
+      const adjustmentFor = (date: string) => {
+        let adjustment = adjustments.get(date);
+        if (!adjustment) {
+          adjustment = { used: 0n, released: 0n };
+          adjustments.set(date, adjustment);
+        }
+        return adjustment;
+      };
       for (const reservation of reservations.rows) {
         if (chargeAgainstReservations === 0n) break;
         const remainingUsec = BigInt(reservation.remaining_cpu_usec);
+        if (remainingUsec === 0n) continue;
         const consumed =
           remainingUsec < chargeAgainstReservations ? remainingUsec : chargeAgainstReservations;
         await client.query(
@@ -203,23 +221,37 @@ export class SandboxComputeBudgetMeter {
             WHERE exec_id = $1`,
           [reservation.exec_id, consumed.toString()],
         );
-        released += consumed;
+        const adjustment = adjustmentFor(reservation.usage_date);
+        adjustment.used += consumed;
+        adjustment.released += consumed;
         chargeAgainstReservations -= consumed;
       }
-      await client.query(
-        `UPDATE sandbox_compute_room_daily
-            SET used_cpu_usec = used_cpu_usec + $3::bigint,
-                reserved_cpu_usec = GREATEST(0, reserved_cpu_usec - $4::bigint)
-          WHERE room_id = $1 AND usage_date = $2::date`,
-        [input.room_id, usageDate, delta.toString(), released.toString()],
-      );
-      await client.query(
-        `UPDATE sandbox_compute_agent_daily
-            SET used_cpu_usec = used_cpu_usec + $4::bigint,
-                reserved_cpu_usec = GREATEST(0, reserved_cpu_usec - $5::bigint)
-          WHERE room_id = $1 AND participant_id = $2 AND usage_date = $3::date`,
-        [input.room_id, input.participant_id, usageDate, delta.toString(), released.toString()],
-      );
+      if (chargeAgainstReservations > 0n) {
+        const chargeDate = reservations.rows[0]?.usage_date ?? usageDate;
+        adjustmentFor(chargeDate).used += chargeAgainstReservations;
+      }
+      for (const [date, adjustment] of adjustments) {
+        await client.query(
+          `UPDATE sandbox_compute_room_daily
+              SET used_cpu_usec = used_cpu_usec + $3::bigint,
+                  reserved_cpu_usec = GREATEST(0, reserved_cpu_usec - $4::bigint)
+            WHERE room_id = $1 AND usage_date = $2::date`,
+          [input.room_id, date, adjustment.used.toString(), adjustment.released.toString()],
+        );
+        await client.query(
+          `UPDATE sandbox_compute_agent_daily
+              SET used_cpu_usec = used_cpu_usec + $4::bigint,
+                  reserved_cpu_usec = GREATEST(0, reserved_cpu_usec - $5::bigint)
+            WHERE room_id = $1 AND participant_id = $2 AND usage_date = $3::date`,
+          [
+            input.room_id,
+            input.participant_id,
+            date,
+            adjustment.used.toString(),
+            adjustment.released.toString(),
+          ],
+        );
+      }
       return delta;
     });
   }

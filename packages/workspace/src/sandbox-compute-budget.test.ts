@@ -130,6 +130,49 @@ describe("SandboxComputeBudgetMeter", () => {
     expect(agent.rows[0]?.used_cpu_usec).toBe("500000000");
   });
 
+  it("charges a midnight-spanning exec to the reservation's UTC day", async () => {
+    const ids = await fixture();
+    let now = new Date("2026-10-01T23:55:00Z");
+    const meter = new SandboxComputeBudgetMeter(db.pool, () => now);
+    const execId = newId("exec");
+    expect(
+      await meter.reserve({
+        ...ids,
+        exec_id: execId,
+        requested_timeout_ms: 20 * 60_000,
+        vcpus: 2,
+      }),
+    ).toBe(20 * 60_000);
+    expect(
+      await meter.sample({
+        ...ids,
+        usage_usec: 0n,
+        generation: "start-1",
+        sampled_at: now,
+      }),
+    ).toBe(0n);
+    now = new Date("2026-10-02T00:05:00Z");
+    expect(
+      await meter.sample({
+        ...ids,
+        usage_usec: 180_000_000n,
+        generation: "start-1",
+        sampled_at: now,
+      }),
+    ).toBe(180_000_000n);
+    expect(await meter.release(execId)).toBe(2_220_000_000n);
+
+    const usage = await db.pool.query<{ usage_date: string; used: string; reserved: string }>(
+      `SELECT usage_date::text, used_cpu_usec::text AS used, reserved_cpu_usec::text AS reserved
+         FROM sandbox_compute_room_daily WHERE room_id = $1 ORDER BY usage_date`,
+      [ids.room_id],
+    );
+    expect(usage.rows).toEqual([
+      { usage_date: "2026-10-01", used: "180000000", reserved: "0" },
+      { usage_date: "2026-10-02", used: "0", reserved: "0" },
+    ]);
+  });
+
   it("reports an exhausted measured cap so a running sandbox can be hibernated", async () => {
     const ids = await fixture({
       compute_budgets: { agent_vcpu_hours_per_day: 1, room_vcpu_hours_per_day: 4 },
