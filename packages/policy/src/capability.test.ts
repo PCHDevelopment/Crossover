@@ -222,6 +222,17 @@ describe("capabilityMatches: workspace path globs", () => {
       expect(covers("src/*a*b*", "src/xbxax")).toBe(false);
     });
 
+    it("is a wildcard even where the path has a * of its own", () => {
+      // The pattern's `*` was once compared to the text character first, so it only matched itself
+      // there and the match failed (found by comparing with the Rego policy, scope-oracle.test.ts).
+      expect(covers("*", "**")).toBe(true);
+      expect(covers("src/*", "src/*.ts")).toBe(true);
+      expect(covers("src/*.ts", "src/*.ts")).toBe(true);
+      expect(covers("*a*", "a**b")).toBe(true);
+      expect(covers("a*b*c", "a*b*c")).toBe(true);
+      expect(covers("src/*", "src/*/x")).toBe(false);
+    });
+
     it("an exact path (no wildcards) covers only that path", () => {
       expect(covers("src/a.ts", "src/a.ts")).toBe(true);
       expect(covers("src/a.ts", "src/a.tsx")).toBe(false);
