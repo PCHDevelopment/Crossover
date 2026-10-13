@@ -1574,6 +1574,43 @@ Messages, inbox, sandbox and the `room mcp` stdio shim.
 
 D9 fidelity with no functional change. Last.
 
+### T1509 3b · Tier-3 grant rules in the policy — S1
+
+Start after #287 or #290 merges, and after T1533. The decision moves into Rego. Every message, error code and detail stays byte-for-byte the same.
+
+1. Create `packages/policy/policy/grants.rego` with package `crossover.grants` and an entrypoint `grant_check`.
+   - Input: `{"base": string, "scope": string|null, "expires_in_ms": number|null}`.
+   - Output: `{"allow": true}`, or `{"allow": false, "reason": R}`. Evaluate in this order, taking the tier from `crossover.tiers`:
+     - `expires_in_ms` is a number ≤ 0: `expiry_not_in_future`;
+     - tier 3 and `expires_in_ms` is null: `tier3_needs_expiry`;
+     - tier 3 and `expires_in_ms` > 86400000: `tier3_expiry_too_long`;
+     - anything else: allow.
+   - Compile it into the same `policy.wasm` as a third entrypoint, in the same way #290 added `tier`.
+2. `engine.ts`: add `grantCheck(base, scope, expiresInMs)`, parsed strictly the way `parseTier` is. An unknown reason or shape throws `PolicyEngineError`.
+3. `packages/kernel/src/modules/capabilities/grants.ts`:
+   - in `superRefine`, replace the tier-3/no-expiry check with `grantCheck(..., null)` when `expires_at` is absent. On `tier3_needs_expiry`, add the existing issue: same path, same message.
+   - in `execute`, compute `expiresInMs = expiresAt - now` (null if absent) and call `grantCheck` once. Map the reasons to the existing errors: `expiry_not_in_future` to "expires_at must be in the future", `tier3_expiry_too_long` to "Tier 3 capabilities expire within 24 hours", with the same details.
+   - keep the `capabilities.grant_tier3` authorize call as it is, and remove the now-unused TS comparisons.
+4. Invites: no change. They already go through `tierOf`.
+5. `packages/policy/src/grants-oracle.test.ts`:
+   - Capabilities: `messages.read`, `messages.send`, `aws.deploy_lambda:staging-x`, `aws.deploy_lambda:prod`, `capabilities.grant_tier3` and one unknown base.
+   - `expires_in_ms`: null, -1, 0, 1, 3600000, 86400000, 86400001.
+   - Compare against a TS reference function that copies the current `grants.ts` logic, kept in the test file. Measure the test, and give it a timeout per T1529 only if it is over 2 s.
+6. Rego unit tests in `grants_test.rego` for each reason and each boundary. Existing kernel tests pass unchanged.
+7. Include a mutation check in the PR text: change `86400000` to `86400001` in Rego and show the oracle fail.
+
+### T1509 3c · `holdsGatedScope` in the policy — S1
+
+After 3b. Exact semantics to keep, from `packages/kernel/src/modules/tools/tools.ts:231`: true if some live grant has `requires_approval` and its capability equals `capability` or starts with `capability + ":"`, and no live deny has a capability exactly equal to `capability`.
+
+1. Add a `holds_gated_scope` entrypoint to `grants.rego`.
+   - Input: `{"capability": string, "grants": [{"capability": string, "requires_approval": bool}], "denies": [{"capability": string}]}`.
+   - Output: a boolean.
+2. `engine.ts`: add `holdsGatedScope(capability, grants, denies)`, parsed strictly.
+3. `tools.ts`: the function keeps its name and signature. It loads grants as now, then returns the engine's answer instead of evaluating in TS.
+4. Oracle test: a seeded corpus of 2,000 cases. Capabilities come from five bases with and without scopes, including look-alikes such as `tools.invoke2` and `tools.invoke:` with an empty scope, plus mixed gated and ungated grants and exact and scoped denies. Compare against the old TS function, copied into the test as the reference.
+5. Rego unit tests for the look-alike prefix and for a scoped deny, which does not block.
+
 ### T1510 · compose.test.ts sandbox-over-MCP test times out under load — S2 · done
 
 T1417's second unidentified flake, now named (seq 1082): `apps/server/src/compose.test.ts` › composeServer › "supports a sandbox coding flow through MCP before and after submission" (line 1578), `Test timed out in 5000ms` during a full parallel `pnpm check`. Find what it waits on; give it an explicit timeout sized to the work or remove the wait. Do not just raise the default.
@@ -1676,38 +1713,74 @@ Step 1: put the exit code, whether the call timed out, and the first 500 bytes o
 
 ### T1529 · Audit heavy tests for measured timeouts — Q1
 
-Review 15's rule is that any test that loops over thousands of cases, or starts containers or databases, gets an explicit timeout with its measured time in a comment, in the PR that adds it. Tests written before the rule have failed unrelated PRs (T1510, T1517, T1522, T1527). Find the rest before they do:
+Review 15's rule: a test that takes over 2 s gets an explicit timeout with its measurements in a comment. Older tests on vitest's 5 s default have failed unrelated PRs (T1510, T1517, T1522, T1527). Do exactly these steps, and post the results of step 3 before any code.
 
-1. Run `pnpm test` with vitest's JSON reporter twice on an idle machine and twice with the CPUs oversubscribed about three times over (as S1 did for T1527). List every test that takes over 1 s in any run and is still on the 5 s default. `packages/policy/src/authorize.test.ts` (2.9 s for the file, 0.9 s for one case, seen by S2) is a known candidate.
-2. For each test over 2 s oversubscribed, give it an explicit timeout of about seven times the oversubscribed time, with the numbers in a comment. Keep every case and every assertion.
-3. Post the table (test, idle, oversubscribed, budget) before the PR. Ship it in PRs of at most 400 non-test lines, grouped by package.
-
-Do not change product code in this task. If a test is slow because the product is slow, open a separate task.
+1. On main, run `pnpm test -- --reporter=json --outputFile=t-idle-N.json` twice (N = 1, 2) with nothing else running.
+2. Run it twice more under load. In another shell, start one CPU burner per core, three times over: `for i in $(seq $((3*$(nproc)))); do (while :; do :; done) & done`. Save `t-load-N.json`, then `kill` the burners.
+3. From the four files, list every test whose largest duration is over 2,000 ms and which has no timeout argument in its source. One row per test: file, test name, idle max (ms), load max (ms), budget. Budget = load max × 7, rounded up to the next 5,000 ms, and never below 15,000 ms. Include `packages/workspace/src/docker-execution-driver.test.ts` and `packages/policy/src/authorize.test.ts` even if they come in under 2 s, so we have their numbers.
+4. After O1 approves the table: for each row, pass the budget as the test's timeout argument. Add a one-line comment above the test: `// Measured (T1529): idle <x> ms, 3x load <y> ms; budget 7x.` Change nothing else: no assertions, no cases, no product code.
+5. One PR per package, at most 400 changed lines each.
 
 ### T1530 · Archive retention, unarchive and purge — S2
 
 From T1519. Plan before code, and split if any PR goes over 400 non-test lines:
 
-1. A migration adding `rooms.archived_at` and `rooms.retention_days` (default 365, check 30–365).
+1. A migration adding `rooms.retention_days` (default 365, check 30–365), the notice and purge progress fields, and the out-of-room deletion audit table. `rooms.archived_at` already exists (migration 0001); keep it as the start of retention.
 2. An owner-only `rooms.set_retention` command, and `rooms.unarchive`. Unarchive is only allowed while `ARCHIVED` and within retention. It returns the room to `ACTIVE`, does not recreate sandboxes, and emits `room.unarchived`.
 3. A purge sweeper on the room-lease holder:
    - 7 days before deletion it sends one inbox notice to the owner (idempotent);
-   - at the end it hard-deletes the room's repository, events, memory, tasks, decisions and stored exports, recording a `room.deleted` audit row outside the room;
+   - at the end it hard-deletes the room's repository, workspace data, events, memory, tasks and decisions, recording a `room.deleted` audit row outside the room;
    - it is safe to run on two nodes at once.
 4. The owner-controls UI: a retention selector and an Unarchive button.
 
 The tests must cover: unarchive after retention has ended is refused; the notice is sent exactly once; and a purge that is interrupted part-way finishes on the next sweep.
 
+**Decisions (O1, 17:34):**
+
+- Retention can be changed while `ARCHIVED`, but only if the new deadline (`archived_at` + `retention_days`) is at least 7 days from now. Otherwise the command fails with `VALIDATION` "retention would end within the 7-day notice period".
+- Any successful change clears `retention_notice_sent_at`.
+- There is no persistent export store, so purge phases are `WORKSPACE` (bare repository, workspace directories, remaining sandbox volumes) and then `DATABASE`.
+- Events are `room.unarchived` and `room.retention_changed`.
+- Unarchive clears `archived_at`, so re-archiving starts a new retention period.
+
 ### T1531 · Single-host mode guardrails — S1
 
-From T1418, after T1509 3c. The server detects single-host mode, meaning sandboxes on the local Docker socket. In that mode:
+From T1418, after T1509 3c. Every deployment today is single-host, because `DockerExecutionDriver` is the only driver. Exact change:
 
-- it refuses to start without `SANDBOX_RUNTIME=runsc`, with a clear error;
-- it logs "single-host mode: not for multi-tenant or untrusted use" at startup;
-- the compose file and README say the same.
+1. `apps/server/src/config.ts`: add `ALLOW_UNSANDBOXED_DEV` (`"1"` or absent) to the env schema. Next to the existing `DEV_LOGIN` production check, add:
+   - if `SANDBOX_RUNTIME` is not `runsc` and `ALLOW_UNSANDBOXED_DEV` is not `"1"`, call `invalidConfig("SANDBOX_RUNTIME=runsc is required: sandboxes share this host (single-host mode, ARCHITECTURE §4.1). Set ALLOW_UNSANDBOXED_DEV=1 only for local development.")`;
+   - if `ALLOW_UNSANDBOXED_DEV` is `"1"` and `NODE_ENV` is `production`, call `invalidConfig("ALLOW_UNSANDBOXED_DEV is refused when NODE_ENV=production")`. There is no override.
+2. `apps/server/src/main.ts`: after config loads, log once with the server logger: `single-host mode: not for multi-tenant or untrusted use (ARCHITECTURE §4.1)`. If `ALLOW_UNSANDBOXED_DEV` is set, log a second line: `ALLOW_UNSANDBOXED_DEV=1: sandboxes run WITHOUT gVisor (development only)`.
+3. `docker-compose.yml`: add `ALLOW_UNSANDBOXED_DEV: "1"` under the server's `environment`, with the comment `# development stack only; production requires SANDBOX_RUNTIME=runsc (§4.1)`.
+4. `apps/server/src/e2e/deploy-topology.test.ts` runs the production image on a CI runner without gVisor. Pass `NODE_ENV=development` and `ALLOW_UNSANDBOXED_DEV=1` to that container. Then run the test locally. If anything else in it depends on production mode, stop and post the failure; don't work around it.
+5. `config.test.ts`: add four cases:
+   - runsc set: starts;
+   - neither variable set: refused with the first message;
+   - `ALLOW_UNSANDBOXED_DEV=1` in development: starts;
+   - `ALLOW_UNSANDBOXED_DEV=1` in production: refused with the second message.
 
-Development keeps working through an explicit `ALLOW_UNSANDBOXED_DEV=1`. That flag is refused when `NODE_ENV=production` and is logged loudly. Tests cover each startup branch.
+   Any existing test whose config lacks runsc gets `ALLOW_UNSANDBOXED_DEV: "1"`, and that is the only change to it.
+
+6. README: in the deployment section, add one paragraph copying the §4.1 single-host limits.
 
 ### T1532 · Remote sandbox-host driver (§4.1) — unassigned
 
 From T1418. An `ExecutionDriver` that runs sandboxes on separate sandbox hosts over an authenticated channel (mutual TLS or signed requests), with host registration, health checks and capacity, and the same lifecycle, output streaming and compute accounting as `DockerExecutionDriver`. It is required before any multi-tenant or untrusted deployment. It is not needed for the MVP demo. Scope and split it into a milestone when it is scheduled.
+
+### T1533 · Stop wasted CI runs — S1
+
+From Peter, 2026-10-13. The repository is private and CI runs on one self-hosted runner, so every unneeded run delays the ones people are waiting for. O1 has already investigated, so this is the whole change.
+
+**Cause, found by O1.** #275's head `f7ac994` got two `pull_request` runs a second apart (38393066270 and 38393067806). One came from pushing the merge of main, the other from retargeting the base. Superseded pushes also leave stale runs queued.
+
+**Change.** Add exactly this at the top level of `.github/workflows/ci.yml`, after `on:`:
+
+```yaml
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+```
+
+Change nothing else: no trigger, `runs-on`, port or service changes. A PR run joins its PR's group, and a newer push cancels the older run. Every other run (push to `main`, nightly, manual) gets a group of its own from `run_id`, so it is never cancelled or replaced. A shared group would let a third push to `main` drop the second while it waits, even with `cancel-in-progress` false.
+
+**Proof, in the PR text, with run links:** (a) two pushes to the PR a minute apart, where the first run shows `cancelled`; (b) after merge, two pushes to `main` in quick succession, where both run to completion. O1 checks the history as well.
