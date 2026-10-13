@@ -9,15 +9,23 @@ import rego.v1
 base := {
 	"room_match": true,
 	"participant": {"status": "ACTIVE", "authority": "MEMBER", "role": "DEVELOPER"},
-	"capability": "messages.send",
 	"room_status": "ACTIVE",
 	"mutating": true,
-	"path_invalid": false,
-	"denied": false,
-	"covering": {"any": false, "ungated": false},
 	"approved": false,
-	"per_path_gate": false,
+	"action": "messages.send",
+	"resource_path": null,
+	"per_path": false,
+	"grants": [],
+	"denies": [],
 }
+
+ungated(capability) := {"capability": capability, "requires_approval": false}
+
+gated(capability) := {"capability": capability, "requires_approval": true}
+
+revocation(capability) := {"capability": capability}
+
+observer := {"status": "ACTIVE", "authority": "MEMBER", "role": "OBSERVER"}
 
 # In the catalog, but not in a developer's bundle and not an authority power a member has.
 not_in_bundle := "room.freeze"
@@ -81,59 +89,61 @@ test_reads_pass_the_room_gate if {
 }
 
 test_invalid_path_is_refused_before_grants if {
-	input_ := object.union(base, {"path_invalid": true, "covering": {"any": true, "ungated": true}})
+	input_ := object.union(base, {"action": "workspace.write", "resource_path": "../x", "grants": [ungated("workspace.write")]})
 	refused(input_, "FORBIDDEN", "invalid_path")
 }
 
 test_a_revocation_beats_the_role_bundle_and_every_grant if {
-	input_ := object.union(base, {"denied": true, "covering": {"any": true, "ungated": true}})
+	input_ := object.union(base, {"denies": [revocation("messages.send")], "grants": [ungated("messages.send")]})
 	refused(input_, "FORBIDDEN", "revoked")
 }
 
 test_an_ungated_grant_allows_without_the_bundle if {
-	input_ := object.union(base, {"capability": not_in_bundle, "covering": {"any": true, "ungated": true}})
+	input_ := object.union(base, {"action": not_in_bundle, "grants": [ungated(not_in_bundle)]})
 	decide(input_) == {"allow": true}
 }
 
 test_a_gated_grant_waits_for_approval_even_when_the_bundle_allows if {
-	input_ := object.union(base, {"covering": {"any": true, "ungated": false}})
+	input_ := object.union(base, {"grants": [gated("messages.send")]})
 	refused(input_, "APPROVAL_REQUIRED", "approval_required")
 }
 
 test_an_approved_command_passes_the_gate if {
-	input_ := object.union(base, {"covering": {"any": true, "ungated": false}, "approved": true})
+	input_ := object.union(base, {"grants": [gated("messages.send")], "approved": true})
 	decide(input_) == {"allow": true}
 }
 
 test_approval_never_overrides_a_revocation if {
-	input_ := object.union(base, {"denied": true, "covering": {"any": true, "ungated": false}, "approved": true})
+	input_ := object.union(base, {"denies": [revocation("messages.send")], "grants": [gated("messages.send")], "approved": true})
 	refused(input_, "FORBIDDEN", "revoked")
 }
 
 test_the_per_path_gate_lets_a_scoped_grant_reach_the_handler if {
-	input_ := object.union(base, {"capability": not_in_bundle, "per_path_gate": true})
+	input_ := object.union(base, {"action": "workspace.write", "per_path": true, "participant": observer, "grants": [ungated("workspace.write:src/**")]})
 	decide(input_) == {"allow": true}
 }
 
 test_unknown_capability if {
-	input_ := object.union(base, {"capability": "tasks.*"})
+	input_ := object.union(base, {"action": "tasks.*"})
 	refused(input_, "FORBIDDEN", "unknown_capability")
 }
 
-test_missing_capability if refused(with_fact("capability", not_in_bundle), "FORBIDDEN", "missing_capability")
+test_missing_capability if refused(with_fact("action", not_in_bundle), "FORBIDDEN", "missing_capability")
 
 # Facts that are missing or of the wrong type decide nothing: always a refusal.
 test_missing_facts_are_refused if {
-	every fact in ["room_match", "mutating", "path_invalid", "denied", "approved", "per_path_gate", "capability", "room_status", "covering", "participant"] {
+	every fact in ["room_match", "mutating", "approved", "per_path", "action", "resource_path", "grants", "denies", "room_status", "participant"] {
 		input_ := object.remove(base, [fact])
 		refused(input_, "FORBIDDEN", "invalid_input")
 	}
 }
 
 test_wrongly_typed_facts_are_refused if {
-	refused(with_fact("capability", true), "FORBIDDEN", "invalid_input")
+	refused(with_fact("action", true), "FORBIDDEN", "invalid_input")
 	refused(with_fact("mutating", 1), "FORBIDDEN", "invalid_input")
-	refused(with_fact("covering", {"any": "yes", "ungated": true}), "FORBIDDEN", "invalid_input")
+	refused(with_fact("grants", [{"capability": "messages.send", "requires_approval": "no"}]), "FORBIDDEN", "invalid_input")
+	refused(with_fact("denies", [{"capability": 1}]), "FORBIDDEN", "invalid_input")
+	refused(with_fact("resource_path", 5), "FORBIDDEN", "invalid_input")
 }
 
 test_no_input_at_all_is_refused if {
@@ -145,7 +155,7 @@ test_no_input_at_all_is_refused if {
 # exhaustive comparison with the TypeScript is in src/bundles-oracle.test.ts.
 covers(role, authority, capability) if {
 	participant := {"status": "ACTIVE", "authority": authority, "role": role}
-	d := decide(object.union(base, {"participant": participant, "capability": capability}))
+	d := decide(object.union(base, {"participant": participant, "action": capability}))
 	d == {"allow": true}
 }
 
@@ -165,4 +175,25 @@ test_authority_powers_are_not_in_the_role_bundles if {
 	covers("LEAD", "OWNER", "room.freeze")
 	not covers("LEAD", "ADMIN", "room.freeze")
 	not covers("LEAD", "MEMBER", "room.freeze")
+}
+
+# A live grant covers the action by its scope (the matching itself is tested in scope_test.rego).
+test_a_scoped_grant_covers_only_its_paths if {
+	grants := [ungated("workspace.write:src/**")]
+	input_ := object.union(base, {"action": "workspace.write", "participant": observer, "grants": grants})
+	allowed := object.union(input_, {"resource_path": "src/a/b.ts"})
+	decide(allowed) == {"allow": true}
+	refused(object.union(input_, {"resource_path": "docs/a.md"}), "FORBIDDEN", "missing_capability")
+}
+
+test_a_scoped_revocation_applies_to_the_path_of_the_request if {
+	input_ := object.union(base, {"action": "workspace.write", "resource_path": "secrets/k", "denies": [revocation("workspace.write:secrets/**")]})
+	refused(input_, "FORBIDDEN", "revoked")
+}
+
+test_the_per_path_gate_needs_a_scoped_ungated_grant_and_the_unscoped_action if {
+	gate := object.union(base, {"action": "workspace.write", "per_path": true, "participant": observer})
+	refused(object.union(gate, {"grants": [gated("workspace.write:src/**")]}), "FORBIDDEN", "missing_capability")
+	refused(object.union(gate, {"per_path": false, "grants": [ungated("workspace.write:src/**")]}), "FORBIDDEN", "missing_capability")
+	decide(object.union(gate, {"grants": [ungated("workspace.write:src/**")]})) == {"allow": true}
 }

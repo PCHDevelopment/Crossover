@@ -15,21 +15,21 @@ const WASM = new URL("../policy/policy.wasm", import.meta.url);
 const allowed: AuthzFacts = {
   room_match: true,
   participant: { status: "ACTIVE", authority: "MEMBER", role: "DEVELOPER" },
-  capability: "messages.send",
   room_status: "ACTIVE",
   mutating: true,
-  path_invalid: false,
-  denied: false,
-  covering: { any: false, ungated: false },
   approved: false,
-  per_path_gate: false,
+  action: "messages.send",
+  resource_path: null,
+  per_path: false,
+  grants: [],
+  denies: [],
 };
 
 describe("the compiled policy", () => {
   it("answers the ladder: allow, and a refusal with its code and reason", async () => {
     const engine = await createPolicyEngine(await readFile(WASM));
     expect(engine.decide(allowed)).toEqual({ allow: true });
-    expect(engine.decide({ ...allowed, capability: "room.freeze" })).toEqual({
+    expect(engine.decide({ ...allowed, action: "room.freeze" })).toEqual({
       allow: false,
       code: "FORBIDDEN",
       reason: "missing_capability",
@@ -44,12 +44,12 @@ describe("the compiled policy", () => {
 
   it("refuses facts that are missing or of the wrong type instead of guessing", async () => {
     const engine = await createPolicyEngine(await readFile(WASM));
-    const { capability: _removed, ...incomplete } = allowed;
+    const { action: _removed, ...incomplete } = allowed;
     void _removed;
     for (const facts of [
       incomplete,
-      { ...allowed, capability: true },
-      { ...allowed, covering: null },
+      { ...allowed, action: true },
+      { ...allowed, grants: null },
       {},
     ]) {
       expect(engine.decide(facts as unknown as AuthzFacts)).toMatchObject({

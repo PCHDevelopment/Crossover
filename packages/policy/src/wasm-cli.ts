@@ -13,7 +13,8 @@ const OPA_VERSION = "1.21.2";
 const root = fileURLToPath(new URL("..", import.meta.url));
 const opa = process.env["OPA_BIN"] ?? "opa";
 const policyDir = join(root, "policy");
-const SOURCES = ["authz.rego", "bundles.gen.rego"];
+const WRITTEN = ["authz.rego", "scope.rego"];
+const SOURCES = [...WRITTEN, "bundles.gen.rego"];
 
 main();
 
@@ -33,7 +34,7 @@ function main(): void {
   try {
     // Built in a scratch directory so the generated file never has to be on disk first, and so
     // `--check` compares what the sources produce with what is committed.
-    copyFileSync(join(policyDir, "authz.rego"), join(work, "authz.rego"));
+    for (const name of WRITTEN) copyFileSync(join(policyDir, name), join(work, name));
     writeFileSync(join(work, "bundles.gen.rego"), renderBundlesRego());
     // CI requires every file in policy/ to be `opa fmt` clean, this one included.
     execFileSync(opa, ["fmt", "--write", "bundles.gen.rego"], { cwd: work, stdio: "inherit" });

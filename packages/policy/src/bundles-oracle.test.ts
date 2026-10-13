@@ -20,12 +20,12 @@ function facts(role: string, authority: string, capability: string): AuthzFacts 
     participant: { status: "ACTIVE", authority, role },
     room_status: "ACTIVE",
     mutating: true,
-    path_invalid: false,
-    denied: false,
-    covering: { any: false, ungated: false },
     approved: false,
-    per_path_gate: false,
-    capability,
+    action: capability,
+    resource_path: null,
+    per_path: false,
+    grants: [],
+    denies: [],
   };
 }
 

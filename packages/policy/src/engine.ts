@@ -19,21 +19,18 @@ export interface AuthzFacts {
   room_status: string;
   /** The command changes state. */
   mutating: boolean;
-  /** The path the check is about is not a safe workspace path. */
-  path_invalid: boolean;
-  /** A live revocation covers the action. */
-  denied: boolean;
-  /** Live grants covering the action: any, and whether one of them has no approval gate. */
-  covering: { any: boolean; ungated: boolean };
   /** The command was approved by an owner or admin (T905). */
   approved: boolean;
-  /** A per-path command's gate (T218) is satisfied by an ungated scoped grant. */
-  per_path_gate: boolean;
-  /**
-   * The capability asked for, without its scope (`<resource>.<action>`, "" when there is none).
-   * The policy looks it up in the catalog and in what the participant's role and authority cover.
-   */
-  capability: string;
+  /** The capability asked for, `<resource>.<action>[:<scope>]` (§21.1). */
+  action: string;
+  /** The workspace path the check is about, when the resource names one; null otherwise. */
+  resource_path: string | null;
+  /** Set only on the command-level gate of a command that authorizes each path itself (T218). */
+  per_path: boolean;
+  /** The participant's live grants (not ended, not expired). */
+  grants: { capability: string; requires_approval: boolean }[];
+  /** The participant's live revocations. */
+  denies: { capability: string }[];
 }
 
 export const DENY_CODES = [
