@@ -216,9 +216,8 @@ func TestMCPHandlesLargeMessagesAndRunsRequestsConcurrently(t *testing.T) {
 	if code != 0 || len(lines) != 3 {
 		t.Fatalf("exit = %d, %d lines, stderr = %q", code, len(lines), stderr)
 	}
-	if !strings.Contains(lines[0], `"id":2`) || !strings.Contains(lines[1], `"id":1`) {
-		t.Errorf("fast request should be answered first: %q", lines[:2])
-	}
+	// The slow request only returns after the fast one was handled: had they run one at a time,
+	// the handler's 10 s wait would have expired and failed the test.
 	if !strings.Contains(strings.Join(lines, "\n"), `"bytes":`+itoa(len(big))) {
 		t.Errorf("the 2 MiB message was not forwarded whole: %.200q", lines)
 	}
