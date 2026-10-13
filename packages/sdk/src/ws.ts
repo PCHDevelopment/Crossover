@@ -587,3 +587,282 @@ export class Subscription implements AsyncIterable<SdkEvent> {
     };
   }
 }
+
+/** One private output update from a sandbox execution. Data is decoded from the wire's base64. */
+export type SandboxOutputUpdate =
+  | {
+      kind: "data";
+      exec_id: string;
+      sequence: number;
+      stream: "stdout" | "stderr";
+      data: Uint8Array;
+    }
+  | { kind: "truncated"; exec_id: string; sequence: number }
+  | {
+      kind: "finished";
+      exec_id: string;
+      sequence: number;
+      exit_code: number | null;
+      duration_ms: number | null;
+      reason: string | null;
+      truncated: boolean;
+    };
+
+export interface SandboxOutputSubscribeOptions {
+  /** Resume after this output cursor. Default 0. */
+  after?: number;
+  onUpdate?: (update: SandboxOutputUpdate) => void;
+  onError?: (error: unknown) => void;
+  /** `connecting` → `live`, `reconnecting` after a dropped stream, `closed` at the end. */
+  onState?: (state: "connecting" | "live" | "reconnecting" | "closed") => void;
+  reconnect?: { minMs?: number; maxMs?: number };
+}
+
+/** A private sandbox output stream that resumes from its last delivered cursor after reconnects. */
+export class SandboxOutputSubscription {
+  lastSequence: number;
+  private done = false;
+  private session: WsSession | undefined;
+  private retryAfterMs: number | undefined;
+  private readonly abort = new AbortController();
+
+  constructor(
+    private readonly config: WsConfig,
+    private readonly execId: string,
+    private readonly options: SandboxOutputSubscribeOptions = {},
+  ) {
+    this.lastSequence = options.after ?? 0;
+    void this.run();
+  }
+
+  close(): void {
+    this.finish();
+  }
+
+  private finish(error?: unknown): void {
+    if (this.done) return;
+    this.done = true;
+    this.abort.abort();
+    this.session?.close();
+    this.options.onState?.("closed");
+    if (error !== undefined) this.options.onError?.(error);
+  }
+
+  private deliver(update: SandboxOutputUpdate): void {
+    if (update.kind !== "finished") this.lastSequence = update.sequence;
+    this.options.onUpdate?.(update);
+  }
+
+  private async run(): Promise<void> {
+    const min = this.options.reconnect?.minMs ?? 100;
+    const max = this.options.reconnect?.maxMs ?? 5_000;
+    let attempt = 0;
+    let first = true;
+    let renewed = false;
+    let refreshSince: number | undefined;
+    const renew = async (used: string): Promise<"renewed" | "refused" | "later"> => {
+      if (!this.config.refresh) return "refused";
+      if (refreshSince !== undefined && Date.now() - refreshSince > REFRESH_PATIENCE_MS)
+        return "refused";
+      try {
+        const renewedNow = await this.config.refresh(used);
+        refreshSince = undefined;
+        return renewedNow ? "renewed" : "refused";
+      } catch (error) {
+        refreshSince ??= Date.now();
+        if (error instanceof CrossoverError) this.retryAfterMs = retryAfterOf(error);
+        return "later";
+      }
+    };
+
+    while (!this.done) {
+      this.options.onState?.(first ? "connecting" : "reconnecting");
+      first = false;
+      let end: "dropped" | "fatal" | "expired" = "dropped";
+      const used = this.config.getToken?.() ?? this.config.token;
+      try {
+        const session = await WsSession.open(this.config);
+        if (this.done) {
+          session.close();
+          return;
+        }
+        this.session = session;
+        end = await new Promise<"dropped" | "fatal" | "expired">((resolve) => {
+          const rejectFrame = (error: CrossoverError) => {
+            if (error.code === "UNAUTHENTICATED") {
+              resolve("expired");
+              session.close();
+            } else if (error.retryable) {
+              this.retryAfterMs = retryAfterOf(error);
+              session.close();
+            } else {
+              this.finish(error);
+              resolve("fatal");
+            }
+          };
+          const acceptCursor = (sequence: unknown): boolean => {
+            if (!Number.isSafeInteger(sequence) || (sequence as number) < 1) {
+              this.finish(new CrossoverError("VALIDATION", "Invalid sandbox output sequence"));
+              resolve("fatal");
+              return false;
+            }
+            const cursor = sequence as number;
+            if (cursor <= this.lastSequence) return false;
+            if (cursor !== this.lastSequence + 1) {
+              session.close();
+              return false;
+            }
+            return true;
+          };
+          session.onFrame((frame) => {
+            if (this.done) return;
+            if (frame.type === "sandbox.output.subscribed" && frame["exec_id"] === this.execId) {
+              attempt = 0;
+              renewed = false;
+              this.options.onState?.("live");
+              return;
+            }
+            if (
+              (frame.type === "sandbox.output" || frame.type === "sandbox.output.truncated") &&
+              frame["exec_id"] === this.execId
+            ) {
+              const sequence = frame["sequence"];
+              if (!acceptCursor(sequence)) return;
+              if (frame.type === "sandbox.output.truncated") {
+                this.deliver({
+                  kind: "truncated",
+                  exec_id: this.execId,
+                  sequence: sequence as number,
+                });
+                return;
+              }
+              if (
+                frame["encoding"] !== "base64" ||
+                typeof frame["data"] !== "string" ||
+                (frame["stream"] !== "stdout" && frame["stream"] !== "stderr")
+              ) {
+                this.finish(new CrossoverError("VALIDATION", "Invalid sandbox output frame"));
+                resolve("fatal");
+                return;
+              }
+              try {
+                const binary = atob(frame["data"]);
+                const data = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+                this.deliver({
+                  kind: "data",
+                  exec_id: this.execId,
+                  sequence: sequence as number,
+                  stream: frame["stream"],
+                  data,
+                });
+              } catch {
+                this.finish(new CrossoverError("VALIDATION", "Invalid sandbox output encoding"));
+                resolve("fatal");
+              }
+              return;
+            }
+            if (frame.type === "sandbox.output.finished" && frame["exec_id"] === this.execId) {
+              const sequence = frame["sequence"];
+              if (!Number.isSafeInteger(sequence) || (sequence as number) !== this.lastSequence) {
+                session.close();
+                return;
+              }
+              if (
+                (frame["exit_code"] !== null && !Number.isSafeInteger(frame["exit_code"])) ||
+                (frame["duration_ms"] !== null && !Number.isFinite(frame["duration_ms"])) ||
+                typeof frame["truncated"] !== "boolean"
+              ) {
+                this.finish(new CrossoverError("VALIDATION", "Invalid sandbox completion frame"));
+                resolve("fatal");
+                return;
+              }
+              this.deliver({
+                kind: "finished",
+                exec_id: this.execId,
+                sequence: sequence as number,
+                exit_code: frame["exit_code"] as number | null,
+                duration_ms: frame["duration_ms"] as number | null,
+                reason: typeof frame["reason"] === "string" ? frame["reason"] : null,
+                truncated: frame["truncated"],
+              });
+              this.finish();
+              resolve("fatal");
+              return;
+            }
+            if (
+              frame.type === "sandbox.output.resync_required" &&
+              frame["exec_id"] === this.execId
+            ) {
+              this.options.onState?.("reconnecting");
+              session.send({
+                type: "sandbox.output.subscribe",
+                exec_id: this.execId,
+                after: this.lastSequence,
+              });
+              return;
+            }
+            if (frame.type === "error") rejectFrame(frameError(frame));
+          });
+          session.onClose((code) => {
+            resolve(
+              code === CLOSE.UNAUTHENTICATED
+                ? "expired"
+                : code === CLOSE.NOT_FOUND
+                  ? "fatal"
+                  : "dropped",
+            );
+          });
+          session.send({
+            type: "sandbox.output.subscribe",
+            exec_id: this.execId,
+            after: this.lastSequence,
+          });
+        });
+      } catch (error) {
+        if (error instanceof CrossoverError && error.retryable) {
+          this.retryAfterMs = retryAfterOf(error);
+        } else if (error instanceof CrossoverError && error.code === "UNAUTHENTICATED") {
+          const outcome = renewed ? "refused" : await renew(used);
+          if (outcome === "renewed") {
+            renewed = true;
+            continue;
+          }
+          if (outcome === "refused") {
+            this.finish(error);
+            return;
+          }
+          end = "dropped";
+        } else if (
+          error instanceof CrossoverError ||
+          (error instanceof TransportError && !error.retryable)
+        ) {
+          this.finish(error);
+          return;
+        }
+      }
+      this.session = undefined;
+      if (this.done) return;
+      if (end === "expired" && !renewed) {
+        const outcome = await renew(used);
+        if (outcome === "renewed") {
+          renewed = true;
+          continue;
+        }
+        if (outcome === "later") end = "dropped";
+      }
+      if (end === "fatal" || end === "expired") {
+        this.finish(new CrossoverError("NOT_FOUND", "Sandbox output is unavailable"));
+        return;
+      }
+      attempt += 1;
+      const wait = Math.min(max, min * 2 ** (attempt - 1));
+      const asked = this.retryAfterMs;
+      this.retryAfterMs = undefined;
+      try {
+        await sleep(asked ?? wait / 2 + Math.random() * (wait / 2), this.abort.signal);
+      } catch {
+        return;
+      }
+    }
+  }
+}

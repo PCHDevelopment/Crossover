@@ -226,6 +226,67 @@ td {
 .feed li[data-type="capability.denied"] {
   color: var(--danger);
 }
+.terminal-command {
+  margin: 16px 0;
+}
+.terminal-command-actions,
+.terminal-output-header {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 12px;
+}
+.terminal-command-actions label {
+  flex: 1;
+}
+.terminal-command-actions button {
+  margin-bottom: 10px;
+}
+.terminal-output-panel {
+  margin-top: 16px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.terminal-output-header {
+  align-items: center;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg);
+}
+.terminal-output {
+  min-height: 180px;
+  max-height: 480px;
+  padding: 12px;
+  overflow: auto;
+  background: #101319;
+  color: #e4e8f0;
+  font:
+    13px/1.5 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    monospace;
+}
+.terminal-chunk {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 8px;
+}
+.terminal-chunk > span {
+  color: #9aa3b2;
+}
+.terminal-chunk.stderr > span {
+  color: #ff8a80;
+}
+.terminal-chunk pre {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+}
+.terminal-truncated {
+  color: #ffd166;
+}
 .message-list {
   max-height: 420px;
   overflow-y: auto;

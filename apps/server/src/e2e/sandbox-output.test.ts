@@ -35,6 +35,7 @@ class OutputExecutionDriver implements ExecutionDriver {
   private readonly outputGate = new Promise<void>((resolve) => (this.releaseGate = resolve));
   readonly outputDone = new Promise<void>((resolve) => (this.resolveOutputDone = resolve));
   outputBytes = 0;
+  execCalls = 0;
   private cancellation: SandboxExecTermination | undefined;
 
   async create({
@@ -60,6 +61,7 @@ class OutputExecutionDriver implements ExecutionDriver {
   async exec(
     input: Parameters<NonNullable<ExecutionDriver["exec"]>>[0],
   ): Promise<SandboxExecProcess> {
+    this.execCalls += 1;
     let finish!: (outcome: SandboxExecOutcome) => void;
     const finished = new Promise<SandboxExecOutcome>((resolve) => (finish = resolve));
     void this.outputGate
@@ -256,5 +258,96 @@ describe("sandbox output composition", () => {
     expect(resync).toMatchObject({ exec_id: execId });
     expect(resync["after"]).toBeLessThan(lastCursor);
     expect(errors).toEqual([]);
+
+    const joinAgent = async (name: string) => {
+      const invite = await ok(
+        await post(
+          `/v1/rooms/${roomId}/commands`,
+          envelope("room.invite", { role: "DEVELOPER" }),
+          ownerToken,
+        ),
+      );
+      return ok(
+        await post(`/v1/rooms/${roomId}/join`, {
+          token: invite.one_time.token,
+          manifest: {
+            name,
+            operator: { name: "Test operator", contact: "test@example.com" },
+            vendor: "test",
+            model: "test-model",
+            client: "rest",
+            client_version: "1",
+            description: "Sandbox output access test",
+          },
+        }),
+        201,
+      );
+    };
+    const firstAgent = await joinAgent("Agent A");
+    const secondAgent = await joinAgent("Agent B");
+    for (const target of [firstAgent.participant_id, secondAgent.participant_id]) {
+      const refused = await post(
+        `/v1/rooms/${roomId}/commands`,
+        envelope("sandbox.exec", { command: "must not run", participant_id: target }),
+        ownerToken,
+      );
+      expect(refused.statusCode).toBe(400);
+      expect(refused.json().error.code).toBe("VALIDATION");
+    }
+    expect(driver.execCalls).toBe(1);
+
+    const otherLogin = await ok(
+      await post("/v1/auth/dev-login", {
+        subject: `sandbox-output-other-${newId("usr")}`,
+        display_name: "Other room member",
+      }),
+    );
+    const otherCreated = await ok(
+      await post(
+        "/v1/commands",
+        envelope("room.create", {
+          slug: `sandbox-output-other-${++serial}`,
+          name: "Other room",
+          objective: "Verify room-scoped output access",
+        }),
+        otherLogin.session_token,
+      ),
+    );
+    const otherRoomId = otherCreated.response.room.id as string;
+    const otherSession = await ok(
+      await post(`/v1/rooms/${otherRoomId}/session`, {}, otherLogin.session_token),
+    );
+    const otherSocket = new WebSocket(wsUrl);
+    const otherFrames: Record<string, unknown>[] = [];
+    otherSocket.on("message", (data) =>
+      otherFrames.push(JSON.parse(data.toString()) as Record<string, unknown>),
+    );
+    await new Promise<void>((resolve, reject) => {
+      otherSocket.once("open", resolve);
+      otherSocket.once("error", reject);
+    });
+    otherSocket.send(
+      JSON.stringify({
+        type: "hello",
+        protocol_version: 1,
+        client: "sandbox-output-cross-room-test",
+        client_version: "1",
+        token: otherSession.tokens.access_token,
+      }),
+    );
+    otherSocket.send(
+      JSON.stringify({ type: "sandbox.output.subscribe", exec_id: execId, after: 0 }),
+    );
+    const refusedOutput = await until(
+      () =>
+        otherFrames.find((frame) =>
+          ["error", "sandbox.output.subscribed", "sandbox.output"].includes(String(frame.type)),
+        ),
+      "cross-room sandbox output refusal",
+    );
+    expect(refusedOutput.type).toBe("error");
+    expect(otherFrames.some((frame) => frame.type === "sandbox.output")).toBe(false);
+    expect(otherFrames.some((frame) => frame.type === "sandbox.output.subscribed")).toBe(false);
+    otherSocket.close();
   }, 30_000);
 });
