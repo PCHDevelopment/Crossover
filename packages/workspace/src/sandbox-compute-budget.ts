@@ -57,8 +57,7 @@ export class SandboxComputeBudgetMeter {
         `SELECT r.settings, p.budgets AS participant_budgets
            FROM rooms r
            JOIN participants p ON p.room_id = r.id AND p.id = $2
-          WHERE r.id = $1
-          FOR UPDATE OF r, p`,
+          WHERE r.id = $1`,
         [input.room_id, input.participant_id],
       );
       const room = rooms[0];
@@ -84,7 +83,7 @@ export class SandboxComputeBudgetMeter {
       const agentRemaining = remaining(agentUsage, agentLimit);
       const available = minNullable(roomRemaining, agentRemaining);
       const dayRemainingMs = millisecondsUntilUtcDayEnd(now);
-      let timeoutMs = Math.min(input.requested_timeout_ms, dayRemainingMs);
+      let timeoutMs = input.requested_timeout_ms;
       if (available !== null) {
         const cpuTimeoutMs = available / (BigInt(input.vcpus) * 1_000n);
         timeoutMs = Math.min(timeoutMs, Number(cpuTimeoutMs));
@@ -179,17 +178,15 @@ export class SandboxComputeBudgetMeter {
 
   /** Expire abandoned reservations so a server crash cannot hold daily capacity forever. */
   async sweepExpired(now = this.now()): Promise<number> {
-    return withTransaction(this.pool, async (client) => {
-      const { rows } = await client.query<{ exec_id: string }>(
-        `SELECT exec_id FROM sandbox_compute_reservations
-          WHERE expires_at <= $1
-          ORDER BY expires_at, exec_id LIMIT $2`,
-        [now, EXPIRED_BATCH_SIZE],
-      );
-      let removed = 0;
-      for (const row of rows) if ((await this.releaseOne(client, row.exec_id)) > 0n) removed++;
-      return removed;
-    });
+    const { rows } = await this.pool.query<{ exec_id: string }>(
+      `SELECT exec_id FROM sandbox_compute_reservations
+        WHERE expires_at <= $1
+        ORDER BY expires_at, exec_id LIMIT $2`,
+      [now, EXPIRED_BATCH_SIZE],
+    );
+    let removed = 0;
+    for (const row of rows) if ((await this.release(row.exec_id)) > 0n) removed++;
+    return removed;
   }
 
   private async releaseExpired(

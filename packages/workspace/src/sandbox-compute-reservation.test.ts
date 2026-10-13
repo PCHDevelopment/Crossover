@@ -1,3 +1,4 @@
+import { type Pool } from "@crossover/db";
 import { createTestDatabase, type TestDatabase } from "@crossover/db/testing";
 import { newId } from "@crossover/protocol";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -98,6 +99,18 @@ describe("SandboxComputeBudgetMeter reservations", () => {
     expect(attempts.filter((attempt) => attempt.status === "rejected")).toHaveLength(1);
   });
 
+  it("does not shorten a reservation at UTC midnight", async () => {
+    const ids = await fixture();
+    const meter = new SandboxComputeBudgetMeter(db.pool, () => new Date("2026-10-01T23:55:00Z"));
+    const timeoutMs = await meter.reserve({
+      ...ids,
+      exec_id: newId("exec"),
+      requested_timeout_ms: 20 * 60_000,
+      vcpus: 2,
+    });
+    expect(timeoutMs).toBe(20 * 60_000);
+  });
+
   it("expires reservations left by a crashed exec", async () => {
     const ids = await fixture();
     let now = new Date("2026-10-01T12:00:00Z");
@@ -116,5 +129,35 @@ describe("SandboxComputeBudgetMeter reservations", () => {
       [ids.room_id],
     );
     expect(usage.rows[0]?.reserved_cpu_usec).toBe("0");
+  });
+
+  it("releases each expired reservation in its own transaction", async () => {
+    const ids = await fixture();
+    let now = new Date("2026-10-01T12:00:00Z");
+    let connections = 0;
+    const observedPool = new Proxy(db.pool, {
+      get(target, property) {
+        if (property === "connect")
+          return () => {
+            connections++;
+            return target.connect();
+          };
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as Pool;
+    const meter = new SandboxComputeBudgetMeter(observedPool, () => now);
+    for (let index = 0; index < 3; index++) {
+      await meter.reserve({
+        ...ids,
+        exec_id: newId("exec"),
+        requested_timeout_ms: 60_000,
+        vcpus: 1,
+      });
+    }
+    now = new Date(now.getTime() + 120_001);
+    connections = 0;
+    expect(await meter.sweepExpired()).toBe(3);
+    expect(connections).toBe(3);
   });
 });
