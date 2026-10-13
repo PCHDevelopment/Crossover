@@ -1,10 +1,31 @@
 import { DEFAULT_PROTECTED_PATHS } from "@crossover/workspace/protected-paths";
 import { CrossoverClient, type RoomClient } from "@crossover/sdk";
 import { manifest, type WebFixture } from "./web-fixture.js";
+import { refuseNextCommand } from "./web-refusal.js";
 import type { Page } from "playwright-core";
 import { expect, it } from "vitest";
 
 export function registerWebCollaborationStart(fixture: WebFixture): void {
+  it("T1507: the room header reports workspace status read refusals", async () => {
+    const page: Page = await fixture.browser!.newPage();
+    const finishRefusal = await refuseNextCommand(page, "workspace.history");
+    await page.goto(fixture.baseUrl);
+    await page.getByTestId("login-name").fill("Header owner");
+    await page.getByTestId("login-submit").click();
+    await page.getByTestId("room-name").fill("Header status room");
+    await page.getByTestId("room-objective").fill("Show status errors");
+    await page.getByTestId("room-create").click();
+    await page.getByTestId("room-title").waitFor();
+    await expect
+      .poll(() => page.getByTestId("workspace-status-error").textContent())
+      .toContain("The server refused this action");
+    await finishRefusal();
+    await page.reload();
+    await page.getByTestId("room-title").waitFor();
+    await expect.poll(() => page.getByTestId("workspace-status-error").count()).toBe(0);
+    await page.close();
+  }, 60_000);
+
   it("login, create a room, agents join and a lead is appointed, tasks appear on the board, a denial shows in Activity, pause and resume work", async () => {
     const page: Page = await fixture.browser!.newPage();
     const problems: string[] = [];
@@ -53,6 +74,9 @@ export function registerWebCollaborationStart(fixture: WebFixture): void {
     await expect
       .poll(async () => page.getByTestId("import-status").textContent())
       .toContain("Repository import synced at revision 1.");
+    await expect
+      .poll(async () => page.getByTestId("workspace-revision").textContent())
+      .toContain("1");
     await expect
       .poll(async () => page.getByTestId("health-command-suggestion").textContent())
       .toContain("npm run typecheck && npm test");
@@ -624,7 +648,8 @@ export function registerWebDecisionsAndInbox(fixture: WebFixture): void {
     const problems: string[] = [];
     page.on("pageerror", (error) => problems.push(`pageerror: ${error.message}`));
     page.on("console", (entry) => {
-      if (entry.type() === "error") problems.push(`console: ${entry.text()}`);
+      if (entry.type() === "error" && !entry.text().includes("status of 403"))
+        problems.push(`console: ${entry.text()}`);
     });
 
     await page.goto(fixture.baseUrl);
@@ -671,6 +696,7 @@ export function registerWebDecisionsAndInbox(fixture: WebFixture): void {
     await expect
       .poll(() => page.getByTestId("decision-detail").textContent())
       .toContain("Session tokens or JWT");
+    await expect.poll(() => page.getByTestId("decision-detail").textContent()).toContain("HUMAN");
     const decisionId = (
       await owner.api.decisions.list<{ decisions: { id: string; title: string }[] }>({ limit: 100 })
     ).response.decisions.find((decision) => decision.title === "Session tokens or JWT")!.id;
@@ -711,6 +737,32 @@ export function registerWebDecisionsAndInbox(fixture: WebFixture): void {
       .poll(() => page.getByTestId("memory-detail").textContent())
       .toContain("JWT is the best fit");
     await expect.poll(() => page.getByTestId("memory-history").textContent()).toContain("system");
+    await expect.poll(() => page.getByTestId("memory-detail").textContent()).toContain("SYSTEM");
+
+    await page.getByTestId("collab-decisions").click();
+    await page
+      .getByTestId("decision-veto-rationale")
+      .fill("The accepted option missed an important constraint.");
+    const finishVetoRefusal = await refuseNextCommand(page, "decisions.veto");
+    await page.getByTestId("decision-veto").click();
+    await expect
+      .poll(() => page.getByTestId("collaboration-notice").textContent())
+      .toContain("The server refused this action");
+    await finishVetoRefusal();
+    await page.getByTestId("decision-veto").click();
+    await expect.poll(() => page.getByTestId("decision-detail").textContent()).toContain("VETOED");
+
+    await page.getByTestId("decision-title").fill("A proposal to withdraw");
+    await page.getByTestId("decision-context").fill("This proposal is no longer needed.");
+    await page.getByTestId("decision-options").fill("Keep it\nDrop it");
+    await page.getByTestId("decision-propose").click();
+    await expect
+      .poll(() => page.getByTestId("decision-detail").textContent())
+      .toContain("A proposal to withdraw");
+    await page.getByTestId("decision-withdraw").click();
+    await expect
+      .poll(() => page.getByTestId("decision-detail").textContent())
+      .toContain("WITHDRAWN");
 
     expect(problems).toEqual([]);
     await page.close();
@@ -788,6 +840,10 @@ export function registerWebDecisionsAndInbox(fixture: WebFixture): void {
         { timeout: 90_000 },
       )
       .toBe("RED");
+    await expect.poll(() => page.getByTestId("workspace-health").textContent()).toContain("RED");
+    await expect
+      .poll(() => page.getByTestId("workspace-revision").textContent())
+      .toContain(String(revision));
     await expect
       .poll(
         async () => {
@@ -824,7 +880,8 @@ export function registerWebDecisionsAndInbox(fixture: WebFixture): void {
     const problems: string[] = [];
     page.on("pageerror", (error) => problems.push(`pageerror: ${error.message}`));
     page.on("console", (entry) => {
-      if (entry.type() === "error") problems.push(`console: ${entry.text()}`);
+      if (entry.type() === "error" && !entry.text().includes("status of 403"))
+        problems.push(`console: ${entry.text()}`);
     });
 
     await page.goto(fixture.baseUrl);
@@ -921,9 +978,16 @@ export function registerWebDecisionsAndInbox(fixture: WebFixture): void {
       .toBe(1);
     await page.getByTestId("message-file-target").selectOption("src/auth.ts");
     await page.getByTestId("message-add-reference").click();
+    const finishMessageRefusal = await refuseNextCommand(page, "messages.send");
+    await page.getByTestId("message-send").click();
+    await expect
+      .poll(() => page.getByTestId("messages-notice").textContent())
+      .toContain("The server refused this action");
+    await finishMessageRefusal();
     await page.getByTestId("message-send").click();
 
     await expect.poll(() => page.getByTestId("message-list").textContent()).toContain(messageBody);
+    await expect.poll(() => page.getByTestId("message-list").textContent()).toContain("HUMAN");
     await expect
       .poll(() => page.getByTestId("message-list").textContent())
       .toContain("task: Review authentication");
@@ -959,7 +1023,7 @@ export function registerWebDecisionsAndInbox(fixture: WebFixture): void {
       .filter({ hasText: "I see it and will review the login flow." });
     await expect
       .poll(() => agentReply.textContent())
-      .toContain("From Message agent · trust: participant");
+      .toContain("From Message agent · AGENT · trust: participant");
     expect(problems).toEqual([]);
     await page.close();
   }, 60_000);
