@@ -1688,7 +1688,7 @@ Review 15's rule: a test that takes over 2 s gets an explicit timeout with its m
 
 From T1519. Plan before code, and split if any PR goes over 400 non-test lines:
 
-1. A migration adding `rooms.archived_at` and `rooms.retention_days` (default 365, check 30–365).
+1. A migration adding `rooms.retention_days` (default 365, check 30–365), the notice and purge progress fields, and the out-of-room deletion audit table. `rooms.archived_at` already exists (migration 0001); keep it as the start of retention.
 2. An owner-only `rooms.set_retention` command, and `rooms.unarchive`. Unarchive is only allowed while `ARCHIVED` and within retention. It returns the room to `ACTIVE`, does not recreate sandboxes, and emits `room.unarchived`.
 3. A purge sweeper on the room-lease holder:
    - 7 days before deletion it sends one inbox notice to the owner (idempotent);
