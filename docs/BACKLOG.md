@@ -1651,3 +1651,7 @@ In #279, S1 found that the bug also left a gap in the circuit breaker's protecte
 ### T1524 · Move the room-export route out of gateway server.ts — S1
 
 From Reviews 13 and 14. `packages/gateway/src/server.ts` is 676 lines, and the export route (about 110 lines) is inline. Move it next to `room-export.ts` and register it from `server.ts`, as was done for `execution.ts`. Behaviour must not change: existing tests pass unchanged, and the diff moves code rather than rewriting it. Document beside the endpoint that exports refuse with `UNAVAILABLE` when Redis is down.
+
+### T1525 · Split kernel dispatcher.ts by command family — S1
+
+From the tech-debt register (Reviews 11–14). `packages/kernel/src/dispatcher.ts` is 1,793 lines and every new command adds to it. Move the handlers into modules by command family (tasks, messages, decisions, memory, workspace and so on), keeping registration, the transaction wrapper and authorization in `dispatcher.ts`. Behaviour must not change: existing tests pass unchanged, and the diff moves code rather than rewriting it, as in T1518 and T1524. Post the module split before writing code, and ship it as more than one PR if any one PR would be over 400 non-test lines.
