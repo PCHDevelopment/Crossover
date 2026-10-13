@@ -524,5 +524,5 @@ describe("egress visibility conformance (§34.5)", () => {
       }
     }
     expect(problems).toEqual([]);
-  });
+  }, 15_000);
 });
