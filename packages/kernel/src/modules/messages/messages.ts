@@ -10,6 +10,7 @@ import {
   type Provenance,
 } from "../provenance.js";
 import { checkLoopProtection } from "./loop.js";
+import { validateRefs } from "./refs.js";
 import type { Dispatcher, EmittedEvent } from "../../dispatcher.js";
 
 export const MAX_BODY_BYTES = 32 * 1024;
@@ -99,7 +100,8 @@ export function messageView(row: MessageRow): MessageView {
  * Register `messages.send`, `messages.edit` and `messages.list` (T401, §17.5).
  *
  * - **send** posts a message. Every mention must be a participant of the room (`VALIDATION`
- *   names the first that isn't); `reply_to` must be a message of the room. The owner of a task
+ *   names the first that isn't); `reply_to` must be a message of the room; every ref must be of a known kind and exist in
+ *   the room (`VALIDATION`, `details.unknown_refs`). The owner of a task
  *   named in `refs` keeps their claim lease alive by posting about it (§8.4). Emits
  *   `message.sent`, which carries the message as sent, so the original text stays in the ledger.
  * - **edit** changes the text; only the author may (`FORBIDDEN`). Emits `message.edited` with
@@ -148,6 +150,7 @@ export function registerMessageCommands(dispatcher: Dispatcher): void {
           });
         }
       }
+      await validateRefs(ctx.client, ctx.room_id, p.refs);
       const messageId = newId("msg");
       const inboxEvents: EmittedEvent[] = [...(loop.inboxEvents ?? [])];
       // T902: a high-confidence secret in the body rejects; a low-confidence
