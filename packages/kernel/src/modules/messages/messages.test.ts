@@ -247,11 +247,11 @@ describe("messages.send", () => {
       decision: newId("dec"),
       message: ((await send(s, s.a, {})).response as MessageView).id,
       changeset: newId("cs"),
-      conflict: newId("cf"),
+      conflict: newId("conf"),
       memory: `notes/${newId("mem")}`,
-      file: `src/${newId("f")}.ts`,
-      removed_file: `src/${newId("gone")}.ts`,
-      removed_memory: `notes/${newId("gone")}`,
+      file: `src/f${++n}.ts`,
+      removed_file: `src/gone${++n}.ts`,
+      removed_memory: `notes/gone${++n}`,
     };
     const author = s.a.participant_id;
     const ws = newId("ws");
