@@ -102,6 +102,14 @@ describe("createTestDatabase", () => {
     client.release(true);
   });
 
+  it("a client that dies before drop() starts is still a failure (T1520)", async () => {
+    const db = await create();
+    const client = await db.pool.connect();
+    // Not swallowed: without a listener Node would throw here too, and the test run fails.
+    expect(() => client.emit("error", new Error("connection lost"))).toThrow("connection lost");
+    client.release(true);
+  });
+
   it("a database left behind doesn't break later runs", async () => {
     const leaked = await create({ "0001_t.sql": "CREATE TABLE t (id int)" });
     const next = await create({ "0001_t.sql": "CREATE TABLE t (id int)" });
