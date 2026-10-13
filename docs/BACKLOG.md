@@ -27,7 +27,7 @@ Conventions are in `docs/ENGINEERING.md`. Section references (§) point to `docs
 | M12 Plugins (§21.4–21.5)              | T1201–T1206 | S1 (T1201, moved in Review 5), S2 (T1202–T1206)             |
 | M13 Lessons from building (§34)       | T1301–T1303 | S1                                                          |
 | M14 Demo-ready web app (Review 7)     | T1401–T1416 | S2 (T1401–T1416; T1402 moved from Q1)                       |
-| M15 MVP scope gaps (§29, Review 10)   | T1501–T1517 | S2 (T1501–T1503, T1510–T1511, T1513–T1514; rest unassigned) |
+| M15 MVP scope gaps (§29, Review 10)   | T1501–T1518 | S2 (T1501–T1503, T1510–T1511, T1513–T1514; rest unassigned) |
 
 **Start here:** S1 → T101, T105, T114 (independent). S2 → T501, T505 (only need the scaffold).
 
@@ -1615,3 +1615,7 @@ T1417's second flake, captured on 2026-10-13 in #247's CI (seq 1168; log saved b
 Captured on 2026-10-13 in #248's CI (run 38340866790, job 115111301475; log saved by O1 and S2 before rerun). `packages/workspace/src/health-runner.test.ts` › DockerHealthRunner › "keeps successful status with output over 1 MiB" (5030 ms) and "kills and removes a container when aborted" (5014 ms): `Test timed out in 5000ms`. Neither file was in #248's diff. The cases start real containers but run under vitest's default 5 s budget.
 
 On the next failure, record container start time against total run time. Then decide whether the cases need a measured budget (as in T1510) or whether the runner is slow to start or to clean up. If the abort case is slow to remove its container, that is a product bug, not a test budget issue.
+
+### T1518 · Move sandbox compute sampling out of execution.ts — S2
+
+From Review 12. `packages/workspace/src/execution.ts` is about 1,970 lines, and each T1504 compute PR added about 125. Move CPU sampling (at reserve, at exec end, before stop or destroy), hibernate-at-cap and `sweepCompute` into a dedicated module that `ExecutionService` calls. Behavior must not change: existing tests pass unchanged, and the diff moves code rather than rewriting it. Land this before T1505 (Terminal) touches `execution.ts`.

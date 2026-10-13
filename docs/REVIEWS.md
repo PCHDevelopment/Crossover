@@ -2,6 +2,49 @@
 
 Periodic big-picture reviews by O1: is the merged code building the product in ARCHITECTURE.md, in the right order? Newest first.
 
+## 2026-10-13 · Review 12 (04:20 UTC; 5 PRs merged since Review 11)
+
+**State.** #245, #246, #247, #248 and #251 merged, all by S2, each with CI green on the merged head:
+
+- **T1504 budgets, three of four parts done:**
+  - The owner command `budgets.set` / `budgets.get`, with `room.budgets_changed` events (#245).
+  - Budget controls in Owner controls (#246).
+  - Daily sandbox CPU reservations and accounting in migration 0033 (#247). Reserving takes no locks on room or participant rows, does not cap usage at the UTC day boundary, and releases each expired reservation in its own short transaction.
+  - Enforcement (#248). CPU is read on the host from the Docker Engine stats API, never from inside the sandbox, keyed to the container's start time. It is sampled when an exec is reserved, when it ends, on the sweeper and before stop or destroy. A sandbox at its cap is hibernated. The meter and sweeper are wired into `ExecutionService.startSweeper`, so this runs in production, not only in tests.
+- **T1516** (#251): the 57P01 errors were fallout from the test's own teardown. Its 15 s budget is measured, against a 3.6 s passing run over 14 tools, so it has about four times headroom.
+- **T1515** (#250, approved, waiting for CI): `DockerToolRunner` now validates arguments against the registered schema on the host, before the egress lookup, credentials or Docker. A policy refusal can no longer turn into a retryable worker error.
+
+**Against §29.** T1504 has one part left, #249 (compute limits and usage UI and API). After that the order is unchanged: T1505 Terminal, T1506 export and archive, T1507 UI completeness, T1512, T1508, T1509. The §30 demo flow is unaffected by this stretch.
+
+**What went well.** Reviews caught a trust-boundary bug in #248 before merge: it measured CPU with a shell inside the sandbox, so the agent being billed could report its own usage. S2 moved the measurement to the host and added a test where the sandbox's shell reports zero. Rules about intermittent failures are holding: S2 saved the failing tests' names and errors before every rerun in this stretch.
+
+**What needs correcting.** S2's first #250 deleted the failing assertion instead of fixing the cause. The rework was right, but deleting an assertion that guards a policy decision is never a fix for an intermittent failure.
+
+**Course corrections.**
+
+1. **Task order for S2:**
+   1. Merge #250 (T1515) once CI is green.
+   2. Retarget #249 (T1504 compute 3/3) to main, merge main into it, and get it reviewed.
+   3. **T1518 (new):** move compute sampling and the compute sweep out of `execution.ts` with no behavior change. Do it before T1505, which will add interactive execs to the same file.
+   4. T1505 Terminal
+   5. T1506 export/archive
+   6. T1507 UI completeness
+   7. T1512
+   8. T1508
+   9. T1509
+
+   T1517 (DockerHealthRunner timeouts) is taken up when it next fails, using the evidence the backlog asks for.
+2. **Rule for intermittent tests:** fix them in product code or give the test a measured budget. Removing or weakening an assertion needs O1's sign-off in the room before you push.
+3. **CI capacity, for Peter:** one self-hosted runner serves every workflow. Code checks waited 20–40 minutes behind the documentation workflow in this stretch, which delays every merge. Options are a second runner or path filters so documentation-only pushes don't take the runner. This is Peter's decision.
+
+**Tech-debt register, new:**
+
+- `execution.ts` is now about 1,970 lines and grows about 125 lines per compute PR. T1518 is the first cut, and the Terminal work must not add to the file before then. (`dispatcher.ts` is unchanged at about 1,790.)
+- Host CPU stats only support a Unix-socket `DOCKER_HOST`. That matches `docker-compose.yml`, which mounts `/var/run/docker.sock`. A deployment behind a TCP or TLS socket proxy would fail the CPU read. Document the constraint in ARCHITECTURE's deployment section or support TCP and TLS before anyone deploys that way.
+- Carried over from Review 11: `RedisOAuthStateStore` opens its own Redis connection; dev-login returns `session_token` in its response body; the web app imports a constant from `@crossover/workspace`.
+
+**Closed since Review 11:** T1516, the sandbox-compute trust boundary (#248), and T1515 once #250 merges.
+
 ## 2026-10-13 · Review 11 (00:20 UTC; 8 PRs merged since Review 10)
 
 **State.** #237–#244 merged, all by S2, each with CI green on the merged head:
