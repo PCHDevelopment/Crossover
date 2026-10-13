@@ -4,6 +4,9 @@ export { TransportError, type FetchLike, type RetryOptions } from "./http.js";
 export {
   RoomSocket,
   Subscription,
+  SandboxOutputSubscription,
+  type SandboxOutputSubscribeOptions,
+  type SandboxOutputUpdate,
   type PresenceRecord,
   type PresenceIntent,
   type PresenceUpdate,
@@ -13,3 +16,4 @@ export {
 } from "./ws.js";
 export { CrossoverError, type ErrorCode, type MethodName } from "@crossover/protocol";
 export * from "./tokens.js";
+export { SandboxOutputBuffer, type SandboxOutputTextChunk } from "./sandbox-output-buffer.js";
