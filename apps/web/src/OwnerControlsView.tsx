@@ -36,21 +36,40 @@ const BUDGET_FIELDS = [
   { name: "changesets", label: "ChangeSets", window: "per hour", default: 60 },
   { name: "tool_invocations", label: "Tool invocations", window: "per hour", default: 100 },
 ] as const;
+const COMPUTE_BUDGET_FIELDS = [
+  { name: "agent_vcpu_hours_per_day", label: "Per-agent sandbox CPU", default: 4 },
+  { name: "room_vcpu_hours_per_day", label: "Room sandbox CPU", default: 40 },
+] as const;
 type BudgetName = (typeof BUDGET_FIELDS)[number]["name"];
 type BudgetValues = Partial<Record<BudgetName, number | null>>;
 type BudgetForm = Record<BudgetName, { value: string; unlimited: boolean }>;
+type ComputeBudgetName = (typeof COMPUTE_BUDGET_FIELDS)[number]["name"];
+type ComputeBudgetValues = Partial<Record<ComputeBudgetName, number | null>>;
+type ComputeBudgetForm = Record<ComputeBudgetName, { value: string; unlimited: boolean }>;
 
 interface BudgetAgentStatus {
   participant_id: string;
   display_name: string;
   status: string;
   budgets: BudgetValues;
+  compute_budgets: ComputeBudgetValues;
   effective: Record<BudgetName, number | null>;
   usage: Record<BudgetName, number>;
+  compute: {
+    limit_vcpu_hours_per_day: number | null;
+    used_vcpu_hours: number;
+    reserved_vcpu_hours: number;
+  };
 }
 
 interface BudgetStatus {
   room_budgets: BudgetValues;
+  compute_budgets: ComputeBudgetValues;
+  room_compute: {
+    limit_vcpu_hours_per_day: number | null;
+    used_vcpu_hours: number;
+    reserved_vcpu_hours: number;
+  };
   agents: BudgetAgentStatus[];
 }
 
@@ -84,6 +103,41 @@ function budgetValues(form: BudgetForm): BudgetValues {
     values[name] = value;
   }
   return values;
+}
+
+const computeBudgetForm = (values: ComputeBudgetValues): ComputeBudgetForm =>
+  Object.fromEntries(
+    COMPUTE_BUDGET_FIELDS.map(({ name }) => {
+      const value = values[name];
+      return [
+        name,
+        {
+          value: value === undefined || value === null ? "" : String(value),
+          unlimited: value === null,
+        },
+      ];
+    }),
+  ) as ComputeBudgetForm;
+
+function computeBudgetValues(form: ComputeBudgetForm): ComputeBudgetValues {
+  const values: ComputeBudgetValues = {};
+  for (const { name, label } of COMPUTE_BUDGET_FIELDS) {
+    const field = form[name];
+    if (field.unlimited) {
+      values[name] = null;
+      continue;
+    }
+    if (!field.value.trim()) continue;
+    const value = Number(field.value);
+    if (!Number.isSafeInteger(value) || value < 1)
+      throw new Error(`${label} must be a positive whole number.`);
+    values[name] = value;
+  }
+  return values;
+}
+
+function formatCpuHours(hours: number): string {
+  return hours.toFixed(3).replace(/\.000$/, "");
 }
 
 const list = (value: unknown): string[] =>
@@ -162,9 +216,15 @@ export function OwnerControlsView(props: {
   const [approvals, setApprovals] = useState<Approval[]>([]);
   const [budgetStatus, setBudgetStatus] = useState<BudgetStatus>();
   const [roomBudgetForm, setRoomBudgetForm] = useState<BudgetForm>(() => budgetForm({}));
+  const [roomComputeBudgetForm, setRoomComputeBudgetForm] = useState<ComputeBudgetForm>(() =>
+    computeBudgetForm({}),
+  );
   const [budgetTargetId, setBudgetTargetId] = useState("");
   const budgetTargetIdRef = useRef("");
   const [agentBudgetForm, setAgentBudgetForm] = useState<BudgetForm>(() => budgetForm({}));
+  const [agentComputeBudgetForm, setAgentComputeBudgetForm] = useState<ComputeBudgetForm>(() =>
+    computeBudgetForm({}),
+  );
   const [budgetLoading, setBudgetLoading] = useState(false);
 
   const refreshCapabilities = useCallback(async () => {
@@ -195,6 +255,7 @@ export function OwnerControlsView(props: {
     try {
       const status = await refreshBudgetStatus();
       setRoomBudgetForm(budgetForm(status.room_budgets));
+      setRoomComputeBudgetForm(computeBudgetForm(status.compute_budgets));
       const target =
         status.agents.find((agent) => agent.participant_id === budgetTargetIdRef.current) ??
         status.agents[0];
@@ -202,6 +263,7 @@ export function OwnerControlsView(props: {
       budgetTargetIdRef.current = nextTargetId;
       setBudgetTargetId(nextTargetId);
       setAgentBudgetForm(budgetForm(target?.budgets ?? {}));
+      setAgentComputeBudgetForm(computeBudgetForm(target?.compute_budgets ?? {}));
     } finally {
       setBudgetLoading(false);
     }
@@ -317,12 +379,33 @@ export function OwnerControlsView(props: {
     });
   };
 
+  const submitComputeBudgets = (event: FormEvent) => {
+    event.preventDefault();
+    let compute_budgets: ComputeBudgetValues;
+    try {
+      compute_budgets = computeBudgetValues(roomComputeBudgetForm);
+    } catch (err) {
+      setError(errorText(err));
+      return;
+    }
+    if (!window.confirm("Replace the room's daily sandbox CPU limits?")) return;
+    void perform("Save sandbox CPU limits", async () => {
+      await room.api.budgets.set({ compute_budgets });
+      await loadBudgetControls();
+    });
+  };
+
   const submitAgentBudgets = (event: FormEvent) => {
     event.preventDefault();
     if (!budgetTargetId) return;
     let budgets: BudgetValues;
+    let compute_budgets: ComputeBudgetValues;
     try {
       budgets = budgetValues(agentBudgetForm);
+      const allComputeBudgets = computeBudgetValues(agentComputeBudgetForm);
+      const agentComputeBudget = allComputeBudgets.agent_vcpu_hours_per_day;
+      compute_budgets =
+        agentComputeBudget === undefined ? {} : { agent_vcpu_hours_per_day: agentComputeBudget };
     } catch (err) {
       setError(errorText(err));
       return;
@@ -330,7 +413,7 @@ export function OwnerControlsView(props: {
     const target = budgetStatus?.agents.find((agent) => agent.participant_id === budgetTargetId);
     if (!target || !window.confirm(`Replace ${target.display_name}'s budget overrides?`)) return;
     void perform(`Save ${target.display_name}'s budgets`, async () => {
-      await room.api.budgets.set({ participant_id: budgetTargetId, budgets });
+      await room.api.budgets.set({ participant_id: budgetTargetId, budgets, compute_budgets });
       await loadBudgetControls();
     });
   };
@@ -576,6 +659,51 @@ export function OwnerControlsView(props: {
           </button>
         </form>
 
+        <form onSubmit={submitComputeBudgets}>
+          <h4>Daily sandbox CPU limits</h4>
+          <p className="muted">
+            Limits count measured sandbox CPU time in vCPU-hours per UTC day. Blank uses the
+            platform default; No limit removes that cap.
+          </p>
+          {COMPUTE_BUDGET_FIELDS.map(({ name, label, default: defaultValue }) => (
+            <label key={name}>
+              {label} (vCPU-hours/day; platform default {defaultValue})
+              <input
+                data-testid={`compute-budget-${name}`}
+                type="number"
+                min={1}
+                step={1}
+                value={roomComputeBudgetForm[name].value}
+                disabled={busy || roomComputeBudgetForm[name].unlimited}
+                onChange={(event) =>
+                  setRoomComputeBudgetForm((current) => ({
+                    ...current,
+                    [name]: { ...current[name], value: event.target.value },
+                  }))
+                }
+              />
+              <span>
+                <input
+                  data-testid={`compute-budget-unlimited-${name}`}
+                  type="checkbox"
+                  checked={roomComputeBudgetForm[name].unlimited}
+                  disabled={busy}
+                  onChange={(event) =>
+                    setRoomComputeBudgetForm((current) => ({
+                      ...current,
+                      [name]: { ...current[name], unlimited: event.target.checked },
+                    }))
+                  }
+                />
+                No limit
+              </span>
+            </label>
+          ))}
+          <button data-testid="save-compute-budgets" disabled={busy || budgetLoading}>
+            Save CPU limits
+          </button>
+        </form>
+
         <form onSubmit={submitAgentBudgets}>
           <h4>Agent overrides</h4>
           <label>
@@ -592,6 +720,7 @@ export function OwnerControlsView(props: {
                   (agent) => agent.participant_id === participantId,
                 );
                 setAgentBudgetForm(budgetForm(target?.budgets ?? {}));
+                setAgentComputeBudgetForm(computeBudgetForm(target?.compute_budgets ?? {}));
               }}
             >
               <option value="">Choose an agent</option>
@@ -638,6 +767,44 @@ export function OwnerControlsView(props: {
                   </span>
                 </label>
               ))}
+              <label>
+                Per-agent sandbox CPU (vCPU-hours/day; default 4)
+                <input
+                  data-testid="agent-compute-budget-agent_vcpu_hours_per_day"
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={agentComputeBudgetForm.agent_vcpu_hours_per_day.value}
+                  disabled={busy || agentComputeBudgetForm.agent_vcpu_hours_per_day.unlimited}
+                  onChange={(event) =>
+                    setAgentComputeBudgetForm((current) => ({
+                      ...current,
+                      agent_vcpu_hours_per_day: {
+                        ...current.agent_vcpu_hours_per_day,
+                        value: event.target.value,
+                      },
+                    }))
+                  }
+                />
+                <span>
+                  <input
+                    data-testid="agent-compute-budget-unlimited-agent_vcpu_hours_per_day"
+                    type="checkbox"
+                    checked={agentComputeBudgetForm.agent_vcpu_hours_per_day.unlimited}
+                    disabled={busy}
+                    onChange={(event) =>
+                      setAgentComputeBudgetForm((current) => ({
+                        ...current,
+                        agent_vcpu_hours_per_day: {
+                          ...current.agent_vcpu_hours_per_day,
+                          unlimited: event.target.checked,
+                        },
+                      }))
+                    }
+                  />
+                  No limit
+                </span>
+              </label>
               <button data-testid="save-agent-budgets" disabled={busy || budgetLoading}>
                 Save agent overrides
               </button>
@@ -648,6 +815,11 @@ export function OwnerControlsView(props: {
         </form>
 
         <h4>Current usage</h4>
+        <p data-testid="room-compute-usage">
+          Room sandbox CPU: {formatCpuHours(budgetStatus?.room_compute.used_vcpu_hours ?? 0)} used,{" "}
+          {formatCpuHours(budgetStatus?.room_compute.reserved_vcpu_hours ?? 0)} reserved of{" "}
+          {budgetStatus?.room_compute.limit_vcpu_hours_per_day ?? "unlimited"} vCPU-hours/day
+        </p>
         {!budgetStatus?.agents.length ? (
           <p className="muted">No agent budget usage yet.</p>
         ) : (
@@ -662,6 +834,11 @@ export function OwnerControlsView(props: {
                       {window}
                     </li>
                   ))}
+                  <li data-testid={`compute-usage-${agent.participant_id}`}>
+                    Sandbox CPU: {formatCpuHours(agent.compute.used_vcpu_hours)} used,{" "}
+                    {formatCpuHours(agent.compute.reserved_vcpu_hours)} reserved of{" "}
+                    {agent.compute.limit_vcpu_hours_per_day ?? "unlimited"} vCPU-hours/day
+                  </li>
                 </ul>
               </li>
             ))}

@@ -1,10 +1,11 @@
 import { execFileSync } from "node:child_process";
-import { describe, expect, it, beforeAll, afterAll } from "vitest";
+import { describe, expect, it, beforeAll, afterAll, afterEach } from "vitest";
 import { createTestDatabase, type TestDatabase } from "@crossover/db/testing";
 import { ToolRegistry, type ToolInvocation } from "@crossover/kernel";
 import { newId } from "@crossover/protocol";
 import { normalizeRoomEgressAllowlist } from "@crossover/security";
 import { browserNavigateParams, browserReadPageParams } from "./browser-plugin.js";
+import { invokeDocker, type PluginDockerInvoker } from "./plugin-runner-docker.js";
 import { DockerToolRunner } from "./plugin-runner.js";
 
 const SECRET = "browser-test-proxy-secret-with-32-bytes";
@@ -26,6 +27,7 @@ describe.skipIf(skipDockerIntegration)("browser plugin real Docker integration",
   let proxyContainer: string | undefined;
   let roomId: string;
   let participantId: string;
+  let expectedWorkerError: "PROVIDER_UNAVAILABLE" | "VALIDATION" | undefined;
 
   beforeAll(async () => {
     db = await createTestDatabase();
@@ -122,11 +124,40 @@ describe.skipIf(skipDockerIntegration)("browser plugin real Docker integration",
         maxOutputBytes: 256 * 1024,
       },
     });
+    const logFailedWorkerBeforeCleanup: PluginDockerInvoker = async (binary, args, options) => {
+      const nameIndex = args[0] === "run" ? args.indexOf("--name") : -1;
+      const container = nameIndex === -1 ? undefined : args[nameIndex + 1];
+      const result = await invokeDocker(binary, args, options);
+      if (
+        container &&
+        (result.code !== 0 || result.timedOut || result.aborted || result.outputOverflow)
+      ) {
+        const expectedCode =
+          expectedWorkerError === "PROVIDER_UNAVAILABLE"
+            ? "unavailable"
+            : expectedWorkerError === "VALIDATION"
+              ? "validation"
+              : undefined;
+        let actualCode: unknown;
+        try {
+          actualCode = (JSON.parse(result.stdout) as { error?: { code?: unknown } }).error?.code;
+        } catch {
+          actualCode = undefined;
+        }
+        if (expectedCode === undefined || actualCode !== expectedCode) {
+          console.error(
+            `[browser-plugin.docker.test] worker container ${container} failed before cleanup:\n${await readDockerLogs(container)}`,
+          );
+        }
+      }
+      return result;
+    };
     runner = new DockerToolRunner({
       registry,
       egressProxyContainer: proxyContainer,
       egressProxySecret: SECRET,
       timeoutMs: 45_000,
+      invoke: logFailedWorkerBeforeCleanup,
       roomEgressHosts: async (invocation) => {
         const { rows } = await db.pool.query<{ hosts: unknown }>(
           "SELECT settings -> 'egress_allowlist' AS hosts FROM rooms WHERE id = $1",
@@ -152,6 +183,13 @@ describe.skipIf(skipDockerIntegration)("browser plugin real Docker integration",
     if (db) await db.drop();
   });
 
+  afterEach(async ({ task }) => {
+    if (task.result?.state !== "fail" || !proxyContainer) return;
+    console.error(
+      `[browser-plugin.docker.test] proxy container ${proxyContainer} logs on test failure:\n${await readDockerLogs(proxyContainer)}`,
+    );
+  });
+
   it("uses the signed room allowlist, denies unsafe destinations, and caps UTF-8 page text", async () => {
     const navigate = await invoke("browser.navigate", { url: "https://browser-fixture.test/" });
     expect(navigate.result).toMatchObject({
@@ -173,18 +211,24 @@ describe.skipIf(skipDockerIntegration)("browser plugin real Docker integration",
       "https://127.0.0.1/",
       "https://169.254.169.254/",
     ]) {
-      await expect(invoke("browser.navigate", { url })).rejects.toMatchObject({
+      await expect(
+        invoke("browser.navigate", { url }, "PROVIDER_UNAVAILABLE"),
+      ).rejects.toMatchObject({
         options: { code: "PROVIDER_UNAVAILABLE" },
       });
     }
     await expect(
-      invoke("browser.navigate", { url: "http://browser-fixture.test/" }),
+      invoke("browser.navigate", { url: "http://browser-fixture.test/" }, "VALIDATION"),
     ).rejects.toMatchObject({
       options: { code: "VALIDATION" },
     });
   }, 60_000);
 
-  async function invoke(tool: string, args: Record<string, unknown>) {
+  async function invoke(
+    tool: string,
+    args: Record<string, unknown>,
+    expectedError?: "PROVIDER_UNAVAILABLE" | "VALIDATION",
+  ) {
     const invocation: ToolInvocation = {
       tool,
       args,
@@ -194,7 +238,12 @@ describe.skipIf(skipDockerIntegration)("browser plugin real Docker integration",
       participant_id: participantId,
       invocation_id: newId("cmd"),
     };
-    return runner!.run(invocation, new AbortController().signal);
+    expectedWorkerError = expectedError;
+    try {
+      return await runner!.run(invocation, new AbortController().signal);
+    } finally {
+      expectedWorkerError = undefined;
+    }
   }
 });
 
@@ -213,4 +262,16 @@ async function waitForProxy(container: string): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   throw new Error("Browser test proxy did not start");
+}
+
+async function readDockerLogs(container: string): Promise<string> {
+  try {
+    return execFileSync("docker", ["logs", "--tail", "200", container], {
+      encoding: "utf8",
+      timeout: 5_000,
+    }).slice(-16_384);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return `could not read container logs: ${detail}`;
+  }
 }
