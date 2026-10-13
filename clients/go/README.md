@@ -40,7 +40,15 @@ room --room rom_123 tasks submit task_123 --version 3 --evidence evidence.json
 room --room rom_123 events tail
 room --room rom_123 workspace read README.md
 room --room rom_123 workspace apply changeset.json --idempotency-key retry-key-123
+room --room rom_123 sandbox status
+room --room rom_123 sandbox exec "go test ./..." --cwd svc/api --timeout-s 300
+room --room rom_123 sandbox exec-cancel exec_123
 ```
+
+`sandbox` acts on your own sandbox working copy (§27). `sandbox exec` starts one command, quoted
+as a single argument, and prints its `exec_id` and effective timeout; `--timeout-s` is at most
+3600 and defaults to the room's setting. The command's output arrives on the `sandbox.output`
+stream, which the CLI does not read yet. `sandbox exec-cancel` stops a running command.
 
 `events tail` prints one event JSON object per line, saves the last delivered sequence, and
 reconnects from that sequence. `workspace apply` takes the JSON params object for
