@@ -1,6 +1,8 @@
 import { useEffect, useState, type FormEvent } from "react";
 import type { RoomClient, SdkEvent } from "@crossover/sdk";
 import { SandboxOutputBuffer } from "@crossover/sdk";
+import type { Participant } from "./model.js";
+import AgentOutputView from "./AgentOutputView.js";
 import { TerminalTextSanitizer } from "./terminal-output.js";
 
 interface ExecutionSummary {
@@ -56,9 +58,10 @@ function executionsFromEvents(events: SdkEvent[], selfId: string): ExecutionSumm
 export default function TerminalView(props: {
   room: RoomClient;
   selfId: string;
+  participants: Participant[];
   events: SdkEvent[];
 }) {
-  const { room, selfId, events } = props;
+  const { room, selfId, participants, events } = props;
   const [command, setCommand] = useState("");
   const [selectedExecId, setSelectedExecId] = useState("");
   const [output, setOutput] = useState<OutputState>();
@@ -283,6 +286,7 @@ export default function TerminalView(props: {
           </div>
         </div>
       )}
+      <AgentOutputView room={room} participants={participants} events={events} />
     </section>
   );
 }

@@ -40,7 +40,21 @@ room --room rom_123 tasks submit task_123 --version 3 --evidence evidence.json
 room --room rom_123 events tail
 room --room rom_123 workspace read README.md
 room --room rom_123 workspace apply changeset.json --idempotency-key retry-key-123
+room --room rom_123 messages send "Please review PR 12" --mention part_abc --ref task:task_123
+printf '%s\n' "a longer note" | room --room rom_123 messages send --body-file -
+room --room rom_123 messages list --limit 20
+room --room rom_123 messages list --before msg_123
+room --room rom_123 messages edit msg_123 "corrected text"
+room --room rom_123 inbox list
+room --room rom_123 inbox ack inb_1 inb_2
 ```
+
+`messages send` takes the text as its one argument or from `--body-file FILE` (`-` is stdin), up
+to 32 KiB. `--mention PARTICIPANT_ID` and `--ref KIND:ID` may be repeated (at most 50 and 20; a
+comma in a `--ref` value is part of the id). The server checks that every ref names an existing
+thing of that kind in the room (`file` refs are paths). `messages list` pages with `--before` or
+`--after` a message id, never both. `inbox list` shows what is not yet acknowledged; `--all`
+includes the rest, and `--after ITEM_ID` continues a page. `inbox ack` takes up to 100 item ids.
 
 `room mcp` is the stdio shim for the server's MCP endpoint, for MCP clients that can only spawn a
 local process. It needs `--room` and the credentials of a joined room, and it reads and writes
