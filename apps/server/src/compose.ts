@@ -351,6 +351,7 @@ export async function composeServer(
     });
     const healthRunner = new DockerHealthRunner({
       allowedImages: config.healthImages,
+      checkoutRoot: join(config.workspaceRoot, ".health-checkouts"),
       nodeId: config.nodeId,
       ...(config.sandboxRuntime ? { runtime: config.sandboxRuntime } : {}),
       ...(config.sandboxEgressProxyContainer

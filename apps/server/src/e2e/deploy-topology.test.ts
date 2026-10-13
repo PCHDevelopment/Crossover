@@ -12,7 +12,7 @@ const execFileAsync = promisify(execFile);
 const image = process.env["CROSSOVER_SERVER_IMAGE"];
 const GIT_NETWORK = "crossover-git";
 const DOCKER_TIMEOUT_MS = 15_000;
-const TEST_TIMEOUT_MS = 120_000;
+const HEALTH_TOPOLOGY_TIMEOUT_MS = 85_000;
 // Ordinary requests answer in 10-150 ms on an idle runner; 10 s leaves two orders of magnitude.
 const REQUEST_BUDGET_MS = 10_000;
 // The first sandbox.exec creates the sandbox and fetches the workspace through crossover-git in the
@@ -245,8 +245,9 @@ describe.skipIf(!image)("deployed server topology", () => {
     if (workspaceRoot) await rm(workspaceRoot, { recursive: true, force: true });
   }, 30_000);
 
+  // Measured (T1534): idle 8,976 ms, 3x load 11,679 ms; budget 7x rounded up to 85,000 ms.
   it(
-    "fetches a canonical workspace into a sandbox through the deployed server on crossover-git",
+    "uses host-visible health checkouts and fetches a canonical workspace through crossover-git",
     async () => {
       const login = await requestJson<{ session_token: string }>("/v1/auth/dev-login", {
         subject: `deploy-topology-${randomBytes(8).toString("hex")}`,
@@ -268,16 +269,34 @@ describe.skipIf(!image)("deployed server topology", () => {
       const token = session.tokens.access_token;
       await requestJson(
         `/v1/rooms/${roomId}/commands`,
+        envelope("room.set_health", { health_command: "node --check index.js" }),
+        token,
+      );
+      await requestJson(
+        `/v1/rooms/${roomId}/commands`,
         envelope("workspace.apply_changeset", {
           source: "API",
-          message: "Add a file for the deployed fetch test",
+          message: "Add files for deployed health and fetch tests",
           base_workspace_revision: 0,
           operations: [
             { type: "create", path: "README.md", content: "fetched without a bridge\n" },
+            { type: "create", path: "index.js", content: "const ready = true;\n" },
           ],
         }),
         token,
       );
+      const greenStatus = await waitFor(
+        "host-mounted health checkout returns GREEN",
+        async () => {
+          const { rows } = await db!.pool.query<{ status: string }>(
+            "SELECT status FROM health_runs WHERE room_id = $1 AND revision = 1 ORDER BY created_at DESC LIMIT 1",
+            [roomId],
+          );
+          return rows[0]?.status ?? null;
+        },
+        (status) => status === "GREEN",
+      );
+      expect(greenStatus).toBe("GREEN");
       await requestJson(
         `/v1/rooms/${roomId}/commands`,
         envelope("sandbox.exec", { command: "cat README.md", timeout_s: FIRST_EXEC_TIMEOUT_S }),
@@ -321,7 +340,30 @@ describe.skipIf(!image)("deployed server topology", () => {
         (value) => value === "fetched without a bridge",
       );
       expect(content).toBe("fetched without a bridge");
+
+      await requestJson(
+        `/v1/rooms/${roomId}/commands`,
+        envelope("workspace.apply_changeset", {
+          source: "API",
+          message: "Break index.js to verify host-mounted health checkout contents",
+          base_workspace_revision: 1,
+          operations: [{ type: "modify", path: "index.js", content: "const broken = ;\n" }],
+        }),
+        token,
+      );
+      const redStatus = await waitFor(
+        "host-mounted health checkout returns RED for broken JavaScript",
+        async () => {
+          const { rows } = await db!.pool.query<{ status: string }>(
+            "SELECT status FROM health_runs WHERE room_id = $1 AND revision = 2 ORDER BY created_at DESC LIMIT 1",
+            [roomId],
+          );
+          return rows[0]?.status ?? null;
+        },
+        (status) => status === "RED",
+      );
+      expect(redStatus).toBe("RED");
     },
-    TEST_TIMEOUT_MS,
+    HEALTH_TOPOLOGY_TIMEOUT_MS,
   );
 });
