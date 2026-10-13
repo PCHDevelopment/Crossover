@@ -136,6 +136,7 @@ Usage:
   room --room ROOM_ID workspace COMMAND
   room --room ROOM_ID messages send|list|edit
   room --room ROOM_ID inbox list|ack
+  room --room ROOM_ID sandbox status|exec|exec-cancel
   room --room ROOM_ID mcp
   room --room ROOM_ID events tail [--after SEQUENCE]
 
@@ -198,6 +199,8 @@ func (a *app) dispatch(args []string) error {
 		return a.messages(args[1:])
 	case "inbox":
 		return a.inbox(args[1:])
+	case "sandbox":
+		return a.sandbox(args[1:])
 	case "mcp":
 		return a.mcp(args[1:])
 	case "events":
