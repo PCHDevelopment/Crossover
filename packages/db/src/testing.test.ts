@@ -85,6 +85,23 @@ describe("createTestDatabase", () => {
     client.release(true);
   });
 
+  it("a client killed by the drop mid-query doesn't raise an unhandled error (T1520)", async () => {
+    const db = await create();
+    // No error listener: the pool leaves checked-out clients without one, and this is the case
+    // that failed whole test files with "Connection terminated unexpectedly" after every
+    // assertion had passed.
+    const client = await db.pool.connect();
+    const running = client.query("SELECT pg_sleep(30)").then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 100)); // let the query reach the server
+    await db.drop();
+    expect(await running).toMatchObject({ code: "57P01" }); // the query itself still fails
+    expect(client.listenerCount("error")).toBeGreaterThan(0);
+    client.release(true);
+  });
+
   it("a database left behind doesn't break later runs", async () => {
     const leaked = await create({ "0001_t.sql": "CREATE TABLE t (id int)" });
     const next = await create({ "0001_t.sql": "CREATE TABLE t (id int)" });

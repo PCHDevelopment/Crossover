@@ -48,6 +48,11 @@ export async function createTestDatabase(
   const pool = createPool(url.toString());
   // Dropping the database with FORCE can kill a still-closing connection; that's expected.
   pool.on("error", () => {});
+  // The pool only listens for errors on idle clients. A client that is checked out when the
+  // database is dropped (an in-flight query or transaction) emits 57P01 / "Connection
+  // terminated unexpectedly" with no listener, which fails the whole test run as an unhandled
+  // error even though every assertion passed. The query that held it still rejects.
+  pool.on("connect", (client) => client.on("error", () => {}));
 
   let dropped = false;
   let closing: Promise<void> | undefined;
