@@ -27,7 +27,7 @@ Conventions are in `docs/ENGINEERING.md`. Section references (§) point to `docs
 | M12 Plugins (§21.4–21.5)              | T1201–T1206 | S1 (T1201, moved in Review 5), S2 (T1202–T1206)                                              |
 | M13 Lessons from building (§34)       | T1301–T1303 | S1                                                                                           |
 | M14 Demo-ready web app (Review 7)     | T1401–T1416 | S2 (T1401–T1416; T1402 moved from Q1)                                                        |
-| M15 MVP scope gaps (§29, Review 10)   | T1501–T1521 | S2 (T1501–T1505, T1510–T1511, T1513–T1516, T1518); S1 (T1508, T1512, T1517); rest unassigned |
+| M15 MVP scope gaps (§29, Review 10)   | T1501–T1522 | S2 (T1501–T1505, T1510–T1511, T1513–T1516, T1518); S1 (T1508, T1512, T1517); rest unassigned |
 
 **Start here:** S1 → T101, T105, T114 (independent). S2 → T501, T505 (only need the scaffold).
 
@@ -1633,3 +1633,7 @@ Found by S2 (seq 1227–1228). In `apps/server/src/e2e/web.test.ts`, all 14 asse
 ### T1521 · Owner-controls budget e2e reads before the save lands — S1
 
 #261's CI (run 38362177263, job 115178717905; log saved by S1 before one rerun) failed in `apps/server/src/e2e/web.test.ts` at `web-collaboration.ts:253`: it expected `room_budgets` `{ messages: 8 }` and got `{}`. The test polls `owner-controls-notice` for "complete", which a notice from an earlier action can already satisfy, and then reads `budgets.get` straight away. Wait for the saved state instead: poll `budgets.get` until it matches, or wait on a notice tied to that save. Do the same for the compute-budget save that follows. No assertion is weakened.
+
+### T1522 · Deploy-topology first sandbox.exec has no time margin — S1
+
+`apps/server/src/e2e/deploy-topology.test.ts:255` gives the first `sandbox.exec` a 10 s per-request abort (`requestJson`, line 47). That first request runs `ensureSandbox`, container create and a git fetch over `crossover-git`, all inside one request, under full-suite load. The whole test took 9.95 s (#257), 10.15 s (#261) and 14.9 s (#269). On #273 (run 38379543415, job 115236242740) the exec request alone went past 10 s. Time each phase of the first exec in CI, then give that one request a measured budget, as in T1510. If one phase dominates, for example the image pull or the fetch, decide whether it should be warmed before the test.
