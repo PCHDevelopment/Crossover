@@ -6,6 +6,7 @@ export * from "./state.js";
 export * from "./lead.js";
 export * from "./lifecycle.js";
 export * from "./retention.js";
+export * from "./retention-sweeper.js";
 export * from "./events.js";
 export * from "./redact.js";
 export * from "./redact-event.js";
