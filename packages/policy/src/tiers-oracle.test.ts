@@ -19,6 +19,13 @@ beforeAll(async () => {
   await initPolicy(); // `tierOf` reads the shipped engine
 });
 
+/**
+ * An explicit budget for the two big comparisons (T1527 rule: a test that loops thousands of cases
+ * gets a measured timeout). Measured on 4 cores, alone: 43 and 49 ms for the 1,900 base x scope
+ * cases, 96 and 84 ms for the 5,000 random ones (file 0.15 s). The shared CI runner has been seen
+ * at 4x the local time under load (scope-oracle.test.ts, T1527); 30 s is over 200x the slower
+ * measurement.
+ */
 const ORACLE_TIMEOUT_MS = 30_000;
 
 const SCOPES: (string | undefined)[] = [
