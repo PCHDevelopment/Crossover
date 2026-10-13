@@ -43,8 +43,28 @@ import {
   type DispatcherOptions,
 } from "./dispatcher/types.js";
 
-// The public surface of this module is unchanged: the types moved to dispatcher/types.ts.
-export * from "./dispatcher/types.js";
+// The public surface of this module is unchanged: these moved to dispatcher/types.ts. Listed by name
+// so that what stays internal there (the two local result types) does not become API.
+export {
+  READ_VIEWS,
+  allowAll,
+  type AnonymousCommandDefinition,
+  type AnonymousContext,
+  type Authorizer,
+  type AuthorizeOptions,
+  type CommandContext,
+  type CommandDefinition,
+  type CommandInfo,
+  type CommandResult,
+  type DispatchResult,
+  type DispatcherOptions,
+  type EmittedEvent,
+  type PrepareContext,
+  type ReadView,
+  type RoomlessCommandDefinition,
+  type RoomlessContext,
+  type UserPrincipal,
+} from "./dispatcher/types.js";
 
 function errorFromBody(error: ErrorBody["error"]): CrossoverError {
   return new CrossoverError(error.code, error.message, {
