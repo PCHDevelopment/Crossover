@@ -226,6 +226,10 @@ export function registerWebCollaborationStart(fixture: WebFixture): void {
       (await client.roomSession(guestLogin.session_token, roomId)).tokens.access_token,
     );
     await expect(guestRoom.api.room.freeze({})).rejects.toMatchObject({ code: "FORBIDDEN" });
+    await expect(guestRoom.api.budgets.get({})).rejects.toMatchObject({ code: "FORBIDDEN" });
+    await expect(guestRoom.api.budgets.set({ budgets: { messages: 1 } })).rejects.toMatchObject({
+      code: "FORBIDDEN",
+    });
     const guestPage = await fixture.browser!.newPage();
     await guestPage.goto(fixture.baseUrl);
     await guestPage.getByTestId("login-name").fill("RoomGuest");
@@ -237,6 +241,28 @@ export function registerWebCollaborationStart(fixture: WebFixture): void {
     const observer = await joinAgent("ObserverAgent", undefined, "OBSERVER");
     await page.getByTestId("tab-owner-controls").click();
     await page.getByTestId("owner-controls").waitFor();
+
+    await page.getByTestId("room-budget-messages").fill("8");
+    await page.getByTestId("save-room-budgets").click();
+    await expect
+      .poll(() => page.getByTestId("owner-controls-notice").textContent())
+      .toContain("complete");
+    const roomBudgetState = await owner.api.budgets.get<{
+      room_budgets: Record<string, number | null>;
+    }>({});
+    expect(roomBudgetState.response.room_budgets).toEqual({ messages: 8 });
+
+    await page.getByTestId("budget-agent").selectOption(agentA.id);
+    await page.getByTestId("agent-budget-messages").fill("2");
+    await page.getByTestId("save-agent-budgets").click();
+    await expect
+      .poll(() => page.getByTestId("owner-controls-notice").textContent())
+      .toContain("complete");
+    await agentA.room.api.messages.send({ body: "budget usage check" });
+    await page.getByTestId("refresh-budgets").click();
+    await expect
+      .poll(() => page.getByTestId(`budget-usage-${agentA.id}-messages`).textContent())
+      .toContain("Messages: 1 used of 2 per minute");
 
     await page.getByTestId("egress-hosts").fill("registry.acme.test\n*.packages.example");
     await page.getByTestId("save-egress").click();
