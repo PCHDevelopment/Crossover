@@ -35,9 +35,11 @@ function main(): void {
       [
         "build",
         ...["-t", "wasm", "-e", "crossover/authz/decision", "-o", bundle],
-        join(root, "policy", "authz.rego"),
+        // Relative to the working directory: the module embeds the source path it was built from,
+        // so an absolute one would make it differ from machine to machine.
+        "authz.rego",
       ],
-      { stdio: "inherit" },
+      { cwd: join(root, "policy"), stdio: "inherit" },
     );
     const built = fileFromTar(gunzipSync(readFileSync(bundle)), "policy.wasm");
     if (!process.argv.includes("--check")) {
