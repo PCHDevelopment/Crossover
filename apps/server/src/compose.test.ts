@@ -154,6 +154,9 @@ class RecordingExecutionDriver implements ExecutionDriver {
     };
   }
   async start(_input: { sandbox_id: string }): Promise<void> {}
+  async cpuUsage(): Promise<{ usage_usec: bigint; generation: string }> {
+    return { usage_usec: 0n, generation: "recording-container-start" };
+  }
   async stop(input: { sandbox_id: string }): Promise<void> {
     this.stopped.push(input.sandbox_id);
   }

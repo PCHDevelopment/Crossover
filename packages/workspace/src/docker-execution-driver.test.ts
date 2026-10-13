@@ -1,11 +1,16 @@
 import { execFileSync } from "node:child_process";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { CrossoverError, newId } from "@crossover/protocol";
 import { createSandboxProxyCredential, verifySandboxReadToken } from "@crossover/security";
-import { DockerExecutionDriver, type DockerInvoker } from "./docker-execution-driver.js";
+import {
+  DockerExecutionDriver,
+  parseDockerCpuUsageUsec,
+  type DockerInvoker,
+} from "./docker-execution-driver.js";
 
 const hardOptions = {
   volumeDriver: "local",
@@ -40,6 +45,81 @@ function expectMissing(container: string, path: string) {
 }
 
 describe("DockerExecutionDriver", () => {
+  it("charges host Docker CPU stats even if the sandbox shell would report zero", async () => {
+    const root = await mkdtemp(join(tmpdir(), "crossover-docker-cpu-stats-"));
+    const socketPath = join(root, "docker.sock");
+    const sandboxId = newId("sandbox");
+    const containerRef = `crossover-sbx-${sandboxId.toLowerCase()}`;
+    const calls: string[][] = [];
+    const apiPaths: string[] = [];
+    const server = createServer((request, response) => {
+      apiPaths.push(request.url ?? "");
+      response.setHeader("content-type", "application/json");
+      if (request.url === "/version") {
+        response.end('{"ApiVersion":"1.41"}');
+      } else {
+        response.end(
+          '{"cpu_stats":{"cpu_usage":{"total_usage":9007199254740999000,"percpu_usage":[]}}}',
+        );
+      }
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(socketPath, resolve);
+    });
+
+    const driver = new DockerExecutionDriver({
+      dockerSocketPath: socketPath,
+      invoke: async (args) => {
+        calls.push([...args]);
+        if (args[0] === "container" && args[1] === "inspect")
+          return { code: 0, stdout: "true|2026-10-13T01:00:00.000000000Z\n", stderr: "" };
+        // A compromised sandbox could make this command print zero. CPU sampling must never call it.
+        if (args[0] === "exec") return { code: 0, stdout: "0\n", stderr: "" };
+        return { code: 1, stdout: "", stderr: "unexpected Docker invocation" };
+      },
+    });
+
+    try {
+      await expect(
+        driver.cpuUsage({
+          sandbox_id: sandboxId,
+          resources: { volume_ref: containerRef, container_ref: containerRef },
+        }),
+      ).resolves.toEqual({
+        usage_usec: 9_007_199_254_740_999n,
+        generation: "2026-10-13T01:00:00.000000000Z",
+      });
+      expect(calls.map((args) => args.slice(0, 3))).toEqual([
+        ["container", "inspect", "--format"],
+        ["container", "inspect", "--format"],
+      ]);
+      expect(calls.some((args) => args[0] === "exec")).toBe(false);
+      expect(apiPaths).toEqual([
+        "/version",
+        `/v1.41/containers/${encodeURIComponent(containerRef)}/stats?stream=false&one-shot=true`,
+      ]);
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()));
+      });
+      await unlink(socketPath).catch(() => {});
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("parses the Docker CPU counter as nanoseconds without losing integer precision", () => {
+    expect(parseDockerCpuUsageUsec('{"cpu_stats":{"cpu_usage":{"total_usage":0}}}')).toBe(0n);
+    expect(
+      parseDockerCpuUsageUsec('{"cpu_stats":{"cpu_usage":{"total_usage":9007199254740999000}}}'),
+    ).toBe(9_007_199_254_740_999n);
+    expect(() => parseDockerCpuUsageUsec("not JSON")).toThrow(/invalid container stats JSON/);
+    expect(() => parseDockerCpuUsageUsec('{"cpu_stats":{"cpu_usage":{}}}')).toThrow(
+      /missing CPU total_usage/,
+    );
+  });
+
   it("passes command text on stdin, keeps it out of Docker argv, and reports output failures distinctly", async () => {
     const root = await mkdtemp(join(tmpdir(), "crossover-docker-exec-stdin-"));
     try {

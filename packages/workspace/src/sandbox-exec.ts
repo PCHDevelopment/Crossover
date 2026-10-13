@@ -177,16 +177,17 @@ async function prepareExec(
   const timeout_s = Math.min(requested, ceiling, MAX_TIMEOUT_S);
   const cwd = normalizeSandboxCwd(params.cwd);
   const exec_id = newId("exec");
-  const sandbox_id = await execution.reserveExec(
+  const reservation = await execution.reserveExec(
     ctx.room_id,
     ctx.principal.participant_id,
     exec_id,
+    timeout_s * 1_000,
   );
   return {
     exec_id,
-    sandbox_id,
+    sandbox_id: reservation.sandbox_id,
     cwd,
-    timeout_s,
+    timeout_s: Math.floor(reservation.timeout_ms / 1_000),
   };
 }
 

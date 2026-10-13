@@ -78,6 +78,10 @@ class FakeExecutionDriver implements ExecutionDriver {
     this.running.add(input.sandbox_id);
   }
 
+  async cpuUsage(): Promise<{ usage_usec: bigint; generation: string }> {
+    return { usage_usec: 0n, generation: "fake-container-start" };
+  }
+
   async stop(input: { sandbox_id: string; resources: SandboxResources }): Promise<void> {
     this.stopped.push(input.sandbox_id);
     if (this.stopGate) {
