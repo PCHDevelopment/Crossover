@@ -78,8 +78,8 @@ Migrations live in `packages/db/migrations` and are numbered globally (`0001_…
 ```sh
 corepack enable
 pnpm install
-docker compose up -d   # PostgreSQL 16 + Redis 7
 cp .env.example .env
+docker compose up -d   # PostgreSQL 16 + Redis 7
 pnpm check             # format, lint, typecheck, test
 pnpm build && DEV_LOGIN=true WEB_ROOT=apps/web/dist/app pnpm --filter @crossover/server start   # migrate, serve the API and the web app on :8080
 pnpm --filter @crossover/web dev   # the web app with hot reload on :5173, proxying /v1 to :8080

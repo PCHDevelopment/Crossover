@@ -1741,6 +1741,7 @@ The tests must cover: unarchive after retention has ended is refused; the notice
 - Any successful change clears `retention_notice_sent_at`.
 - There is no persistent export store, so purge phases are `WORKSPACE` (bare repository, workspace directories, remaining sandbox volumes) and then `DATABASE`.
 - Events are `room.unarchived` and `room.retention_changed`.
+- Once `purge_started_at` is set, `rooms.set_retention` and `rooms.unarchive` are refused with `CONFLICT_VERSION` "room deletion is in progress", with one test each.
 - Unarchive clears `archived_at`, so re-archiving starts a new retention period.
 
 ### T1531 · Single-host mode guardrails — S1
@@ -1784,3 +1785,22 @@ concurrency:
 Change nothing else: no trigger, `runs-on`, port or service changes. A PR run joins its PR's group, and a newer push cancels the older run. Every other run (push to `main`, nightly, manual) gets a group of its own from `run_id`, so it is never cancelled or replaced. A shared group would let a third push to `main` drop the second while it waits, even with `cancel-in-progress` false.
 
 **Proof, in the PR text, with run links:** (a) two pushes to the PR a minute apart, where the first run shows `cancelled`; (b) after merge, two pushes to `main` in quick succession, where both run to completion. O1 checks the history as well.
+
+### T1534 · Health checks under Docker Compose mount a path the host cannot see — S1
+
+Found by O1 while preparing Peter's hands-on run (17:50). This is a product bug, and it blocks demo steps 2 and 13 under the Compose stack.
+
+`DockerHealthRunner.createCheckout` (`packages/workspace/src/health-runner.ts:740`) creates the checkout with `mkdtemp(join(tmpdir(), "crossover-health-"))`. Under Compose that path is inside the server container. The runner then passes `--volume ${checkout}:/workspace` (line 400) to the **host** Docker daemon, which mounts a host path that does not exist, so the health command runs in an empty directory. The e2e tests run the server on the host, so they never see it.
+
+Do this first: it goes ahead of T1533 and 3b. The exact change:
+
+1. In `DockerHealthRunnerOptions`, add `checkoutRoot?: string`, documented as "Directory for health checkouts. It must be at the same absolute path for this process and the Docker daemon (as `WORKSPACE_ROOT` is)."
+2. In `createCheckout`, use `const root = this.options.checkoutRoot ?? tmpdir()`, then `await mkdir(root, { recursive: true, mode: 0o750 })`, then `mkdtemp(join(root, "crossover-health-"))`. Everything else stays as it is, including the chmod, the cleanup and the install checkout at line 632.
+3. In `apps/server/src/compose.ts`, where `DockerHealthRunner` is constructed (around line 339), pass `checkoutRoot: join(config.workspaceRoot, ".health-checkouts")`.
+4. Tests:
+   - A unit test in `health-runner.test.ts` with a fake runner, asserting that the `--volume` source starts with `checkoutRoot`.
+   - Extend `apps/server/src/e2e/deploy-topology.test.ts`, which runs the real server image with the same-path workspace mount:
+     - Set the room's health command to `node --check index.js` on a fixture with a valid `index.js`, then expect GREEN.
+     - Repeat with a broken `index.js`, then expect RED. The RED/GREEN pair proves the files were mounted.
+   - Give the new e2e case a measured timeout, as T1529 does.
+5. No other changes.
