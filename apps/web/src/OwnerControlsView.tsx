@@ -483,6 +483,17 @@ export function OwnerControlsView(props: {
       await room.api.room.resume({});
     });
 
+  const archive = () => {
+    if (roomStatus !== "ACTIVE" && roomStatus !== "PAUSED") return;
+    if (
+      !window.confirm(`Archive ${roomName}? This cannot be undone; the room will become read-only.`)
+    )
+      return;
+    void perform("Archive room", async () => {
+      await room.api.room.archive({});
+    });
+  };
+
   return (
     <section aria-label="Owner controls" data-testid="owner-controls">
       <h2>Owner controls</h2>
@@ -512,6 +523,11 @@ export function OwnerControlsView(props: {
           </button>
         ) : (
           <p className="muted">Lifecycle controls are unavailable for this room status.</p>
+        )}
+        {(roomStatus === "ACTIVE" || roomStatus === "PAUSED") && (
+          <button data-testid="archive-room" disabled={busy} onClick={archive}>
+            Archive room
+          </button>
         )}
       </section>
 

@@ -3,7 +3,11 @@ import type { RoomClient, SdkEvent } from "@crossover/sdk";
 import type { Participant, Task } from "./model.js";
 
 type MessageRef = { kind: "task" | "decision" | "file"; id: string };
-type MessageProvenance = { author_id: string; trust: string };
+type MessageProvenance = {
+  author_id: string;
+  author_kind: "HUMAN" | "AGENT" | "SYSTEM";
+  trust: string;
+};
 type RoomMessage = {
   id: string;
   author_id: string;
@@ -183,7 +187,8 @@ export default function MessagesView(props: {
             <div className="message-meta">
               <strong>{nameOf(item.author_id)}</strong>
               <span className="muted">
-                From {nameOf(item.provenance.author_id)} · trust: {item.provenance.trust}
+                From {nameOf(item.provenance.author_id)} · {item.provenance.author_kind} · trust:{" "}
+                {item.provenance.trust}
               </span>
               <time dateTime={item.created_at}>{new Date(item.created_at).toLocaleString()}</time>
             </div>
