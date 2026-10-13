@@ -137,6 +137,7 @@ Usage:
   room --room ROOM_ID messages send|list|edit
   room --room ROOM_ID inbox list|ack
   room --room ROOM_ID sandbox status|exec|exec-cancel
+  room --room ROOM_ID mcp
   room --room ROOM_ID events tail [--after SEQUENCE]
 
 Global options --server URL and --room ROOM_ID may appear before or after the command.
@@ -200,6 +201,8 @@ func (a *app) dispatch(args []string) error {
 		return a.inbox(args[1:])
 	case "sandbox":
 		return a.sandbox(args[1:])
+	case "mcp":
+		return a.mcp(args[1:])
 	case "events":
 		return a.events(args[1:])
 	case "--help", "-h", "help":
