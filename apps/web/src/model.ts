@@ -27,6 +27,7 @@ export interface Task {
   requirements: string[];
   status: TaskStatus;
   owner_id: string | null;
+  blocked_reason: string | null;
   priority: number;
   version: number;
 }
