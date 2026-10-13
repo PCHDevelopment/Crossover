@@ -14,6 +14,49 @@ export const BUDGET_DEFAULTS = {
 export type BudgetName = keyof typeof BUDGET_DEFAULTS;
 export const BUDGET_NAMES = Object.keys(BUDGET_DEFAULTS) as BudgetName[];
 
+/** Sandbox CPU is accounted separately from count budgets, in vCPU-hours per UTC day. */
+export const COMPUTE_BUDGET_DEFAULTS = {
+  agent_vcpu_hours_per_day: 4,
+  room_vcpu_hours_per_day: 40,
+} as const;
+
+export type ComputeBudgetName = keyof typeof COMPUTE_BUDGET_DEFAULTS;
+export type ComputeBudgetOverrides = Partial<Record<ComputeBudgetName, number | null>>;
+
+export function readComputeOverrides(raw: unknown): ComputeBudgetOverrides {
+  const found: ComputeBudgetOverrides = {};
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return found;
+  for (const name of Object.keys(COMPUTE_BUDGET_DEFAULTS) as ComputeBudgetName[]) {
+    const value = (raw as Record<string, unknown>)[name];
+    if (value === null || (typeof value === "number" && Number.isSafeInteger(value) && value >= 1))
+      found[name] = value;
+  }
+  return found;
+}
+
+export function computeLimitFor(
+  name: ComputeBudgetName,
+  room: ComputeBudgetOverrides,
+  participant: ComputeBudgetOverrides = {},
+): number | null {
+  if (name === "room_vcpu_hours_per_day")
+    return Object.hasOwn(room, name) ? (room[name] ?? null) : COMPUTE_BUDGET_DEFAULTS[name];
+
+  const hasRoomLimit = Object.hasOwn(room, name);
+  const hasParticipantLimit = Object.hasOwn(participant, name);
+  if (!hasRoomLimit && !hasParticipantLimit) return COMPUTE_BUDGET_DEFAULTS[name];
+  if (!hasRoomLimit) return participant[name] ?? null;
+  if (!hasParticipantLimit) return room[name] ?? null;
+
+  const roomLimit = room[name];
+  const participantLimit = participant[name];
+  if (roomLimit === null) return participantLimit ?? null;
+  if (participantLimit === null) return roomLimit ?? null;
+  if (roomLimit === undefined) return participantLimit ?? null;
+  if (participantLimit === undefined) return roomLimit;
+  return Math.min(roomLimit, participantLimit);
+}
+
 /** The budgets a method draws on: every command counts as one, and some count as another too. */
 export function budgetsOf(method: string): BudgetName[] {
   const names: BudgetName[] = ["commands"];
