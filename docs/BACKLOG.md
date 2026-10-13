@@ -1519,7 +1519,7 @@ A local full run around 16:20 UTC on 2026-10-12 saw two failures that passed on 
 
 Open a fix task the next time either fails, with its saved output. Both became T1510 and T1511 (fixed). New, 2026-10-13: one timeout in `apps/server/src/e2e/egress-visibility.test.ts` during a full parallel run (#245 validation); output not saved, so the case is unknown. Next occurrence: save the full output first. Rule from now on: before rerunning a failed test, save its full output (name, error, stack).
 
-### T1418 · Deployment topology vs ARCHITECTURE §4.1 — O1 (decision), owner TBD
+### T1418 · Deployment topology vs ARCHITECTURE §4.1 — decided (Peter, 2026-10-13) · done
 
 §4.1 puts sandboxes on separate sandbox hosts that never share a host with app nodes. The only server image (T1416) runs sandboxes through the app host's Docker socket: a single-host topology that is acceptable for the MVP demo but is not the documented production design.
 
@@ -1529,6 +1529,8 @@ Decide before any non-demo deployment:
 - (b) amend §4.1 to allow a single-host mode with stated limits.
 
 Until then the compose file must label itself demo or development only.
+
+**Decision (Peter, 2026-10-13):** (b) now, (a) before untrusted users. §4.1 now allows single-host mode under stated limits (T1531). The remote sandbox-host driver is T1532, required before any multi-tenant or untrusted deployment.
 
 ## M15 MVP scope gaps (§29, Review 10)
 
@@ -1622,9 +1624,11 @@ Second capture (2026-10-13, S2's local full suite, seq 1197): "kills and removes
 
 From Review 12. `packages/workspace/src/execution.ts` is about 1,970 lines, and each T1504 compute PR added about 125. Move CPU sampling (at reserve, at exec end, before stop or destroy), hibernate-at-cap and `sweepCompute` into a dedicated module that `ExecutionService` calls. Behavior must not change: existing tests pass unchanged, and the diff moves code rather than rewriting it. Land this before T1505 (Terminal) touches `execution.ts`.
 
-### T1519 · Decide archived-room retention — Peter
+### T1519 · Decide archived-room retention — decided (Peter, 2026-10-13) · done
 
 Raised by S2 during T1506 planning. ARCHITECTURE §5 says archived data is kept for one year by default, but the lifecycle diagram shows `ARCHIVED → DELETED` after 30 days. The code has no unarchive and no purge. T1506 ships the existing one-way, read-only archive with no deletion. Peter decides the retention period, and whether archive can be undone, before anyone builds a purge job. Fix the spec afterwards so the two statements agree.
+
+**Decision (Peter, 2026-10-13):** retention defaults to 1 year, and the owner can set it from 30 days to 1 year. The owner can unarchive while retention lasts. When it ends, the room is hard-deleted after a 7-day notice. §5 and §19.7 now agree. The build is T1530.
 
 ### T1520 · Test fixtures drop the database while an injected pool is open — S1 · done
 
@@ -1679,3 +1683,31 @@ Review 15's rule is that any test that loops over thousands of cases, or starts 
 3. Post the table (test, idle, oversubscribed, budget) before the PR. Ship it in PRs of at most 400 non-test lines, grouped by package.
 
 Do not change product code in this task. If a test is slow because the product is slow, open a separate task.
+
+### T1530 · Archive retention, unarchive and purge — S2
+
+From T1519. Plan before code, and split if any PR goes over 400 non-test lines:
+
+1. A migration adding `rooms.archived_at` and `rooms.retention_days` (default 365, check 30–365).
+2. An owner-only `rooms.set_retention` command, and `rooms.unarchive`. Unarchive is only allowed while `ARCHIVED` and within retention. It returns the room to `ACTIVE`, does not recreate sandboxes, and emits `room.unarchived`.
+3. A purge sweeper on the room-lease holder:
+   - 7 days before deletion it sends one inbox notice to the owner (idempotent);
+   - at the end it hard-deletes the room's repository, events, memory, tasks, decisions and stored exports, recording a `room.deleted` audit row outside the room;
+   - it is safe to run on two nodes at once.
+4. The owner-controls UI: a retention selector and an Unarchive button.
+
+The tests must cover: unarchive after retention has ended is refused; the notice is sent exactly once; and a purge that is interrupted part-way finishes on the next sweep.
+
+### T1531 · Single-host mode guardrails — S1
+
+From T1418, after T1509 3c. The server detects single-host mode, meaning sandboxes on the local Docker socket. In that mode:
+
+- it refuses to start without `SANDBOX_RUNTIME=runsc`, with a clear error;
+- it logs "single-host mode: not for multi-tenant or untrusted use" at startup;
+- the compose file and README say the same.
+
+Development keeps working through an explicit `ALLOW_UNSANDBOXED_DEV=1`. That flag is refused when `NODE_ENV=production` and is logged loudly. Tests cover each startup branch.
+
+### T1532 · Remote sandbox-host driver (§4.1) — unassigned
+
+From T1418. An `ExecutionDriver` that runs sandboxes on separate sandbox hosts over an authenticated channel (mutual TLS or signed requests), with host registration, health checks and capacity, and the same lifecycle, output streaming and compute accounting as `DockerExecutionDriver`. It is required before any multi-tenant or untrusted deployment. It is not needed for the MVP demo. Scope and split it into a milestone when it is scheduled.

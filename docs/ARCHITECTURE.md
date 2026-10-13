@@ -181,6 +181,12 @@ Start as a **modular monolith**:
 
 - **App nodes** run the gateway, room kernel, workspace service and plugin runner as modules in one TypeScript/Node process (plugin runner child processes are isolated per invocation).
 - **Sandbox hosts** are separate EC2 instances. They are a hard security boundary and never share a host with app nodes.
+- **Single-host mode** (decided 2026-10-13, T1418) is allowed until the remote sandbox-host driver (T1532) exists. App node and sandboxes share one host, and sandboxes run through that host's Docker. It is permitted only under these limits:
+  - one organisation whose users all trust each other;
+  - `SANDBOX_RUNTIME=runsc` (gVisor) is required, and the server refuses to start in single-host mode without it;
+  - the Docker socket is reachable only by the server process;
+  - the compose file and the server's startup log say "single-host mode: not for multi-tenant or untrusted use".
+  Separate sandbox hosts (T1532) are required before any deployment where people who do not trust each other run agents.
 - **Shared infrastructure:** PostgreSQL (RDS), Redis (ElastiCache), S3, Secrets Manager.
 
 Logical module boundaries are explicit in code (separate packages with interface contracts) so subsystems can be split into services later.
@@ -201,19 +207,21 @@ Each active room is owned by exactly one app node at a time.
 ```text
 ACTIVE ──freeze──▶ PAUSED ──resume──▶ ACTIVE
   │                  │
-  └──archive──▶ ARCHIVED ──(30-day grace)──▶ DELETED
-                  │
-                  └──export bundle
+  └──archive──▶ ARCHIVED ──(retention ends, default 1 year)──▶ DELETED
+                  │  ▲
+                  │  └──unarchive (owner, within retention)──▶ ACTIVE
+                  └──export bundle (until deletion)
 ```
 
 | State | Behavior |
 |---|---|
 | `ACTIVE` | Normal operation |
 | `PAUSED` | Owner froze the room. All agent mutations rejected with `ROOM_PAUSED`; agent sandboxes stopped (volumes kept); humans can read, owner can still act |
-| `ARCHIVED` | Read-only. Sandboxes destroyed. Repository, ledger, memory, tasks and decisions retained (default 1 year). Exportable as a bundle |
-| `DELETED` | Hard-deleted after a 30-day grace period from the delete request |
+| `ARCHIVED` | Read-only. Sandboxes destroyed. Repository, ledger, memory, tasks and decisions retained for the room's retention period (default 1 year; the owner can set 30 days to 1 year). Exportable as a bundle until deletion. The owner can unarchive back to `ACTIVE` while retention lasts |
+| `DELETED` | Hard-deleted when retention ends: repository, events, memory, tasks, decisions and stored exports. The owner is notified 7 days before. Not reversible |
 
 - **Archive triggers:** owner action, or 30 days with no mutations (owner notified 7 days before).
+- **Retention** (decided 2026-10-13, T1519): it counts from the moment of archiving, and unarchiving stops the clock. A purge job deletes rooms whose retention has ended. The owner gets a notice 7 days before.
 - **Export bundle:** `git bundle` of the full repository + `events.jsonl` + `memory.json` + `tasks.json` + `decisions.json`.
 - This resolves the v0.1 tension: rooms are bounded projects (agents and sandboxes live and die with them), but their history persists.
 
@@ -1251,7 +1259,7 @@ The ledger is immutable in structure, but payloads can be redacted:
 
 ## 19.7 Retention
 
-Active rooms: indefinite. Archived rooms: 1 year by default, then deleted with the room.
+Active rooms: indefinite. Archived rooms: retained for the room's retention period (default 1 year; the owner can set 30 days to 1 year), unarchivable by the owner until then, then hard-deleted by the purge job after a 7-day notice (§5).
 
 ---
 
