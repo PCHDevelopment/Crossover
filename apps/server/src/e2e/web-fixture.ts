@@ -2,10 +2,12 @@ import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { createTestDatabase, type TestDatabase } from "@crossover/db/testing";
+import type { OAuthProvider } from "@crossover/gateway";
 import { git, type UpstreamFetcher } from "@crossover/workspace";
 import { chromium, type Browser } from "playwright-core";
 import { afterAll, beforeAll } from "vitest";
@@ -36,6 +38,20 @@ const gitIdentity = {
 };
 const runGit = (cwd: string, args: string[]) =>
   git(args, { cwd, timeoutMs: 30_000, env: gitIdentity });
+
+async function reservePort(): Promise<number> {
+  const probe = createServer();
+  await new Promise<void>((resolve, reject) => {
+    probe.once("error", reject);
+    probe.listen(0, "127.0.0.1", resolve);
+  });
+  const address = probe.address();
+  if (!address || typeof address === "string") throw new Error("Could not reserve a test port");
+  await new Promise<void>((resolve, reject) =>
+    probe.close((error) => (error ? reject(error) : resolve())),
+  );
+  return address.port;
+}
 
 /** Ensure the shared DockerExecutionDriver network exists; parallel jobs may use it. */
 async function ensureGitNetwork(): Promise<void> {
@@ -224,6 +240,8 @@ export function registerWebFixture(): WebFixture {
     gitSocketPath = join(gitSocketDirectory, "git.sock");
     gitBridgeContainer = `crossover-web-git-bridge-${process.pid}-${randomBytes(6).toString("hex")}`;
     gitInternalTokenSecret = randomBytes(32).toString("hex");
+    const port = await reservePort();
+    baseUrl = `http://127.0.0.1:${port}`;
     await ensureGitNetwork();
     upstreamDir = join(dir, "upstream");
     await mkdir(upstreamDir, { recursive: true });
@@ -301,14 +319,28 @@ export function registerWebFixture(): WebFixture {
       ["--filter", "@crossover/web", "exec", "vite", "build", "--outDir", webRoot],
       { cwd: root, timeout: 120_000 },
     );
+    const publicBaseUrl = baseUrl;
+    const stubOAuthProvider: OAuthProvider = {
+      name: "stub",
+      authorizationUrl({ state }) {
+        const url = new URL("/__test/oauth", publicBaseUrl);
+        url.searchParams.set("state", state);
+        return url.toString();
+      },
+      async identity({ code }) {
+        if (code !== "e2e-stub-code") throw new Error("Invalid test authorization code");
+        return { provider: "stub", subject: "web-e2e-user", display_name: "E2E User" };
+      },
+    };
     const config: ServerConfig = {
       databaseUrl: "unused: test pool is injected",
       redisUrl: process.env["REDIS_URL"] ?? "redis://localhost:6379",
       workspaceRoot: join(dir, "workspaces"),
       host: "127.0.0.1",
-      port: 0,
+      port,
       nodeId: `web-e2e-${process.pid}`,
       devLogin: true,
+      oauth: { publicBaseUrl },
       healthImages: ["node:22-bookworm-slim"],
       awsPluginImage:
         "node:22-bookworm-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392",
@@ -319,6 +351,7 @@ export function registerWebFixture(): WebFixture {
     };
     server = await composeServer(config, {
       pool: db.pool,
+      oauthProviders: { stub: stubOAuthProvider },
       upstream: {
         fetcher: upstreamFetcher,
         resolve: async () => ["93.184.216.34"],
@@ -337,6 +370,14 @@ export function registerWebFixture(): WebFixture {
         },
       },
     });
+    server.app.get<{ Querystring: { state?: string } }>("/__test/oauth", async (request, reply) => {
+      const state = request.query.state;
+      if (!state || !/^[A-Za-z0-9_-]{43}$/.test(state)) return reply.status(400).send();
+      const callback = new URL("/v1/auth/oauth/stub/callback", publicBaseUrl);
+      callback.searchParams.set("state", state);
+      callback.searchParams.set("code", "e2e-stub-code");
+      return reply.redirect(callback.toString());
+    });
     await server.gitApp.listen({ path: gitSocketPath });
     await chmod(gitSocketPath, 0o666);
     // Production runs the server container itself on crossover-git. This test bridges that one hop
@@ -346,7 +387,7 @@ export function registerWebFixture(): WebFixture {
     server.app.addHook("onError", async (request, _reply, error) => {
       console.error(`[web-e2e request ${request.method} ${request.url}]`, error);
     });
-    baseUrl = await server.app.listen({ port: 0, host: "127.0.0.1" });
+    baseUrl = await server.app.listen({ port, host: "127.0.0.1" });
     browser = await chromium.launch({ executablePath, args: ["--no-sandbox"] });
   }, 180_000);
 

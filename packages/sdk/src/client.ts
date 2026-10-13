@@ -1,7 +1,7 @@
 import { CrossoverError, isMutatingMethod, newId, type MethodName } from "@crossover/protocol";
 import { makeApi, type Api, type CallOptions, type CommandResult } from "./api.js";
 import { TokenStore, type RoomTokens, type TokenOptions } from "./tokens.js";
-import { errorFromBody, postJson, type FetchLike, type RetryOptions } from "./http.js";
+import { errorFromBody, getJson, postJson, type FetchLike, type RetryOptions } from "./http.js";
 import {
   RoomSocket,
   Subscription,
@@ -65,6 +65,8 @@ export class CrossoverClient {
   private readonly fetchImpl: FetchLike;
   /** Token stores by the refresh token they started from: one per login. */
   private readonly stores = new Map<string, TokenStore>();
+  private readonly tokenStores = new Set<TokenStore>();
+  private readonly activeRooms = new Set<RoomClient>();
 
   constructor(options: ClientOptions) {
     this.options = {
@@ -88,9 +90,48 @@ export class CrossoverClient {
     return json as UserSession;
   }
 
+  /** OAuth providers available for browser sign-in; only their names are returned. */
+  async authProviders(): Promise<string[]> {
+    const json = await getJson(
+      this.fetchImpl,
+      `${this.options.baseUrl}/v1/auth/providers`,
+      undefined,
+    );
+    return (json as { providers: string[] }).providers;
+  }
+
+  /** Whether this browser has a valid HttpOnly session cookie; never returns credentials. */
+  async authSession(): Promise<boolean> {
+    const json = await getJson(
+      this.fetchImpl,
+      `${this.options.baseUrl}/v1/auth/session`,
+      undefined,
+    );
+    return (json as { authenticated: boolean }).authenticated;
+  }
+
+  /** Revoke the browser cookie session. Browser fetch includes same-origin cookies by default. */
+  async logout(): Promise<void> {
+    await postJson(
+      this.fetchImpl,
+      `${this.options.baseUrl}/v1/auth/logout`,
+      undefined,
+      {},
+      this.options.retry,
+    );
+  }
+
+  /** Close every room stream and erase the access and refresh tokens held by this client. */
+  clearRoomSessions(): void {
+    for (const room of [...this.activeRooms]) room.close();
+    for (const store of this.tokenStores) store.clear();
+    this.stores.clear();
+    this.tokenStores.clear();
+  }
+
   /** A command that has no room yet (`room.create`), as a signed-in user. */
   async userCommand<R = unknown>(
-    session: string,
+    session: string | undefined,
     method: MethodName,
     params: Record<string, unknown>,
     options: CallOptions = {},
@@ -107,9 +148,10 @@ export class CrossoverClient {
   }
 
   /** The rooms a signed-in user belongs to. */
-  async rooms(session: string): Promise<UserRoomInfo[]> {
+  async rooms(session?: string): Promise<UserRoomInfo[]> {
     const res = await this.fetchImpl(`${this.options.baseUrl}/v1/rooms`, {
-      headers: { authorization: `Bearer ${session}` },
+      credentials: "same-origin",
+      headers: session ? { authorization: `Bearer ${session}` } : {},
     });
     const json: unknown = await res.json().catch(() => null);
     if (!res.ok) throw errorFromBody(json, res.status);
@@ -118,14 +160,14 @@ export class CrossoverClient {
 
   /** Create a room as a signed-in user. */
   createRoom(
-    session: string,
+    session: string | undefined,
     input: { slug: string; name: string; objective: string; settings?: Record<string, unknown> },
   ): Promise<CommandResult<{ room: { id: string } & Record<string, unknown> }>> {
     return this.userCommand(session, "room.create", input);
   }
 
   /** Exchange a user session for a room access token (the user must be a participant). */
-  async roomSession(session: string, roomId: string): Promise<RoomSessionInfo> {
+  async roomSession(session: string | undefined, roomId: string): Promise<RoomSessionInfo> {
     const { json } = await postJson(
       this.fetchImpl,
       `${this.options.baseUrl}/v1/rooms/${encodeURIComponent(roomId)}/session`,
@@ -174,9 +216,14 @@ export class CrossoverClient {
         this.options.retry,
         options,
       );
+      this.tokenStores.add(store);
       if (login) this.stores.set(login, store);
     }
-    return new RoomClient(this, roomId, store, this.fetchImpl);
+    const room = new RoomClient(this, roomId, store, this.fetchImpl, (closed) =>
+      this.activeRooms.delete(closed),
+    );
+    this.activeRooms.add(room);
+    return room;
   }
 }
 
@@ -194,14 +241,22 @@ function envelope(method: string, params: Record<string, unknown>, options: Call
 export class RoomClient {
   /** Every command of the catalog as a typed call: `room.api.tasks.create({ … })`. */
   readonly api: Api;
+  private readonly subscriptions = new Set<Subscription>();
+  private readonly sockets = new Set<RoomSocket>();
+  private closed = false;
 
   constructor(
     private readonly client: CrossoverClient,
     readonly roomId: string,
     private readonly tokens: TokenStore,
     private readonly fetchImpl: FetchLike,
+    private readonly onClose: (room: RoomClient) => void,
   ) {
     this.api = makeApi((method, params, options) => this.call(method, params, options));
+  }
+
+  get isClosed(): boolean {
+    return this.closed;
   }
 
   /** Run a command over REST. Mutating commands are retried safely with the same idempotency key. */
@@ -252,6 +307,7 @@ export class RoomClient {
   /** Commands over a WebSocket, with the same answers as REST (it doesn't reconnect by itself). */
   socket(): RoomSocket & { api: Api } {
     const socket = new RoomSocket(this.wsConfig());
+    this.sockets.add(socket);
     const api = makeApi((method, params, options) =>
       socket.call(method, params, isMutatingMethod(method), options),
     );
@@ -263,6 +319,19 @@ export class RoomClient {
    * and in order, across dropped connections. See {@link Subscription}.
    */
   subscribe(options: SubscribeOptions = {}): Subscription {
-    return new Subscription(this.wsConfig(), options);
+    const subscription = new Subscription(this.wsConfig(), options);
+    this.subscriptions.add(subscription);
+    return subscription;
+  }
+
+  /** Close every live connection for this room. */
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    for (const subscription of this.subscriptions) subscription.close();
+    for (const socket of this.sockets) socket.close();
+    this.subscriptions.clear();
+    this.sockets.clear();
+    this.onClose(this);
   }
 }

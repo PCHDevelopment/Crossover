@@ -63,13 +63,8 @@ const TABS: { id: Tab; label: string }[] = [
 const message = (error: unknown): string =>
   error instanceof Error ? error.message : "Something went wrong";
 
-export function RoomView(props: {
-  session: string;
-  roomId: string;
-  onBack: () => void;
-  onSignedOut: () => void;
-}) {
-  const { session, roomId, onBack, onSignedOut } = props;
+export function RoomView(props: { roomId: string; onBack: () => void; onSignedOut: () => void }) {
+  const { roomId, onBack, onSignedOut } = props;
   const [open, setOpen] = useState<OpenRoom>();
   const [error, setError] = useState<string>();
   const [state, setState] = useState<RoomState>();
@@ -90,9 +85,14 @@ export function RoomView(props: {
   // Enter the room.
   useEffect(() => {
     let cancelled = false;
-    openRoom(session, roomId).then(
+    let activeRoom: RoomClient | undefined;
+    openRoom(roomId).then(
       (entered) => {
-        if (cancelled) return;
+        if (cancelled) {
+          entered.room.close();
+          return;
+        }
+        activeRoom = entered.room;
         roomRef.current = entered.room;
         setOpen(entered);
       },
@@ -103,8 +103,10 @@ export function RoomView(props: {
     );
     return () => {
       cancelled = true;
+      activeRoom?.close();
+      roomRef.current = undefined;
     };
-  }, [session, roomId, onSignedOut]);
+  }, [roomId, onSignedOut]);
 
   const reload = useCallback(async () => {
     const room = roomRef.current;
@@ -133,7 +135,7 @@ export function RoomView(props: {
     let sub: ReturnType<RoomClient["subscribe"]> | undefined;
     void (async () => {
       await reload();
-      if (closed) return;
+      if (closed || open.room.isClosed) return;
       let last = 0;
       try {
         last = (await open.room.api.room.get_state<RoomState>({ view: "summary" })).response
@@ -141,7 +143,7 @@ export function RoomView(props: {
       } catch {
         // the feed then starts from the beginning
       }
-      if (closed) return;
+      if (closed || open.room.isClosed) return;
       sub = open.room.subscribe({
         after: Math.max(0, last - BACKLOG),
         onState: (s) => setLive(s),

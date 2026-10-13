@@ -1,14 +1,35 @@
 import { useCallback, useEffect, useState } from "react";
 import { CrossoverError, type UserRoomInfo } from "@crossover/sdk";
-import { client, getSession, setSession } from "./session.js";
+import { client } from "./session.js";
 import { RoomView } from "./RoomView.js";
 
 /** `/` the room list, `/rooms/<id>` one room. */
 const roomIdOf = (path: string): string | undefined => /^\/rooms\/([^/]+)\/?$/.exec(path)?.[1];
 
 export function App() {
-  const [session, setSessionState] = useState<string | undefined>(getSession());
+  const [authenticated, setAuthenticated] = useState<boolean>();
+  const [providers, setProviders] = useState<string[]>([]);
+  const [bootstrapError, setBootstrapError] = useState<string>();
   const [path, setPath] = useState(window.location.pathname);
+
+  useEffect(() => {
+    let active = true;
+    void client.authProviders().then(
+      (names) => active && setProviders(names),
+      (err: unknown) => active && setBootstrapError(message(err)),
+    );
+    void client.authSession().then(
+      (isAuthenticated) => active && setAuthenticated(isAuthenticated),
+      (err: unknown) => {
+        if (!active) return;
+        setBootstrapError(message(err));
+        setAuthenticated(false);
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     const onPop = () => setPath(window.location.pathname);
@@ -19,13 +40,29 @@ export function App() {
     window.history.pushState({}, "", to);
     setPath(to);
   }, []);
-  const signIn = (token: string | undefined) => {
-    setSession(token);
-    setSessionState(token);
-    if (!token) go("/");
+  const signIn = () => {
+    setBootstrapError(undefined);
+    setAuthenticated(true);
+    go("/");
+  };
+  const signedOut = useCallback(() => {
+    client.clearRoomSessions();
+    setAuthenticated(false);
+    go("/");
+  }, [go]);
+  const signOut = async () => {
+    client.clearRoomSessions();
+    try {
+      await client.logout();
+    } catch (err) {
+      setBootstrapError(message(err));
+    }
+    signedOut();
   };
 
-  if (!session) return <Login onSession={signIn} />;
+  if (authenticated === undefined) return <main className="card">Loading…</main>;
+  if (!authenticated)
+    return <Login providers={providers} error={bootstrapError} onSession={signIn} />;
   const roomId = roomIdOf(path);
   return (
     <div className="app">
@@ -39,24 +76,14 @@ export function App() {
         >
           <strong>Crossover</strong>
         </a>
-        <button data-testid="sign-out" onClick={() => signIn(undefined)}>
+        <button data-testid="sign-out" onClick={() => void signOut()}>
           Sign out
         </button>
       </header>
       {roomId ? (
-        <RoomView
-          key={roomId}
-          session={session}
-          roomId={roomId}
-          onBack={() => go("/")}
-          onSignedOut={() => signIn(undefined)}
-        />
+        <RoomView key={roomId} roomId={roomId} onBack={() => go("/")} onSignedOut={signedOut} />
       ) : (
-        <Rooms
-          session={session}
-          onOpen={(id) => go(`/rooms/${id}`)}
-          onSignedOut={() => signIn(undefined)}
-        />
+        <Rooms onOpen={(id) => go(`/rooms/${id}`)} onSignedOut={signedOut} />
       )}
     </div>
   );
@@ -67,7 +94,15 @@ const message = (error: unknown): string =>
 export const isUnauthenticated = (error: unknown): boolean =>
   error instanceof CrossoverError && error.code === "UNAUTHENTICATED";
 
-function Login({ onSession }: { onSession: (token: string) => void }) {
+function Login({
+  providers,
+  error: bootstrapError,
+  onSession,
+}: {
+  providers: string[];
+  error?: string | undefined;
+  onSession: () => void;
+}) {
   const [name, setName] = useState("");
   const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
@@ -75,6 +110,22 @@ function Login({ onSession }: { onSession: (token: string) => void }) {
     <main className="card narrow">
       <h1>Crossover</h1>
       <p>Sign in to your rooms.</p>
+      {providers.map((provider) => (
+        <p key={provider}>
+          <a
+            data-testid={`oauth-${provider}`}
+            href={`/v1/auth/oauth/${encodeURIComponent(provider)}`}
+          >
+            Continue with{" "}
+            {provider === "github" ? "GitHub" : provider === "google" ? "Google" : provider}
+          </a>
+        </p>
+      ))}
+      {bootstrapError && (
+        <p role="alert" className="error">
+          {bootstrapError}
+        </p>
+      )}
       <form
         onSubmit={async (e) => {
           e.preventDefault();
@@ -82,11 +133,11 @@ function Login({ onSession }: { onSession: (token: string) => void }) {
           setError(undefined);
           try {
             // Development sign-in: the server accepts it only when it is switched on.
-            const login = await client.devLogin({
+            await client.devLogin({
               subject: name.trim(),
               display_name: name.trim(),
             });
-            onSession(login.session_token);
+            onSession();
           } catch (err) {
             setError(message(err));
           } finally {
@@ -125,15 +176,7 @@ const slugOf = (name: string) =>
     .replace(/^-+|-+$/g, "")
     .slice(0, 60);
 
-function Rooms({
-  session,
-  onOpen,
-  onSignedOut,
-}: {
-  session: string;
-  onOpen: (id: string) => void;
-  onSignedOut: () => void;
-}) {
+function Rooms({ onOpen, onSignedOut }: { onOpen: (id: string) => void; onSignedOut: () => void }) {
   const [rooms, setRooms] = useState<UserRoomInfo[]>();
   const [error, setError] = useState<string>();
   const [name, setName] = useState("");
@@ -142,12 +185,12 @@ function Rooms({
 
   const load = useCallback(async () => {
     try {
-      setRooms(await client.rooms(session));
+      setRooms(await client.rooms());
     } catch (err) {
       if (isUnauthenticated(err)) onSignedOut();
       else setError(message(err));
     }
-  }, [session, onSignedOut]);
+  }, [onSignedOut]);
   useEffect(() => {
     void load();
   }, [load]);
@@ -180,7 +223,7 @@ function Rooms({
           setError(undefined);
           try {
             const slug = `${slugOf(name) || "room"}-${Math.random().toString(36).slice(2, 6)}`;
-            const created = await client.createRoom(session, {
+            const created = await client.createRoom(undefined, {
               slug,
               name: name.trim(),
               objective: objective.trim(),

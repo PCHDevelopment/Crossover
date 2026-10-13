@@ -5,6 +5,7 @@ import {
   type RouteRateLimiter,
   type SandboxOutputMetadata,
   type SandboxOutputSource,
+  type OAuthProvider,
 } from "@crossover/gateway";
 import { MCP_TOOLS, registerMcp } from "@crossover/mcp";
 import { buildInternalGitServer } from "./internal-git.js";
@@ -128,6 +129,8 @@ export interface ComposeOverrides {
   tools?: { registry?: ToolRegistry; runner?: ToolRunner; timeoutMs?: number };
   /** Secret storage and provider verification seams for integration commands. */
   integrations?: IntegrationCommandsOptions;
+  /** OAuth provider injection for isolated composition tests; never populated from server config. */
+  oauthProviders?: Readonly<Record<string, OAuthProvider>>;
   /** How `git.import` reaches an upstream (fetcher, credentials, host check); production: HTTPS clone, no credentials. */
   upstream?: UpstreamDeps;
 }
@@ -520,7 +523,7 @@ export async function composeServer(
           ? {
               publicBaseUrl: config.oauth.publicBaseUrl,
               stateStore: oauthStateStore,
-              providers: {
+              providers: overrides.oauthProviders ?? {
                 ...(config.oauth.github
                   ? { github: githubOAuthProvider(config.oauth.github) }
                   : {}),

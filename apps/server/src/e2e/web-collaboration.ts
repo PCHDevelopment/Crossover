@@ -228,10 +228,8 @@ export function registerWebCollaborationStart(fixture: WebFixture): void {
     await expect(guestRoom.api.room.freeze({})).rejects.toMatchObject({ code: "FORBIDDEN" });
     const guestPage = await fixture.browser!.newPage();
     await guestPage.goto(fixture.baseUrl);
-    await guestPage.evaluate(
-      (token) => sessionStorage.setItem("crossover.session", token),
-      guestLogin.session_token,
-    );
+    await guestPage.getByTestId("login-name").fill("RoomGuest");
+    await guestPage.getByTestId("login-submit").click();
     await guestPage.goto(`${fixture.baseUrl}/rooms/${roomId}`);
     await guestPage.getByTestId("room-title").waitFor();
     await expect.poll(() => guestPage.getByTestId("tab-owner-controls").count()).toBe(0);
