@@ -1198,7 +1198,7 @@ If the node crashes between steps 2 and 3, the new owner reconciles on startup b
 ## 19.5 Event catalog
 
 ```text
-room.created / room.paused / room.resumed / room.archived
+room.created / room.paused / room.resumed / room.archived / room.exported
 room.egress_allowlist_changed / room.protected_paths_changed / room.health_settings_changed
 room.budgets_changed
 lead.changed / lead.transfer_offered
