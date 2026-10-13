@@ -1141,18 +1141,23 @@ describe("DockerHealthRunner", () => {
       expect(result.status).toBe("GREEN");
       expect(result.log).toContain("docker-health-ok");
     },
+    DOCKER_CASE_TIMEOUT_MS,
   );
 
-  it.skipIf(skipDockerIntegration)("blocks network access from the container", async () => {
-    const { repository, revision } = await makeRepo();
-    const result = await new DockerHealthRunner({ allowedImages: [DEFAULT_HEALTH_IMAGE] }).run({
-      repository,
-      revision,
-      command:
-        "node -e \"fetch('https://example.com',{signal:AbortSignal.timeout(2000)}).then(()=>process.exit(1),()=>process.exit(0))\"",
-    });
-    expect(result.status).toBe("GREEN");
-  });
+  it.skipIf(skipDockerIntegration)(
+    "blocks network access from the container",
+    async () => {
+      const { repository, revision } = await makeRepo();
+      const result = await new DockerHealthRunner({ allowedImages: [DEFAULT_HEALTH_IMAGE] }).run({
+        repository,
+        revision,
+        command:
+          "node -e \"fetch('https://example.com',{signal:AbortSignal.timeout(2000)}).then(()=>process.exit(1),()=>process.exit(0))\"",
+      });
+      expect(result.status).toBe("GREEN");
+    },
+    DOCKER_CASE_TIMEOUT_MS,
+  );
 
   it.skipIf(skipDockerIntegration)(
     "keeps successful status with output over 1 MiB",
