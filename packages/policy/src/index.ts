@@ -3,9 +3,13 @@ export {
   initPolicy,
   createPolicyEngine,
   parseDecision,
+  parseGrantCheck,
   PolicyEngineError,
+  grantCheck,
   type AuthzFacts,
   type Decision,
+  type GrantCheckReason,
+  type GrantCheckResult,
   type PolicyEngine,
   type PolicyInfo,
 } from "./engine.js";

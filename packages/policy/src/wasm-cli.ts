@@ -15,14 +15,18 @@ const OPA_VERSION = "1.21.2";
 const root = fileURLToPath(new URL("..", import.meta.url));
 const opa = process.env["OPA_BIN"] ?? "opa";
 const policyDir = join(root, "policy");
-const WRITTEN = ["authz.rego", "scope.rego", "tiers.rego"];
+const WRITTEN = ["authz.rego", "scope.rego", "tiers.rego", "grants.rego"];
 const GENERATED: [string, () => string][] = [
   ["bundles.gen.rego", renderBundlesRego],
   ["tiers.gen.rego", renderTiersRego],
 ];
 const SOURCES = [...WRITTEN, ...GENERATED.map(([name]) => name)];
-// The first entrypoint is the module's default one (`PolicyEngine.decide`); `tier` is asked for by name.
-const ENTRYPOINTS = ["crossover/authz/decision", "crossover/tiers/tier"];
+// The first entrypoint is the module's default one (`PolicyEngine.decide`); the others are asked for by name.
+const ENTRYPOINTS = [
+  "crossover/authz/decision",
+  "crossover/tiers/tier",
+  "crossover/grants/grant_check",
+];
 
 main();
 
