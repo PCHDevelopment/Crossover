@@ -226,6 +226,33 @@ td {
 .feed li[data-type="capability.denied"] {
   color: var(--danger);
 }
+.terminal-output {
+  max-height: 480px;
+  overflow: auto;
+  background: #101319;
+  color: #e4e8f0;
+  font:
+    13px/1.5 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    monospace;
+}
+.agent-output-view {
+  margin-top: 32px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
+.terminal-chunk {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 8px;
+}
+.terminal-chunk pre {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+}
 .message-list {
   max-height: 420px;
   overflow-y: auto;
