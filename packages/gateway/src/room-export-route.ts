@@ -10,6 +10,10 @@ import type { RoomExportLimiter, RoomExportSource } from "./room-export.js";
 /**
  * `GET /v1/rooms/:roomId/export` (§5): streams the room's export bundle to its owner or an admin.
  * Moved out of server.ts (T1524) unchanged.
+ *
+ * Redis (the admission limiter and the per-room lock) must be up: when it is not, the export is
+ * refused with `UNAVAILABLE` (503) before anything is streamed; a lock that cannot be released
+ * afterwards is logged, and expires on its own TTL.
  */
 export function registerRoomExportRoute(
   app: FastifyInstance,
