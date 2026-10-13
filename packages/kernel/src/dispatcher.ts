@@ -1,29 +1,29 @@
 import { withTransaction, type PoolClient } from "@crossover/db";
-import {
-  appendEvents,
-  hashRequest,
-  IDEMPOTENCY_TTL_HOURS,
-  withIdempotency,
-  type NewEvent,
-} from "@crossover/ledger";
+import { appendEvents, hashRequest, withIdempotency, type NewEvent } from "@crossover/ledger";
 import {
   commandEnvelopeSchema,
   CrossoverError,
   isMethodName,
   METHODS,
   newId,
-  type ErrorBody,
   type CommandEnvelope,
   type RoomEvent,
 } from "@crossover/protocol";
 import type { z } from "zod";
 import type { RoomActorRegistry } from "./actor.js";
-import { BUDGET_DEFAULTS, budgetsOf, limitFor, readOverrides, type BudgetName } from "./budgets.js";
 import type { RoomLeases } from "./leases.js";
-import { queueApproval, type ApprovalRow } from "./modules/approvals/approvals.js";
+import { type ApprovalRow } from "./modules/approvals/approvals.js";
 import type { Principal } from "./principal.js";
 import { DispatcherCore } from "./dispatcher/core.js";
 import { afterCommitWork } from "./dispatcher/delivery.js";
+import {
+  runApproved,
+  runsOnApproval,
+  gateLifted,
+  queueForApproval,
+} from "./dispatcher/approvals.js";
+import { errorFromBody, validation } from "./dispatcher/errors.js";
+import { enforceBudgets, isReplay, requestHashOf } from "./dispatcher/budget-gate.js";
 import { recordDenial } from "./dispatcher/denials.js";
 import {
   READ_VIEWS,
@@ -45,13 +45,6 @@ import {
 
 // The public surface of this module is unchanged: the types moved to dispatcher/types.ts.
 export * from "./dispatcher/types.js";
-
-function errorFromBody(error: ErrorBody["error"]): CrossoverError {
-  return new CrossoverError(error.code, error.message, {
-    retryable: error.retryable,
-    ...(error.details === undefined ? {} : { details: error.details }),
-  });
-}
 
 /**
  * Runs commands (ARCHITECTURE §16.2, §19.2).
@@ -161,7 +154,7 @@ export class Dispatcher {
     }
     const params: unknown = parsedParams.data;
 
-    await this.enforceBudgets(principal, envelope);
+    await enforceBudgets(this.core, principal, envelope);
     return def.mutating
       ? this.runMutating(principal, envelope, def, action, params)
       : this.runRead(principal, envelope, def, action, params);
@@ -450,377 +443,13 @@ export class Dispatcher {
   }
 
   /**
-   * The command was stopped by an approval gate (§22.2) and rolled back: keep it for the owner
-   * or an admin in a transaction of its own (`approval.requested`, inbox items), and return the
-   * error to throw, now naming the approval. If it can't be kept, the original error stands.
-   */
-  private async queueForApproval(
-    principal: Principal,
-    envelope: { method: string; id: string },
-    def: CommandDefinition<z.ZodType, unknown>,
-    params: unknown,
-    idempotency: { key: string; hash: string },
-    error: CrossoverError,
-    token: number,
-  ): Promise<
-    { error: CrossoverError; replay?: undefined } | { replay: DispatchResult; error?: undefined }
-  > {
-    if (def.returnsOneTime || def.notApprovable) {
-      return {
-        error: new CrossoverError("VALIDATION", `${envelope.method} can't wait for approval`, {
-          details: { reason: "not_approvable", method: envelope.method },
-        }),
-      };
-    }
-    // The authorization came first, ahead of the idempotency lookup, so a request that already ran
-    // (approved earlier, the gate still on) would be queued again: replay its stored result.
-    const { rows: used } = await this.core.pool.query<{
-      request_hash: string;
-      response: {
-        response: unknown;
-        events: RoomEvent[];
-        committed_error?: ErrorBody["error"];
-      } | null;
-    }>(
-      `SELECT request_hash, response FROM idempotency_keys
-       WHERE participant_id = $1 AND idempotency_key = $2
-         AND created_at >= clock_timestamp() - make_interval(hours => $3)`,
-      [principal.participant_id, idempotency.key, IDEMPOTENCY_TTL_HOURS],
-    );
-    // The key stands for the request it first ran: reusing it for another, gated one is the usual
-    // key-reuse error, and must not leave an approval nobody could decide.
-    if (used[0] && used[0].request_hash !== idempotency.hash) {
-      return {
-        error: new CrossoverError(
-          "VALIDATION",
-          "Idempotency key was already used with a different request",
-          { details: { idempotency_key: idempotency.key } },
-        ),
-      };
-    }
-    const stored = used[0]?.response;
-    if (stored) {
-      if (stored.committed_error) return { error: errorFromBody(stored.committed_error) };
-      return {
-        replay: {
-          response: stored.response,
-          events: stored.events ?? [],
-          replayed: true,
-        },
-      };
-    }
-    const capability =
-      typeof error.details?.["capability"] === "string"
-        ? error.details["capability"]
-        : envelope.method;
-    try {
-      const queued = await withTransaction(this.core.pool, async (client) => {
-        const {
-          approval,
-          created,
-          events: inboxEvents,
-        } = await queueApproval(client, principal, {
-          method: envelope.method,
-          params,
-          idempotency_key: idempotency.key,
-          idempotency_hash: idempotency.hash,
-          capability,
-        });
-        const events = created
-          ? await appendEvents(
-              client,
-              principal.room_id,
-              [
-                {
-                  type: "approval.requested",
-                  actor_id: principal.participant_id,
-                  causation_id: envelope.id,
-                  payload: {
-                    approval_id: approval.id,
-                    method: envelope.method,
-                    capability,
-                    expires_at: approval.expires_at,
-                  },
-                },
-                ...inboxEvents.map((event) => ({
-                  type: event.type,
-                  actor_id: event.actor_id ?? "system",
-                  causation_id: envelope.id,
-                  ...(event.payload !== undefined ? { payload: event.payload } : {}),
-                  ...(event.schema_version !== undefined
-                    ? { schema_version: event.schema_version }
-                    : {}),
-                })),
-              ],
-              token,
-            )
-          : [];
-        return { approval, events };
-      });
-      await afterCommitWork(this.core, principal.room_id, envelope, [], {
-        response: undefined,
-        events: queued.events,
-        replayed: false,
-      });
-      return {
-        error: new CrossoverError("APPROVAL_REQUIRED", error.message, {
-          details: {
-            ...error.details,
-            approval_id: queued.approval.id,
-            expires_at: queued.approval.expires_at,
-          },
-        }),
-      };
-    } catch (queueError) {
-      if (queueError instanceof CrossoverError && queueError.code === "VALIDATION") {
-        return { error: queueError };
-      }
-      // Without an approval there is nothing to wait for: say so, don't answer "queued".
-      this.core.onDenialRecordError(queueError, {
-        method: envelope.method,
-        command_id: envelope.id,
-        room_id: principal.room_id,
-        action: "approval.requested",
-      });
-      return {
-        error: new CrossoverError("STALE_FENCE", "The request couldn't be queued; retry it", {
-          retryable: true,
-        }),
-      };
-    }
-  }
-
-  /**
    * Run the command an approval kept (T905), as its requester, inside the approver's
    * transaction (`outer`). The approval gate is lifted for it; every other check still applies.
    * Returns what the command returned, for the caller to append its events. A command that
    * returns a one-time secret can't run this way (`VALIDATION`, `one_time_result`).
    */
   async runApproved(outer: CommandContext, approval: ApprovalRow): Promise<CommandResult<unknown>> {
-    const registered = this.core.commands.get(approval.method);
-    if (!registered || !registered.def.mutating) {
-      throw new CrossoverError("VALIDATION", `Approval is for a method that isn't available now`, {
-        details: { reason: "unknown_method", method: approval.method },
-      });
-    }
-    const { def, action } = registered;
-    const parsed = def.params.safeParse(approval.params);
-    if (!parsed.success)
-      throw validation(`Invalid params for ${approval.method}`, parsed.error.issues);
-    const params: unknown = parsed.data;
-    const { client, room_id } = outer;
-    const requester = await this.core.principalOf(client, room_id, approval.requester_id);
-    // A refusal while running the approved command is the requester's, so it names them; the
-    // approver, whose transaction this is, is who the denial is recorded against.
-    const check = (
-      principal: Principal,
-      a: string,
-      resource: Record<string, unknown>,
-      extra = {},
-    ) =>
-      this.core
-        .authorize(
-          principal,
-          a,
-          { ...resource, room_id },
-          { method: approval.method, params, client, approved: true, ...extra },
-        )
-        .catch((error: unknown) => this.core.onBehalfOf(error, principal.participant_id));
-    await check(requester, action, {}, def.perPathAuthorize ? { perPath: true } : {});
-    const ctx: CommandContext = {
-      client,
-      principal: requester,
-      room_id,
-      command_id: outer.command_id,
-      idempotency_key: approval.idempotency_key,
-      authorize: (a, resource, options) =>
-        check(requester, a, resource ?? {}, options?.anyScope ? { perPath: true } : {}),
-      authorizeAs: async (participantId, a, resource, options) =>
-        check(
-          await this.core.principalOf(client, room_id, participantId),
-          a,
-          resource ?? {},
-          options?.anyScope ? { perPath: true } : {},
-        ).catch((error: unknown) => this.core.onBehalfOf(error, participantId)),
-      afterCommit: outer.afterCommit,
-    };
-    const out = await def.execute(ctx, params);
-    if (out.oneTime !== undefined) {
-      throw new CrossoverError("VALIDATION", "That command returns a one-time secret", {
-        details: { reason: "one_time_result", method: approval.method },
-      });
-    }
-    if (out.afterCommit) outer.afterCommit(out.afterCommit);
-    return out;
-  }
-
-  /**
-   * Count the command against the agent's budgets (§22.3) and refuse it with `BUDGET_EXCEEDED`
-   * and `retry_after` (seconds) when one is used up. Agents only; the limits are the defaults
-   * unless the room's `settings.budgets` or the participant's `budgets` override them. When both
-   * have a finite value, the tighter limit applies. The first
-   * refusal of a window is also recorded as `budget.exceeded`, so a flood of refused calls
-   * writes one event, not one each. If the limiter or its overrides can't be read, the command
-   * goes ahead.
-   */
-  private async enforceBudgets(
-    principal: Principal,
-    envelope: {
-      method: string;
-      id: string;
-      idempotency_key?: string | undefined;
-      params?: unknown;
-    },
-  ) {
-    if (!this.core.budgets || principal.kind !== "AGENT") return;
-    const room_id = principal.room_id;
-    let refusal:
-      { budget: BudgetName; limit: number; retry_after_ms: number; first: boolean } | undefined;
-    try {
-      // A retry of a command that already ran gets its stored result and costs nothing.
-      if (await this.isReplay(principal, envelope)) return;
-      const { rows } = await this.core.pool.query<{ room: unknown; mine: unknown }>(
-        `SELECT r.settings -> 'budgets' AS room, p.budgets AS mine
-         FROM participants p JOIN rooms r ON r.id = p.room_id
-         WHERE p.id = $1 AND p.room_id = $2`,
-        [principal.participant_id, room_id],
-      );
-      const room = readOverrides(rows[0]?.room);
-      const mine = readOverrides(rows[0]?.mine);
-      const keyOf = (budget: BudgetName) => ({
-        room_id,
-        participant_id: principal.participant_id,
-        budget,
-      });
-      const applicable: { budget: BudgetName; limit: number }[] = [];
-      for (const budget of budgetsOf(envelope.method)) {
-        const limit = limitFor(budget, room, mine);
-        if (limit !== null) applicable.push({ budget, limit });
-      }
-      // Look at every budget first: a command refused for one spends none of the others, so an
-      // agent hammering a refused `messages.send` can still read.
-      let exhausted: { budget: BudgetName; limit: number } | undefined;
-      for (const item of applicable) {
-        const used = await this.core.budgets.peek(
-          keyOf(item.budget),
-          BUDGET_DEFAULTS[item.budget].windowMs,
-        );
-        if (used >= item.limit) {
-          exhausted = item;
-          break;
-        }
-      }
-      for (const item of exhausted ? [exhausted] : applicable) {
-        const decision = await this.core.budgets.consume(
-          keyOf(item.budget),
-          item.limit,
-          BUDGET_DEFAULTS[item.budget].windowMs,
-        );
-        if (!decision.allowed) {
-          refusal = { ...item, ...decision };
-          break;
-        }
-      }
-    } catch (error) {
-      try {
-        this.core.onBudgetError(error, { method: envelope.method, room_id });
-      } catch {
-        // A broken error handler must not change the command's outcome.
-      }
-      return;
-    }
-    if (!refusal) return;
-    const retryAfter = Math.max(1, Math.ceil(refusal.retry_after_ms / 1000));
-    const details = {
-      budget: refusal.budget,
-      limit: refusal.limit,
-      window_seconds: BUDGET_DEFAULTS[refusal.budget].windowMs / 1000,
-      retry_after: retryAfter,
-    };
-    if (refusal.first) await this.recordBudgetExceeded(principal, envelope, details);
-    throw new CrossoverError(
-      "BUDGET_EXCEEDED",
-      `The ${refusal.budget} budget (${refusal.limit} per ${details.window_seconds} s) is used up; retry in ${retryAfter} s`,
-      { details },
-    );
-  }
-
-  private requestHashOf(
-    principal: Principal,
-    envelope: { method: string; params?: unknown },
-  ): string {
-    return hashRequest({
-      room_id: principal.room_id,
-      method: envelope.method,
-      params: envelope.params,
-    });
-  }
-
-  /** Whether this exact request (same participant, key and content) already ran and has a stored result. */
-  private async isReplay(
-    principal: Principal,
-    envelope: { method: string; idempotency_key?: string | undefined; params?: unknown },
-  ): Promise<boolean> {
-    if (envelope.idempotency_key === undefined) return false;
-    let requestHash: string;
-    try {
-      requestHash = hashRequest({
-        room_id: principal.room_id,
-        method: envelope.method,
-        params: envelope.params,
-      });
-    } catch {
-      return false; // the command itself will say the params are bad
-    }
-    const { rowCount } = await this.core.pool.query(
-      `SELECT 1 FROM idempotency_keys
-       WHERE participant_id = $1 AND idempotency_key = $2 AND request_hash = $3
-         AND response IS NOT NULL
-         AND created_at >= clock_timestamp() - make_interval(hours => $4)`,
-      [principal.participant_id, envelope.idempotency_key, requestHash, IDEMPOTENCY_TTL_HOURS],
-    );
-    return (rowCount ?? 0) > 0;
-  }
-
-  /** Append `budget.exceeded` in a transaction of its own. Never throws. */
-  private async recordBudgetExceeded(
-    principal: Principal,
-    envelope: { method: string; id: string },
-    details: Record<string, unknown>,
-  ): Promise<void> {
-    const room_id = principal.room_id;
-    try {
-      await this.actors.get(room_id).submit(async () => {
-        const token = await this.leases.ensure(room_id);
-        const events = await withTransaction(this.core.pool, (client) =>
-          appendEvents(
-            client,
-            room_id,
-            [
-              {
-                type: "budget.exceeded",
-                actor_id: principal.participant_id,
-                causation_id: envelope.id,
-                payload: { ...details, method: envelope.method },
-              },
-            ],
-            token,
-          ),
-        );
-        await afterCommitWork(this.core, room_id, envelope, [], {
-          response: undefined,
-          events,
-          replayed: false,
-        });
-      });
-    } catch (error) {
-      this.core.onDenialRecordError(error, {
-        method: envelope.method,
-        command_id: envelope.id,
-        room_id,
-        action: "budget.exceeded",
-      });
-    }
+    return runApproved(this.core, outer, approval);
   }
 
   private async runRead(
@@ -932,9 +561,9 @@ export class Dispatcher {
     try {
       // Only for a principal who may run it, and not for a replay of a request that already ran.
       // A refusal here is left for the command's own authorization to report and record.
-      const lifted = await this.gateLifted(principal, envelope, def);
+      const lifted = await gateLifted(this.core, principal, envelope, def);
       const allowed = await this.mayPrepare(principal, envelope, action, def, params);
-      if (allowed && key !== undefined && !(await this.isReplay(principal, envelope))) {
+      if (allowed && key !== undefined && !(await isReplay(this.core, principal, envelope))) {
         ran = true;
         prepared = await def.prepare(
           {
@@ -943,7 +572,7 @@ export class Dispatcher {
             room_id: principal.room_id,
             command_id: envelope.id,
             idempotency_key: key,
-            request_hash: this.requestHashOf(principal, envelope),
+            request_hash: requestHashOf(principal, envelope),
             isAllowed: (a, resource, options) =>
               this.isAllowed(
                 principal,
@@ -1003,45 +632,9 @@ export class Dispatcher {
     }
   }
 
-  /**
-   * Whether an owner or admin approved this very request (same requester, idempotency key and
-   * params) for a command that waits for the requester's retry instead of running on approval.
-   */
-  private async gateLifted(
-    principal: Principal,
-    envelope: { method: string; idempotency_key?: string | undefined; params?: unknown },
-    def: CommandDefinition<z.ZodType, unknown>,
-  ): Promise<boolean> {
-    if (!def.approvalLiftsGate || envelope.idempotency_key === undefined) return false;
-    let hash: string;
-    try {
-      hash = hashRequest({
-        room_id: principal.room_id,
-        method: envelope.method,
-        params: envelope.params,
-      });
-    } catch {
-      return false;
-    }
-    const { rowCount } = await this.core.pool.query(
-      `SELECT 1 FROM approvals
-       WHERE room_id = $1 AND requester_id = $2 AND idempotency_key = $3 AND idempotency_hash = $4
-         AND status = 'APPROVED'
-         AND decided_at >= clock_timestamp() - make_interval(hours => $5)`,
-      [
-        principal.room_id,
-        principal.participant_id,
-        envelope.idempotency_key,
-        hash,
-        IDEMPOTENCY_TTL_HOURS,
-      ],
-    );
-    return (rowCount ?? 0) > 0;
-  }
-
   /** Whether `method` runs when an approval is granted (the usual case), or waits for the requester's retry. */
   runsOnApproval(method: string): boolean {
-    return !this.core.commands.get(method)?.def.approvalLiftsGate;
+    return runsOnApproval(this.core, method);
   }
 
   /** Whether the principal passes the command's authorization now, without recording a denial. */
@@ -1104,7 +697,7 @@ export class Dispatcher {
 
     return this.actors.get(room_id).submit(async () => {
       const token = await this.leases.ensure(room_id);
-      const lifted = await this.gateLifted(principal, envelope, def);
+      const lifted = await gateLifted(this.core, principal, envelope, def);
       const afterCommit: (() => void | Promise<void>)[] = [];
       let oneTime: unknown;
       let result: DispatchResultWithCommittedError;
@@ -1216,7 +809,8 @@ export class Dispatcher {
           err.code === "APPROVAL_REQUIRED" &&
           err.details?.["approval_id"] === undefined
         ) {
-          const queued = await this.queueForApproval(
+          const queued = await queueForApproval(
+            this.core,
             principal,
             envelope,
             def,
@@ -1238,8 +832,4 @@ export class Dispatcher {
       return oneTime === undefined || result.replayed ? result : { ...result, one_time: oneTime };
     });
   }
-}
-
-function validation(message: string, issues: unknown): CrossoverError {
-  return new CrossoverError("VALIDATION", message, { details: { issues } });
 }
