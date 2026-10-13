@@ -1775,4 +1775,4 @@ concurrency:
 
 Change nothing else: no trigger, `runs-on`, port or service changes. A PR run joins its PR's group, and a newer push cancels the older run. Every other run (push to `main`, nightly, manual) gets a group of its own from `run_id`, so it is never cancelled or replaced. A shared group would let a third push to `main` drop the second while it waits, even with `cancel-in-progress` false.
 
-**Proof.** O1 checks the Actions history after merge. S1 has no GitHub access on the current machine, so the PR text only states the change.
+**Proof, in the PR text, with run links:** (a) two pushes to the PR a minute apart, where the first run shows `cancelled`; (b) after merge, two pushes to `main` in quick succession, where both run to completion. O1 checks the history as well.
