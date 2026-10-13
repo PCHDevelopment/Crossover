@@ -74,6 +74,8 @@ export interface DockerToolRunnerOptions {
   roomEgressHosts?: PluginRoomEgressProvider;
   invoke?: PluginDockerInvoker;
   sweepResources?: boolean;
+  /** Overrides the plugin-run label value; intended for isolated cleanup tests. */
+  pluginRunLabelValue?: string;
 }
 
 /** Run each plugin call in a throwaway, resource-limited container. */
@@ -87,6 +89,7 @@ export class DockerToolRunner implements ToolRunner {
   private readonly maxOutputBytes: number;
   private readonly credentials: PluginCredentialProvider;
   private readonly invoke: PluginDockerInvoker;
+  private readonly pluginRunLabelValue: string;
   private readonly resourceSweeper: PluginResourceSweeper;
 
   constructor(private readonly options: DockerToolRunnerOptions) {
@@ -98,6 +101,7 @@ export class DockerToolRunner implements ToolRunner {
     this.maxOutputBytes = options.maxOutputBytes ?? MAX_OUTPUT_BYTES;
     this.credentials = options.credentials ?? (async () => ({}));
     this.invoke = options.invoke ?? invokeDocker;
+    this.pluginRunLabelValue = options.pluginRunLabelValue ?? "true";
 
     if (options.runtime !== undefined && !this.runtime)
       throw new Error("SANDBOX_RUNTIME must be a nonempty Docker runtime name");
@@ -131,7 +135,11 @@ export class DockerToolRunner implements ToolRunner {
     }
 
     const shouldSweep = options.sweepResources ?? options.invoke === undefined;
-    this.resourceSweeper = new PluginResourceSweeper(this.dockerBinary, this.invoke);
+    this.resourceSweeper = new PluginResourceSweeper(
+      this.dockerBinary,
+      this.invoke,
+      this.pluginRunLabelValue,
+    );
     if (shouldSweep) this.resourceSweeper.start();
   }
 
@@ -212,7 +220,7 @@ export class DockerToolRunner implements ToolRunner {
           "create",
           "--internal",
           "--label",
-          `${PLUGIN_RUN_LABEL}=true`,
+          `${PLUGIN_RUN_LABEL}=${this.pluginRunLabelValue}`,
           "--label",
           `${PLUGIN_RUN_CREATED_AT_LABEL}=${Date.now()}`,
           networkName,
@@ -261,7 +269,7 @@ export class DockerToolRunner implements ToolRunner {
         "--name",
         containerName,
         "--label",
-        `${PLUGIN_RUN_LABEL}=true`,
+        `${PLUGIN_RUN_LABEL}=${this.pluginRunLabelValue}`,
         "--label",
         `${PLUGIN_RUN_CREATED_AT_LABEL}=${Date.now()}`,
         `--network=${networkName ?? "none"}`,

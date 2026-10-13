@@ -5,7 +5,12 @@ import { type ToolInvocation, ToolRegistry } from "@crossover/kernel";
 import { newId } from "@crossover/protocol";
 import { describe, expect, it, beforeAll, afterAll } from "vitest";
 import { z } from "zod";
-import { invokeDocker, type PluginDockerInvoker } from "./plugin-runner-docker.js";
+import {
+  invokeDocker,
+  PLUGIN_RUN_CREATED_AT_LABEL,
+  PLUGIN_RUN_LABEL,
+  type PluginDockerInvoker,
+} from "./plugin-runner-docker.js";
 import { DockerToolRunner } from "./plugin-runner.js";
 
 const PLUGIN_IMAGE =
@@ -234,6 +239,7 @@ describe.skipIf(skipDockerIntegration)("DockerToolRunner real Docker integration
 
   it("removes stale labeled containers and networks during startup cleanup", async () => {
     const suffix = randomBytes(6).toString("hex");
+    const sweepLabelValue = `test-${suffix}`;
     const staleContainer = `crossover-plugin-stale-${suffix}`;
     const staleNetwork = `crossover-plugin-net-stale-${suffix}`;
     execFileSync(
@@ -246,9 +252,9 @@ describe.skipIf(skipDockerIntegration)("DockerToolRunner real Docker integration
         "--network",
         "none",
         "--label",
-        "crossover.plugin-run=true",
+        `${PLUGIN_RUN_LABEL}=${sweepLabelValue}`,
         "--label",
-        "crossover.plugin-run-created-at=0",
+        `${PLUGIN_RUN_CREATED_AT_LABEL}=0`,
         PLUGIN_IMAGE,
         "/bin/busybox",
         "sleep",
@@ -263,14 +269,22 @@ describe.skipIf(skipDockerIntegration)("DockerToolRunner real Docker integration
         "create",
         "--internal",
         "--label",
-        "crossover.plugin-run=true",
+        `${PLUGIN_RUN_LABEL}=${sweepLabelValue}`,
         "--label",
-        "crossover.plugin-run-created-at=0",
+        `${PLUGIN_RUN_CREATED_AT_LABEL}=0`,
         staleNetwork,
       ],
       { stdio: "ignore", timeout: 10_000 },
     );
-    const runner = createRunner(["/bin/busybox", "true"], [], 5_000, true);
+    const runner = createRunner(
+      ["/bin/busybox", "true"],
+      [],
+      5_000,
+      true,
+      PLUGIN_IMAGE,
+      invokeDocker,
+      sweepLabelValue,
+    );
     try {
       await runner.sweepStaleResources();
       await expect
@@ -317,6 +331,7 @@ describe.skipIf(skipDockerIntegration)("DockerToolRunner real Docker integration
     sweepResources?: boolean,
     image = PLUGIN_IMAGE,
     invoke: PluginDockerInvoker = invokeDocker,
+    pluginRunLabelValue?: string,
   ): DockerToolRunner {
     const registry = new ToolRegistry();
     registry.register({
@@ -335,6 +350,7 @@ describe.skipIf(skipDockerIntegration)("DockerToolRunner real Docker integration
       credentials: async () => ({ GITHUB_TOKEN: CREDENTIAL }),
       timeoutMs,
       sweepResources: sweepResources ?? true,
+      ...(pluginRunLabelValue === undefined ? {} : { pluginRunLabelValue }),
       invoke,
     });
   }
