@@ -27,7 +27,7 @@ Conventions are in `docs/ENGINEERING.md`. Section references (§) point to `docs
 | M12 Plugins (§21.4–21.5)              | T1201–T1206 | S1 (T1201, moved in Review 5), S2 (T1202–T1206)             |
 | M13 Lessons from building (§34)       | T1301–T1303 | S1                                                          |
 | M14 Demo-ready web app (Review 7)     | T1401–T1416 | S2 (T1401–T1416; T1402 moved from Q1)                       |
-| M15 MVP scope gaps (§29, Review 10)   | T1501–T1515 | S2 (T1501–T1503, T1510–T1511, T1513–T1514; rest unassigned) |
+| M15 MVP scope gaps (§29, Review 10)   | T1501–T1516 | S2 (T1501–T1503, T1510–T1511, T1513–T1514; rest unassigned) |
 
 **Start here:** S1 → T101, T105, T114 (independent). S2 → T501, T505 (only need the scaffold).
 
@@ -1603,3 +1603,9 @@ Fix it in the server: when `GIT_INTERNAL_HOST` is not an IP literal, resolve thi
 T1417's first flake, captured with evidence on 2026-10-13 (seq 1160, during T1504 PR B validation; log saved by S2). `apps/server/src/browser-plugin.docker.test.ts` › "uses the signed room allowlist, denies unsafe destinations, and caps UTF-8 page text" (assertion at lines 180–183). Expected `ToolProviderError { code: VALIDATION }`, got `ToolProviderError: Plugin execution failed { retryable: true }`. Under a full parallel run the plugin worker failed or timed out before returning its own policy refusal, and the runner reported a generic retryable failure.
 
 Find which: a worker timeout, a container start race, or an exit before the result is written. Decide whether a policy refusal can ever be reported as retryable; it should not be, because an agent would retry a denied action. Fix the cause, not the assertion.
+
+### T1516 · egress-visibility MCP read-tool test times out in parallel CI — S2
+
+T1417's second flake, captured on 2026-10-13 in #247's CI (seq 1168; log saved by S2). `apps/server/src/e2e/egress-visibility.test.ts` › "egress visibility conformance (§34.5)" › "every MCP read tool: B never receives it, and each tool is a registered read command" (line 500): `Test timed out in 5000ms`. The same run logged PostgreSQL `FATAL 57P01 terminating connection due to administrator command` and `Connection terminated unexpectedly`. It also timed out once locally during #245 validation.
+
+57P01 is what `DROP DATABASE … WITH (FORCE)` does to live sessions, so check first whether another test file's cleanup drops a database this test is still using, or whether this test shares a pool or database name across workers. Otherwise, find which of the MCP read-tool calls stalls. Give the test a measured budget only after the cause is known (as in T1510).
