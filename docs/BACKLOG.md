@@ -1711,3 +1711,17 @@ Development keeps working through an explicit `ALLOW_UNSANDBOXED_DEV=1`. That fl
 ### T1532 · Remote sandbox-host driver (§4.1) — unassigned
 
 From T1418. An `ExecutionDriver` that runs sandboxes on separate sandbox hosts over an authenticated channel (mutual TLS or signed requests), with host registration, health checks and capacity, and the same lifecycle, output streaming and compute accounting as `DockerExecutionDriver`. It is required before any multi-tenant or untrusted deployment. It is not needed for the MVP demo. Scope and split it into a milestone when it is scheduled.
+
+### T1533 · Stop wasted CI runs — Q1
+
+From Peter, 2026-10-13. The repository is private and CI runs on one self-hosted runner, so every run that nobody needs delays the ones people are waiting for. Do this before T1529's PRs.
+
+1. **Cancel superseded runs.** Add a `concurrency` group to `.github/workflows/ci.yml` keyed on the PR number, falling back to the ref (`${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}`). Set `cancel-in-progress` to true only for `pull_request` events. Runs on `main`, scheduled runs and manual runs must never be cancelled.
+2. **Stop duplicate runs of the same commit.** Some PRs got two `check` runs for the same head (for example #275 at 11:51, run 38393066270 next to 38393067806). Find which events triggered both. A retarget or a base change can fire `pull_request` twice, and a push to a branch can also fire `push`. Restrict the triggers so that one commit on one PR gets exactly one run. Keep `push` to `main`, `schedule` and `workflow_dispatch` as they are.
+3. **Leave the runner alone.** No change to `runs-on`, ports or services. Adding runners is a separate decision for Peter.
+
+Prove it in the PR text with links to runs:
+
+- two pushes in a row to a test PR, where the first run is cancelled;
+- a retarget, which starts one run;
+- a push to `main` that runs to the end even while another run is going.
