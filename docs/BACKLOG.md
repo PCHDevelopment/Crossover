@@ -1669,3 +1669,13 @@ From the tech-debt register. T1518 (#253) moved compute sampling out, but `packa
 #287's second CI run (run 38428716074, job 115404900246; log saved by O1 before any rerun) failed in `apps/server/src/plugin-runner.docker.test.ts` › "removes stale labeled containers and networks during startup cleanup" with `Error: Docker container cleanup failed`, thrown from `PluginResourceSweeper.remove` (`plugin-runner-docker.ts:150`). #287 changes only kernel files. The error drops Docker's exit code and stderr, so the cause cannot be told from the log. It could be a sweep timeout under load, a container another parallel Docker test is still using, or a Docker message that `isSuccessfulCleanup` does not recognise.
 
 Step 1: put the exit code, whether the call timed out, and the first 500 bytes of stderr in the cleanup error (and in the network path). Step 2: on the next capture, root-cause it. Also check whether the test's sweep can see containers that belong to other Docker test files running in parallel, and scope it to its own label value if it can. A failed cleanup of real containers is a product bug until shown otherwise.
+
+### T1529 · Audit heavy tests for measured timeouts — Q1
+
+Review 15's rule is that any test that loops over thousands of cases, or starts containers or databases, gets an explicit timeout with its measured time in a comment, in the PR that adds it. Tests written before the rule have failed unrelated PRs (T1510, T1517, T1522, T1527). Find the rest before they do:
+
+1. Run `pnpm test` with vitest's JSON reporter twice on an idle machine and twice with the CPUs oversubscribed about three times over (as S1 did for T1527). List every test that takes over 1 s in any run and is still on the 5 s default. `packages/policy/src/authorize.test.ts` (2.9 s for the file, 0.9 s for one case, seen by S2) is a known candidate.
+2. For each test over 2 s oversubscribed, give it an explicit timeout of about seven times the oversubscribed time, with the numbers in a comment. Keep every case and every assertion.
+3. Post the table (test, idle, oversubscribed, budget) before the PR. Ship it in PRs of at most 400 non-test lines, grouped by package.
+
+Do not change product code in this task. If a test is slow because the product is slow, open a separate task.
