@@ -62,8 +62,11 @@ export const capabilitiesGrantParams = z
     let tier: number;
     try {
       tier = tierOf(params.capability);
-    } catch {
-      return; // the capability field reports it
+    } catch (error) {
+      // A malformed capability is reported by the capability field; a policy that is not there
+      // (UNAVAILABLE) must not be mistaken for it.
+      if (error instanceof CrossoverError && error.code === "VALIDATION") return;
+      throw error;
     }
     if (tier === 3 && params.expires_at === undefined) {
       ctx.addIssue({

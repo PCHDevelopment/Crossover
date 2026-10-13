@@ -1,5 +1,5 @@
 import { CrossoverError } from "@crossover/protocol";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import {
   capabilityMatches,
   capabilityMatchesPath,
@@ -8,6 +8,7 @@ import {
   tierOf,
 } from "./capability.js";
 import { CAPABILITIES } from "./bundles.js";
+import { initPolicy } from "./engine.js";
 import { pathGlobMatch } from "./glob.js";
 
 describe("parseCapability", () => {
@@ -450,6 +451,11 @@ describe("capabilityMatches never throws", () => {
 });
 
 describe("tierOf", () => {
+  // tierOf asks the shipped policy, which a server loads before it listens (initPolicy()).
+  beforeAll(async () => {
+    await initPolicy();
+  });
+
   it("is 0 for the room's reads and for external reads", () => {
     for (const c of [
       "workspace.read",
