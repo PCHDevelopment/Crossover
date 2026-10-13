@@ -556,6 +556,7 @@ describe("DockerExecutionDriver", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+    // T1529: measured 1.2 s at 3x oversubscription; budget 10 s.
   }, 10_000);
 
   it("treats the streamed byte backstop as truncation", async () => {
@@ -593,6 +594,7 @@ describe("DockerExecutionDriver", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+    // T1529: measured 1.2 s at 3x oversubscription; budget 10 s.
   }, 10_000);
 
   it("returns a retryable generic error when Git status fails without exposing stderr", async () => {
@@ -1182,7 +1184,8 @@ describe("DockerExecutionDriver", () => {
         await driver.destroy({ sandbox_id: sandboxId, resources });
       }
     },
-    15_000,
+    // T1529: measured 15.1 s at 3x oversubscription; budget 31 s (~2x).
+    31_000,
   );
 
   it.skipIf(skipDockerIntegration)(
@@ -1325,6 +1328,7 @@ describe("DockerExecutionDriver", () => {
         await driver.destroy({ sandbox_id: sandboxId, resources });
       }
     },
+    // T1529: measured 69.2 s at 3x oversubscription; budget 120 s (~1.7x).
     120_000,
   );
 
@@ -1352,7 +1356,8 @@ describe("DockerExecutionDriver", () => {
         await driver.destroy({ sandbox_id: sandboxId, resources });
       }
     },
-    30_000,
+    // T1529: measured 22.3 s at 3x oversubscription; budget 45 s (~2x).
+    45_000,
   );
   it.skipIf(skipDockerIntegration)(
     "restarts the sandbox to kill a detached setsid child",
@@ -1380,6 +1385,7 @@ describe("DockerExecutionDriver", () => {
         await driver.destroy({ sandbox_id: sandboxId, resources });
       }
     },
+    // T1529: measured 7.9 s at 3x oversubscription; budget 30 s (~3.8x).
     30_000,
   );
 });
