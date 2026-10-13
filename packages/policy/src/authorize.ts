@@ -1,12 +1,5 @@
 import type { Pool, PoolClient } from "@crossover/db";
 import { CrossoverError, isMethodName, METHODS } from "@crossover/protocol";
-import {
-  capabilityMatches,
-  capabilityMatchesPath,
-  isSafeRequestPath,
-  parseCapability,
-  PATH_SCOPED_RESOURCES,
-} from "./capability.js";
 import { loadLiveGrants } from "./grants.js";
 import { policyEngine, type AuthzFacts, type Decision } from "./engine.js";
 import { CAPABILITIES, isCapability } from "./bundles.js";
@@ -96,7 +89,7 @@ interface ParticipantRow {
  * checked: the participant's role, authority and status are re-read here, and those win.
  *
  * Commands that act on a path call `authorize("workspace.write", { path })` with the path in the
- * resource, not in the action. Scoped grants and denies are matched against that path, so
+ * resource, not in the action. The policy matches scoped grants and denies against that path, so
  * `workspace.write:secrets/**` applies to it just as to `workspace.write:secrets/k`.
  */
 async function loadFacts(
@@ -111,12 +104,13 @@ async function loadFacts(
     participant: null,
     room_status: "",
     mutating: isMutating(context.method, base),
-    path_invalid: false,
-    denied: false,
-    covering: { any: false, ungated: false },
     approved: context.approved === true,
-    per_path_gate: false,
-    capability: base,
+    // Not a string (a bug in the caller): the empty capability, which no catalog entry matches.
+    action: typeof action === "string" ? action : "",
+    resource_path: typeof resource.path === "string" ? resource.path : null,
+    per_path: context.perPath === true,
+    grants: [],
+    denies: [],
   };
   if (!facts.room_match) return { facts, row: undefined };
 
@@ -131,34 +125,19 @@ async function loadFacts(
   facts.participant = { status: row.status, authority: row.authority, role: row.role };
   facts.room_status = row.room_status;
 
-  const path = pathOf(action, base, resource);
-  // "" names the workspace root (listing it): not a path to test against scopes, but fine.
-  if (path !== undefined && path !== "" && !isSafeRequestPath(path)) {
-    facts.path_invalid = true;
-    return { facts, row };
-  }
-  const covers = (capability: string): boolean =>
-    path === undefined
-      ? capabilityMatches(capability, action)
-      : capabilityMatchesPath(capability, base, path);
   const { grants, denies } = await loadLiveGrants(
     context.client,
     principal.room_id,
     principal.participant_id,
   );
-  const covering = grants.filter((g) => covers(g.capability));
-  facts.denied = denies.some((d) => covers(d.capability));
-  facts.covering = {
-    any: covering.length > 0,
-    ungated: covering.some((g) => !g.requires_approval),
-  };
-  // A per-path command's gate (T218): holding an ungated scoped grant of the capability is
-  // enough to reach the handler, which authorizes each path itself.
-  facts.per_path_gate =
-    context.perPath === true &&
-    path === undefined &&
-    action === base &&
-    grants.some((g) => !g.requires_approval && hasScopeOf(g.capability, base));
+  // Only grants and revocations of this capability can cover it (the policy checks that again), so
+  // the rest are not sent: a participant with grants of a dozen capabilities pays for one.
+  const ofThisCapability = ({ capability }: { capability: string }): boolean =>
+    capability.split(":", 1)[0] === base;
+  facts.grants = grants
+    .filter(ofThisCapability)
+    .map((g) => ({ capability: g.capability, requires_approval: g.requires_approval }));
+  facts.denies = denies.filter(ofThisCapability).map((d) => ({ capability: d.capability }));
   return { facts, row };
 }
 
@@ -209,32 +188,12 @@ const FORBIDDEN_REASONS = new Set([
 ]);
 
 /**
- * The workspace path a check is about, when it is named in the resource rather than the
- * action: only for an unscoped action on a path-scoped resource (`workspace.*`).
- */
-function pathOf(action: string, base: string, resource: PolicyResource): string | undefined {
-  if (action !== base || typeof resource.path !== "string") return undefined;
-  const root = base.split(".", 1)[0] ?? "";
-  return PATH_SCOPED_RESOURCES.has(root) ? resource.path : undefined;
-}
-
-/**
  * Does the command change state? The catalog says for a known method; for anything else the
  * capability's own flag, and an unknown capability counts as a mutation (fail closed).
  */
 function isMutating(method: string, base: string): boolean {
   if (isMethodName(method)) return METHODS[method].mutating;
   return isCapability(base) ? CAPABILITIES[base].mutating : true;
-}
-
-/** Is `capability` a scoped grant (has a `:scope`) of `base`? */
-function hasScopeOf(capability: string, base: string): boolean {
-  try {
-    const parsed = parseCapability(capability);
-    return parsed.base === base && parsed.scope !== undefined;
-  } catch {
-    return false;
-  }
 }
 
 function forbidden(action: string, extra: Record<string, unknown>): CrossoverError {
