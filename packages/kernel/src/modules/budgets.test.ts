@@ -32,7 +32,7 @@ interface Room {
   human: Principal;
 }
 
-async function setup(): Promise<Room> {
+async function setup(settings?: Record<string, unknown>): Promise<Room> {
   const id = newId("room");
   const ownerId = newId("part");
   const adminId = newId("part");
@@ -46,7 +46,9 @@ async function setup(): Promise<Room> {
       id,
       ownerId,
       agentId,
-      JSON.stringify({ keep: true, budgets: { commands: 9, messages: 8, sandbox_compute: 17 } }),
+      JSON.stringify(
+        settings ?? { keep: true, budgets: { commands: 9, messages: 8, sandbox_compute: 17 } },
+      ),
     ],
   );
   await pool.query(
@@ -180,11 +182,168 @@ describe("budgets.set and budgets.get", () => {
     { budgets: { messages: 0 } },
     { budgets: { messages: 1.5 } },
     { budgets: { messages: Number.MAX_SAFE_INTEGER + 1 } },
+    { compute_budgets: { unknown: 1 } },
+    { compute_budgets: { agent_vcpu_hours_per_day: 0 } },
+    { compute_budgets: { room_vcpu_hours_per_day: Number.MAX_SAFE_INTEGER + 1 } },
+    {},
   ])("rejects malformed budget overrides: %j", async (params) => {
     const room = await setup();
     await expect(dispatch(room, room.owner, "budgets.set", params)).rejects.toMatchObject({
       code: "VALIDATION",
     });
+  });
+
+  it("sets room and per-agent CPU caps, applies the tighter limit, and reports daily usage", async () => {
+    const room = await setup({ keep: true, budgets: { messages: 6 } });
+    const roomSet = await dispatch(room, room.owner, "budgets.set", {
+      compute_budgets: { agent_vcpu_hours_per_day: 2, room_vcpu_hours_per_day: 8 },
+    });
+    expect(roomSet.response).toEqual({
+      participant_id: null,
+      compute_budgets: { agent_vcpu_hours_per_day: 2, room_vcpu_hours_per_day: 8 },
+      changed: true,
+    });
+    expect(roomSet.events[0]).toMatchObject({
+      type: "room.budgets_changed",
+      payload: {
+        participant_id: null,
+        old_compute_budgets: {},
+        new_compute_budgets: {
+          agent_vcpu_hours_per_day: 2,
+          room_vcpu_hours_per_day: 8,
+        },
+      },
+    });
+    const settingsAfterComputeUpdate = (
+      await pool.query<{ settings: Record<string, unknown> }>(
+        "SELECT settings FROM rooms WHERE id = $1",
+        [room.id],
+      )
+    ).rows[0]!.settings;
+    expect(settingsAfterComputeUpdate).toMatchObject({
+      keep: true,
+      budgets: { messages: 6 },
+      compute_budgets: { agent_vcpu_hours_per_day: 2, room_vcpu_hours_per_day: 8 },
+    });
+
+    const agentSet = await dispatch(room, room.admin, "budgets.set", {
+      participant_id: room.agent.participant_id,
+      compute_budgets: { agent_vcpu_hours_per_day: 1 },
+    });
+    expect(agentSet.response).toMatchObject({
+      participant_id: room.agent.participant_id,
+      compute_budgets: { agent_vcpu_hours_per_day: 1 },
+      changed: true,
+    });
+    expect(agentSet.events[0]).toMatchObject({
+      type: "room.budgets_changed",
+      payload: {
+        participant_id: room.agent.participant_id,
+        old_compute_budgets: {},
+        new_compute_budgets: { agent_vcpu_hours_per_day: 1 },
+      },
+    });
+    const participantBudgets = (
+      await pool.query<{ budgets: Record<string, unknown> }>(
+        "SELECT budgets FROM participants WHERE id = $1",
+        [room.agent.participant_id],
+      )
+    ).rows[0]!.budgets;
+    expect(participantBudgets).toEqual({ messages: 2, agent_vcpu_hours_per_day: 1 });
+
+    const usageDate = new Date().toISOString().slice(0, 10);
+    await pool.query(
+      `INSERT INTO sandbox_compute_room_daily
+         (room_id, usage_date, used_cpu_usec, reserved_cpu_usec)
+       VALUES ($1, $2::date, 1800000000, 900000000)`,
+      [room.id, usageDate],
+    );
+    await pool.query(
+      `INSERT INTO sandbox_compute_agent_daily
+         (room_id, participant_id, usage_date, used_cpu_usec, reserved_cpu_usec)
+       VALUES ($1, $2, $3::date, 720000000, 360000000)`,
+      [room.id, room.agent.participant_id, usageDate],
+    );
+
+    const result = await dispatch(room, room.owner, "budgets.get");
+    const response = result.response as {
+      room_compute: {
+        limit_vcpu_hours_per_day: number | null;
+        used_vcpu_hours: number;
+        reserved_vcpu_hours: number;
+      };
+      agents: {
+        participant_id: string;
+        compute_budgets: Record<string, number | null>;
+        compute: {
+          limit_vcpu_hours_per_day: number | null;
+          used_vcpu_hours: number;
+          reserved_vcpu_hours: number;
+        };
+      }[];
+    };
+    expect(response.room_compute).toEqual({
+      limit_vcpu_hours_per_day: 8,
+      used_vcpu_hours: 0.5,
+      reserved_vcpu_hours: 0.25,
+    });
+    expect(response.agents).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          participant_id: room.agent.participant_id,
+          compute_budgets: { agent_vcpu_hours_per_day: 1 },
+          compute: {
+            limit_vcpu_hours_per_day: 1,
+            used_vcpu_hours: 0.2,
+            reserved_vcpu_hours: 0.1,
+          },
+        }),
+      ]),
+    );
+
+    await dispatch(room, room.admin, "budgets.set", {
+      participant_id: room.agent.participant_id,
+      compute_budgets: { agent_vcpu_hours_per_day: 12 },
+    });
+    const tighterRoomCap = await dispatch(room, room.owner, "budgets.get");
+    const agent = (tighterRoomCap.response as typeof response).agents.find(
+      (entry) => entry.participant_id === room.agent.participant_id,
+    );
+    expect(agent?.compute.limit_vcpu_hours_per_day).toBe(2);
+
+    await dispatch(room, room.admin, "budgets.set", {
+      participant_id: room.agent.participant_id,
+      compute_budgets: { agent_vcpu_hours_per_day: null },
+    });
+    const inheritedRoomCap = await dispatch(room, room.owner, "budgets.get");
+    expect(
+      (inheritedRoomCap.response as typeof response).agents.find(
+        (entry) => entry.participant_id === room.agent.participant_id,
+      )?.compute.limit_vcpu_hours_per_day,
+    ).toBe(2);
+
+    await dispatch(room, room.owner, "budgets.set", {
+      compute_budgets: {
+        agent_vcpu_hours_per_day: null,
+        room_vcpu_hours_per_day: 8,
+      },
+    });
+    const noAgentCap = await dispatch(room, room.owner, "budgets.get");
+    expect(
+      (noAgentCap.response as typeof response).agents.find(
+        (entry) => entry.participant_id === room.agent.participant_id,
+      )?.compute.limit_vcpu_hours_per_day,
+    ).toBeNull();
+  });
+
+  it("rejects room-only compute limits when targeting an agent", async () => {
+    const room = await setup();
+    await expect(
+      dispatch(room, room.owner, "budgets.set", {
+        participant_id: room.agent.participant_id,
+        compute_budgets: { room_vcpu_hours_per_day: 5 },
+      }),
+    ).rejects.toMatchObject({ code: "VALIDATION" });
   });
 
   it("shows effective limits and current counts to owners and admins only", async () => {
@@ -198,19 +357,25 @@ describe("budgets.set and budgets.get", () => {
     const result = await dispatch(room, room.owner, "budgets.get");
     const response = result.response as {
       room_budgets: Record<string, number | null>;
+      room_compute: { limit_vcpu_hours_per_day: number | null };
       agents: {
         participant_id: string;
         effective: Record<string, number | null>;
         usage: Record<string, number>;
+        compute_budgets: Record<string, number | null>;
+        compute: { limit_vcpu_hours_per_day: number | null };
       }[];
     };
     expect(response.room_budgets).toEqual({ messages: 5 });
+    expect(response.room_compute.limit_vcpu_hours_per_day).toBe(40);
     expect(response.agents).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           participant_id: room.agent.participant_id,
           effective: expect.objectContaining({ commands: 120, messages: 2 }),
           usage: expect.objectContaining({ commands: 0, messages: 1 }),
+          compute_budgets: {},
+          compute: expect.objectContaining({ limit_vcpu_hours_per_day: 4 }),
         }),
       ]),
     );

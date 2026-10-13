@@ -252,8 +252,25 @@ export function registerWebCollaborationStart(fixture: WebFixture): void {
     }>({});
     expect(roomBudgetState.response.room_budgets).toEqual({ messages: 8 });
 
+    await page.getByTestId("compute-budget-agent_vcpu_hours_per_day").fill("3");
+    await page.getByTestId("compute-budget-room_vcpu_hours_per_day").fill("12");
+    await page.getByTestId("save-compute-budgets").click();
+    await expect
+      .poll(() => page.getByTestId("owner-controls-notice").textContent())
+      .toContain("complete");
+    const computeBudgetState = await owner.api.budgets.get<{
+      compute_budgets: Record<string, number | null>;
+      room_compute: { limit_vcpu_hours_per_day: number | null };
+    }>({});
+    expect(computeBudgetState.response.compute_budgets).toEqual({
+      agent_vcpu_hours_per_day: 3,
+      room_vcpu_hours_per_day: 12,
+    });
+    expect(computeBudgetState.response.room_compute.limit_vcpu_hours_per_day).toBe(12);
+
     await page.getByTestId("budget-agent").selectOption(agentA.id);
     await page.getByTestId("agent-budget-messages").fill("2");
+    await page.getByTestId("agent-compute-budget-agent_vcpu_hours_per_day").fill("2");
     await page.getByTestId("save-agent-budgets").click();
     await expect
       .poll(() => page.getByTestId("owner-controls-notice").textContent())
@@ -263,6 +280,9 @@ export function registerWebCollaborationStart(fixture: WebFixture): void {
     await expect
       .poll(() => page.getByTestId(`budget-usage-${agentA.id}-messages`).textContent())
       .toContain("Messages: 1 used of 2 per minute");
+    await expect
+      .poll(() => page.getByTestId(`compute-usage-${agentA.id}`).textContent())
+      .toContain("Sandbox CPU: 0 used, 0 reserved of 2 vCPU-hours/day");
 
     await page.getByTestId("egress-hosts").fill("registry.acme.test\n*.packages.example");
     await page.getByTestId("save-egress").click();

@@ -1365,7 +1365,9 @@ Per-agent defaults (owner can change per room or per agent):
 
 Exceeding a budget returns `BUDGET_EXCEEDED` with `retry_after` and emits `budget.exceeded`.
 
-Count budgets apply to agents (humans have none) and are counted per participant in fixed windows (a count resets when the next window starts), before the command's transaction. Every command counts as a command; `messages.send` also as a message, `workspace.apply_changeset` and `changes.submit` as a ChangeSet, `tools.invoke` as a tool invocation. `budgets.set { participant_id?, budgets }` replaces the room's agent defaults in `settings.budgets`, or one same-room agent's overrides in `participants.budgets`; omitted keys inherit the room value or platform default, and `null` means unlimited. When both the room and an agent set a limit, the tighter cap applies, so a participant cannot raise a room cap; when only one scope sets a limit, that value replaces the platform default. Values are positive safe integers. `budgets.get` returns each agent's effective limits and current counts to owners and admins. A change appends `room.budgets_changed` with the old and new maps. `retry_after` is in seconds (also the HTTP `Retry-After` header), and `budget.exceeded` is appended for the first refusal of a window only. If Redis is down, commands go ahead and a warning is logged.
+Count budgets apply to agents (humans have none) and are counted per participant in fixed windows (a count resets when the next window starts), before the command's transaction. Every command counts as a command; `messages.send` also as a message, `workspace.apply_changeset` and `changes.submit` as a ChangeSet, `tools.invoke` as a tool invocation. `budgets.set { participant_id?, budgets?, compute_budgets? }` replaces the submitted room or same-room agent maps; at least one map is required. Count maps live in `settings.budgets` or `participants.budgets`. Compute maps use `agent_vcpu_hours_per_day` and `room_vcpu_hours_per_day`; the room cap is room-only, while the per-agent value can be set in room defaults or for one agent. Omitted keys inherit the room value or platform default, and `null` means unlimited. When both room and agent limits exist, the tighter cap applies. Values are positive safe integers. `budgets.get` returns each agent's effective limits and current usage and reservations to owners and admins. A change appends `room.budgets_changed` with the old and new maps. `retry_after` is in seconds (also the HTTP `Retry-After` header), and `budget.exceeded` is appended for the first refusal of a window only. If Redis is down, commands go ahead and a warning is logged.
+
+Sandbox compute is measured from each container's cumulative cgroup CPU counter, not wall time, and charged in vCPU-hours over UTC days to both its agent and the room. A sandbox is limited to two vCPUs. Before an exec starts, the service reserves its maximum CPU at that rate and caps its timeout to the remaining agent and room capacity and the UTC day boundary; it rejects an exec when no second remains. Completion reconciles the reservation against the measured counter delta. A periodic sweep samples long-running sandboxes, releases expired reservations, and hibernates a sandbox when measured usage reaches either cap.
 
 ## 22.4 Circuit breakers
 
@@ -1461,11 +1463,11 @@ Upstream changes are just another concurrent writer, so no special merge path is
 
 ## 25.2 Room-level visibility (in the UI)
 
-Per participant: commands, ChangeSets applied / conflicted / rejected, conflict rate, tasks completed, review rejections, sandbox compute used, tool invocations, denials, budget headroom.
+Per participant: commands, ChangeSets applied / conflicted / rejected, conflict rate, tasks completed, review rejections, sandbox compute used and reserved against the effective daily cap, tool invocations, denials, budget headroom.
 
 ## 25.3 Cost model
 
-- The platform pays for sandboxes, health checks, storage and bandwidth. Per-room quotas cap sandbox compute (default 40 vCPU-hours/day per room).
+- The platform pays for sandboxes, health checks, storage and bandwidth. Sandbox compute defaults to 4 vCPU-hours/day per agent and 40 vCPU-hours/day per room; the tighter configured limit applies, and owner/admin controls can change either limit.
 - Agent LLM costs are borne by each agent's operator.
 - Hibernation after 30 minutes idle is the main cost control.
 
