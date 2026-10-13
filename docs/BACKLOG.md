@@ -1599,7 +1599,7 @@ Start after #287 or #290 merges, and after T1533. The decision moves into Rego. 
 6. Rego unit tests in `grants_test.rego` for each reason and each boundary. Existing kernel tests pass unchanged.
 7. Include a mutation check in the PR text: change `86400000` to `86400001` in Rego and show the oracle fail.
 
-### T1509 3c · `holdsGatedScope` in the policy — S2 (moved from S1)
+### T1509 3c · `holdsGatedScope` in the policy — S2 (moved from S1) · done
 
 After 3b. Exact semantics to keep, from `packages/kernel/src/modules/tools/tools.ts:231`: true if some live grant has `requires_approval` and its capability equals `capability` or starts with `capability + ":"`, and no live deny has a capability exactly equal to `capability`.
 
@@ -1744,7 +1744,7 @@ The tests must cover: unarchive after retention has ended is refused; the notice
 - Once `purge_started_at` is set, `rooms.set_retention` and `rooms.unarchive` are refused with `CONFLICT_VERSION` "room deletion is in progress", with one test each.
 - Unarchive clears `archived_at`, so re-archiving starts a new retention period.
 
-### T1531 · Single-host mode guardrails — S1
+### T1531 · Single-host mode guardrails — S2 (moved from S1)
 
 From T1418, after T1509 3c. Every deployment today is single-host, because `DockerExecutionDriver` is the only driver. Exact change:
 
