@@ -1517,7 +1517,7 @@ A local full run around 16:20 UTC on 2026-10-12 saw two failures that passed on 
 - `apps/server/src/browser-plugin.docker.test.ts`, "uses the signed room allowlist, denies unsafe destinations, and caps UTF-8 page text": a provider error.
 - `apps/server/src/compose.test.ts`: a 5 s timeout in an unidentified test.
 
-Open a fix task the next time either fails, with its saved output. Rule from now on: before rerunning a failed test, save its full output (name, error, stack).
+Open a fix task the next time either fails, with its saved output. Both became T1510 and T1511 (fixed). New, 2026-10-13: one timeout in `apps/server/src/e2e/egress-visibility.test.ts` during a full parallel run (#245 validation); output not saved, so the case is unknown. Next occurrence: save the full output first. Rule from now on: before rerunning a failed test, save its full output (name, error, stack).
 
 ### T1418 · Deployment topology vs ARCHITECTURE §4.1 — O1 (decision), owner TBD
 
@@ -1546,9 +1546,11 @@ The collaboration panel has no channel: nothing in `apps/web` calls `messages.*`
 
 Only `POST /v1/auth/dev-login` exists. Add OAuth (§15.3) behind configuration, with the session token in an HttpOnly cookie, and keep dev-login for development only. Required before any non-demo deployment.
 
-### T1504 · Budget configuration — unassigned
+### T1504 · Budget configuration — S2
 
 Budgets are enforced, but nothing sets `rooms.settings.budgets` or `participants.budgets`. Add an owner command and an owner-controls section, plus the sandbox-compute budget (§22).
+
+PR A (#245, `budgets.set`/`budgets.get`, `room.budgets_changed`) and the Owner controls section (#246) are merged. PR B, sandbox CPU metering: migration **0033**. Meter cumulative cgroup CPU per sandbox, charging the delta at exec end, on a periodic sweep and at stop, to the owning participant. Enforce the per-agent 4 vCPU-h/day and room 40 vCPU-h/day limits with TTL'd reservations, refuse a new exec when either is exhausted, and cap timeouts by the remaining budget.
 
 ### T1505 · Terminal tab — unassigned
 
