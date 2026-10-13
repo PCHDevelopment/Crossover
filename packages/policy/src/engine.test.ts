@@ -5,6 +5,7 @@ import {
   createPolicyEngine,
   parseDecision,
   parseGrantCheck,
+  parseHoldsGatedScope,
   PolicyEngineError,
   initPolicy,
   type AuthzFacts,
@@ -42,6 +43,24 @@ describe("the compiled policy", () => {
         participant: { status: "PAUSED", authority: "MEMBER", role: "DEVELOPER" },
       }),
     ).toEqual({ allow: false, code: "PARTICIPANT_PAUSED", reason: "participant_paused" });
+  });
+
+  it("answers whether a gated grant covers a capability without an exact deny", async () => {
+    const engine = await createPolicyEngine(await readFile(WASM));
+    expect(
+      engine.holdsGatedScope(
+        "tools.invoke",
+        [{ capability: "tools.invoke:repo/main", requires_approval: true }],
+        [],
+      ),
+    ).toBe(true);
+    expect(
+      engine.holdsGatedScope(
+        "tools.invoke",
+        [{ capability: "tools.invoke:repo/main", requires_approval: true }],
+        [{ capability: "tools.invoke" }],
+      ),
+    ).toBe(false);
   });
 
   it("refuses facts that are missing or of the wrong type instead of guessing", async () => {
@@ -143,5 +162,23 @@ describe("parseGrantCheck accepts exactly one well-formed answer", () => {
     ],
   ])("rejects %s", (_name, result) => {
     expect(() => parseGrantCheck(result)).toThrow(PolicyEngineError);
+  });
+});
+
+describe("parseHoldsGatedScope accepts exactly one boolean answer", () => {
+  it("takes true and false", () => {
+    expect(parseHoldsGatedScope([{ result: true }])).toBe(true);
+    expect(parseHoldsGatedScope([{ result: false }])).toBe(false);
+  });
+
+  it.each([
+    ["no result", undefined],
+    ["an empty result set", []],
+    ["two results", [{ result: true }, { result: false }]],
+    ["an undefined result", [{}]],
+    ["a non-boolean result", [{ result: 1 }]],
+    ["a result with another field", [{ result: true, extra: false }]],
+  ])("rejects %s", (_name, result) => {
+    expect(() => parseHoldsGatedScope(result)).toThrow(PolicyEngineError);
   });
 });

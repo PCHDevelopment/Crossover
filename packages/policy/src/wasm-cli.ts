@@ -26,6 +26,7 @@ const ENTRYPOINTS = [
   "crossover/authz/decision",
   "crossover/tiers/tier",
   "crossover/grants/grant_check",
+  "crossover/grants/holds_gated_scope",
 ];
 
 main();
