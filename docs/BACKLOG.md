@@ -1804,3 +1804,15 @@ Do this first: it goes ahead of T1533 and 3b. The exact change:
      - Repeat with a broken `index.js`, then expect RED. The RED/GREEN pair proves the files were mounted.
    - Give the new e2e case a measured timeout, as T1529 does.
 5. No other changes.
+
+### T1535 · Dev UI proxies `/mcp` — S2
+
+Found by O1 while preparing Peter's hands-on run. In development the web app runs on Vite (:5173), which proxies only `/v1` to the server (:8080). The Setup tab's MCP example (`apps/web/src/RoomSetupView.tsx`, `mcpConfigExample`) builds its URL from `window.location.origin`, so under Vite it points agents at `http://localhost:5173/mcp`, which returns the web app. In production the server serves both, so the URL is right there.
+
+The exact change:
+
+1. In `apps/web/vite.config.ts`, add `"/mcp": { target: "http://127.0.0.1:8080", changeOrigin: false }` to `server.proxy`, next to `/v1`. No `ws`; MCP here is plain HTTP.
+2. Update the comment above `defineConfig` to say it proxies `/v1` and `/mcp`.
+3. Change nothing else: not `RoomSetupView.tsx`, not the server.
+
+**Proof, in the PR text:** with the server on :8080 and `pnpm --filter @crossover/web dev`, run `curl -sS -o /dev/null -w '%{http_code} %{content_type}\n' -X POST http://localhost:5173/mcp -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'` before and after. Before shows the web app (`text/html`); after shows the server's JSON error for a missing token (401 or the MCP error envelope). Paste both lines.
