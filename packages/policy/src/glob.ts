@@ -21,12 +21,13 @@ export function wildcardMatch(pattern: string, text: string): boolean {
   let starP = -1;
   let starT = 0;
   while (t < text.length) {
-    if (p < pattern.length && (pattern[p] === "?" || pattern[p] === text[t])) {
-      p++;
-      t++;
-    } else if (p < pattern.length && pattern[p] === "*") {
+    // A `*` in the pattern is always a wildcard, even where the text has a `*` there too.
+    if (p < pattern.length && pattern[p] === "*") {
       starP = p++;
       starT = t;
+    } else if (p < pattern.length && (pattern[p] === "?" || pattern[p] === text[t])) {
+      p++;
+      t++;
     } else if (starP !== -1) {
       p = starP + 1;
       t = ++starT;

@@ -78,3 +78,31 @@ it("caches a base tree's line count across ChangeSets", async () => {
   expect(second.reasons).toContain("lines_removed");
   expect(spy.mock.calls.filter(([args]) => args[0] === "grep")).toHaveLength(1);
 });
+
+it("protects a file whose name has a * in it just like any other under a * pattern", async () => {
+  const root = await mkdtemp(join(tmpdir(), "crossover-circuit-breaker-star-"));
+  roots.push(root);
+  const repoPath = await initRoomRepo(root, "room_test");
+  const options = { gitDir: repoPath, timeoutMs: 10_000 };
+  const empty = (await git(["rev-parse", "refs/room/canonical"], options)).stdout.trim();
+  const base = await materialize(repoPath, empty, [
+    { type: "create", path: "small.txt", content: "one\n" },
+  ]);
+  const candidate = await materialize(repoPath, base, [
+    { type: "modify", path: "small.txt", content: "two\n" },
+  ]);
+
+  // `secrets/*` once failed to match `secrets/*key` (the pattern's * was compared with the file
+  // name's *), which let such a file past the protected-path check.
+  const assessment = await assessCircuitBreaker({
+    repoPath,
+    baseCommit: base,
+    candidateTree: candidate,
+    touchedPaths: ["secrets/*key", "secrets/**", "secrets/a", "other/*key"],
+    protectedPatterns: ["secrets/*"],
+    rejectedRecently: false,
+  });
+
+  expect(assessment.protected_paths).toEqual(["secrets/*key", "secrets/**", "secrets/a"].sort());
+  expect(assessment.reasons).toContain("protected_path");
+});
