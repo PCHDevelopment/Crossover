@@ -30,6 +30,61 @@ interface Approval {
 
 type AssignableRole = Exclude<Participant["role"], "LEAD">;
 const ASSIGNABLE_ROLES: readonly AssignableRole[] = ["DEVELOPER", "REVIEWER", "OBSERVER"];
+const BUDGET_FIELDS = [
+  { name: "commands", label: "Commands", window: "per minute", default: 120 },
+  { name: "messages", label: "Messages", window: "per minute", default: 10 },
+  { name: "changesets", label: "ChangeSets", window: "per hour", default: 60 },
+  { name: "tool_invocations", label: "Tool invocations", window: "per hour", default: 100 },
+] as const;
+type BudgetName = (typeof BUDGET_FIELDS)[number]["name"];
+type BudgetValues = Partial<Record<BudgetName, number | null>>;
+type BudgetForm = Record<BudgetName, { value: string; unlimited: boolean }>;
+
+interface BudgetAgentStatus {
+  participant_id: string;
+  display_name: string;
+  status: string;
+  budgets: BudgetValues;
+  effective: Record<BudgetName, number | null>;
+  usage: Record<BudgetName, number>;
+}
+
+interface BudgetStatus {
+  room_budgets: BudgetValues;
+  agents: BudgetAgentStatus[];
+}
+
+const budgetForm = (values: BudgetValues): BudgetForm =>
+  Object.fromEntries(
+    BUDGET_FIELDS.map(({ name }) => {
+      const value = values[name];
+      return [
+        name,
+        {
+          value: value === undefined || value === null ? "" : String(value),
+          unlimited: value === null,
+        },
+      ];
+    }),
+  ) as BudgetForm;
+
+function budgetValues(form: BudgetForm): BudgetValues {
+  const values: BudgetValues = {};
+  for (const { name, label } of BUDGET_FIELDS) {
+    const field = form[name];
+    if (field.unlimited) {
+      values[name] = null;
+      continue;
+    }
+    if (!field.value.trim()) continue;
+    const value = Number(field.value);
+    if (!Number.isSafeInteger(value) || value < 1) {
+      throw new Error(`${label} must be a positive whole number.`);
+    }
+    values[name] = value;
+  }
+  return values;
+}
 
 const list = (value: unknown): string[] =>
   Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
@@ -105,6 +160,12 @@ export function OwnerControlsView(props: {
   const [expiresAt, setExpiresAt] = useState("");
   const [requiresApproval, setRequiresApproval] = useState(false);
   const [approvals, setApprovals] = useState<Approval[]>([]);
+  const [budgetStatus, setBudgetStatus] = useState<BudgetStatus>();
+  const [roomBudgetForm, setRoomBudgetForm] = useState<BudgetForm>(() => budgetForm({}));
+  const [budgetTargetId, setBudgetTargetId] = useState("");
+  const budgetTargetIdRef = useRef("");
+  const [agentBudgetForm, setAgentBudgetForm] = useState<BudgetForm>(() => budgetForm({}));
+  const [budgetLoading, setBudgetLoading] = useState(false);
 
   const refreshCapabilities = useCallback(async () => {
     if (!targetId) {
@@ -123,6 +184,29 @@ export function OwnerControlsView(props: {
     setApprovals(result.response.approvals);
   }, [room]);
 
+  const refreshBudgetStatus = useCallback(async (): Promise<BudgetStatus> => {
+    const result = await room.api.budgets.get<BudgetStatus>({});
+    setBudgetStatus(result.response);
+    return result.response;
+  }, [room]);
+
+  const loadBudgetControls = useCallback(async () => {
+    setBudgetLoading(true);
+    try {
+      const status = await refreshBudgetStatus();
+      setRoomBudgetForm(budgetForm(status.room_budgets));
+      const target =
+        status.agents.find((agent) => agent.participant_id === budgetTargetIdRef.current) ??
+        status.agents[0];
+      const nextTargetId = target?.participant_id ?? "";
+      budgetTargetIdRef.current = nextTargetId;
+      setBudgetTargetId(nextTargetId);
+      setAgentBudgetForm(budgetForm(target?.budgets ?? {}));
+    } finally {
+      setBudgetLoading(false);
+    }
+  }, [refreshBudgetStatus]);
+
   useEffect(() => {
     void refreshCapabilities().catch((err: unknown) => setError(errorText(err)));
   }, [refreshCapabilities]);
@@ -136,8 +220,18 @@ export function OwnerControlsView(props: {
       if (event.type === "capability.granted" || event.type === "capability.revoked") {
         void refreshCapabilities().catch((err: unknown) => setError(errorText(err)));
       }
+      if (event.type === "room.budgets_changed") {
+        void loadBudgetControls().catch((err: unknown) => setError(errorText(err)));
+      }
+      if (event.type === "budget.exceeded") {
+        void refreshBudgetStatus().catch((err: unknown) => setError(errorText(err)));
+      }
     });
-  }, [onEvent, refreshApprovals, refreshCapabilities]);
+  }, [loadBudgetControls, onEvent, refreshApprovals, refreshBudgetStatus, refreshCapabilities]);
+
+  useEffect(() => {
+    void loadBudgetControls().catch((err: unknown) => setError(errorText(err)));
+  }, [loadBudgetControls]);
 
   const perform = async (label: string, action: () => Promise<void>) => {
     setBusy(true);
@@ -204,6 +298,40 @@ export function OwnerControlsView(props: {
       return;
     void perform("Save protected paths", async () => {
       await room.api.room.set_protected_paths({ patterns });
+    });
+  };
+
+  const submitRoomBudgets = (event: FormEvent) => {
+    event.preventDefault();
+    let budgets: BudgetValues;
+    try {
+      budgets = budgetValues(roomBudgetForm);
+    } catch (err) {
+      setError(errorText(err));
+      return;
+    }
+    if (!window.confirm("Replace the room's default limits for every agent?")) return;
+    void perform("Save room budgets", async () => {
+      await room.api.budgets.set({ budgets });
+      await loadBudgetControls();
+    });
+  };
+
+  const submitAgentBudgets = (event: FormEvent) => {
+    event.preventDefault();
+    if (!budgetTargetId) return;
+    let budgets: BudgetValues;
+    try {
+      budgets = budgetValues(agentBudgetForm);
+    } catch (err) {
+      setError(errorText(err));
+      return;
+    }
+    const target = budgetStatus?.agents.find((agent) => agent.participant_id === budgetTargetId);
+    if (!target || !window.confirm(`Replace ${target.display_name}'s budget overrides?`)) return;
+    void perform(`Save ${target.display_name}'s budgets`, async () => {
+      await room.api.budgets.set({ participant_id: budgetTargetId, budgets });
+      await loadBudgetControls();
     });
   };
 
@@ -387,6 +515,158 @@ export function OwnerControlsView(props: {
               </li>
             ))}
         </ul>
+      </section>
+
+      <section aria-label="Budgets">
+        <h3>Agent budgets</h3>
+        <p className="muted">
+          Room defaults apply to each agent. Leave a value blank to inherit the room value or
+          platform default; No limit removes this scope's cap, while a limit from the other scope
+          still applies.
+        </p>
+        <button
+          type="button"
+          data-testid="refresh-budgets"
+          disabled={busy || budgetLoading}
+          onClick={() =>
+            void loadBudgetControls().catch((err: unknown) => setError(errorText(err)))
+          }
+        >
+          {budgetLoading ? "Loading budgets…" : "Refresh budget status"}
+        </button>
+
+        <form onSubmit={submitRoomBudgets}>
+          <h4>Room defaults</h4>
+          {BUDGET_FIELDS.map(({ name, label, window, default: defaultValue }) => (
+            <label key={name}>
+              {label} ({window}; platform default {defaultValue})
+              <input
+                data-testid={`room-budget-${name}`}
+                type="number"
+                min={1}
+                step={1}
+                value={roomBudgetForm[name].value}
+                disabled={busy || roomBudgetForm[name].unlimited}
+                onChange={(event) =>
+                  setRoomBudgetForm((current) => ({
+                    ...current,
+                    [name]: { ...current[name], value: event.target.value },
+                  }))
+                }
+              />
+              <span>
+                <input
+                  data-testid={`room-budget-unlimited-${name}`}
+                  type="checkbox"
+                  checked={roomBudgetForm[name].unlimited}
+                  disabled={busy}
+                  onChange={(event) =>
+                    setRoomBudgetForm((current) => ({
+                      ...current,
+                      [name]: { ...current[name], unlimited: event.target.checked },
+                    }))
+                  }
+                />
+                No limit
+              </span>
+            </label>
+          ))}
+          <button data-testid="save-room-budgets" disabled={busy || budgetLoading}>
+            Save room defaults
+          </button>
+        </form>
+
+        <form onSubmit={submitAgentBudgets}>
+          <h4>Agent overrides</h4>
+          <label>
+            Agent
+            <select
+              data-testid="budget-agent"
+              value={budgetTargetId}
+              disabled={busy || budgetLoading || !budgetStatus?.agents.length}
+              onChange={(event) => {
+                const participantId = event.target.value;
+                budgetTargetIdRef.current = participantId;
+                setBudgetTargetId(participantId);
+                const target = budgetStatus?.agents.find(
+                  (agent) => agent.participant_id === participantId,
+                );
+                setAgentBudgetForm(budgetForm(target?.budgets ?? {}));
+              }}
+            >
+              <option value="">Choose an agent</option>
+              {budgetStatus?.agents.map((agent) => (
+                <option key={agent.participant_id} value={agent.participant_id}>
+                  {agent.display_name} ({agent.status.toLowerCase()})
+                </option>
+              ))}
+            </select>
+          </label>
+          {budgetTargetId ? (
+            <>
+              {BUDGET_FIELDS.map(({ name, label, window }) => (
+                <label key={name}>
+                  {label} ({window})
+                  <input
+                    data-testid={`agent-budget-${name}`}
+                    type="number"
+                    min={1}
+                    step={1}
+                    value={agentBudgetForm[name].value}
+                    disabled={busy || agentBudgetForm[name].unlimited}
+                    onChange={(event) =>
+                      setAgentBudgetForm((current) => ({
+                        ...current,
+                        [name]: { ...current[name], value: event.target.value },
+                      }))
+                    }
+                  />
+                  <span>
+                    <input
+                      data-testid={`agent-budget-unlimited-${name}`}
+                      type="checkbox"
+                      checked={agentBudgetForm[name].unlimited}
+                      disabled={busy}
+                      onChange={(event) =>
+                        setAgentBudgetForm((current) => ({
+                          ...current,
+                          [name]: { ...current[name], unlimited: event.target.checked },
+                        }))
+                      }
+                    />
+                    No limit
+                  </span>
+                </label>
+              ))}
+              <button data-testid="save-agent-budgets" disabled={busy || budgetLoading}>
+                Save agent overrides
+              </button>
+            </>
+          ) : (
+            <p className="muted">No agents in this room.</p>
+          )}
+        </form>
+
+        <h4>Current usage</h4>
+        {!budgetStatus?.agents.length ? (
+          <p className="muted">No agent budget usage yet.</p>
+        ) : (
+          <ul className="list" data-testid="budget-usage-list">
+            {budgetStatus.agents.map((agent) => (
+              <li key={agent.participant_id}>
+                <strong>{agent.display_name}</strong>
+                <ul>
+                  {BUDGET_FIELDS.map(({ name, label, window }) => (
+                    <li key={name} data-testid={`budget-usage-${agent.participant_id}-${name}`}>
+                      {label}: {agent.usage[name]} used of {agent.effective[name] ?? "unlimited"}{" "}
+                      {window}
+                    </li>
+                  ))}
+                </ul>
+              </li>
+            ))}
+          </ul>
+        )}
       </section>
 
       <section aria-label="Capabilities">
