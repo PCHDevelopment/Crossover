@@ -2272,6 +2272,7 @@ describe("loadConfig", () => {
     DATABASE_URL: "postgres://x",
     REDIS_URL: "redis://x",
     WORKSPACE_ROOT: "./data",
+    ALLOW_UNSANDBOXED_DEV: "1",
   };
 
   it("applies defaults: loopback, port 8080, dev login off, a node id", () => {
@@ -2320,6 +2321,8 @@ describe("loadConfig", () => {
     const production = {
       ...env,
       NODE_ENV: "production",
+      SANDBOX_RUNTIME: "runsc",
+      ALLOW_UNSANDBOXED_DEV: undefined,
       SANDBOX_DISK_ENFORCEMENT: "soft",
       INTEGRATION_KMS_KEY_ID: "alias/crossover-test",
       DEV_LOGIN: "true",

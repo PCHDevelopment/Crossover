@@ -5,6 +5,7 @@ const env = {
   DATABASE_URL: "postgres://x",
   REDIS_URL: "redis://x",
   WORKSPACE_ROOT: "./data",
+  ALLOW_UNSANDBOXED_DEV: "1",
 };
 
 describe("OAuth provider configuration", () => {
@@ -25,6 +26,8 @@ describe("sandbox disk enforcement configuration", () => {
       loadConfig({
         ...env,
         NODE_ENV: "production",
+        SANDBOX_RUNTIME: "runsc",
+        ALLOW_UNSANDBOXED_DEV: undefined,
         SANDBOX_DISK_ENFORCEMENT: "soft",
         INTEGRATION_KMS_KEY_ID: "alias/crossover-test",
       }),
@@ -32,13 +35,22 @@ describe("sandbox disk enforcement configuration", () => {
   });
 
   it("defaults production to hard and requires operator volume quota configuration", () => {
-    expect(() => loadConfig({ ...env, NODE_ENV: "production" })).toThrow(
+    expect(() =>
+      loadConfig({
+        ...env,
+        NODE_ENV: "production",
+        SANDBOX_RUNTIME: "runsc",
+        ALLOW_UNSANDBOXED_DEV: undefined,
+      }),
+    ).toThrow(
       /SANDBOX_DISK_ENFORCEMENT=hard requires SANDBOX_VOLUME_DRIVER and SANDBOX_VOLUME_OPTS/,
     );
     expect(
       loadConfig({
         ...env,
         NODE_ENV: "production",
+        SANDBOX_RUNTIME: "runsc",
+        ALLOW_UNSANDBOXED_DEV: undefined,
         INTEGRATION_KMS_KEY_ID: "alias/crossover-test",
         SANDBOX_VOLUME_DRIVER: "local",
         SANDBOX_VOLUME_OPTS: '{"type":"none","device":"/srv/sandbox","o":"bind,pquota"}',
@@ -62,6 +74,8 @@ describe("sandbox disk enforcement configuration", () => {
       loadConfig({
         ...env,
         NODE_ENV: "production",
+        SANDBOX_RUNTIME: "runsc",
+        ALLOW_UNSANDBOXED_DEV: undefined,
         SANDBOX_DISK_ENFORCEMENT: "soft",
       }),
     ).toThrow(/INTEGRATION_KMS_KEY_ID is required in production/);
@@ -69,6 +83,8 @@ describe("sandbox disk enforcement configuration", () => {
       loadConfig({
         ...env,
         NODE_ENV: "production",
+        SANDBOX_RUNTIME: "runsc",
+        ALLOW_UNSANDBOXED_DEV: undefined,
         SANDBOX_DISK_ENFORCEMENT: "soft",
         INTEGRATION_KMS_KEY_ID: "alias/crossover-test",
         INTEGRATION_SECRET_KEY: "ab".repeat(32),
@@ -90,6 +106,25 @@ describe("sandbox disk enforcement configuration", () => {
       sandboxRuntime: "runsc",
     });
     expect(() => loadConfig({ ...env, SANDBOX_RUNTIME: "  " })).toThrow(/SANDBOX_RUNTIME/);
+  });
+
+  it("requires gVisor unless the development-only opt-out is enabled", () => {
+    expect(
+      loadConfig({ ...env, SANDBOX_RUNTIME: "runsc", ALLOW_UNSANDBOXED_DEV: undefined }),
+    ).toMatchObject({ sandboxRuntime: "runsc", allowUnsandboxedDev: false });
+    expect(() =>
+      loadConfig({ ...env, SANDBOX_RUNTIME: undefined, ALLOW_UNSANDBOXED_DEV: undefined }),
+    ).toThrow(
+      "Invalid server configuration:\n  SANDBOX_RUNTIME=runsc is required: sandboxes share this host (single-host mode, ARCHITECTURE §4.1). Set ALLOW_UNSANDBOXED_DEV=1 only for local development.",
+    );
+    expect(
+      loadConfig({ ...env, SANDBOX_RUNTIME: undefined, ALLOW_UNSANDBOXED_DEV: "1" }),
+    ).toMatchObject({ allowUnsandboxedDev: true });
+    expect(() =>
+      loadConfig({ ...env, NODE_ENV: "production", ALLOW_UNSANDBOXED_DEV: "1" }),
+    ).toThrow(
+      "Invalid server configuration:\n  ALLOW_UNSANDBOXED_DEV is refused when NODE_ENV=production",
+    );
   });
 
   it("configures only a named egress proxy and validates its port", () => {
