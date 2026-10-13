@@ -12,6 +12,10 @@ import { resolveGitInternalListenHost } from "./git-internal-listener.js";
  */
 async function main(): Promise<void> {
   const config = loadConfig();
+  console.warn("single-host mode: not for multi-tenant or untrusted use (ARCHITECTURE §4.1)");
+  if (config.allowUnsandboxedDev) {
+    console.warn("ALLOW_UNSANDBOXED_DEV=1: sandboxes run WITHOUT gVisor (development only)");
+  }
   await assertGitVersion();
 
   const migrationPool = createPool(config.databaseUrl);

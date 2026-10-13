@@ -158,9 +158,13 @@ describe.skipIf(!image)("deployed server topology", () => {
       "--env",
       "PORT=8080",
       "--env",
+      "NODE_ENV=development",
+      "--env",
       "DEV_LOGIN=true",
       "--env",
       "DEV_LOGIN_ALLOW_PRODUCTION=true", // explicit opt-in for this disposable topology fixture
+      "--env",
+      "ALLOW_UNSANDBOXED_DEV=1",
       "--env",
       "INTEGRATION_KMS_KEY_ID=alias/crossover-deploy-topology-test",
       "--env",
