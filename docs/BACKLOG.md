@@ -1676,13 +1676,13 @@ Step 1: put the exit code, whether the call timed out, and the first 500 bytes o
 
 ### T1529 · Audit heavy tests for measured timeouts — Q1
 
-Review 15's rule is that any test that loops over thousands of cases, or starts containers or databases, gets an explicit timeout with its measured time in a comment, in the PR that adds it. Tests written before the rule have failed unrelated PRs (T1510, T1517, T1522, T1527). Find the rest before they do:
+Review 15's rule: a test that takes over 2 s gets an explicit timeout with its measurements in a comment. Older tests on vitest's 5 s default have failed unrelated PRs (T1510, T1517, T1522, T1527). Do exactly these steps, and post the results of step 3 before any code.
 
-1. Run `pnpm test` with vitest's JSON reporter twice on an idle machine and twice with the CPUs oversubscribed about three times over (as S1 did for T1527). List every test that takes over 1 s in any run and is still on the 5 s default. `packages/policy/src/authorize.test.ts` (2.9 s for the file, 0.9 s for one case, seen by S2) is a known candidate.
-2. For each test over 2 s oversubscribed, give it an explicit timeout of about seven times the oversubscribed time, with the numbers in a comment. Keep every case and every assertion.
-3. Post the table (test, idle, oversubscribed, budget) before the PR. Ship it in PRs of at most 400 non-test lines, grouped by package.
-
-Do not change product code in this task. If a test is slow because the product is slow, open a separate task.
+1. On main, run `pnpm test -- --reporter=json --outputFile=t-idle-N.json` twice (N = 1, 2) with nothing else running.
+2. Run it twice more under load. In another shell, start one CPU burner per core, three times over: `for i in $(seq $((3*$(nproc)))); do (while :; do :; done) & done`. Save `t-load-N.json`, then `kill` the burners.
+3. From the four files, list every test whose largest duration is over 2,000 ms and which has no timeout argument in its source. One row per test: file, test name, idle max (ms), load max (ms), budget. Budget = load max × 7, rounded up to the next 5,000 ms, and never below 15,000 ms. Include `packages/workspace/src/docker-execution-driver.test.ts` and `packages/policy/src/authorize.test.ts` even if they come in under 2 s, so we have their numbers.
+4. After O1 approves the table: for each row, pass the budget as the test's timeout argument. Add a one-line comment above the test: `// Measured (T1529): idle <x> ms, 3x load <y> ms; budget 7x.` Change nothing else: no assertions, no cases, no product code.
+5. One PR per package, at most 400 changed lines each.
 
 ### T1530 · Archive retention, unarchive and purge — S2
 
@@ -1712,16 +1712,20 @@ Development keeps working through an explicit `ALLOW_UNSANDBOXED_DEV=1`. That fl
 
 From T1418. An `ExecutionDriver` that runs sandboxes on separate sandbox hosts over an authenticated channel (mutual TLS or signed requests), with host registration, health checks and capacity, and the same lifecycle, output streaming and compute accounting as `DockerExecutionDriver`. It is required before any multi-tenant or untrusted deployment. It is not needed for the MVP demo. Scope and split it into a milestone when it is scheduled.
 
-### T1533 · Stop wasted CI runs — Q1
+### T1533 · Stop wasted CI runs — S1
 
-From Peter, 2026-10-13. The repository is private and CI runs on one self-hosted runner, so every run that nobody needs delays the ones people are waiting for. Do this before T1529's PRs.
+From Peter, 2026-10-13. The repository is private and CI runs on one self-hosted runner, so every unneeded run delays the ones people are waiting for. O1 has already investigated, so this is the whole change.
 
-1. **Cancel superseded runs.** Add a `concurrency` group to `.github/workflows/ci.yml` keyed on the PR number, falling back to the ref (`${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}`). Set `cancel-in-progress` to true only for `pull_request` events. Runs on `main`, scheduled runs and manual runs must never be cancelled.
-2. **Stop duplicate runs of the same commit.** Some PRs got two `check` runs for the same head (for example #275 at 11:51, run 38393066270 next to 38393067806). Find which events triggered both. A retarget or a base change can fire `pull_request` twice, and a push to a branch can also fire `push`. Restrict the triggers so that one commit on one PR gets exactly one run. Keep `push` to `main`, `schedule` and `workflow_dispatch` as they are.
-3. **Leave the runner alone.** No change to `runs-on`, ports or services. Adding runners is a separate decision for Peter.
+**Cause, found by O1.** #275's head `f7ac994` got two `pull_request` runs a second apart (38393066270 and 38393067806). One came from pushing the merge of main, the other from retargeting the base. Superseded pushes also leave stale runs queued.
 
-Prove it in the PR text with links to runs:
+**Change.** Add exactly this at the top level of `.github/workflows/ci.yml`, after `on:`:
 
-- two pushes in a row to a test PR, where the first run is cancelled;
-- a retarget, which starts one run;
-- a push to `main` that runs to the end even while another run is going.
+```yaml
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+```
+
+Change nothing else: no trigger, `runs-on`, port or service changes. Pushes to `main`, nightly runs and manual runs keep their own groups and are never cancelled.
+
+**Proof.** O1 checks the Actions history after merge. S1 has no GitHub access on the current machine, so the PR text only states the change.
