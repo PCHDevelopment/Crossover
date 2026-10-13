@@ -16,6 +16,7 @@ import { newId } from "@crossover/protocol";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { composeServer, type CrossoverServer } from "../compose.js";
 import type { ServerConfig } from "../config.js";
+import { browserNavigateParams } from "../browser-plugin.js";
 
 /** The tool registry (T1201) through the real server: the real policy, the prepare phase and the ledger. */
 
@@ -35,7 +36,7 @@ const runner: ToolRunner = {
     if (invocation.tool === "github.read_repository" && args["repo"] === "acme/large")
       return { result: { content: "x".repeat(240 * 1024) } };
     if (args["title"] === "slow") await gate;
-    if (args["title"] === "hang" || args["url"] === "hang")
+    if (args["title"] === "hang" || args["url"] === "https://hang.test/")
       await new Promise<void>((resolve) => hung.push(resolve));
     if (args["title"] === "boom")
       throw new ToolProviderError("GitHub is down", { retryable: true });
@@ -82,7 +83,7 @@ function registry() {
     description: "Load a page",
     capability: "browser.navigate",
     tier: 2,
-    input: z.object({ url: z.string() }),
+    input: browserNavigateParams,
     idempotent: true,
   });
   r.register({
@@ -398,6 +399,18 @@ describe("tools over HTTP", () => {
     expect(unheld.body).not.toContain("issues");
     expect(unheld.json()).toEqual(unknown.json());
   });
+
+  it("the browser URL policy rejects HTTP through tools.invoke before the runner starts", async () => {
+    const r = await newRoom();
+    await ok(await r.grant("browser.navigate"));
+    const before = invoked.length;
+    const invalid = await r.invoke("browser.navigate", {
+      url: "http://browser-fixture.test/",
+    });
+    expect(invalid.statusCode).toBe(400);
+    expect(invalid.json().error).toMatchObject({ code: "VALIDATION", retryable: false });
+    expect(invoked.length).toBe(before);
+  });
 });
 
 /** Exactly-once (review of T1201): the key is claimed before the effect, and the outcome kept whatever happens next. */
@@ -465,7 +478,10 @@ describe("tools run exactly once", () => {
   it("a timeout of an idempotent tool may be retried: the key is released and the retry runs it again", async () => {
     const r = await newRoom();
     await ok(await r.grant("browser.navigate"));
-    const request = envelope("tools.invoke", { tool: "browser.navigate", args: { url: "hang" } });
+    const request = envelope("tools.invoke", {
+      tool: "browser.navigate",
+      args: { url: "https://hang.test/" },
+    });
     const before = invoked.length;
     const first = await send(r, request);
     expect(first.statusCode).toBe(503);

@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ToolRegistry, type ToolExecutionSpec, type ToolInvocation } from "@crossover/kernel";
 import { verifyPluginProxyCredential } from "@crossover/security";
 import { z } from "zod";
+import { browserNavigateParams } from "./browser-plugin.js";
 import {
   DockerToolRunner,
   resolveAwsRegionalHosts,
@@ -66,6 +67,47 @@ const invocation: ToolInvocation = {
 };
 
 describe("DockerToolRunner", () => {
+  it("rejects invalid browser URLs on the host before calling Docker", async () => {
+    const tools = new ToolRegistry();
+    tools.register({
+      name: "browser.navigate",
+      description: "Navigate to an HTTPS page",
+      capability: "browser.navigate",
+      tier: 2,
+      input: browserNavigateParams,
+      idempotent: true,
+      execution: {
+        image: `crossover-browser-plugin@sha256:${"a".repeat(64)}`,
+        command: ["node", "/app/plugins/browser/worker.mjs"],
+        egressHosts: [],
+        roomEgressAllowlist: true,
+      },
+    });
+    const invoke = vi.fn<PluginDockerInvoker>(async () => ({ code: 0, stdout: "", stderr: "" }));
+    const roomEgressHosts = vi.fn(async () => ["browser-fixture.test"]);
+    const runner = new DockerToolRunner({
+      registry: tools,
+      invoke,
+      roomEgressHosts,
+      sweepResources: false,
+    });
+    const invalidInvocation: ToolInvocation = {
+      ...invocation,
+      tool: "browser.navigate",
+      capability: "browser.navigate",
+      args: { url: "http://browser-fixture.test/" },
+    };
+
+    await expect(runner.run(invalidInvocation, new AbortController().signal)).rejects.toMatchObject(
+      {
+        name: "ToolProviderError",
+        options: { retryable: false, code: "VALIDATION" },
+      },
+    );
+    expect(roomEgressHosts).not.toHaveBeenCalled();
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
   it("derives only the invocation region's AWS service endpoints", () => {
     expect(
       resolveAwsRegionalHosts(
@@ -113,14 +155,25 @@ describe("DockerToolRunner", () => {
       scope: "arn:aws:logs:us-east-1:123456789012:log-group:app",
       args: { log_group_arn: "arn:aws:logs:us-east-1:123456789012:log-group:app" },
     };
-    const runner = new DockerToolRunner({
-      registry: registry({
-        name: "aws.read_logs",
-        capability: "aws.read_logs",
-        hosts: [],
+    const tools = new ToolRegistry();
+    tools.register({
+      name: "aws.read_logs",
+      description: "Read a CloudWatch log group",
+      capability: "aws.read_logs",
+      tier: 0,
+      input: z.object({ log_group_arn: z.string() }),
+      scope: (args) => args.log_group_arn,
+      idempotent: true,
+      execution: {
+        image: `busybox:1.36.1-musl@sha256:${"a".repeat(64)}`,
+        command: ["node", "dist/worker.js"],
+        egressHosts: [],
         awsRegionalEgress: { regionFrom: "scope.logsArn", services: ["logs"] },
         integrations: [{ provider: "aws" }],
-      }),
+      },
+    });
+    const runner = new DockerToolRunner({
+      registry: tools,
       egressProxyContainer: "crossover-egress-proxy",
       egressProxySecret: SECRET,
       invoke,
