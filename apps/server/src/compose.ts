@@ -2,7 +2,9 @@ import { createPool, withTransaction, type Pool } from "@crossover/db";
 import {
   buildGateway,
   RedisOAuthStateStore,
+  RedisRoomExportLimiter,
   type RouteRateLimiter,
+  type RoomExportLimiter,
   type SandboxOutputMetadata,
   type SandboxOutputSource,
   type OAuthProvider,
@@ -77,6 +79,7 @@ import { join } from "node:path";
 import { DockerToolRunner } from "./plugin-runner.js";
 import { AwsKmsDataKeyOperations, KmsRoomDataKeyProvider } from "./kms-secret-keys.js";
 import { ConfigKeyRoomDataKeyProvider, EnvelopeSecretStore } from "./secret-store.js";
+import { RoomExportService } from "./room-export.js";
 import {
   ConflictEscalationSweeper,
   DockerExecutionDriver,
@@ -132,6 +135,8 @@ export interface ComposeOverrides {
   tools?: { registry?: ToolRegistry; runner?: ToolRunner; timeoutMs?: number };
   /** Secret storage and provider verification seams for integration commands. */
   integrations?: IntegrationCommandsOptions;
+  /** Room export admission limiter for gateway tests. */
+  roomExportLimiter?: RoomExportLimiter;
   /** OAuth provider injection for isolated composition tests; never populated from server config. */
   oauthProviders?: Readonly<Record<string, OAuthProvider>>;
   /** How `git.import` reaches an upstream (fetcher, credentials, host check); production: HTTPS clone, no credentials. */
@@ -203,6 +208,10 @@ export async function composeServer(
   const presenceSubscriber = new RedisPresenceSubscriber(config.redisUrl);
   const ownBudgets = overrides.budgets ? undefined : new RedisBudgetLimiter(config.redisUrl);
   const budgets = overrides.budgets ?? ownBudgets!;
+  const ownRoomExportLimiter = overrides.roomExportLimiter
+    ? undefined
+    : new RedisRoomExportLimiter(config.redisUrl);
+  const roomExportLimiter = overrides.roomExportLimiter ?? ownRoomExportLimiter!;
   const now = overrides.now ?? (() => new Date());
   const authRouteLimiter: RouteRateLimiter = {
     hit: async (key, limit, windowMs) => {
@@ -551,6 +560,7 @@ export async function composeServer(
         intents: intentSubscriber,
         intentStore,
       },
+      roomExport: { source: new RoomExportService(pool), limiter: roomExportLimiter },
     });
     gitApp = buildInternalGitServer({
       pool,
@@ -582,6 +592,7 @@ export async function composeServer(
         await presenceStore.close();
         await presenceSubscriber.close();
         await ownBudgets?.close();
+        await ownRoomExportLimiter?.close();
         await oauthStateStore?.close();
         if (!overrides.pool) await pool.end();
       })());
@@ -604,6 +615,7 @@ export async function composeServer(
     await presenceStore.close();
     await presenceSubscriber.close();
     await ownBudgets?.close();
+    await ownRoomExportLimiter?.close();
     await oauthStateStore?.close();
     if (!overrides.pool) await pool.end();
     throw err;

@@ -47,6 +47,9 @@ room --room rom_123 messages list --before msg_123
 room --room rom_123 messages edit msg_123 "corrected text"
 room --room rom_123 inbox list
 room --room rom_123 inbox ack inb_1 inb_2
+room --room rom_123 sandbox status
+room --room rom_123 sandbox exec "go test ./..." --cwd svc/api --timeout-s 300
+room --room rom_123 sandbox exec-cancel exec_123
 ```
 
 `messages send` takes the text as its one argument or from `--body-file FILE` (`-` is stdin), up
@@ -55,6 +58,11 @@ comma in a `--ref` value is part of the id). The server checks that every ref na
 thing of that kind in the room (`file` refs are paths). `messages list` pages with `--before` or
 `--after` a message id, never both. `inbox list` shows what is not yet acknowledged; `--all`
 includes the rest, and `--after ITEM_ID` continues a page. `inbox ack` takes up to 100 item ids.
+
+`sandbox` acts on your own sandbox working copy (§27). `sandbox exec` starts one command, quoted
+as a single argument, and prints its `exec_id` and effective timeout; `--timeout-s` is at most
+3600 and defaults to the room's setting. The command's output arrives on the `sandbox.output`
+stream, which the CLI does not read yet. `sandbox exec-cancel` stops a running command.
 
 `room mcp` is the stdio shim for the server's MCP endpoint, for MCP clients that can only spawn a
 local process. It needs `--room` and the credentials of a joined room, and it reads and writes
