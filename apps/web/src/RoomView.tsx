@@ -1,4 +1,13 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+} from "react";
 import type { PresenceIntent, RoomClient, SdkEvent } from "@crossover/sdk";
 import { isUnauthenticated } from "./App.js";
 import {
@@ -78,6 +87,10 @@ export function RoomView(props: { roomId: string; onBack: () => void; onSignedOu
   const [notice, setNotice] = useState<string>();
   const [presence, setPresence] = useState<PresenceMap>(new Map());
   const [intents, setIntents] = useState<IntentMap>(new Map());
+  const [taskTitle, setTaskTitle] = useState("");
+  const [taskRequirements, setTaskRequirements] = useState("");
+  const [taskAssignees, setTaskAssignees] = useState<Record<string, string>>({});
+  const [taskBusy, setTaskBusy] = useState<string>();
   const roomRef = useRef<RoomClient>(undefined);
   const listeners = useRef(new Set<(event: SdkEvent) => void>());
   const onEvent = useCallback((listener: (event: SdkEvent) => void) => {
@@ -207,6 +220,9 @@ export function RoomView(props: { roomId: string; onBack: () => void; onSignedOu
   const mayInvite = me.authority === "OWNER" || me.authority === "ADMIN";
   const mayAppointLead = me.authority === "OWNER" || me.authority === "ADMIN";
   const maySetup = mayImport || mayInvite || mayAppointLead;
+  const mayCreateTasks = me.role === "DEVELOPER" || me.role === "LEAD";
+  const mayClaimTasks = mayCreateTasks;
+  const mayAssignTasks = me.authority === "OWNER" || me.authority === "ADMIN" || me.role === "LEAD";
 
   const control = async (p: Participant, method: "pause" | "resume") => {
     setNotice(undefined);
@@ -215,6 +231,52 @@ export function RoomView(props: { roomId: string; onBack: () => void; onSignedOu
       await reload();
     } catch (err) {
       setNotice(message(err));
+    }
+  };
+
+  const createTask = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const requirements = taskRequirements
+      .split("\n")
+      .map((requirement) => requirement.trim())
+      .filter(Boolean);
+    setTaskBusy("create");
+    setNotice(undefined);
+    try {
+      await open.room.api.tasks.create({ title: taskTitle.trim(), requirements });
+      setTaskTitle("");
+      setTaskRequirements("");
+      await reload();
+    } catch (err) {
+      setNotice(message(err));
+    } finally {
+      setTaskBusy(undefined);
+    }
+  };
+
+  const taskAction = async (task: Task, action: "claim" | "assign") => {
+    setTaskBusy(task.id);
+    setNotice(undefined);
+    try {
+      if (action === "claim") {
+        await open.room.api.tasks.claim({ task_id: task.id, expected_version: task.version });
+      } else {
+        const participantId =
+          taskAssignees[task.id] ??
+          participants.find((participant) => participant.status === "ACTIVE")?.id;
+        if (!participantId) throw new Error("Choose an active participant to assign this task.");
+        await open.room.api.tasks.assign({
+          task_id: task.id,
+          expected_version: task.version,
+          participant_id: participantId,
+        });
+      }
+      await reload();
+    } catch (err) {
+      setNotice(message(err));
+      await reload();
+    } finally {
+      setTaskBusy(undefined);
     }
   };
 
@@ -303,6 +365,33 @@ export function RoomView(props: { roomId: string; onBack: () => void; onSignedOu
       {tab === "tasks" && (
         <section aria-label="Tasks board">
           <h2>Tasks</h2>
+          {mayCreateTasks && (
+            <form onSubmit={(event) => void createTask(event)} data-testid="task-create-form">
+              <label>
+                Task title
+                <input
+                  value={taskTitle}
+                  onChange={(event) => setTaskTitle(event.target.value)}
+                  maxLength={200}
+                  required
+                  data-testid="task-title"
+                />
+              </label>
+              <label>
+                Requirements (one per line)
+                <textarea
+                  value={taskRequirements}
+                  onChange={(event) => setTaskRequirements(event.target.value)}
+                  maxLength={50_000}
+                  required
+                  data-testid="task-requirements"
+                />
+              </label>
+              <button disabled={taskBusy !== undefined} data-testid="task-create">
+                {taskBusy === "create" ? "Creating…" : "Create task"}
+              </button>
+            </form>
+          )}
           <div className="board" data-testid="board">
             {TASK_STATUSES.map((status) => (
               <div key={status} className="column" data-testid={`column-${status}`}>
@@ -310,9 +399,56 @@ export function RoomView(props: { roomId: string; onBack: () => void; onSignedOu
                 {tasks
                   .filter((t) => t.status === status)
                   .map((t) => (
-                    <div key={t.id} className="task" data-testid="task">
+                    <div key={t.id} className="task" data-testid="task" data-id={t.id}>
                       <div>{t.title}</div>
                       <div className="muted">{t.owner_id ? names(t.owner_id) : "unassigned"}</div>
+                      {t.status === "OPEN" && mayClaimTasks && (
+                        <button
+                          disabled={taskBusy !== undefined}
+                          data-testid="task-claim"
+                          onClick={() => void taskAction(t, "claim")}
+                        >
+                          Claim
+                        </button>
+                      )}
+                      {t.status === "OPEN" && mayAssignTasks && (
+                        <span className="task-actions">
+                          <select
+                            aria-label={`Assign ${t.title} to`}
+                            value={
+                              taskAssignees[t.id] ??
+                              participants.find((participant) => participant.status === "ACTIVE")
+                                ?.id ??
+                              ""
+                            }
+                            onChange={(event) =>
+                              setTaskAssignees((current) => ({
+                                ...current,
+                                [t.id]: event.target.value,
+                              }))
+                            }
+                            data-testid="task-assignee"
+                          >
+                            {participants
+                              .filter((participant) => participant.status === "ACTIVE")
+                              .map((participant) => (
+                                <option key={participant.id} value={participant.id}>
+                                  {participant.display_name}
+                                </option>
+                              ))}
+                          </select>
+                          <button
+                            disabled={
+                              taskBusy !== undefined ||
+                              participants.every((p) => p.status !== "ACTIVE")
+                            }
+                            data-testid="task-assign"
+                            onClick={() => void taskAction(t, "assign")}
+                          >
+                            Assign
+                          </button>
+                        </span>
+                      )}
                     </div>
                   ))}
               </div>
@@ -328,6 +464,7 @@ export function RoomView(props: { roomId: string; onBack: () => void; onSignedOu
             canPropose={me.role !== "OBSERVER"}
             canPosition={me.role !== "OBSERVER"}
             canDecide={me.role === "LEAD"}
+            canWriteMemory={me.role !== "OBSERVER"}
             nameOf={names}
             onEvent={onEvent}
           />

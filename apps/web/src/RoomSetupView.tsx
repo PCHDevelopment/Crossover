@@ -14,6 +14,14 @@ interface ImportResponse {
   upstream: { url: string; branch: string; last_synced_sha: string };
 }
 
+interface PullResponse {
+  status: "UP_TO_DATE" | "APPLIED" | "HELD" | "CONFLICT";
+  applied_revision?: number;
+  parts?: number;
+  applied_parts?: number;
+  upstream: { url: string; branch: string; last_synced_sha: string };
+}
+
 interface InviteResponse {
   invite_id: string;
   role: InviteRole;
@@ -57,6 +65,9 @@ export function RoomSetupView(props: {
   const [importStatus, setImportStatus] = useState<string>();
   const [importError, setImportError] = useState<string>();
   const [imported, setImported] = useState<ImportResponse>();
+  const [pullBusy, setPullBusy] = useState(false);
+  const [pullStatus, setPullStatus] = useState<string>();
+  const [pullError, setPullError] = useState<string>();
   const [inviteRole, setInviteRole] = useState<InviteRole>("DEVELOPER");
   const [inviteBusy, setInviteBusy] = useState(false);
   const [inviteError, setInviteError] = useState<string>();
@@ -93,6 +104,16 @@ export function RoomSetupView(props: {
               ? `Repository import synced at revision ${revision}.`
               : "Repository import synced.",
           );
+        } else if (
+          event.type === "workspace.upstream_synced" &&
+          event.payload["imported"] !== true
+        ) {
+          const revision = event.payload["last_synced_room_revision"];
+          setPullStatus(
+            typeof revision === "number"
+              ? `Upstream sync recorded at workspace revision ${revision}.`
+              : "Upstream sync recorded.",
+          );
         } else if (event.type === "room.health_settings_changed") {
           setHealthStatus("Health settings updated.");
         }
@@ -122,6 +143,37 @@ export function RoomSetupView(props: {
       setImportError(error instanceof Error ? error.message : "Repository import failed");
     } finally {
       setImportBusy(false);
+    }
+  };
+
+  const pullUpstream = async () => {
+    setPullBusy(true);
+    setPullError(undefined);
+    setPullStatus("Fetching upstream changes…");
+    try {
+      const result = await room.api.git.pull_upstream<PullResponse>({});
+      const response = result.response;
+      const sha = response.upstream.last_synced_sha.slice(0, 12);
+      if (response.status === "UP_TO_DATE") {
+        setPullStatus(`Upstream is already up to date at ${response.upstream.branch}@${sha}.`);
+      } else if (response.status === "APPLIED") {
+        setPullStatus(
+          `Upstream changes applied at workspace revision ${response.applied_revision}.`,
+        );
+      } else if (response.status === "HELD") {
+        setPullStatus(
+          `Upstream pull held after ${response.applied_parts}/${response.parts} part(s).`,
+        );
+      } else {
+        setPullStatus(
+          `Upstream pull conflicted after ${response.applied_parts}/${response.parts} part(s); resolve the conflict before pulling again.`,
+        );
+      }
+    } catch (error) {
+      setPullStatus(undefined);
+      setPullError(error instanceof Error ? error.message : "Upstream pull failed");
+    } finally {
+      setPullBusy(false);
     }
   };
 
@@ -329,6 +381,33 @@ const joined = await client.join("${roomId}", { token, manifest });`;
                 </button>
               )}
             </div>
+          )}
+        </section>
+      )}
+
+      {mayImport && (
+        <section className="delivery-section" aria-label="Upstream updates">
+          <h3>Upstream updates</h3>
+          <p className="muted">
+            After importing a repository, pull its latest changes into this room’s workspace.
+          </p>
+          <button
+            type="button"
+            data-testid="upstream-pull"
+            disabled={pullBusy || importBusy}
+            onClick={() => void pullUpstream()}
+          >
+            {pullBusy ? "Pulling…" : "Pull upstream"}
+          </button>
+          {pullStatus && (
+            <p role="status" aria-live="polite" data-testid="upstream-pull-status">
+              {pullStatus}
+            </p>
+          )}
+          {pullError && (
+            <p role="alert" className="error" data-testid="upstream-pull-error">
+              {pullError}
+            </p>
           )}
         </section>
       )}

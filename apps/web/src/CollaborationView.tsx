@@ -68,10 +68,12 @@ export default function CollaborationView(props: {
   canPropose: boolean;
   canPosition: boolean;
   canDecide: boolean;
+  canWriteMemory: boolean;
   nameOf: (id: string) => string;
   onEvent: (listener: (event: SdkEvent) => void) => () => void;
 }) {
-  const { room, selfId, canPropose, canPosition, canDecide, nameOf, onEvent } = props;
+  const { room, selfId, canPropose, canPosition, canDecide, canWriteMemory, nameOf, onEvent } =
+    props;
   const [section, setSection] = useState<Section>("decisions");
   const [notice, setNotice] = useState<string>();
   const [busy, setBusy] = useState<string>();
@@ -90,6 +92,12 @@ export default function CollaborationView(props: {
   const [memoryKey, setMemoryKey] = useState<string>();
   const [memoryEntry, setMemoryEntry] = useState<MemoryEntry>();
   const [memoryHistory, setMemoryHistory] = useState<MemoryRevision[]>([]);
+  const [memoryWriteKey, setMemoryWriteKey] = useState("");
+  const [memoryWriteValue, setMemoryWriteValue] = useState("");
+  const [memoryWriteType, setMemoryWriteType] = useState<"text/markdown" | "application/json">(
+    "text/markdown",
+  );
+  const [memorySourceRefs, setMemorySourceRefs] = useState("");
 
   const loadDecisions = useCallback(async () => {
     const page = await room.api.decisions.list<{ decisions: Decision[] }>({ limit: 100 });
@@ -127,6 +135,7 @@ export default function CollaborationView(props: {
       ]);
       setMemoryEntry(entry.response);
       setMemoryHistory(history.response.revisions);
+      return entry.response;
     },
     [room],
   );
@@ -244,13 +253,55 @@ export default function CollaborationView(props: {
     }
   };
 
+  const writeMemory = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const key = memoryWriteKey.trim();
+    setBusy("memory:write");
+    setNotice(undefined);
+    try {
+      const source_refs = memorySourceRefs
+        .split("\n")
+        .map((reference) => reference.trim())
+        .filter(Boolean)
+        .map((reference) => {
+          const separator = reference.indexOf(":");
+          if (separator < 1 || separator === reference.length - 1)
+            throw new Error("Write each source reference as kind:id on its own line.");
+          return {
+            kind: reference.slice(0, separator).trim(),
+            id: reference.slice(separator + 1).trim(),
+          };
+        });
+      const expected_revision = memoryEntry?.key === key ? memoryEntry.revision : 0;
+      await room.api.memory.put({
+        key,
+        value: memoryWriteValue,
+        content_type: memoryWriteType,
+        expected_revision,
+        source_refs,
+      });
+      setMemoryKey(key);
+      await Promise.all([loadMemory(memoryPrefix), loadMemoryDetail(key)]);
+    } catch (error) {
+      setNotice(message(error));
+    } finally {
+      setBusy(undefined);
+    }
+  };
+
   const selectMemory = async (key: string) => {
     setMemoryKey(key);
     setMemoryEntry(undefined);
     setMemoryHistory([]);
     setNotice(undefined);
     try {
-      await loadMemoryDetail(key);
+      const entry = await loadMemoryDetail(key);
+      setMemoryWriteKey(entry.key);
+      setMemoryWriteValue(entry.redacted ? "" : entry.value);
+      setMemoryWriteType(entry.content_type as "text/markdown" | "application/json");
+      setMemorySourceRefs(
+        entry.source_refs.map((source) => `${source.kind}:${source.id}`).join("\n"),
+      );
     } catch (error) {
       setNotice(message(error));
     }
@@ -519,6 +570,54 @@ export default function CollaborationView(props: {
             </label>
             <button data-testid="memory-filter">Filter</button>
           </form>
+          {canWriteMemory && (
+            <form onSubmit={(event) => void writeMemory(event)} data-testid="memory-write-form">
+              <label>
+                Key
+                <input
+                  value={memoryWriteKey}
+                  onChange={(event) => setMemoryWriteKey(event.target.value)}
+                  maxLength={200}
+                  required
+                  data-testid="memory-write-key"
+                />
+              </label>
+              <label>
+                Content type
+                <select
+                  value={memoryWriteType}
+                  onChange={(event) =>
+                    setMemoryWriteType(event.target.value as "text/markdown" | "application/json")
+                  }
+                  data-testid="memory-write-type"
+                >
+                  <option value="text/markdown">Markdown text</option>
+                  <option value="application/json">JSON</option>
+                </select>
+              </label>
+              <label>
+                Value
+                <textarea
+                  value={memoryWriteValue}
+                  onChange={(event) => setMemoryWriteValue(event.target.value)}
+                  maxLength={65_536}
+                  required
+                  data-testid="memory-write-value"
+                />
+              </label>
+              <label>
+                Source references (kind:id, one per line)
+                <textarea
+                  value={memorySourceRefs}
+                  onChange={(event) => setMemorySourceRefs(event.target.value)}
+                  data-testid="memory-source-refs"
+                />
+              </label>
+              <button disabled={busy !== undefined} data-testid="memory-write">
+                {busy === "memory:write" ? "Saving…" : "Write shared memory"}
+              </button>
+            </form>
+          )}
           <ul className="list" data-testid="memory-list">
             {memory.map((entry) => (
               <li key={entry.key}>
