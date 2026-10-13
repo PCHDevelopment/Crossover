@@ -378,7 +378,11 @@ function registerWebDemoFlow(fixture: WebFixture): void {
           () => page.getByTestId("agent-output-output").textContent(),
           (text) => text?.includes("agent-terminal-output-marker") ?? false,
         );
-        expect(await page.getByTestId("agent-output-panel").getByRole("button").count()).toBe(0);
+        const agentOutput = page.getByTestId("agent-output-panel");
+        expect(await agentOutput.locator("input, textarea, button").count()).toBe(0);
+        expect(await page.getByText("Read-only output from agent sandbox commands.").count()).toBe(
+          1,
+        );
         await page.getByTestId("tab-setup").click();
       });
 
