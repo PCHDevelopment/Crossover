@@ -24,4 +24,14 @@ describe("sanitizeTerminalText", () => {
   it("removes C1 controls and bidi override and isolate characters", () => {
     expect(sanitizeTerminalText("a\u009b2Jb\u0080c\u202ed\u2066e\u2069f")).toBe("abcdef");
   });
+
+  it("stops buffering an unterminated OSC after 4 KiB and shows following text", () => {
+    const sanitizer = new TerminalTextSanitizer();
+    const content = "x".repeat(4 * 1024);
+
+    expect(sanitizer.write("\u001b]0;")).toBe("");
+    expect(sanitizer.write(`${content}visible after OSC`)).toContain("visible after OSC");
+    expect(sanitizer.write("later text")).toBe("later text");
+    sanitizer.finish();
+  });
 });
