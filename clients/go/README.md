@@ -42,6 +42,17 @@ room --room rom_123 workspace read README.md
 room --room rom_123 workspace apply changeset.json --idempotency-key retry-key-123
 ```
 
+`room mcp` is the stdio shim for the server's MCP endpoint, for MCP clients that can only spawn a
+local process. It needs `--room` and the credentials of a joined room, and it reads and writes
+newline-delimited JSON-RPC: each message from stdin is POSTed to `{server}/mcp` with the room's
+access token, and the reply (plain JSON or an event stream) is written to stdout as one line per
+message. Notifications get no reply. An expired token is refreshed once and the message re-sent;
+a failure comes back to the client as a JSON-RPC error for that request, with the protocol error
+in `data`. Only protocol messages go to stdout; diagnostics go to stderr with credentials
+redacted. It runs until stdin closes, after answering what was already sent, and handles up to
+eight requests at a time. Configure it in an MCP client as the command
+`room --server https://crossover.example --room rom_123 mcp`.
+
 `events tail` prints one event JSON object per line, saves the last delivered sequence, and
 reconnects from that sequence. `workspace apply` takes the JSON params object for
 `workspace.apply_changeset` (the `source`, `message`, base revision, and operations fields).
