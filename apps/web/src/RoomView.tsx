@@ -66,12 +66,33 @@ const TABS: { id: Tab; label: string }[] = [
 const message = (error: unknown): string =>
   error instanceof Error ? error.message : "Something went wrong";
 
+interface HealthBadge {
+  status: string;
+  revision: number;
+  sequence: number;
+}
+
+function healthBadge(event: SdkEvent): HealthBadge | undefined {
+  const status = event.payload["status"];
+  const revision = event.payload["revision"];
+  if (
+    event.type !== "workspace.health" ||
+    typeof status !== "string" ||
+    typeof revision !== "number"
+  )
+    return undefined;
+  return { status, revision, sequence: event.sequence };
+}
+
 export function RoomView(props: { roomId: string; onBack: () => void; onSignedOut: () => void }) {
   const { roomId, onBack, onSignedOut } = props;
   const [open, setOpen] = useState<OpenRoom>();
   const [error, setError] = useState<string>();
   const [state, setState] = useState<RoomState>();
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [workspaceRevision, setWorkspaceRevision] = useState<number>();
+  const [workspaceHealth, setWorkspaceHealth] = useState<HealthBadge>();
+  const [workspaceStatusError, setWorkspaceStatusError] = useState<string>();
   const [feed, setFeed] = useState<SdkEvent[]>([]);
   const [live, setLive] = useState<string>("connecting");
   const [tab, setTab] = useState<Tab>("overview");
@@ -152,6 +173,20 @@ export function RoomView(props: { roomId: string; onBack: () => void; onSignedOu
         onState: (s) => setLive(s),
         onEvent: (event) => {
           setFeed((f) => [event, ...f].slice(0, FEED_LIMIT));
+          if (event.type === "workspace.changeset.applied") {
+            const revision = event.payload["applied_revision"];
+            if (typeof revision === "number")
+              setWorkspaceRevision((current) => Math.max(current ?? 0, revision));
+          } else if (event.type === "workspace.upstream_synced") {
+            const revision = event.payload["last_synced_room_revision"];
+            if (typeof revision === "number")
+              setWorkspaceRevision((current) => Math.max(current ?? 0, revision));
+          }
+          const health = healthBadge(event);
+          if (health)
+            setWorkspaceHealth((current) =>
+              !current || health.sequence > current.sequence ? health : current,
+            );
           if (affectsState(event.type)) refreshSoon();
           for (const listener of listeners.current) listener(event);
         },
@@ -174,6 +209,47 @@ export function RoomView(props: { roomId: string; onBack: () => void; onSignedOu
       sub?.close();
     };
   }, [open, reload]);
+
+  // The workspace head and latest health result are durable room data, not settings.
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    void (async () => {
+      const [history, latestHealth] = await Promise.all([
+        open.room.api.workspace.history<{ entries: { workspace_revision: number }[] }>({
+          limit: 1,
+        }),
+        (async () => {
+          let after = 0;
+          let latest: HealthBadge | undefined;
+          for (;;) {
+            const page = await open.room.api.room.events.list<{
+              events: SdkEvent[];
+              next_after: number | null;
+            }>({ after, limit: 500, types: ["workspace.health"] });
+            const last = page.response.events.at(-1);
+            if (last) latest = healthBadge(last) ?? latest;
+            if (page.response.next_after === null) return latest;
+            after = page.response.next_after;
+          }
+        })(),
+      ]);
+      if (cancelled) return;
+      const revision = history.response.entries[0]?.workspace_revision;
+      if (typeof revision === "number")
+        setWorkspaceRevision((current) => Math.max(current ?? 0, revision));
+      if (latestHealth)
+        setWorkspaceHealth((current) =>
+          !current || latestHealth.sequence > current.sequence ? latestHealth : current,
+        );
+      setWorkspaceStatusError(undefined);
+    })().catch((error: unknown) => {
+      if (!cancelled) setWorkspaceStatusError(message(error));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
 
   const names = useMemo(() => {
     const byId = new Map((state?.sections.participants ?? []).map((p) => [p.id, p.display_name]));
@@ -229,7 +305,19 @@ export function RoomView(props: { roomId: string; onBack: () => void; onSignedOu
         <span className="badge" data-testid="live-state">
           {live}
         </span>
+        <span className="badge" data-testid="workspace-revision">
+          Revision {workspaceRevision ?? "—"}
+        </span>{" "}
+        <span className="badge" data-testid="workspace-health">
+          Health{" "}
+          {workspaceHealth ? `${workspaceHealth.status} · r${workspaceHealth.revision}` : "not run"}
+        </span>
       </p>
+      {workspaceStatusError && (
+        <p role="alert" className="error" data-testid="workspace-status-error">
+          Workspace status unavailable: {workspaceStatusError}
+        </p>
+      )}
       <nav className="tabs" role="tablist">
         {TABS.filter(
           ({ id }) =>
@@ -328,6 +416,7 @@ export function RoomView(props: { roomId: string; onBack: () => void; onSignedOu
             canPropose={me.role !== "OBSERVER"}
             canPosition={me.role !== "OBSERVER"}
             canDecide={me.role === "LEAD"}
+            canVeto={me.authority === "OWNER" || me.authority === "ADMIN"}
             nameOf={names}
             onEvent={onEvent}
           />
