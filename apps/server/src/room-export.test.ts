@@ -40,15 +40,29 @@ async function git(args: string[], cwd?: string) {
 }
 
 describe("RoomExportService", () => {
+  it("removes staged files when archive creation fails", async () => {
+    const temp = await mkdtemp(join(root, "failed-export-"));
+    try {
+      await expect(
+        new RoomExportService(db.pool, temp).create(newId("room"), new AbortController().signal),
+      ).rejects.toMatchObject({ code: "NOT_FOUND" });
+      expect(await readdir(temp)).toEqual([]);
+    } finally {
+      await rm(temp, { recursive: true, force: true });
+    }
+  });
+
   it("streams a tar containing a verifiable room bundle and only that room's memory", async () => {
     const roomId = newId("room");
     const otherRoomId = newId("room");
     const working = join(root, "working");
     const repo = join(root, "room.git");
+    const staging = join(root, "staging");
     const output = join(root, "export.tar.gz");
     const extracted = join(root, "extracted");
     const clone = join(root, "bundle-clone");
     await mkdir(working);
+    await mkdir(staging);
     await mkdir(extracted);
     await git(["init", "-q", "-b", "main"], working);
     await git(["config", "user.name", identity.GIT_AUTHOR_NAME], working);
@@ -81,7 +95,7 @@ describe("RoomExportService", () => {
       [roomId, otherRoomId],
     );
 
-    const archive = await new RoomExportService(db.pool).create(
+    const archive = await new RoomExportService(db.pool, staging).create(
       roomId,
       new AbortController().signal,
     );
@@ -91,6 +105,7 @@ describe("RoomExportService", () => {
     } finally {
       await archive.cleanup();
     }
+    expect(await readdir(staging)).toEqual([]);
     await execFileAsync("tar", ["-xzf", output, "-C", extracted]);
 
     const memory = JSON.parse(await readFile(join(extracted, "memory.json"), "utf8")) as {

@@ -14,6 +14,8 @@
     "@crossover/protocol": "workspace:*"
   },
   "scripts": {
-    "build": "tsc -b"
+    "build": "tsc -b",
+    "gen:wasm": "tsc -b && node dist/wasm-cli.js",
+    "test:rego": "opa test policy/"
   }
 }
