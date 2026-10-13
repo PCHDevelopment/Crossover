@@ -134,6 +134,8 @@ Usage:
   room join ROOM_ID --invite-token-stdin --manifest FILE
   room --room ROOM_ID tasks COMMAND
   room --room ROOM_ID workspace COMMAND
+  room --room ROOM_ID messages send|list|edit
+  room --room ROOM_ID inbox list|ack
   room --room ROOM_ID events tail [--after SEQUENCE]
 
 Global options --server URL and --room ROOM_ID may appear before or after the command.
@@ -191,6 +193,10 @@ func (a *app) dispatch(args []string) error {
 		return a.tasks(args[1:])
 	case "workspace":
 		return a.workspace(args[1:])
+	case "messages":
+		return a.messages(args[1:])
+	case "inbox":
+		return a.inbox(args[1:])
 	case "events":
 		return a.events(args[1:])
 	case "--help", "-h", "help":
