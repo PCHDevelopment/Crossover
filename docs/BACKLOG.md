@@ -1574,7 +1574,7 @@ Messages, inbox, sandbox and the `room mcp` stdio shim.
 
 D9 fidelity with no functional change. Last.
 
-### T1509 3b · Tier-3 grant rules in the policy — S1
+### T1509 3b · Tier-3 grant rules in the policy — S2 (moved from S1)
 
 Start after #287 or #290 merges, and after T1533. The decision moves into Rego. Every message, error code and detail stays byte-for-byte the same.
 
@@ -1768,7 +1768,7 @@ From T1418, after T1509 3c. Every deployment today is single-host, because `Dock
 
 From T1418. An `ExecutionDriver` that runs sandboxes on separate sandbox hosts over an authenticated channel (mutual TLS or signed requests), with host registration, health checks and capacity, and the same lifecycle, output streaming and compute accounting as `DockerExecutionDriver`. It is required before any multi-tenant or untrusted deployment. It is not needed for the MVP demo. Scope and split it into a milestone when it is scheduled.
 
-### T1533 · Stop wasted CI runs — S2 (moved from S1)
+### T1533 · Stop wasted CI runs — S2 (moved from S1) · done
 
 From Peter, 2026-10-13. The repository is private and CI runs on one self-hosted runner, so every unneeded run delays the ones people are waiting for. O1 has already investigated, so this is the whole change.
 
