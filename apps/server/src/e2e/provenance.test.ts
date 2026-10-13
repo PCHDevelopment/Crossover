@@ -313,6 +313,7 @@ describe("provenance labels (§16.5)", () => {
       "tools.list":
         "tool descriptions the platform registered, filtered to what the caller may use",
       "participants.wake_secret": "the caller's own webhook secret",
+      "budgets.get": "per-agent limits and usage, visible only to owners and admins",
     };
     const reads = server.dispatcher
       .commandInfo()

@@ -52,6 +52,7 @@ import {
   registerPresenceCommands,
   registerPresenceIntentCommands,
   registerRoomCommands,
+  registerBudgetCommands,
   registerRoomDigestCommand,
   registerEventsRedactCommand,
   registerRoomEventsCommand,
@@ -452,6 +453,7 @@ export async function composeServer(
         registry: toolRegistry,
         runner: toolRunner,
       },
+      budgets,
       upstream,
       integrationOptions,
     );
@@ -614,6 +616,7 @@ function registerCommands(
   logs: LogStore,
   outputHub: SandboxOutputHub,
   tools: { registry: ToolRegistry; runner: ToolRunner; timeoutMs?: number },
+  budgets: BudgetLimiter,
   upstream?: UpstreamDeps,
   integrationOptions: IntegrationCommandsOptions = {},
 ): void {
@@ -622,6 +625,7 @@ function registerCommands(
       await provisionWorkspace(client, room_id, config.workspaceRoot);
     },
   });
+  registerBudgetCommands(dispatcher, budgets);
   registerRoomProtectedPathsCommand(dispatcher);
   registerRoomHealthSettingsCommand(dispatcher, {
     allowedImages: config.healthImages,
