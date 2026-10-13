@@ -173,7 +173,8 @@ export function buildGateway(options: GatewayOptions): FastifyInstance {
   const secureCookies = options.secureCookies ?? false;
   const sessionCookieName = secureCookies ? SECURE_SESSION_COOKIE : SESSION_COOKIE;
   const stateCookiePrefix = secureCookies ? SECURE_STATE_COOKIE_PREFIX : STATE_COOKIE_PREFIX;
-  const cookieAuthEnabled = options.oauth !== undefined;
+  // Development sign-in uses the same browser cookie even without configured OAuth providers.
+  const cookieAuthEnabled = options.oauth !== undefined || options.devLogin === true;
   const app = Fastify({
     logger: false,
     bodyLimit: options.bodyLimit ?? 1024 * 1024,
@@ -195,6 +196,25 @@ export function buildGateway(options: GatewayOptions): FastifyInstance {
     if (auth.cookie && mutation) requireSameOrigin(request, options.oauth?.publicBaseUrl);
     return { principal: await authenticateUser(pool, auth.token), ...auth };
   }
+
+  app.get("/v1/auth/providers", async (_request, reply) => {
+    void reply.header("Cache-Control", "no-store");
+    return { providers: Object.keys(options.oauth?.providers ?? {}) };
+  });
+
+  app.get("/v1/auth/session", async (request, reply) => {
+    void reply.header("Cache-Control", "no-store");
+    const token = cookieAuthEnabled ? cookieValue(request, sessionCookieName) : undefined;
+    if (!token) return { authenticated: false };
+    try {
+      await authenticateUser(pool, token);
+      return { authenticated: true };
+    } catch (error) {
+      if (error instanceof CrossoverError && error.code === "UNAUTHENTICATED")
+        return { authenticated: false };
+      throw error;
+    }
+  });
 
   if (options.oauth) {
     const { publicBaseUrl, providers, stateStore } = options.oauth;
@@ -471,6 +491,8 @@ export function buildGateway(options: GatewayOptions): FastifyInstance {
           details: { issues: parsed.error.issues },
         });
       }
+      if (cookieAuthEnabled && request.headers.origin)
+        requireSameOrigin(request, options.oauth?.publicBaseUrl);
       const user = await findOrCreateUser(pool, {
         provider: "dev",
         subject: parsed.data.subject,
@@ -478,6 +500,12 @@ export function buildGateway(options: GatewayOptions): FastifyInstance {
       });
       const session = await createUserSession(pool, user.id);
       void reply.header("Cache-Control", "no-store");
+      if (cookieAuthEnabled) {
+        void reply.header(
+          "Set-Cookie",
+          setCookie(sessionCookieName, session.session_token, session.expires_at, secureCookies),
+        );
+      }
       return {
         user: { id: user.id, display_name: user.display_name },
         session_token: session.session_token,

@@ -394,6 +394,7 @@ describe("platform users (T216)", () => {
     expect(a.statusCode).toBe(200);
     expect(a.headers["cache-control"]).toBe("no-store");
     expect(a.json().session_token).toMatch(/^us_/);
+    expect(a.headers["set-cookie"]).toMatch(/^crossover_session=us_/);
     const b = await login(s, sub, "Someone else");
     expect(b.json().user.id).toBe(a.json().user.id);
     expect(b.json().user.display_name).toBe("Peter"); // not renamed
@@ -402,6 +403,42 @@ describe("platform users (T216)", () => {
       sub,
     ]);
     expect(rows).toEqual([{ provider: "dev" }]);
+  });
+
+  it("uses the browser session cookie for development login and logout", async () => {
+    const s = await setup(undefined, true);
+    expect((await s.app.inject({ method: "GET", url: "/v1/auth/session" })).json()).toEqual({
+      authenticated: false,
+    });
+    const response = await login(s, subject());
+    const header = response.headers["set-cookie"] as string;
+    const cookie = header.split(";", 1)[0]!;
+    expect(
+      (
+        await s.app.inject({
+          method: "GET",
+          url: "/v1/auth/session",
+          headers: { cookie },
+        })
+      ).json(),
+    ).toEqual({ authenticated: true });
+    expect(
+      (await s.app.inject({ method: "GET", url: "/v1/rooms", headers: { cookie } })).statusCode,
+    ).toBe(200);
+    const logout = await post(s, "/v1/auth/logout", {}, { cookie, origin: "http://localhost" });
+    expect(logout.json()).toEqual({ ok: true });
+    expect(
+      (
+        await s.app.inject({
+          method: "GET",
+          url: "/v1/auth/session",
+          headers: { cookie },
+        })
+      ).json(),
+    ).toEqual({ authenticated: false });
+    expect(
+      (await s.app.inject({ method: "GET", url: "/v1/rooms", headers: { cookie } })).statusCode,
+    ).toBe(401);
   });
 
   it.each([
@@ -519,6 +556,10 @@ describe("browser OAuth sessions", () => {
     );
     expect(startCookies.every((value) => !value?.includes(nonce))).toBe(true);
     expect(startCookies.every((value) => !/; Domain=/i.test(value ?? ""))).toBe(true);
+    const available = await s.app.inject({ method: "GET", url: "/v1/auth/providers" });
+    expect(available.json()).toEqual({ providers: ["github", "secondary"] });
+    expect(available.payload).not.toContain("identity.example");
+    expect(available.payload).not.toContain("client_id");
 
     const callback = await s.app.inject({
       method: "GET",

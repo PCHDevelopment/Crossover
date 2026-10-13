@@ -7,6 +7,14 @@ const env = {
   WORKSPACE_ROOT: "./data",
 };
 
+describe("OAuth provider configuration", () => {
+  it("does not select a test stub provider from environment variables", () => {
+    expect(
+      loadConfig({ ...env, OAUTH_STUB_PROVIDER_URL: "https://stub.example.test/authorize" }).oauth,
+    ).toBeUndefined();
+  });
+});
+
 describe("sandbox disk enforcement configuration", () => {
   it("defaults to soft in development and accepts soft without a quota driver", () => {
     expect(loadConfig(env)).toMatchObject({

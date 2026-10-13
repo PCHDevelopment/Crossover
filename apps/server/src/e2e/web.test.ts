@@ -7,12 +7,14 @@ import {
 } from "./web-collaboration.js";
 import { registerWebEditorTests } from "./web-editor.js";
 import { registerWebFixture } from "./web-fixture.js";
+import { registerWebAuthTests } from "./web-auth.js";
 import { registerWebDemoFlow } from "./web-demo-flow.js";
 import { registerWebWorkspaceTests } from "./web-workspace.js";
 
 const fixture = registerWebFixture();
 
 describe.skipIf(!fixture.executablePath && !fixture.inCi)("web app in a browser", () => {
+  registerWebAuthTests(fixture);
   it("T1406 harness: rejects an invalid token through the real Git listener bridge", async () => {
     await fixture.assertBadGitTokenRejected();
   });
