@@ -24,6 +24,7 @@ export interface RoomInfo {
 export interface Task {
   id: string;
   title: string;
+  requirements: string[];
   status: TaskStatus;
   owner_id: string | null;
   blocked_reason: string | null;

@@ -78,6 +78,19 @@ const TABS: { id: Tab; label: string }[] = [
 const message = (error: unknown): string =>
   error instanceof Error ? error.message : "Something went wrong";
 
+type EvidenceKind = "test" | "check" | "manual";
+
+interface TaskEvidenceDraft {
+  kind: EvidenceKind;
+  ref: string;
+  note: string;
+}
+
+interface TaskEvidenceItem {
+  requirement: number;
+  proof: { kind: EvidenceKind; ref: string; note?: string }[];
+}
+
 interface HealthBadge {
   status: string;
   revision: number;
@@ -115,6 +128,9 @@ export function RoomView(props: { roomId: string; onBack: () => void; onSignedOu
   const [taskRequirements, setTaskRequirements] = useState("");
   const [taskAssignees, setTaskAssignees] = useState<Record<string, string>>({});
   const [taskBlockReasons, setTaskBlockReasons] = useState<Record<string, string>>({});
+  const [taskEvidence, setTaskEvidence] = useState<
+    Record<string, Record<number, TaskEvidenceDraft>>
+  >({});
   const [taskBusy, setTaskBusy] = useState<string>();
   const roomRef = useRef<RoomClient>(undefined);
   const listeners = useRef(new Set<(event: SdkEvent) => void>());
@@ -338,7 +354,8 @@ export function RoomView(props: { roomId: string; onBack: () => void; onSignedOu
 
   const taskAction = async (
     task: Task,
-    action: "claim" | "assign" | "block" | "unblock" | "release",
+    action: "claim" | "assign" | "start" | "submit" | "block" | "unblock" | "release",
+    evidence?: TaskEvidenceItem[],
     reason?: string,
   ) => {
     if (
@@ -372,8 +389,21 @@ export function RoomView(props: { roomId: string; onBack: () => void; onSignedOu
         setTaskBlockReasons((current) => ({ ...current, [task.id]: "" }));
       } else if (action === "unblock") {
         await open.room.api.tasks.unblock({ task_id: task.id, expected_version: task.version });
-      } else {
+      } else if (action === "release") {
         await open.room.api.tasks.release({ task_id: task.id, expected_version: task.version });
+      } else if (action === "start") {
+        await open.room.api.tasks.start({ task_id: task.id, expected_version: task.version });
+      } else {
+        await open.room.api.tasks.submit({
+          task_id: task.id,
+          expected_version: task.version,
+          evidence: evidence ?? [],
+        });
+        setTaskEvidence((current) => {
+          const remaining = { ...current };
+          delete remaining[task.id];
+          return remaining;
+        });
       }
       await reload();
     } catch (err) {
@@ -382,6 +412,43 @@ export function RoomView(props: { roomId: string; onBack: () => void; onSignedOu
     } finally {
       setTaskBusy(undefined);
     }
+  };
+
+  const submitTask = (event: FormEvent<HTMLFormElement>, task: Task) => {
+    event.preventDefault();
+    const evidence = task.requirements.flatMap((_, requirement): TaskEvidenceItem[] => {
+      const draft = taskEvidence[task.id]?.[requirement];
+      const ref = draft?.ref.trim();
+      if (!draft || !ref) return [];
+      const note = draft.note.trim();
+      return [
+        {
+          requirement,
+          proof: [{ kind: draft.kind, ref, ...(note ? { note } : {}) }],
+        },
+      ];
+    });
+    void taskAction(task, "submit", evidence);
+  };
+
+  const updateTaskEvidence = (
+    taskId: string,
+    requirement: number,
+    update: Partial<TaskEvidenceDraft>,
+  ) => {
+    setTaskEvidence((current) => ({
+      ...current,
+      [taskId]: {
+        ...current[taskId],
+        [requirement]: {
+          kind: "check",
+          ref: "",
+          note: "",
+          ...current[taskId]?.[requirement],
+          ...update,
+        },
+      },
+    }));
   };
 
   return (
@@ -581,7 +648,7 @@ export function RoomView(props: { roomId: string; onBack: () => void; onSignedOu
                               setNotice("Enter a reason before blocking this task.");
                               return;
                             }
-                            void taskAction(t, "block", reason);
+                            void taskAction(t, "block", undefined, reason);
                           }}
                         >
                           <label>
@@ -626,6 +693,83 @@ export function RoomView(props: { roomId: string; onBack: () => void; onSignedOu
                             Release
                           </button>
                         )}
+                      {t.status === "CLAIMED" && t.owner_id === me.participant_id && (
+                        <button
+                          disabled={taskBusy !== undefined}
+                          data-testid="task-start"
+                          onClick={() => void taskAction(t, "start")}
+                        >
+                          {taskBusy === t.id ? "Starting…" : "Start"}
+                        </button>
+                      )}
+                      {t.status === "IN_PROGRESS" && t.owner_id === me.participant_id && (
+                        <form
+                          className="task-submit-form"
+                          data-testid="task-submit-form"
+                          onSubmit={(event) => submitTask(event, t)}
+                        >
+                          <h4>Submit for review</h4>
+                          <p className="muted">
+                            Add proof for each requirement if this room requires evidence.
+                          </p>
+                          {t.requirements.map((requirement, index) => {
+                            const draft = taskEvidence[t.id]?.[index] ?? {
+                              kind: "check" as const,
+                              ref: "",
+                              note: "",
+                            };
+                            return (
+                              <fieldset key={index} className="task-evidence-field">
+                                <legend>{requirement}</legend>
+                                <label>
+                                  Proof type
+                                  <select
+                                    data-testid={`task-evidence-kind-${index}`}
+                                    value={draft.kind}
+                                    disabled={taskBusy !== undefined}
+                                    onChange={(event) =>
+                                      updateTaskEvidence(t.id, index, {
+                                        kind: event.target.value as EvidenceKind,
+                                      })
+                                    }
+                                  >
+                                    <option value="check">Check</option>
+                                    <option value="test">Test</option>
+                                    <option value="manual">Manual</option>
+                                  </select>
+                                </label>
+                                <label>
+                                  Reference
+                                  <input
+                                    data-testid={`task-evidence-ref-${index}`}
+                                    value={draft.ref}
+                                    maxLength={500}
+                                    disabled={taskBusy !== undefined}
+                                    onChange={(event) =>
+                                      updateTaskEvidence(t.id, index, { ref: event.target.value })
+                                    }
+                                  />
+                                </label>
+                                <label>
+                                  Note (optional)
+                                  <input
+                                    data-testid={`task-evidence-note-${index}`}
+                                    value={draft.note}
+                                    maxLength={1000}
+                                    disabled={taskBusy !== undefined}
+                                    onChange={(event) =>
+                                      updateTaskEvidence(t.id, index, { note: event.target.value })
+                                    }
+                                  />
+                                </label>
+                              </fieldset>
+                            );
+                          })}
+                          <button disabled={taskBusy !== undefined} data-testid="task-submit">
+                            {taskBusy === t.id ? "Submitting…" : "Submit for review"}
+                          </button>
+                        </form>
+                      )}
                     </div>
                   ))}
               </div>
