@@ -9,8 +9,10 @@ import {
 import { CrossoverError, isId } from "@crossover/protocol";
 import { normalizePath } from "./path.js";
 import { ignoredPrunedDirectories } from "./ignore.js";
+import { SANDBOX_VCPU_COUNT } from "./execution.js";
 import type {
   ExecutionDriver,
+  SandboxCpuUsage,
   SandboxLimits,
   SandboxResources,
   SandboxExecOutcome,
@@ -31,6 +33,17 @@ const DEFAULT_GIT_FETCHER_IMAGE = "crossover-git-fetcher:latest";
 export const DEFAULT_GIT_INTERNAL_NETWORK = "crossover-git";
 const FETCH_TIMEOUT_MS = 4 * 60 * 1000;
 const MAX_SNAPSHOT_OUTPUT_BYTES = 96 * 1024 * 1024;
+const CGROUP_CPU_USAGE_SCRIPT =
+  "if [ -r /sys/fs/cgroup/cpu.stat ]; then awk '$1 == \"usage_usec\" { print $2; found = 1 } END { if (!found) exit 3 }' /sys/fs/cgroup/cpu.stat; " +
+  'elif [ -r /sys/fs/cgroup/cpuacct/cpuacct.usage ]; then usage_ns=$(cat /sys/fs/cgroup/cpuacct/cpuacct.usage) && printf "%s\\n" "$((usage_ns / 1000))"; ' +
+  "else exit 4; fi";
+
+export function parseCgroupCpuUsageUsec(value: string): bigint {
+  const trimmed = value.trim();
+  if (!/^(0|[1-9][0-9]*)$/.test(trimmed))
+    throw new Error("ERROR: Docker returned invalid cgroup CPU usage");
+  return BigInt(trimmed);
+}
 
 export interface DockerInvocationOptions {
   timeoutMs?: number;
@@ -334,6 +347,34 @@ export class DockerExecutionDriver implements ExecutionDriver {
     } catch (error) {
       if (!(await this.inspectContainer(input.resources.container_ref))?.running) throw error;
     }
+  }
+
+  /** Read cumulative container CPU time from cgroupfs, keyed by the container start generation. */
+  async cpuUsage(input: {
+    sandbox_id: string;
+    resources: SandboxResources;
+  }): Promise<SandboxCpuUsage> {
+    this.assertResources(input.sandbox_id, input.resources);
+    const inspected = await this.invoke([
+      "container",
+      "inspect",
+      "--format",
+      "{{.State.Running}}|{{.State.StartedAt}}",
+      input.resources.container_ref,
+    ]);
+    if (inspected.code !== 0)
+      throw new Error(`ERROR: Docker CPU inspect failed: ${inspected.stderr.trim()}`);
+    const [running, generation] = inspected.stdout.trim().split("|");
+    if (running !== "true" || !generation)
+      throw new Error(`ERROR: Docker sandbox ${input.sandbox_id} is not running for CPU sampling`);
+
+    const usage = await this.invoke(
+      ["exec", input.resources.container_ref, "sh", "-c", CGROUP_CPU_USAGE_SCRIPT],
+      { timeoutMs: 5_000, maxBuffer: 1_024 },
+    );
+    if (usage.code !== 0)
+      throw new Error(`ERROR: Docker cgroup CPU read failed: ${usage.stderr.trim()}`);
+    return { usage_usec: parseCgroupCpuUsageUsec(usage.stdout), generation };
   }
 
   /** Run a shell command in a fresh process group and capture stdout and stderr separately. */
@@ -1183,7 +1224,7 @@ export class DockerExecutionDriver implements ExecutionDriver {
       "--pids-limit=256",
       "--env",
       "HOME=/tmp",
-      "--cpus=2",
+      `--cpus=${SANDBOX_VCPU_COUNT}`,
       "--memory=4g",
       "--tmpfs",
       "/tmp:rw,nosuid,size=512m",

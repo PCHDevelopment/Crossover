@@ -70,10 +70,16 @@ function setup(settings: unknown = {}) {
     }
   >();
   const execution = {
-    reserveExec: vi.fn(async (roomId: string, ownerId: string, execId: string) => {
-      pendingExecs.set(execId, { room_id: roomId, participant_id: ownerId, sandbox_id: sandboxId });
-      return sandboxId;
-    }),
+    reserveExec: vi.fn(
+      async (roomId: string, ownerId: string, execId: string, requestedTimeoutMs: number) => {
+        pendingExecs.set(execId, {
+          room_id: roomId,
+          participant_id: ownerId,
+          sandbox_id: sandboxId,
+        });
+        return { sandbox_id: sandboxId, timeout_ms: requestedTimeoutMs };
+      },
+    ),
     assertExecReservation: vi.fn((roomId: string, ownerId: string, id: string, execId: string) => {
       const pending = pendingExecs.get(execId);
       if (
@@ -362,6 +368,7 @@ describe("sandbox.exec capacity reservations", () => {
         volume_ref: `volume:${sandbox_id}`,
         container_ref: `container:${sandbox_id}`,
       }),
+      cpuUsage: async () => ({ usage_usec: 0n, generation: "exec-test-container-start" }),
       start: async () => undefined,
       stop: async () => undefined,
       destroy: async () => undefined,

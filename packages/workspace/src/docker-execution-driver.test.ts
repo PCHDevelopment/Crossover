@@ -5,7 +5,11 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { CrossoverError, newId } from "@crossover/protocol";
 import { createSandboxProxyCredential, verifySandboxReadToken } from "@crossover/security";
-import { DockerExecutionDriver, type DockerInvoker } from "./docker-execution-driver.js";
+import {
+  DockerExecutionDriver,
+  parseCgroupCpuUsageUsec,
+  type DockerInvoker,
+} from "./docker-execution-driver.js";
 
 const hardOptions = {
   volumeDriver: "local",
@@ -40,6 +44,44 @@ function expectMissing(container: string, path: string) {
 }
 
 describe("DockerExecutionDriver", () => {
+  it("reads cumulative cgroup CPU use and ties it to the container start generation", async () => {
+    const sandboxId = newId("sandbox");
+    const containerRef = `crossover-sbx-${sandboxId.toLowerCase()}`;
+    const calls: string[][] = [];
+    const driver = new DockerExecutionDriver({
+      invoke: async (args, options) => {
+        calls.push([...args]);
+        if (args[0] === "container" && args[1] === "inspect")
+          return { code: 0, stdout: "true|2026-10-13T01:00:00.000000000Z\n", stderr: "" };
+        if (args[0] === "exec") {
+          expect(options?.timeoutMs).toBe(5_000);
+          return { code: 0, stdout: "987654321\n", stderr: "" };
+        }
+        return { code: 1, stdout: "", stderr: "unexpected Docker invocation" };
+      },
+    });
+
+    await expect(
+      driver.cpuUsage({
+        sandbox_id: sandboxId,
+        resources: { volume_ref: containerRef, container_ref: containerRef },
+      }),
+    ).resolves.toEqual({
+      usage_usec: 987_654_321n,
+      generation: "2026-10-13T01:00:00.000000000Z",
+    });
+    expect(calls.map((args) => args.slice(0, 3))).toEqual([
+      ["container", "inspect", "--format"],
+      ["exec", containerRef, "sh"],
+    ]);
+  });
+
+  it("accepts only a nonnegative integer cgroup CPU counter", () => {
+    expect(parseCgroupCpuUsageUsec("0\n")).toBe(0n);
+    expect(parseCgroupCpuUsageUsec("123456789\n")).toBe(123_456_789n);
+    expect(() => parseCgroupCpuUsageUsec("usage_usec 12")).toThrow(/invalid cgroup CPU usage/);
+  });
+
   it("passes command text on stdin, keeps it out of Docker argv, and reports output failures distinctly", async () => {
     const root = await mkdtemp(join(tmpdir(), "crossover-docker-exec-stdin-"));
     try {

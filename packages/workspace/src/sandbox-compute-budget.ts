@@ -13,6 +13,12 @@ export interface SandboxComputeIdentity {
   sandbox_id: string;
 }
 
+export interface SandboxComputeSample extends SandboxComputeIdentity {
+  usage_usec: bigint;
+  generation: string;
+  sampled_at: Date;
+}
+
 interface ReservationRow extends SandboxComputeIdentity {
   exec_id: string;
   usage_date: string;
@@ -131,6 +137,90 @@ export class SandboxComputeBudgetMeter {
         ],
       );
       return timeoutMs;
+    });
+  }
+
+  /** Charge the monotonic cgroup counter delta once, even when several nodes sample concurrently. */
+  async sample(input: SandboxComputeSample): Promise<bigint> {
+    if (input.usage_usec < 0n || input.generation.length === 0)
+      throw new Error("Invalid sandbox cgroup CPU sample");
+    const usageDate = utcDate(input.sampled_at);
+    return withTransaction(this.pool, async (client) => {
+      await client.query(
+        `INSERT INTO sandbox_compute_samples (sandbox_id, last_usage_usec, generation, sampled_at)
+         VALUES ($1, $2::bigint, $3, $4)
+         ON CONFLICT (sandbox_id) DO NOTHING`,
+        [input.sandbox_id, input.usage_usec.toString(), input.generation, input.sampled_at],
+      );
+      const { rows } = await client.query<{
+        last_usage_usec: string;
+        generation: string;
+        sampled_at: Date;
+      }>(
+        `SELECT last_usage_usec, generation, sampled_at
+           FROM sandbox_compute_samples WHERE sandbox_id = $1 FOR UPDATE`,
+        [input.sandbox_id],
+      );
+      const previous = rows[0];
+      if (!previous) throw new Error("Sandbox CPU sample row disappeared");
+      if (input.sampled_at < previous.sampled_at) return 0n;
+
+      const lastUsec = BigInt(previous.last_usage_usec);
+      if (input.generation === previous.generation && input.usage_usec < lastUsec) return 0n;
+      const delta =
+        input.generation !== previous.generation ? input.usage_usec : input.usage_usec - lastUsec;
+      await client.query(
+        `UPDATE sandbox_compute_samples
+            SET last_usage_usec = $2::bigint, generation = $3, sampled_at = $4
+          WHERE sandbox_id = $1`,
+        [input.sandbox_id, input.usage_usec.toString(), input.generation, input.sampled_at],
+      );
+      if (delta === 0n) return delta;
+
+      await ensureUsageRows(client, input.room_id, input.participant_id, usageDate);
+      await lockUsageRows(client, input.room_id, input.participant_id, usageDate);
+      const reservations = await client.query<{
+        exec_id: string;
+        remaining_cpu_usec: string;
+      }>(
+        `SELECT exec_id, remaining_cpu_usec
+           FROM sandbox_compute_reservations
+          WHERE sandbox_id = $1 AND usage_date = $2::date AND remaining_cpu_usec > 0
+          ORDER BY created_at, exec_id
+          FOR UPDATE`,
+        [input.sandbox_id, usageDate],
+      );
+      let chargeAgainstReservations = delta;
+      let released = 0n;
+      for (const reservation of reservations.rows) {
+        if (chargeAgainstReservations === 0n) break;
+        const remainingUsec = BigInt(reservation.remaining_cpu_usec);
+        const consumed =
+          remainingUsec < chargeAgainstReservations ? remainingUsec : chargeAgainstReservations;
+        await client.query(
+          `UPDATE sandbox_compute_reservations
+              SET remaining_cpu_usec = remaining_cpu_usec - $2::bigint
+            WHERE exec_id = $1`,
+          [reservation.exec_id, consumed.toString()],
+        );
+        released += consumed;
+        chargeAgainstReservations -= consumed;
+      }
+      await client.query(
+        `UPDATE sandbox_compute_room_daily
+            SET used_cpu_usec = used_cpu_usec + $3::bigint,
+                reserved_cpu_usec = GREATEST(0, reserved_cpu_usec - $4::bigint)
+          WHERE room_id = $1 AND usage_date = $2::date`,
+        [input.room_id, usageDate, delta.toString(), released.toString()],
+      );
+      await client.query(
+        `UPDATE sandbox_compute_agent_daily
+            SET used_cpu_usec = used_cpu_usec + $4::bigint,
+                reserved_cpu_usec = GREATEST(0, reserved_cpu_usec - $5::bigint)
+          WHERE room_id = $1 AND participant_id = $2 AND usage_date = $3::date`,
+        [input.room_id, input.participant_id, usageDate, delta.toString(), released.toString()],
+      );
+      return delta;
     });
   }
 
