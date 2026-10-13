@@ -27,7 +27,7 @@ Conventions are in `docs/ENGINEERING.md`. Section references (§) point to `docs
 | M12 Plugins (§21.4–21.5)              | T1201–T1206 | S1 (T1201, moved in Review 5), S2 (T1202–T1206)                                              |
 | M13 Lessons from building (§34)       | T1301–T1303 | S1                                                                                           |
 | M14 Demo-ready web app (Review 7)     | T1401–T1416 | S2 (T1401–T1416; T1402 moved from Q1)                                                        |
-| M15 MVP scope gaps (§29, Review 10)   | T1501–T1518 | S2 (T1501–T1505, T1510–T1511, T1513–T1516, T1518); S1 (T1508, T1512, T1517); rest unassigned |
+| M15 MVP scope gaps (§29, Review 10)   | T1501–T1520 | S2 (T1501–T1505, T1510–T1511, T1513–T1516, T1518); S1 (T1508, T1512, T1517); rest unassigned |
 
 **Start here:** S1 → T101, T105, T114 (independent). S2 → T501, T505 (only need the scaffold).
 
@@ -1621,3 +1621,11 @@ Second capture (2026-10-13, S2's local full suite, seq 1197): "kills and removes
 ### T1518 · Move sandbox compute sampling out of execution.ts — S2
 
 From Review 12. `packages/workspace/src/execution.ts` is about 1,970 lines, and each T1504 compute PR added about 125. Move CPU sampling (at reserve, at exec end, before stop or destroy), hibernate-at-cap and `sweepCompute` into a dedicated module that `ExecutionService` calls. Behavior must not change: existing tests pass unchanged, and the diff moves code rather than rewriting it. Land this before T1505 (Terminal) touches `execution.ts`.
+
+### T1519 · Decide archived-room retention — Peter
+
+Raised by S2 during T1506 planning. ARCHITECTURE §5 says archived data is kept for one year by default, but the lifecycle diagram shows `ARCHIVED → DELETED` after 30 days. The code has no unarchive and no purge. T1506 ships the existing one-way, read-only archive with no deletion. Peter decides the retention period, and whether archive can be undone, before anyone builds a purge job. Fix the spec afterwards so the two statements agree.
+
+### T1520 · Test fixtures drop the database while an injected pool is open — S1
+
+Found by S2 (seq 1227–1228). In `apps/server/src/e2e/web.test.ts`, all 14 assertions passed, then Vitest exited 1 on an unhandled `Connection terminated unexpectedly` from `pg/lib/client.js:204`. The web fixture calls `server.close()`, which deliberately leaves an injected pool open. Then `db.drop()` runs `DROP DATABASE … WITH (FORCE)` before `pool.end()`. End injected pools before dropping, in this fixture and in any other fixture with the same order, and check whether this explains T1516's 57P01. No assertion changes.
