@@ -1574,7 +1574,7 @@ Messages, inbox, sandbox and the `room mcp` stdio shim.
 
 D9 fidelity with no functional change. Last.
 
-### T1509 3b · Tier-3 grant rules in the policy — S2 (moved from S1)
+### T1509 3b · Tier-3 grant rules in the policy — S2 (moved from S1) · done
 
 Start after #287 or #290 merges, and after T1533. The decision moves into Rego. Every message, error code and detail stays byte-for-byte the same.
 
@@ -1599,7 +1599,7 @@ Start after #287 or #290 merges, and after T1533. The decision moves into Rego. 
 6. Rego unit tests in `grants_test.rego` for each reason and each boundary. Existing kernel tests pass unchanged.
 7. Include a mutation check in the PR text: change `86400000` to `86400001` in Rego and show the oracle fail.
 
-### T1509 3c · `holdsGatedScope` in the policy — S1
+### T1509 3c · `holdsGatedScope` in the policy — S2 (moved from S1)
 
 After 3b. Exact semantics to keep, from `packages/kernel/src/modules/tools/tools.ts:231`: true if some live grant has `requires_approval` and its capability equals `capability` or starts with `capability + ":"`, and no live deny has a capability exactly equal to `capability`.
 
