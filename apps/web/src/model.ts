@@ -27,6 +27,7 @@ export interface Task {
   status: TaskStatus;
   owner_id: string | null;
   priority: number;
+  version: number;
 }
 
 export const TASK_STATUSES = [

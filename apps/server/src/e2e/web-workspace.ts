@@ -1,5 +1,6 @@
 import { CrossoverClient } from "@crossover/sdk";
 import { manifest, type WebFixture } from "./web-fixture.js";
+import { refuseNextCommand } from "./web-refusal.js";
 import type { Page } from "playwright-core";
 import { expect, it } from "vitest";
 
@@ -9,7 +10,8 @@ export function registerWebWorkspaceTests(fixture: WebFixture): void {
     const problems: string[] = [];
     page.on("pageerror", (e) => problems.push(`pageerror: ${e.message}`));
     page.on("console", (m) => {
-      if (m.type() === "error") problems.push(`console: ${m.text()} @ ${m.location().url}`);
+      if (m.type() === "error" && !m.text().includes("status of 403"))
+        problems.push(`console: ${m.text()} @ ${m.location().url}`);
     });
     await page.goto(fixture.baseUrl);
     await page.getByTestId("login-name").fill("Peter");
@@ -74,7 +76,7 @@ export function registerWebWorkspaceTests(fixture: WebFixture): void {
       base_file_revisions: { "docs/conflict.txt": base.response.file_revision },
       operations: [{ type: "modify", path: "docs/conflict.txt", content: headText }],
     });
-    const submitted = await agent.api.workspace.apply_changeset<{
+    const submitted = await owner.api.workspace.apply_changeset<{
       status: string;
       changeset_id: string;
       conflict_id: string;
@@ -86,11 +88,18 @@ export function registerWebWorkspaceTests(fixture: WebFixture): void {
       operations: [{ type: "modify", path: "docs/conflict.txt", content: mineText }],
     });
     expect(submitted.response.status).toBe("CONFLICT");
-    await agent.api.conflicts.escalate({ conflict_id: submitted.response.conflict_id });
 
     const conflictRow = page.locator(
       `[data-testid="conflict"][data-id="${submitted.response.conflict_id}"]`,
     );
+    await expect.poll(() => conflictRow.getAttribute("data-status")).toBe("OPEN");
+    const finishEscalationRefusal = await refuseNextCommand(page, "conflicts.escalate");
+    await conflictRow.getByRole("button", { name: "Escalate" }).click();
+    await expect
+      .poll(() => page.getByTestId("changes-notice").textContent())
+      .toContain("The server refused this action");
+    await finishEscalationRefusal();
+    await conflictRow.getByRole("button", { name: "Escalate" }).click();
     await expect.poll(() => conflictRow.getAttribute("data-status")).toBe("ESCALATED");
     await conflictRow.getByRole("button", { name: "Details" }).click();
     await page
