@@ -4,7 +4,7 @@ Tasks for the Phase 1 backend core: ledger, governance, tasks, collaboration sta
 
 Conventions are in `docs/ENGINEERING.md`. Section references (§) point to `docs/ARCHITECTURE.md`.
 
-**Status** lives in the SharedNet room and on the PRs (and in Chorus once it's set up). This file holds specs and owners; O1 updates it when specs change.
+**Status** lives in the SharedNet room and on the PRs (and in Chorus once it's set up). This file holds specs and owners; O1 updates it when specs change. A heading ending in `· done` marks a task whose work has merged; check for it before picking up a task.
 
 **Reading a task:** _Deps_ must be merged before you start. _Migration_ is the file number you must use. Every task also implicitly requires: tests for the acceptance criteria, `pnpm check` green, and no unrelated changes.
 
@@ -1534,37 +1534,37 @@ Until then the compose file must label itself demo or development only.
 
 A §29 check against main at b34f994 found the backend nearly complete. These are the gaps, ranked. One task per PR, 400 non-test lines max.
 
-### T1501 · MCP tools for plugins, edit intents, history and blame — S2
+### T1501 · MCP tools for plugins, edit intents, history and blame — S2 · done
 
 MCP is the primary agent interface (§29), yet MCP agents cannot reach the GitHub, Browser or AWS plugins or publish edit intents. Add MCP tools that map existing commands: `tools_list`, `tools_invoke`, `presence_set_intent`, `presence_clear_intent`, `workspace_history`, `workspace_blame`. Same provenance framing and capability checks as the existing tools. Done when `packages/mcp` tests cover each tool, including a denied call, and the §30 demo's step 7 runs through MCP instead of the SDK.
 
-### T1502 · Message channel in the web app — S2
+### T1502 · Message channel in the web app — S2 · done
 
 The collaboration panel has no channel: nothing in `apps/web` calls `messages.*`. Add a channel view: list with live updates, send, @mentions and references to tasks, decisions and files, rendered with provenance. Done when a browser e2e test sends a message with a mention and the mentioned agent receives it in its inbox.
 
-### T1503 · Human sign-in with GitHub or Google OAuth — unassigned
+### T1503 · Human sign-in with GitHub or Google OAuth — unassigned · done
 
 Only `POST /v1/auth/dev-login` exists. Add OAuth (§15.3) behind configuration, with the session token in an HttpOnly cookie, and keep dev-login for development only. Required before any non-demo deployment.
 
-### T1504 · Budget configuration — S2
+### T1504 · Budget configuration — S2 · done
 
 Budgets are enforced, but nothing sets `rooms.settings.budgets` or `participants.budgets`. Add an owner command and an owner-controls section, plus the sandbox-compute budget (§22).
 
 PR A (#245, `budgets.set`/`budgets.get`, `room.budgets_changed`) and the Owner controls section (#246) are merged. PR B, sandbox CPU metering: migration **0033**. Meter cumulative cgroup CPU per sandbox, charging the delta at exec end, on a periodic sweep and at stop, to the owning participant. Enforce the per-agent 4 vCPU-h/day and room 40 vCPU-h/day limits with TTL'd reservations, refuse a new exec when either is exhausted, and cap timeouts by the remaining budget.
 
-### T1505 · Terminal tab — S2
+### T1505 · Terminal tab — S2 · done
 
 §27 Terminal tab: the human's own sandbox via `sandbox.exec`, and read-only views of agents' sandbox output via `sandbox.output.subscribe`.
 
-### T1506 · Room export bundle and archive button — S2
+### T1506 · Room export bundle and archive button — S2 · done
 
 §5 export bundle (git bundle, `events.jsonl`, `memory.json`, `tasks.json`, `decisions.json`), plus an archive button in owner controls.
 
-### T1507 · Web UI completeness — S2
+### T1507 · Web UI completeness — S2 · done
 
 Decision veto and withdraw; task create, assign and claim; memory write; one-click conflict escalate; health and revision badge in the header; upstream-pull button; show `provenance.author_kind` (HUMAN/AGENT/SYSTEM) beside the trust label in MessagesView and CollaborationView, since `trust` is `participant` for humans and agents alike.
 
-### T1508 · Go CLI breadth — S1
+### T1508 · Go CLI breadth — S1 · done
 
 Messages, inbox, sandbox and the `room mcp` stdio shim.
 
@@ -1572,19 +1572,19 @@ Messages, inbox, sandbox and the `room mcp` stdio shim.
 
 D9 fidelity with no functional change. Last.
 
-### T1510 · compose.test.ts sandbox-over-MCP test times out under load — S2
+### T1510 · compose.test.ts sandbox-over-MCP test times out under load — S2 · done
 
 T1417's second unidentified flake, now named (seq 1082): `apps/server/src/compose.test.ts` › composeServer › "supports a sandbox coding flow through MCP before and after submission" (line 1578), `Test timed out in 5000ms` during a full parallel `pnpm check`. Find what it waits on; give it an explicit timeout sized to the work or remove the wait. Do not just raise the default.
 
-### T1511 · Secret-scanner time-bound assertion fails under load — S2
+### T1511 · Secret-scanner time-bound assertion fails under load — S2 · done
 
 `packages/security/src/secret-scanner.test.ts:181`, "scans a file just under the 2 MiB bound within a time bound": `expected 1020 to be less than 1000` under a full parallel run. A wall-clock bound in a unit test measures machine load, not the scanner. Replace it with a deterministic guard (for example an assertion on work done, or a bound with a documented margin run in isolation).
 
-### T1512 · Validate message refs on the server — S1
+### T1512 · Validate message refs on the server — S1 · done
 
 `messages.send` checks mentions but stores `refs` as given. Reject task, decision and file references that do not exist in the room (`VALIDATION`), as mentions do.
 
-### T1513 · deploy-topology sandbox.exec returned 500 once in CI — S2
+### T1513 · deploy-topology sandbox.exec returned 500 once in CI — S2 · done
 
 First seen on #237 (head 89e9ce0, CI run 38301197654, 2026-10-12 20:02 UTC), a change that touched only one test timeout. `apps/server/src/e2e/deploy-topology.test.ts` › "fetches a canonical workspace into a sandbox through the deployed server on crossover-git": `sandbox.exec` (test line 244) returned `500 {"code":"INTERNAL","message":"Internal error"}`. The same test passed on #234, #235 and #236. The server container's logs were not captured, so the cause is unknown.
 
@@ -1592,25 +1592,25 @@ Step 1 (this task): print the server container's `docker logs` when the test fai
 
 Step 1 done in #238 (internal errors now logged). Likely root cause found while fixing #240 (2026-10-12 21:54): see T1514.
 
-### T1514 · Git listener binds to a nondeterministic address when GIT_INTERNAL_HOST is a hostname — S2
+### T1514 · Git listener binds to a nondeterministic address when GIT_INTERNAL_HOST is a hostname — S2 · done
 
 A container on two networks (bridge and `crossover-git`) resolves its own hostname to whichever address `/etc/hosts` lists first. With `GIT_INTERNAL_HOST=<container name>`, the internal Git listener sometimes binds to the bridge IP, which sandbox fetchers on the internal `crossover-git` network cannot reach. Sandbox materialization then fails, which is the likely cause of T1513's intermittent `sandbox.exec` 500. `docker-compose.yml` has the same setting (`GIT_INTERNAL_HOST: crossover-server`).
 
 Fix it in the server: when `GIT_INTERNAL_HOST` is not an IP literal, resolve this container's address on `crossover-git` deterministically, by inspecting its own container (`GIT_INTERNAL_CONTAINER`) for `NetworkSettings.Networks["crossover-git"].IPAddress`. Fail startup if it has no address there. Then revert the deploy-topology fixture to the plain container name, so the test proves the product path.
 
-### T1515 · Browser plugin refusal surfaces as a retryable provider error under load — S2
+### T1515 · Browser plugin refusal surfaces as a retryable provider error under load — S2 · done
 
 T1417's first flake, captured with evidence on 2026-10-13 (seq 1160, during T1504 PR B validation; log saved by S2). `apps/server/src/browser-plugin.docker.test.ts` › "uses the signed room allowlist, denies unsafe destinations, and caps UTF-8 page text" (assertion at lines 180–183). Expected `ToolProviderError { code: VALIDATION }`, got `ToolProviderError: Plugin execution failed { retryable: true }`. Under a full parallel run the plugin worker failed or timed out before returning its own policy refusal, and the runner reported a generic retryable failure.
 
 Find which: a worker timeout, a container start race, or an exit before the result is written. Decide whether a policy refusal can ever be reported as retryable; it should not be, because an agent would retry a denied action. Fix the cause, not the assertion.
 
-### T1516 · egress-visibility MCP read-tool test times out in parallel CI — S2
+### T1516 · egress-visibility MCP read-tool test times out in parallel CI — S2 · done
 
 T1417's second flake, captured on 2026-10-13 in #247's CI (seq 1168; log saved by S2). `apps/server/src/e2e/egress-visibility.test.ts` › "egress visibility conformance (§34.5)" › "every MCP read tool: B never receives it, and each tool is a registered read command" (line 500): `Test timed out in 5000ms`. The same run logged PostgreSQL `FATAL 57P01 terminating connection due to administrator command` and `Connection terminated unexpectedly`. It also timed out once locally during #245 validation.
 
 57P01 is what `DROP DATABASE … WITH (FORCE)` does to live sessions, so check first whether another test file's cleanup drops a database this test is still using, or whether this test shares a pool or database name across workers. Otherwise, find which of the MCP read-tool calls stalls. Give the test a measured budget only after the cause is known (as in T1510).
 
-### T1517 · DockerHealthRunner integration cases hit the 5 s default timeout under full-suite load — S1
+### T1517 · DockerHealthRunner integration cases hit the 5 s default timeout under full-suite load — S1 · done
 
 Captured on 2026-10-13 in #248's CI (run 38340866790, job 115111301475; log saved by O1 and S2 before rerun). `packages/workspace/src/health-runner.test.ts` › DockerHealthRunner › "keeps successful status with output over 1 MiB" (5030 ms) and "kills and removes a container when aborted" (5014 ms): `Test timed out in 5000ms`. Neither file was in #248's diff. The cases start real containers but run under vitest's default 5 s budget.
 
@@ -1618,7 +1618,7 @@ On the next failure, record container start time against total run time. Then de
 
 Second capture (2026-10-13, S2's local full suite, seq 1197): "kills and removes a container on timeout" failed with `expected no container IDs, got eb5493cb3dca`, and "kills and removes a container when aborted" hit the 5 s timeout. The full suite took 77.9 s; both passed in isolation in 2.9 s. A container left behind after a timeout kill is a cleanup race in `DockerHealthRunner` and a product bug. Fix the race first, then measure whether the abort case still needs a budget.
 
-### T1518 · Move sandbox compute sampling out of execution.ts — S2
+### T1518 · Move sandbox compute sampling out of execution.ts — S2 · done
 
 From Review 12. `packages/workspace/src/execution.ts` is about 1,970 lines, and each T1504 compute PR added about 125. Move CPU sampling (at reserve, at exec end, before stop or destroy), hibernate-at-cap and `sweepCompute` into a dedicated module that `ExecutionService` calls. Behavior must not change: existing tests pass unchanged, and the diff moves code rather than rewriting it. Land this before T1505 (Terminal) touches `execution.ts`.
 
@@ -1626,19 +1626,19 @@ From Review 12. `packages/workspace/src/execution.ts` is about 1,970 lines, and 
 
 Raised by S2 during T1506 planning. ARCHITECTURE §5 says archived data is kept for one year by default, but the lifecycle diagram shows `ARCHIVED → DELETED` after 30 days. The code has no unarchive and no purge. T1506 ships the existing one-way, read-only archive with no deletion. Peter decides the retention period, and whether archive can be undone, before anyone builds a purge job. Fix the spec afterwards so the two statements agree.
 
-### T1520 · Test fixtures drop the database while an injected pool is open — S1
+### T1520 · Test fixtures drop the database while an injected pool is open — S1 · done
 
 Found by S2 (seq 1227–1228). In `apps/server/src/e2e/web.test.ts`, all 14 assertions passed, then Vitest exited 1 on an unhandled `Connection terminated unexpectedly` from `pg/lib/client.js:204`. The web fixture calls `server.close()`, which deliberately leaves an injected pool open. Then `db.drop()` runs `DROP DATABASE … WITH (FORCE)` before `pool.end()`. End injected pools before dropping, in this fixture and in any other fixture with the same order, and check whether this explains T1516's 57P01. No assertion changes.
 
-### T1521 · Owner-controls budget e2e reads before the save lands — S1
+### T1521 · Owner-controls budget e2e reads before the save lands — S1 · done
 
 #261's CI (run 38362177263, job 115178717905; log saved by S1 before one rerun) failed in `apps/server/src/e2e/web.test.ts` at `web-collaboration.ts:253`: it expected `room_budgets` `{ messages: 8 }` and got `{}`. The test polls `owner-controls-notice` for "complete", which a notice from an earlier action can already satisfy, and then reads `budgets.get` straight away. Wait for the saved state instead: poll `budgets.get` until it matches, or wait on a notice tied to that save. Do the same for the compute-budget save that follows. No assertion is weakened.
 
-### T1522 · Deploy-topology first sandbox.exec has no time margin — S1
+### T1522 · Deploy-topology first sandbox.exec has no time margin — S1 · done
 
 `apps/server/src/e2e/deploy-topology.test.ts:255` gives the first `sandbox.exec` a 10 s per-request abort (`requestJson`, line 47). That first request runs `ensureSandbox`, container create and a git fetch over `crossover-git`, all inside one request, under full-suite load. The whole test took 9.95 s (#257), 10.15 s (#261) and 14.9 s (#269). On #273 (run 38379543415, job 115236242740) the exec request alone went past 10 s. Time each phase of the first exec in CI, then give that one request a measured budget, as in T1510. If one phase dominates, for example the image pull or the fetch, decide whether it should be warmed before the test.
 
-### T1523 · Glob `*` is compared literally against a `*` in the text — S1
+### T1523 · Glob `*` is compared literally against a `*` in the text — S1 · done
 
 Found by S1 (seq 1300) while checking the T1509 2b Rego matcher against TypeScript over 118,482 cases. In `glob.ts`, `wildcardMatch` treats a pattern `*` as a literal when the text has a `*` at that position. So pattern `*` does not match text `**`, and a grant `workspace.write:src/*` does not cover the path `src/*.ts`. It fails closed: it causes false denies, never allows. But it contradicts the documented meaning, where `*` matches any run of characters. Fix it in its own PR, before 2b, because the fix widens access. Include:
 
@@ -1648,7 +1648,7 @@ Found by S1 (seq 1300) while checking the T1509 2b Rego matcher against TypeScri
 
 In #279, S1 found that the bug also left a gap in the circuit breaker's protected-path check: `secrets/*` did not match a file named `secrets/*key`. The fix closes that gap too, with a regression test.
 
-### T1524 · Move the room-export route out of gateway server.ts — S1
+### T1524 · Move the room-export route out of gateway server.ts — S1 · done
 
 From Reviews 13 and 14. `packages/gateway/src/server.ts` is 676 lines, and the export route (about 110 lines) is inline. Move it next to `room-export.ts` and register it from `server.ts`, as was done for `execution.ts`. Behaviour must not change: existing tests pass unchanged, and the diff moves code rather than rewriting it. Document beside the endpoint that exports refuse with `UNAVAILABLE` when Redis is down.
 
@@ -1660,6 +1660,12 @@ From the tech-debt register (Reviews 11–14). `packages/kernel/src/dispatcher.t
 
 From the tech-debt register. T1518 (#253) moved compute sampling out, but `packages/workspace/src/execution.ts` is still 1,921 lines. Split the rest of `ExecutionService` by concern (for example sandbox lifecycle, exec and cancel, output streaming, workspace materialization), keeping `ExecutionService` as the public facade so no import outside the file changes. Behaviour must not change: existing tests pass unchanged, and the diff moves code rather than rewriting it. Prove it the way T1525 did: a TypeScript-parser declaration comparison after only the allowed edits, plus a check that the package's exported names are identical on main and on the branch. Post the module split before any code. Ship more than one PR if needed; pure moves with that proof may go over 400 lines.
 
-### T1527 · Scope-oracle test exceeds the 5 s default under full-suite load — S1
+### T1527 · Scope-oracle test exceeds the 5 s default under full-suite load — S1 · done
 
 #287's CI (run 38421887493, job 115381065803; log saved by O1 before any rerun) failed in `packages/policy/src/scope-oracle.test.ts:168`, "covers a requested capability exactly as capabilityMatches() does": `Test timed out in 5000ms`. The file took 8.8 s in a 79 s parallel run. #287 does not touch the policy package. The exhaustive oracle from #280 is deterministic and CPU-bound, so it needs a measured budget, as in T1510: time it in isolation and under `pnpm check`, then set an explicit per-test timeout with the measurements in a comment. Keep every case. Do not sample the corpus or weaken an assertion. Check the other oracle tests (`bundles-oracle.test.ts`) at the same time.
+
+### T1528 · Plugin-runner stale-resource cleanup fails without saying why — S2
+
+#287's second CI run (run 38428716074, job 115404900246; log saved by O1 before any rerun) failed in `apps/server/src/plugin-runner.docker.test.ts` › "removes stale labeled containers and networks during startup cleanup" with `Error: Docker container cleanup failed`, thrown from `PluginResourceSweeper.remove` (`plugin-runner-docker.ts:150`). #287 changes only kernel files. The error drops Docker's exit code and stderr, so the cause cannot be told from the log. It could be a sweep timeout under load, a container another parallel Docker test is still using, or a Docker message that `isSuccessfulCleanup` does not recognise.
+
+Step 1: put the exit code, whether the call timed out, and the first 500 bytes of stderr in the cleanup error (and in the network path). Step 2: on the next capture, root-cause it. Also check whether the test's sweep can see containers that belong to other Docker test files running in parallel, and scope it to its own label value if it can. A failed cleanup of real containers is a product bug until shown otherwise.
