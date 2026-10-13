@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   createPolicyEngine,
   parseDecision,
+  parseGrantCheck,
   PolicyEngineError,
   initPolicy,
   type AuthzFacts,
@@ -112,5 +113,35 @@ describe("parseDecision accepts exactly one well-formed answer", () => {
     ],
   ])("rejects %s", (_name, result) => {
     expect(() => parseDecision(result)).toThrow(PolicyEngineError);
+  });
+});
+
+describe("parseGrantCheck accepts exactly one well-formed answer", () => {
+  it("takes an allow and each known refusal reason", () => {
+    expect(parseGrantCheck([{ result: { allow: true } }])).toEqual({ allow: true });
+    for (const reason of ["expiry_not_in_future", "tier3_needs_expiry", "tier3_expiry_too_long"]) {
+      expect(parseGrantCheck([{ result: { allow: false, reason } }])).toEqual({
+        allow: false,
+        reason,
+      });
+    }
+  });
+
+  it.each([
+    ["no result", undefined],
+    ["an empty result set", []],
+    ["two results", [{ result: { allow: true } }, { result: { allow: true } }]],
+    ["an undefined decision", [{}]],
+    ["a non-object decision", [{ result: "allow" }]],
+    ["a string allow", [{ result: { allow: "true" } }]],
+    ["an allow carrying another field", [{ result: { allow: true, reason: "x" } }]],
+    ["a refusal without a reason", [{ result: { allow: false } }]],
+    ["a refusal with an unknown reason", [{ result: { allow: false, reason: "unknown" } }]],
+    [
+      "a refusal with an extra field",
+      [{ result: { allow: false, reason: "tier3_needs_expiry", code: "FORBIDDEN" } }],
+    ],
+  ])("rejects %s", (_name, result) => {
+    expect(() => parseGrantCheck(result)).toThrow(PolicyEngineError);
   });
 });
