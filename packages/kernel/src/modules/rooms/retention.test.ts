@@ -5,7 +5,7 @@ import type { Principal } from "../../principal.js";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { registerRoomLifecycleCommands } from "./lifecycle.js";
 import { registerRoomRetentionCommands } from "./retention.js";
-import { RoomRetentionSweeper } from "./retention-sweeper.js";
+import { ROOM_SCOPED_TABLES, RoomRetentionSweeper } from "./retention-sweeper.js";
 import { newId } from "@crossover/protocol";
 
 let db: TestDatabase;
@@ -216,6 +216,23 @@ async function seedPurgeGraph(roomId: string, ownerId: string): Promise<void> {
 }
 
 describe("RoomRetentionSweeper", () => {
+  it("keeps room purge coverage aligned with every room-scoped table", async () => {
+    const { rows } = await pool.query<{ table_name: string }>(
+      `SELECT columns.table_name
+         FROM information_schema.columns AS columns
+         JOIN information_schema.tables AS tables
+           ON tables.table_schema = columns.table_schema
+          AND tables.table_name = columns.table_name
+        WHERE columns.table_schema = 'public'
+          AND columns.column_name = 'room_id'
+          AND tables.table_type = 'BASE TABLE'
+          AND columns.table_name NOT IN ('room_deletion_audit', 'room_leases', 'rooms')
+        ORDER BY columns.table_name`,
+    );
+
+    expect(rows.map((row) => row.table_name)).toEqual(ROOM_SCOPED_TABLES);
+  });
+
   it("sends one owner inbox notice at the seven-day boundary", async () => {
     const { dispatcher, roomId } = await archivedRoom();
     const now = new Date();

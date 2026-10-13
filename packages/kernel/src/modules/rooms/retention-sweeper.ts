@@ -6,6 +6,44 @@ import { deliverInbox } from "../inbox/inbox.js";
 const DAY_MS = 24 * 60 * 60 * 1000;
 const RETENTION_NOTICE_MS = 7 * DAY_MS;
 
+/**
+ * Room-scoped tables covered by deleteRoomRows or by cascading deletion of their room/participant.
+ * retention.test.ts keeps this list aligned with every public base table that has a room_id column.
+ */
+export const ROOM_SCOPED_TABLES = [
+  "approvals",
+  "auth_tokens",
+  "capability_grants",
+  "changesets",
+  "checkpoints",
+  "conflicts",
+  "decision_positions",
+  "decisions",
+  "events",
+  "file_revisions",
+  "health_install_runs",
+  "health_runs",
+  "inbox_items",
+  "integration_room_keys",
+  "integrations",
+  "invites",
+  "memory_entries",
+  "memory_revisions",
+  "messages",
+  "participants",
+  "sandbox_compute_agent_daily",
+  "sandbox_compute_reservations",
+  "sandbox_compute_room_daily",
+  "sandboxes",
+  "task_reviews",
+  "tasks",
+  "tool_invocations",
+  "upstreams",
+  "wake_windows",
+  "workspace_revisions",
+  "workspaces",
+] as const;
+
 export interface RoomRetentionSweeperOptions {
   pool: Pool;
   dispatcher: Dispatcher;
