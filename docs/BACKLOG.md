@@ -10,23 +10,23 @@ Conventions are in `docs/ENGINEERING.md`. Section references (§) point to `docs
 
 ## Ownership at a glance
 
-| Milestone                             | Tasks       | Owner                                                       |
-| ------------------------------------- | ----------- | ----------------------------------------------------------- |
-| M0 Foundation                         | T000        | O1                                                          |
-| M1 Persistence, ledger, commands      | T101–T118   | S1                                                          |
-| M2 Rooms, participants, auth, policy  | T201–T215   | S1                                                          |
-| M3 Tasks                              | T301–T312   | S1                                                          |
-| M4 Messages, inbox, decisions, memory | T401–T412   | S1 (moved from S2 for T404–T409, T411–T412 in Review 3)     |
-| M5 Workspace engine                   | T501–T520   | S2                                                          |
-| M6 Conflicts and health               | T601–T610   | S2                                                          |
-| M7 Gateway, MCP, end-to-end           | T701–T713   | S1 (T701–T709, T713), S2 (T710), Q1 (T705, T711), O1 (T712) |
-| M8 Git interoperability (§24)         | T801–T807   | S1 (moved from S2 in Review 4)                              |
-| M9 Safety controls (§22–23)           | T901–T906   | S1 (T904–T906), Q1 (T901–T902), S2 (T903)                   |
-| M10 Execution sandboxes (§14)         | T1001–T1008 | S2 (T1007 split into T1007 + T1007b in Review 5)            |
-| M11 Clients (§27, §29)                | T1101–T1106 | S1 (T1102 → Q1)                                             |
-| M12 Plugins (§21.4–21.5)              | T1201–T1206 | S1 (T1201, moved in Review 5), S2 (T1202–T1206)             |
-| M13 Lessons from building (§34)       | T1301–T1303 | S1                                                          |
-| M14 Demo-ready web app (Review 7)     | T1401–T1416 | S2 (T1401–T1416; T1402 moved from Q1)                       |
+| Milestone                             | Tasks       | Owner                                                                                        |
+| ------------------------------------- | ----------- | -------------------------------------------------------------------------------------------- |
+| M0 Foundation                         | T000        | O1                                                                                           |
+| M1 Persistence, ledger, commands      | T101–T118   | S1                                                                                           |
+| M2 Rooms, participants, auth, policy  | T201–T215   | S1                                                                                           |
+| M3 Tasks                              | T301–T312   | S1                                                                                           |
+| M4 Messages, inbox, decisions, memory | T401–T412   | S1 (moved from S2 for T404–T409, T411–T412 in Review 3)                                      |
+| M5 Workspace engine                   | T501–T520   | S2                                                                                           |
+| M6 Conflicts and health               | T601–T610   | S2                                                                                           |
+| M7 Gateway, MCP, end-to-end           | T701–T713   | S1 (T701–T709, T713), S2 (T710), Q1 (T705, T711), O1 (T712)                                  |
+| M8 Git interoperability (§24)         | T801–T807   | S1 (moved from S2 in Review 4)                                                               |
+| M9 Safety controls (§22–23)           | T901–T906   | S1 (T904–T906), Q1 (T901–T902), S2 (T903)                                                    |
+| M10 Execution sandboxes (§14)         | T1001–T1008 | S2 (T1007 split into T1007 + T1007b in Review 5)                                             |
+| M11 Clients (§27, §29)                | T1101–T1106 | S1 (T1102 → Q1)                                                                              |
+| M12 Plugins (§21.4–21.5)              | T1201–T1206 | S1 (T1201, moved in Review 5), S2 (T1202–T1206)                                              |
+| M13 Lessons from building (§34)       | T1301–T1303 | S1                                                                                           |
+| M14 Demo-ready web app (Review 7)     | T1401–T1416 | S2 (T1401–T1416; T1402 moved from Q1)                                                        |
 | M15 MVP scope gaps (§29, Review 10)   | T1501–T1518 | S2 (T1501–T1505, T1510–T1511, T1513–T1516, T1518); S1 (T1508, T1512, T1517); rest unassigned |
 
 **Start here:** S1 → T101, T105, T114 (independent). S2 → T501, T505 (only need the scaffold).
@@ -1616,8 +1616,8 @@ Captured on 2026-10-13 in #248's CI (run 38340866790, job 115111301475; log save
 
 On the next failure, record container start time against total run time. Then decide whether the cases need a measured budget (as in T1510) or whether the runner is slow to start or to clean up. If the abort case is slow to remove its container, that is a product bug, not a test budget issue.
 
-
 Second capture (2026-10-13, S2's local full suite, seq 1197): "kills and removes a container on timeout" failed with `expected no container IDs, got eb5493cb3dca`, and "kills and removes a container when aborted" hit the 5 s timeout. The full suite took 77.9 s; both passed in isolation in 2.9 s. A container left behind after a timeout kill is a cleanup race in `DockerHealthRunner` and a product bug. Fix the race first, then measure whether the abort case still needs a budget.
+
 ### T1518 · Move sandbox compute sampling out of execution.ts — S2
 
 From Review 12. `packages/workspace/src/execution.ts` is about 1,970 lines, and each T1504 compute PR added about 125. Move CPU sampling (at reserve, at exec end, before stop or destroy), hibernate-at-cap and `sweepCompute` into a dedicated module that `ExecutionService` calls. Behavior must not change: existing tests pass unchanged, and the diff moves code rather than rewriting it. Land this before T1505 (Terminal) touches `execution.ts`.
