@@ -1816,3 +1816,13 @@ The exact change:
 3. Change nothing else: not `RoomSetupView.tsx`, not the server.
 
 **Proof, in the PR text:** with the server on :8080 and `pnpm --filter @crossover/web dev`, run `curl -sS -o /dev/null -w '%{http_code} %{content_type}\n' -X POST http://localhost:5173/mcp -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'` before and after. Before shows the web app (`text/html`); after shows the server's JSON error for a missing token (401 or the MCP error envelope). Paste both lines.
+
+### T1536 · Harden three timing-sensitive tests — S2
+
+From Review 17. Each of these failed once under load on 2026-10-13 and passed on rerun. T1529 covers `apply.test`. The exact change:
+
+1. `apps/server/src/e2e/web-editor.ts:103`: change `await expect.poll(async () => lines.textContent()).toContain("ONE");` to pass `{ timeout: 10_000 }` as the second argument of `expect.poll`, the same as the `onServer` poll a few lines above. It currently uses the 1 s default, and the WebSocket push of another participant's change can take longer under load (run 38467301118 failed here). Change no other line in this file.
+2. `packages/workspace/src/docker-execution-driver.test.ts`, test "restarts the sandbox to kill a detached setsid child" (timeout `30_000`, it timed out on main run 38465499250): measure it 5 times idle and 5 times under 3× CPU load, the same way as T1534. Replace `30_000` with the T1529 budget: load max × 7, rounded up to the next 5,000 ms, minimum 15,000. Add a comment with the measurements. Change nothing else in the test.
+3. `apps/server/src/plugin-runner.docker.test.ts`, test "removes stale labeled containers and networks during startup cleanup": on main run 38465499250 it failed with `Docker container cleanup failed (exit code: 143, timed out: true)`, so an inner `docker` call timed out. Do not change code for this one. Measure how long `docker rm -f` of a running `busybox sleep 300` container takes, 5 times idle and 5 times under 3× load, and put the numbers in the PR text with the name and value of the timeout that cleanup uses in `plugin-runner.ts`. O1 decides the fix from those numbers.
+
+One PR. The PR text has the before and after for items 1 and 2, and the measurements for item 3.
