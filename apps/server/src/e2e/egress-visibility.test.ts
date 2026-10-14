@@ -275,7 +275,7 @@ describe("egress visibility conformance (§34.5)", () => {
     }
     expect(problems).toEqual([]);
     expect(ownerSaw, "control: the owner sees the denied path in room.events.list").toBe(true);
-  }, 30_000); // one request per read command: grows with every read, and CI runs several jobs at once
+  }, 60_000); // Measured (T1538): idle 5324 ms, 3x load 4204 ms; budget 7x of CI max 8174 ms.
 
   it("the WebSocket stream, backfill and live: B never receives it, the owner does (control)", async () => {
     const f = await fixture();
@@ -497,6 +497,7 @@ describe("egress visibility conformance (§34.5)", () => {
     expect(JSON.stringify(asOwner)).toContain(SECRET);
   });
 
+  // Measured (T1538): idle 4157 ms, 3x load 3524 ms; budget 7x of CI max 8174 ms.
   it("every MCP read tool: B never receives it, and each tool is a registered read command", async () => {
     const f = await fixture();
     const byMethod = new Map(server.dispatcher.commandInfo().map((c) => [c.method, c]));
@@ -524,5 +525,5 @@ describe("egress visibility conformance (§34.5)", () => {
       }
     }
     expect(problems).toEqual([]);
-  }, 15_000);
+  }, 60_000);
 });
