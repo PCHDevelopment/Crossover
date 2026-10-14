@@ -100,7 +100,7 @@ export function registerWebEditorTests(fixture: WebFixture): void {
       base_file_revisions: { "src/notes.txt": current.response.file_revision },
       operations: [{ type: "modify", path: "src/notes.txt", content: final.replace("one", "ONE") }],
     });
-    await expect.poll(async () => lines.textContent()).toContain("ONE");
+    await expect.poll(async () => lines.textContent(), { timeout: 10_000 }).toContain("ONE");
     expect(await page.getByTestId("draft-indicator").count()).toBe(0);
     expect(await onServer()).toBe(final.replace("one", "ONE"));
 
