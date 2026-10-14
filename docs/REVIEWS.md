@@ -2,6 +2,48 @@
 
 Periodic big-picture reviews by O1: is the merged code building the product in ARCHITECTURE.md, in the right order? Newest first.
 
+## 2026-10-14 · Review 17 (00:20 UTC; 6 PRs merged since Review 16)
+
+**State.** #301–#306 merged, all from S2, each with CI green on its head. Every one matched its spec on the first review.
+
+- **The demo blockers are fixed.** T1534 (#302) makes health checks work under Compose, with a deployed GREEN-then-RED test. T1535 (#301) makes the dev UI proxy `/mcp`. Peter's hands-on run (docs/DEMO-RUNBOOK.md) no longer has a known blocker before step 17.
+- **T1509 is done.** #304 and #305 moved the tier-3 grant checks and `holdsGatedScope` into Rego. Every authorization decision now runs in the policy, and each move has a reference oracle (42 cases, then 2,000 seeded cases) and a mutation check.
+- **T1533 (#303).** A newer push to a PR now cancels its older CI run, and main, nightly and manual runs keep their own groups.
+- **T1531 (#306).** A production config refuses to start without `SANDBOX_RUNTIME=runsc`, and `ALLOW_UNSANDBOXED_DEV=1` is refused in production. The server logs the single-host limit at startup, and the README states it.
+
+**Against §29 and §30.** The §29 scope is complete. For §30, everything except step 17 (export to a pull request) can be run by hand now. Step 17 needs a GitHub App and a connect UI, and that is Peter's decision.
+
+**What went well.** S2 ran six exact specs back to back with no rework, and each PR carried the proof its spec asked for. Moving S1's specs to S2 kept work flowing while S1 was away.
+
+**What needs correcting.**
+
+1. **Timing-sensitive tests.** Three tests failed on main once, and one failed on #303, all from timeouts under load: the plugin-runner stale cleanup, the `apply.test` abandon at the 5 s default, the docker-execution-driver detached-child test at 30 s, and `web-editor.ts:103`. Each reran green. T1529 covers `apply.test`; the other three need fixes.
+2. **Silence.** S1 has said nothing since about 17:40, with #287 waiting. Q1 said "on it" for T1529 at 20:20 but had not started by 23:01.
+
+**Course corrections.**
+
+1. **S2:**
+   1. T1536, timing hardening for the three flaky tests above (O1 writes the spec next).
+   2. Then MCP tools for checkpoints, roles and pause, if Peter wants agents to do those.
+2. **Q1:** T1529, PR due next.
+3. **S1, when back:** #287 (merge main in). Nothing else is queued for S1 until they are active again.
+4. **For Peter:**
+   - Merge docs PR #298.
+   - Do the hands-on run.
+   - Decide whether step 17 is required for the MVP.
+
+**Tech-debt register, closed:** the tier and grant rules in TypeScript (T1509); wasted CI runs (T1533).
+
+**Still open:**
+
+- `dispatcher.ts` size (#287).
+- Flaky timing tests (T1536).
+- The Rego and TypeScript string-length difference.
+- `RedisOAuthStateStore` opens its own Redis connection.
+- dev-login `session_token`.
+- The web app imports `@crossover/workspace/protected-paths`.
+- The purge's hand-kept delete order, which the schema test guards.
+
 ## 2026-10-13 · Review 16 (20:20 UTC; 5 PRs merged since Review 15)
 
 **State.** #290, #292, #293, #294 and #299 merged, each with CI green on its head, plus docs PRs #295–#297.
