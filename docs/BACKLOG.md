@@ -1844,3 +1844,12 @@ Change nothing else. After it merges, S2 merges main into #307 so #307 gets a fr
 1. On main, run only this file four times: twice idle and twice under 3× load (the T1529 step 2 burners), with `pnpm vitest run apps/server/src/e2e/egress-visibility.test.ts --reporter=json --outputFile=ev-<idle|load>-N.json`. Kill the burners afterwards.
 2. Post one row per test for line 251 ("every read command…", now 30,000 ms) and line 500 ("every MCP read tool…", now 15,000 ms): idle max, load max, and budget. Budget = the larger of load max × 7 and 8,174 × 7, rounded up to the next 5,000 ms, and never below the current value. Wait for O1's approval before step 3.
 3. Set each approved budget as the test's timeout argument. Replace the trailing comment on line 278 and add one above line 500: `// Measured (T1538): idle <x> ms, 3x load <y> ms; budget 7x.` Change nothing else.
+
+### T1539 · Health-runner abort test waits longer for its container — S2
+
+`packages/workspace/src/health-runner.test.ts` › "kills and removes a container when aborted" failed in S2's local `pnpm check` (2026-10-14, seq 1471): `vi.waitFor` at line 1209 expired after 5,000 ms with no container yet. Before the container exists, `run()` makes a checkout and creates the container, which takes longer than 5 s on a busy host. The whole test has passed CI in up to 4,838 ms. Do exactly this:
+
+1. Line 1211: change `{ timeout: 5_000 }` to `{ timeout: 15_000 }`, with the comment `// container start includes the checkout; 5 s failed under local load (T1539)`.
+2. Replace this test's `DOCKER_CASE_TIMEOUT_MS` (30,000) with `45_000`, so that abort and cleanup still get 30 s after the longer wait.
+
+Change nothing else, and leave `DOCKER_CASE_TIMEOUT_MS` itself as it is.
