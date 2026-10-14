@@ -1836,3 +1836,11 @@ From #307's CI (run 38490900840, attempt 2): `plugin-runner.docker.test.ts` "all
 3. `plugin-runner.test.ts`: add one test where the injected `invoke` returns `{ code: 1, timedOut: false, stderr: "boom" }` for `network rm` (and success for everything else). Assert that `run()` rejects with an error whose `cause.message` contains `docker network rm failed (exit code: 1, timed out: false, stderr: "boom")`.
 
 Change nothing else. After it merges, S2 merges main into #307 so #307 gets a fresh run.
+
+### T1538 · Measured budgets for the two timed egress-visibility tests — S2
+
+`apps/server/src/e2e/egress-visibility.test.ts` › "every MCP read tool…" (line 500) timed out at its 15,000 ms budget in #307's first run (run 38490900840) after T1516 raised it from 5 s. Passing runs in saved CI logs reach 8,174 ms. T1529 skips tests that already pass a timeout, so this one needs its own measurement. Do exactly this:
+
+1. On main, run only this file four times: twice idle and twice under 3× load (the T1529 step 2 burners), with `pnpm vitest run apps/server/src/e2e/egress-visibility.test.ts --reporter=json --outputFile=ev-<idle|load>-N.json`. Kill the burners afterwards.
+2. Post one row per test for line 251 ("every read command…", now 30,000 ms) and line 500 ("every MCP read tool…", now 15,000 ms): idle max, load max, and budget. Budget = the larger of load max × 7 and 8,174 × 7, rounded up to the next 5,000 ms, and never below the current value. Wait for O1's approval before step 3.
+3. Set each approved budget as the test's timeout argument. Replace the trailing comment on line 278 and add one above line 500: `// Measured (T1538): idle <x> ms, 3x load <y> ms; budget 7x.` Change nothing else.
