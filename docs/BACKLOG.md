@@ -1817,7 +1817,7 @@ The exact change:
 
 **Proof, in the PR text:** with the server on :8080 and `pnpm --filter @crossover/web dev`, run `curl -sS -o /dev/null -w '%{http_code} %{content_type}\n' -X POST http://localhost:5173/mcp -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'` before and after. Before shows the web app (`text/html`); after shows the server's JSON error for a missing token (401 or the MCP error envelope). Paste both lines.
 
-### T1536 · Harden three timing-sensitive tests — S2
+### T1536 · Harden three timing-sensitive tests — S2 · done
 
 From Review 17. Each of these failed once under load on 2026-10-13 and passed on rerun. T1529 covers `apply.test`. The exact change:
 
