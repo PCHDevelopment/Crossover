@@ -1208,14 +1208,14 @@ describe("DockerHealthRunner", () => {
       }).run({ repository, revision, command, signal: controller.signal });
       await vi.waitFor(
         () => expect(dockerHealthContainers(command).length).toBeGreaterThan(before.length),
-        { timeout: 5_000 },
+        { timeout: 15_000 }, // container start includes the checkout; 5 s failed under local load (T1539)
       );
 
       controller.abort();
       await expect(running).resolves.toMatchObject({ status: "ERROR" });
       expect(dockerHealthContainers(command)).toEqual(before);
     },
-    DOCKER_CASE_TIMEOUT_MS,
+    45_000,
   );
 
   it("persists results against the exact room-scoped workspace revision", async () => {
