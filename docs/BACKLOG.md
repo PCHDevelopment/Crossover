@@ -1837,7 +1837,7 @@ From #307's CI (run 38490900840, attempt 2): `plugin-runner.docker.test.ts` "all
 
 Change nothing else. After it merges, S2 merges main into #307 so #307 gets a fresh run.
 
-### T1538 · Measured budgets for the two timed egress-visibility tests — S2
+### T1538 · Measured budgets for the two timed egress-visibility tests — S2 · done
 
 `apps/server/src/e2e/egress-visibility.test.ts` › "every MCP read tool…" (line 500) timed out at its 15,000 ms budget in #307's first run (run 38490900840) after T1516 raised it from 5 s. Passing runs in saved CI logs reach 8,174 ms. T1529 skips tests that already pass a timeout, so this one needs its own measurement. Do exactly this:
 
