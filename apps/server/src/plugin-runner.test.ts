@@ -270,6 +270,31 @@ describe("DockerToolRunner", () => {
     expect(calls.some((call) => call.args[0] === "network" && call.args[1] === "rm")).toBe(true);
   });
 
+  it("preserves the failing Docker network removal details as the cleanup cause", async () => {
+    const invoke: PluginDockerInvoker = async (_binary, args) => {
+      if (args[0] === "run") return { code: 0, stdout: '{"result":{}}', stderr: "" };
+      if (args[0] === "network" && args[1] === "rm")
+        return { code: 1, timedOut: false, stdout: "", stderr: "boom" };
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    const runner = new DockerToolRunner({
+      registry: registry(),
+      egressProxyContainer: "crossover-egress-proxy",
+      egressProxySecret: SECRET,
+      invoke,
+      sweepResources: false,
+    });
+
+    await expect(runner.run(invocation, new AbortController().signal)).rejects.toMatchObject({
+      message: "Plugin runner cleanup failed",
+      cause: {
+        message: expect.stringContaining(
+          'docker network rm failed (exit code: 1, timed out: false, stderr: "boom")',
+        ),
+      },
+    });
+  });
+
   it("fails with a stable validation error before starting Docker when the room host list is empty", async () => {
     const calls: { args: readonly string[]; options: Parameters<PluginDockerInvoker>[2] }[] = [];
     const invoke: PluginDockerInvoker = async (_binary, args, options) => {

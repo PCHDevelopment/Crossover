@@ -326,21 +326,21 @@ export class DockerToolRunner implements ToolRunner {
           networkCreated,
           proxyConnected,
         });
-      } catch {
-        cleanupError = new Error("Plugin runner cleanup failed");
+      } catch (error) {
+        cleanupError = new Error("Plugin runner cleanup failed", { cause: error });
       }
       if (environmentDirectory) {
         try {
           await rm(environmentDirectory, { recursive: true, force: true });
-        } catch {
-          cleanupError ??= new Error("Plugin runner environment cleanup failed");
+        } catch (error) {
+          cleanupError ??= new Error("Plugin runner environment cleanup failed", { cause: error });
         }
       }
       if (lease?.revoke) {
         try {
           await lease.revoke();
-        } catch {
-          cleanupError ??= new Error("Plugin credential revocation failed");
+        } catch (error) {
+          cleanupError ??= new Error("Plugin credential revocation failed", { cause: error });
         }
       }
       if (cleanupError && !thrown) thrown = cleanupError;
@@ -370,13 +370,17 @@ export class DockerToolRunner implements ToolRunner {
     networkCreated: boolean;
     proxyConnected: boolean;
   }): Promise<void> {
-    let failed = false;
+    const failures: string[] = [];
     const remove = await this.invoke(
       this.dockerBinary,
       ["container", "rm", "--force", input.containerName],
       { timeoutMs: 10_000, maxOutputBytes: 8 * 1024, maxStderrBytes: MAX_STDERR_BYTES },
     );
-    if (remove.code !== 0 && !isMissingDockerResource(remove.stderr)) failed = true;
+    if (remove.code !== 0 && !isMissingDockerResource(remove.stderr)) {
+      failures.push(
+        `docker container rm failed (exit code: ${remove.code}, timed out: ${remove.timedOut}, stderr: ${JSON.stringify(remove.stderr.slice(0, 500))})`,
+      );
+    }
 
     if (input.networkName && input.networkCreated) {
       if (input.proxyConnected) {
@@ -385,16 +389,24 @@ export class DockerToolRunner implements ToolRunner {
           ["network", "disconnect", "--force", input.networkName, this.egressProxyContainer!],
           { timeoutMs: 10_000, maxOutputBytes: 8 * 1024, maxStderrBytes: MAX_STDERR_BYTES },
         );
-        if (disconnected.code !== 0 && !isMissingDockerResource(disconnected.stderr)) failed = true;
+        if (disconnected.code !== 0 && !isMissingDockerResource(disconnected.stderr)) {
+          failures.push(
+            `docker network disconnect failed (exit code: ${disconnected.code}, timed out: ${disconnected.timedOut}, stderr: ${JSON.stringify(disconnected.stderr.slice(0, 500))})`,
+          );
+        }
       }
       const removed = await this.invoke(this.dockerBinary, ["network", "rm", input.networkName], {
         timeoutMs: 10_000,
         maxOutputBytes: 8 * 1024,
         maxStderrBytes: MAX_STDERR_BYTES,
       });
-      if (removed.code !== 0 && !isMissingDockerResource(removed.stderr)) failed = true;
+      if (removed.code !== 0 && !isMissingDockerResource(removed.stderr)) {
+        failures.push(
+          `docker network rm failed (exit code: ${removed.code}, timed out: ${removed.timedOut}, stderr: ${JSON.stringify(removed.stderr.slice(0, 500))})`,
+        );
+      }
     }
-    if (failed) throw new Error("Plugin runner cleanup failed");
+    if (failures.length) throw new Error(`Plugin runner cleanup failed: ${failures.join("; ")}`);
   }
 }
 
