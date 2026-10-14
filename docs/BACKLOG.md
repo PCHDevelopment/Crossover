@@ -1826,3 +1826,13 @@ From Review 17. Each of these failed once under load on 2026-10-13 and passed on
 3. `apps/server/src/plugin-runner.docker.test.ts`, test "removes stale labeled containers and networks during startup cleanup": on main run 38465499250 it failed with `Docker container cleanup failed (exit code: 143, timed out: true)`, so an inner `docker` call timed out. Do not change code for this one. Measure how long `docker rm -f` of a running `busybox sleep 300` container takes, 5 times idle and 5 times under 3× load, and put the numbers in the PR text with the name and value of the timeout that cleanup uses in `plugin-runner.ts`. O1 decides the fix from those numbers.
 
 One PR. The PR text has the before and after for items 1 and 2, and the measurements for item 3.
+
+### T1537 · Plugin-runner cleanup says which step failed — S2
+
+From #307's CI (run 38490900840, attempt 2): `plugin-runner.docker.test.ts` "allows a declared public host…" failed with only `Plugin runner cleanup failed`. `DockerToolRunner.cleanup` (`apps/server/src/plugin-runner.ts`, around line 367) sets a single `failed` flag over three docker calls, and `run()`'s `finally` (around line 329) replaces the error with a new one that has no cause. The failure cannot be diagnosed. The exact change:
+
+1. In `cleanup()`, replace `let failed = false` with `const failures: string[] = []`. For each of the three calls, when it fails (the existing `code !== 0 && !isMissingDockerResource(...)` test), push `` `${step} failed (exit code: ${result.code}, timed out: ${result.timedOut}, stderr: ${JSON.stringify(result.stderr.slice(0, 500))})` ``. Use `step` = `docker container rm`, `docker network disconnect` and `docker network rm`. At the end: `if (failures.length) throw new Error(`Plugin runner cleanup failed: ${failures.join("; ")}`)`.
+2. In `run()`'s `finally`, change the three `catch {` blocks to `catch (error) {` and pass `{ cause: error }` as the second argument of each `new Error(...)`. The messages stay the same.
+3. `plugin-runner.test.ts`: add one test where the injected `invoke` returns `{ code: 1, timedOut: false, stderr: "boom" }` for `network rm` (and success for everything else). Assert that `run()` rejects with an error whose `cause.message` contains `docker network rm failed (exit code: 1, timed out: false, stderr: "boom")`.
+
+Change nothing else. After it merges, S2 merges main into #307 so #307 gets a fresh run.
