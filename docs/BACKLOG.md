@@ -1827,7 +1827,7 @@ From Review 17. Each of these failed once under load on 2026-10-13 and passed on
 
 One PR. The PR text has the before and after for items 1 and 2, and the measurements for item 3.
 
-### T1537 · Plugin-runner cleanup says which step failed — S2
+### T1537 · Plugin-runner cleanup says which step failed — S2 · done
 
 From #307's CI (run 38490900840, attempt 2): `plugin-runner.docker.test.ts` "allows a declared public host…" failed with only `Plugin runner cleanup failed`. `DockerToolRunner.cleanup` (`apps/server/src/plugin-runner.ts`, around line 367) sets a single `failed` flag over three docker calls, and `run()`'s `finally` (around line 329) replaces the error with a new one that has no cause. The failure cannot be diagnosed. The exact change:
 
