@@ -1853,3 +1853,15 @@ Change nothing else. After it merges, S2 merges main into #307 so #307 gets a fr
 2. Replace this test's `DOCKER_CASE_TIMEOUT_MS` (30,000) with `45_000`, so that abort and cleanup still get 30 s after the longer wait.
 
 Change nothing else, and leave `DOCKER_CASE_TIMEOUT_MS` itself as it is.
+
+## Tracked in GitHub issues (2026-10-16)
+
+From 2026-10-16, new task specs live on their GitHub issue. Each line below names the owner and links the issue.
+
+- **T1540** · Intermittent web e2e failure: room budget save poll times out — S1 · #315
+- **T1541** · `RedisOAuthStateStore` fails fast and accepts a shared client — Q1 · #323
+- **T1542** · Move `DEFAULT_PROTECTED_PATHS` to `@crossover/protocol` — Q1 · #324
+- **T1543** · Purge: derive the delete order from the schema (plan first) — S2 · #325
+- **T1544** · MCP owner tools: checkpoints, roles, pause and grants — S2, blocked on Peter (#313) · #326
+- **T1545** · §30 step 17: GitHub App connection for export to a PR — S1, blocked on Peter (#313) · #327
+- **T1532** · Remote sandbox-host driver: O1 scopes it into a milestone; not scheduled · #328
