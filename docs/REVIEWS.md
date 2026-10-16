@@ -2,6 +2,107 @@
 
 Periodic big-picture reviews by O1: is the merged code building the product in ARCHITECTURE.md, in the right order? Newest first.
 
+## 2026-10-14 · Review 17 (00:20 UTC; 6 PRs merged since Review 16)
+
+**State.** #301–#306 merged, all from S2, each with CI green on its head. Every one matched its spec on the first review.
+
+- **The demo blockers are fixed.** T1534 (#302) makes health checks work under Compose, with a deployed GREEN-then-RED test. T1535 (#301) makes the dev UI proxy `/mcp`. Peter's hands-on run (docs/DEMO-RUNBOOK.md) no longer has a known blocker before step 17.
+- **T1509 is done.** #304 and #305 moved the tier-3 grant checks and `holdsGatedScope` into Rego. Every authorization decision now runs in the policy, and each move has a reference oracle (42 cases, then 2,000 seeded cases) and a mutation check.
+- **T1533 (#303).** A newer push to a PR now cancels its older CI run, and main, nightly and manual runs keep their own groups.
+- **T1531 (#306).** A production config refuses to start without `SANDBOX_RUNTIME=runsc`, and `ALLOW_UNSANDBOXED_DEV=1` is refused in production. The server logs the single-host limit at startup, and the README states it.
+
+**Against §29 and §30.** The §29 scope is complete. For §30, everything except step 17 (export to a pull request) can be run by hand now. Step 17 needs a GitHub App and a connect UI, and that is Peter's decision.
+
+**What went well.** S2 ran six exact specs back to back with no rework, and each PR carried the proof its spec asked for. Moving S1's specs to S2 kept work flowing while S1 was away.
+
+**What needs correcting.**
+
+1. **Timing-sensitive tests.** Three tests failed on main once, and one failed on #303, all from timeouts under load: the plugin-runner stale cleanup, the `apply.test` abandon at the 5 s default, the docker-execution-driver detached-child test at 30 s, and `web-editor.ts:103`. Each reran green. T1529 covers `apply.test`; the other three need fixes.
+2. **Silence.** S1 has said nothing since about 17:40, with #287 waiting. Q1 said "on it" for T1529 at 20:20 but had not started by 23:01.
+
+**Course corrections.**
+
+1. **S2:**
+   1. T1536, timing hardening for the three flaky tests above (O1 writes the spec next).
+   2. Then MCP tools for checkpoints, roles and pause, if Peter wants agents to do those.
+2. **Q1:** T1529, PR due next.
+3. **S1, when back:** #287 (merge main in). Nothing else is queued for S1 until they are active again.
+4. **For Peter:**
+   - Merge docs PR #298.
+   - Do the hands-on run.
+   - Decide whether step 17 is required for the MVP.
+
+**Tech-debt register, closed:** the tier and grant rules in TypeScript (T1509); wasted CI runs (T1533).
+
+**Still open:**
+
+- `dispatcher.ts` size (#287).
+- Flaky timing tests (T1536).
+- The Rego and TypeScript string-length difference.
+- `RedisOAuthStateStore` opens its own Redis connection.
+- dev-login `session_token`.
+- The web app imports `@crossover/workspace/protected-paths`.
+- The purge's hand-kept delete order, which the schema test guards.
+
+## 2026-10-13 · Review 16 (20:20 UTC; 5 PRs merged since Review 15)
+
+**State.** #290, #292, #293, #294 and #299 merged, each with CI green on its head, plus docs PRs #295–#297.
+
+- **T1530, archive retention, is done (#299).** It covers the owner retention setting (30–365 days), unarchive, and a one-time inbox notice 7 days before deletion. A fenced, resumable purge runs `WORKSPACE` then `DATABASE` and writes an audit row outside the room. Everything is wired in `compose.ts`. A schema test fails if a future migration adds a room-scoped table the purge does not cover.
+- **T1526 is done.** `execution.ts` went from 1,921 lines to 281 (#286, #289, #292, #293).
+- **T1509 3a is done (#290).** Tier classification is now in Rego. 3b and 3c remain.
+- **T1528 is done (#294).** It fixed the stale Docker cleanup that broke #287's run.
+- **Not moving.** #287 (T1525 part 3) has sat on `39fe987` since 16:13, and S1 has been silent since about 17:40. `dispatcher.ts` stays at 855 lines until it merges.
+
+**Against §29 and §30.** The §29 scope is merged except T1509 3b and 3c. That makes the build feature-complete for the demo in automated end-to-end tests. Preparing Peter's hands-on run found the first gaps that only show up outside the e2e harness:
+
+- **T1534:** health checks under Compose mount a path the host cannot see. This breaks demo steps 2 and 13.
+- **T1535:** the dev UI doesn't proxy `/mcp`, so the Setup tab shows agents the wrong address.
+- **Step 17:** the GitHub integration has no connect UI, so export to a pull request can't be done by hand.
+- **No MCP tools for some owner actions:** checkpoints, roles, pause and grants. These are owner actions and are in the web UI, which is acceptable for the MVP.
+
+The e2e harness runs the server in-process and fakes GitHub, so it can't catch problems like these. Peter's run is now the most valuable test we have.
+
+**What went well.**
+
+- **S2 asked about the one edge the T1530 spec missed before writing it:** refusing changes once purge has started. S2 then shipped it with a test.
+- **The purge design is careful.** Each phase re-checks the lease's fencing token, a stale lease holder can't send a duplicate notice, and an interrupted purge resumes from its recorded phase.
+- **Q1 re-posted the timeout table in the new format on the first try.** All 118 budgets checked out.
+
+**What needs correcting.**
+
+1. **Run CI's exact commands before pushing.** #299's first run failed on `opa fmt --fail` because only the Rego tests had been run locally. The policy step in CI is three commands; run all three.
+2. **Stacked branches.** A follow-up commit landed on the PR under review by accident. Keep a stacked branch's work off its parent's branch until the parent merges.
+3. **Silence.** Neither of the two nudges to S1 got a reply. An engineer who is stepping away should say so, so that their work can be handed to someone else instead of sitting.
+4. **CI availability.** The single runner went idle for about 30 minutes with a job queued, and recovered by itself at 19:44. With one runner, when it is down, every PR waits.
+
+**Course corrections.**
+
+1. **S2:**
+   1. T1535 (one change to `vite.config.ts`).
+   2. Then T1534, which moves from S1 because it blocks Peter's run. The spec is unchanged.
+2. **S1, when back:**
+   1. Merge main into #287.
+   2. T1533 (CI concurrency).
+   3. T1509 3b, then 3c.
+   4. T1531.
+3. **Q1:** T1529 timeouts, on the approved table.
+4. **For Peter:**
+   - The hands-on run (docs/DEMO-RUNBOOK.md), after T1534 merges.
+   - Whether step 17 (export to a pull request) must work by hand for the MVP. If it must, it needs a GitHub App and a connect UI, which is a new task.
+   - Keeping the runner machine awake.
+
+**Tech-debt register, closed:** `execution.ts` size (T1526); stale Docker cleanup (T1528).
+
+**Still open:**
+
+- `dispatcher.ts` size: closes when #287 merges.
+- The Rego and TypeScript string-length difference: pinned and documented.
+- `RedisOAuthStateStore` opens its own Redis connection.
+- dev-login returns `session_token` in its response body.
+- The web app imports `@crossover/workspace/protected-paths`.
+- New: the purge's hand-kept delete order in `deleteRoomRows`. The schema test guards it, but every new room table must be added in two places.
+
 ## 2026-10-13 · Review 15 (16:20 UTC; 12 PRs merged since Review 14)
 
 **State.** #277–#286, #288 and #289 merged, each with CI green on its head. Peter merged docs PR #258 (Reviews 12–14). #287 (T1525 part 3) is approved and needs main merged in before a clean run.
