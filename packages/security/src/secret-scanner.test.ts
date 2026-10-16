@@ -170,7 +170,7 @@ describe("security.scanSecrets", () => {
     expect(findings).toEqual([]);
   });
 
-  // Measured (T1529): idle n/a, 3x load 2913 ms; budget 7x.
+  // Measured (T1529): idle 588 ms, 3x load 2913 ms; budget 7x.
   it("scans a file just under the 2 MiB bound within a time bound", () => {
     // The per-file bound is MAX_SCAN_BYTES (2 MiB). A file just under it is
     // scanned (not skipped) and must be fast — this is the bound O1 asked to
