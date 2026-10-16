@@ -177,6 +177,7 @@ describe("tasks.release", () => {
     },
   );
 
+  // Measured (T1529): idle 800 ms, 3x load 2413 ms; budget 7x.
   it("the lead, owner and admin can release someone else's task; other developers can't", async () => {
     const s = await setup();
     for (const who of [s.lead, s.owner, s.admin]) {
@@ -187,7 +188,7 @@ describe("tasks.release", () => {
     for (const who of [s.agents[1]!, s.human, s.reviewer, s.observer]) {
       await rejects(release(s, who, task), "FORBIDDEN");
     }
-  });
+  }, 20_000);
 
   it.each(["OPEN", "REVIEW", "DONE", "CANCELLED"] as const)(
     "a %s task can't be released",
@@ -207,6 +208,7 @@ describe("tasks.release", () => {
 });
 
 describe("tasks.reopen", () => {
+  // Measured (T1529): idle 1672 ms, 3x load 2644 ms; budget 7x.
   it("the lead and owner reopen a DONE task: IN_PROGRESS with the same owner, and a fresh lease for an agent", async () => {
     const s = await setup();
     for (const who of [s.lead, s.owner, s.admin]) {
@@ -222,7 +224,7 @@ describe("tasks.reopen", () => {
       expect(back.lease_expires_at).not.toBeNull();
       expect(out.events[0]).toMatchObject({ type: "task.reopened", actor_id: who.participant_id });
     }
-  });
+  }, 20_000);
 
   it("developers, reviewers and observers → FORBIDDEN, even the task's own owner", async () => {
     const s = await setup();

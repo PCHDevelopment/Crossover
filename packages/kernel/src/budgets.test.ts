@@ -176,6 +176,7 @@ describe("budgets in the dispatcher (§22.3, T904)", () => {
     expect(await s.events()).toHaveLength(2);
   });
 
+  // Measured (T1529): idle 2483 ms, 3x load 3271 ms; budget 7x.
   it("commands are counted too: the 121st read in a minute is refused", async () => {
     const s = await setup();
     const a = await s.add("AGENT");
@@ -184,7 +185,7 @@ describe("budgets in the dispatcher (§22.3, T904)", () => {
       budget: "commands",
       limit: 120,
     });
-  });
+  }, 25_000);
 
   it("budgets are per participant, and humans have none", async () => {
     const s = await setup({ settings: { budgets: { messages: 2 } } });

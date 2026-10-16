@@ -286,6 +286,7 @@ describe("tasks.review", () => {
       );
     });
 
+    // Measured (T1529): idle 1358 ms, 3x load 3203 ms; budget 7x.
     it("a green gate approves; request_changes doesn't consult the gate; the default is always green", async () => {
       const g = gate(true);
       const s = await setup(g.healthGate);
@@ -302,7 +303,7 @@ describe("tasks.review", () => {
       const s3 = await setup();
       const t4 = await inReview(s3, s3.agent, s3.reviewer);
       await review(s3, s3.reviewer, t4, { verdict: "approve" });
-    });
+    }, 25_000);
   });
 
   it("only reviews a task in REVIEW; a stale version is CONFLICT_VERSION", async () => {
