@@ -185,7 +185,7 @@ describe("loop protection (§17.6)", () => {
     await rejects(say(s, s.c, "again"), "RATE_LIMITED");
   });
 
-  // Measured (T1529): idle n/a, 3x load 2384 ms; budget 7x.
+  // Measured (T1529): idle 963 ms, 3x load 2384 ms; budget 7x.
   it("an agent that spoke a moment ago but isn't in the loop is not throttled by it", async () => {
     const s = await setup();
     await say(s, s.c, "earlier, before the loop");
@@ -198,7 +198,7 @@ describe("loop protection (§17.6)", () => {
     await say(s, s.c, "c is free to speak, and joins the run");
   }, 20_000);
 
-  // Measured (T1529): idle n/a, 3x load 2283 ms; budget 7x.
+  // Measured (T1529): idle 660 ms, 3x load 2283 ms; budget 7x.
   it("a human sending the message that would be the 21st neither detects nor is throttled", async () => {
     const s = await setup();
     await chat(s, [s.a, s.b], LOOP_MESSAGE_LIMIT);
@@ -208,7 +208,7 @@ describe("loop protection (§17.6)", () => {
     expect(await inbox(s, s.lead)).toEqual([]);
   }, 20_000);
 
-  // Measured (T1529): idle n/a, 3x load 2348 ms; budget 7x.
+  // Measured (T1529): idle 959 ms, 3x load 2348 ms; budget 7x.
   it("a human's message ends the run, and a throttled agent may then speak", async () => {
     const s = await setup();
     await chat(s, [s.a, s.b], LOOP_MESSAGE_LIMIT + 1);
@@ -219,7 +219,7 @@ describe("loop protection (§17.6)", () => {
     expect(await loopEvents(s)).toHaveLength(1);
   }, 20_000);
 
-  // Measured (T1529): idle n/a, 3x load 3005 ms; budget 7x.
+  // Measured (T1529): idle 1530 ms, 3x load 3005 ms; budget 7x.
   it("a task update resets the counter (the acceptance case)", async () => {
     const s = await setup();
     const task = (
@@ -237,7 +237,7 @@ describe("loop protection (§17.6)", () => {
     expect(await loopEvents(s)).toHaveLength(1);
   }, 25_000);
 
-  // Measured (T1529): idle n/a, 3x load 2741 ms; budget 7x.
+  // Measured (T1529): idle 1525 ms, 3x load 2741 ms; budget 7x.
   it("a memory write or a decision also resets it", async () => {
     const s = await setup();
     await chat(s, [s.a, s.b], LOOP_MESSAGE_LIMIT);
@@ -300,7 +300,7 @@ describe("loop protection (§17.6)", () => {
     expect(await loopEvents(s)).toHaveLength(1);
   });
 
-  // Measured (T1529): idle n/a, 3x load 3861 ms; budget 7x.
+  // Measured (T1529): idle 1163 ms, 3x load 3861 ms; budget 7x.
   it("unrelated events between messages (denials, health) neither hide a loop nor lift the throttle", async () => {
     const s = await setup();
     await chat(s, [s.a, s.b], LOOP_MESSAGE_LIMIT + 1);
@@ -318,7 +318,7 @@ describe("loop protection (§17.6)", () => {
     expect(await loopEvents(s)).toHaveLength(1);
   }, 30_000);
 
-  // Measured (T1529): idle n/a, 3x load 3186 ms; budget 7x.
+  // Measured (T1529): idle 1352 ms, 3x load 3186 ms; budget 7x.
   it("noise before the 21st message doesn't hide the loop it completes", async () => {
     const s = await setup();
     await chat(s, [s.a, s.b], LOOP_MESSAGE_LIMIT);
@@ -339,7 +339,7 @@ describe("loop protection (§17.6)", () => {
     ]);
   }, 25_000);
 
-  // Measured (T1529): idle n/a, 3x load 3427 ms; budget 7x.
+  // Measured (T1529): idle 1199 ms, 3x load 3427 ms; budget 7x.
   it("a second loop after a reset is detected and announced again", async () => {
     const s = await setup();
     await chat(s, [s.a, s.b], LOOP_MESSAGE_LIMIT + 1);
@@ -352,7 +352,7 @@ describe("loop protection (§17.6)", () => {
     expect(await inbox(s, s.lead)).toHaveLength(2);
   }, 25_000);
 
-  // Measured (T1529): idle n/a, 3x load 2217 ms; budget 7x.
+  // Measured (T1529): idle 1094 ms, 3x load 2217 ms; budget 7x.
   it("the throttle is per room", async () => {
     const s = await setup();
     const other = await setup();

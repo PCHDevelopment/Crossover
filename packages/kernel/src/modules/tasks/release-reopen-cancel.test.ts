@@ -177,7 +177,7 @@ describe("tasks.release", () => {
     },
   );
 
-  // Measured (T1529): idle n/a, 3x load 2413 ms; budget 7x.
+  // Measured (T1529): idle 800 ms, 3x load 2413 ms; budget 7x.
   it("the lead, owner and admin can release someone else's task; other developers can't", async () => {
     const s = await setup();
     for (const who of [s.lead, s.owner, s.admin]) {
@@ -208,7 +208,7 @@ describe("tasks.release", () => {
 });
 
 describe("tasks.reopen", () => {
-  // Measured (T1529): idle n/a, 3x load 2644 ms; budget 7x.
+  // Measured (T1529): idle 1672 ms, 3x load 2644 ms; budget 7x.
   it("the lead and owner reopen a DONE task: IN_PROGRESS with the same owner, and a fresh lease for an agent", async () => {
     const s = await setup();
     for (const who of [s.lead, s.owner, s.admin]) {

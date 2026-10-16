@@ -148,7 +148,7 @@ describe("tasks.list", () => {
     expect((await list(s, s.dev, { mine: true, status: ["OPEN"] })).tasks).toHaveLength(0);
   });
 
-  // Measured (T1529): idle n/a, 3x load 2723 ms; budget 7x.
+  // Measured (T1529): idle 1518 ms, 3x load 2723 ms; budget 7x.
   it("pages through every task exactly once, including ones that share a timestamp", async () => {
     const s = await setup();
     const ids: string[] = [];

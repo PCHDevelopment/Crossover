@@ -286,7 +286,7 @@ describe("tasks.review", () => {
       );
     });
 
-    // Measured (T1529): idle n/a, 3x load 3203 ms; budget 7x.
+    // Measured (T1529): idle 1358 ms, 3x load 3203 ms; budget 7x.
     it("a green gate approves; request_changes doesn't consult the gate; the default is always green", async () => {
       const g = gate(true);
       const s = await setup(g.healthGate);

@@ -176,7 +176,7 @@ describe("budgets in the dispatcher (§22.3, T904)", () => {
     expect(await s.events()).toHaveLength(2);
   });
 
-  // Measured (T1529): idle n/a, 3x load 3271 ms; budget 7x.
+  // Measured (T1529): idle 2483 ms, 3x load 3271 ms; budget 7x.
   it("commands are counted too: the 121st read in a minute is refused", async () => {
     const s = await setup();
     const a = await s.add("AGENT");
