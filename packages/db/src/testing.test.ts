@@ -48,7 +48,7 @@ describe("createTestDatabase", () => {
     await db.pool.query("INSERT INTO t VALUES (1)");
   });
 
-  // Measured (T1529): idle n/a, 3x load 6610 ms; budget 7x.
+  // Measured (T1529): idle 2140 ms, 3x load 6610 ms; budget 7x.
   it("runs the repository's real migrations by default", async () => {
     const db = await createTestDatabase({ url: URL });
     open.push(db);
@@ -56,7 +56,7 @@ describe("createTestDatabase", () => {
     expect(rows[0].t).toBe("schema_migrations");
   }, 50_000);
 
-  // Measured (T1529): idle n/a, 3x load 4341 ms; budget 7x.
+  // Measured (T1529): idle 1192 ms, 3x load 4341 ms; budget 7x.
   it("databases created in parallel don't see each other's data", async () => {
     const dbs = await Promise.all(
       Array.from({ length: 4 }, () => create({ "0001_t.sql": "CREATE TABLE t (who text)" })),
@@ -69,7 +69,7 @@ describe("createTestDatabase", () => {
     expect(new Set(dbs.map((d) => d.name)).size).toBe(4);
   }, 35_000);
 
-  // Measured (T1529): idle n/a, 3x load 2297 ms; budget 7x.
+  // Measured (T1529): idle 916 ms, 3x load 2297 ms; budget 7x.
   it("drop() removes the database and is idempotent", async () => {
     const db = await create();
     expect(await exists(db.name)).toBe(true);
@@ -148,7 +148,7 @@ describe("createTestDatabase", () => {
     }
   });
 
-  // Measured (T1529): idle n/a, 3x load 2215 ms; budget 7x.
+  // Measured (T1529): idle 439 ms, 3x load 2215 ms; budget 7x.
   it("drops the database and rethrows when a migration fails", async () => {
     const before = await listTestDbs();
     await expect(create({ "0001_bad.sql": "SELECT 1/0" })).rejects.toThrow(/division by zero/);
