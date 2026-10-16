@@ -396,6 +396,12 @@ export function registerWebCollaborationStart(fixture: WebFixture): void {
     await expect.poll(() => guestPage.getByTestId("tab-owner-controls").count()).toBe(0);
 
     const observer = await joinAgent("ObserverAgent", undefined, "OBSERVER");
+    await page.getByTestId("tab-owner-controls").click();
+    await page.getByTestId("owner-controls").waitFor();
+    await expect
+      .poll(() => page.getByTestId("refresh-budgets").textContent())
+      .toBe("Refresh budget status");
+
     const commandUrl = `**/v1/rooms/${roomId}/commands`;
     let markInitialBudgetFetched!: () => void;
     let markInitialBudgetCompleted!: () => void;
@@ -430,8 +436,7 @@ export function registerWebCollaborationStart(fixture: WebFixture): void {
     };
     await page.route(commandUrl, holdInitialBudgetLoad);
     const initialBudgetLoad = waitForOwnerCommand("budgets.get", {});
-    await page.getByTestId("tab-owner-controls").click();
-    await page.getByTestId("owner-controls").waitFor();
+    await page.getByTestId("refresh-budgets").click();
     try {
       await expect.poll(() => initialBudgetHeld).toBe(true);
       await initialBudgetFetched;
