@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   check:
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     services:
       postgres:
@@ -34,8 +34,9 @@ jobs:
         ports:
           - 6380:6379
     env:
-      # The service containers publish on 5434/6380 so they don't collide with a Postgres or Redis
-      # already running on the self-hosted runner's host; the URLs must use the same ports.
+      # The service containers publish on 5434/6380 so they don't collide with a local Postgres or
+      # Redis when this job runs on a developer's machine (for example with act); the URLs must use
+      # the same ports.
       DATABASE_URL: postgres://crossover:crossover@localhost:5434/crossover
       REDIS_URL: redis://localhost:6380
     steps:
@@ -75,7 +76,7 @@ jobs:
           path: clients/go/dist/room-*
           if-no-files-found: error
       # workspace.search runs ripgrep. A pinned, checksum-verified binary needs no sudo, so it works
-      # on hosted and self-hosted runners alike.
+      # on any runner.
       - name: Install ripgrep
         run: |
           if command -v rg >/dev/null; then rg --version | head -1; exit 0; fi
@@ -113,8 +114,8 @@ jobs:
           "$dir/opa" fmt --list --fail packages/policy/policy
           "$dir/opa" test packages/policy/policy
           OPA_BIN="$dir/opa" pnpm --filter @crossover/policy gen:wasm -- --check
-      # --with-deps installs Chromium's system libraries through sudo, which a self-hosted runner may
-      # not allow without a password. There, the libraries must already be on the machine.
+      # --with-deps installs Chromium's system libraries through sudo. Hosted runners allow it; where
+      # sudo needs a password, the libraries must already be on the machine.
       - name: Install Chromium
         run: |
           if sudo -n true 2>/dev/null; then
@@ -153,7 +154,7 @@ jobs:
 
   workspace-benchmark:
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     continue-on-error: true
     timeout-minutes: 60
     services:
