@@ -99,6 +99,7 @@ describe("authorize: role × capability against the database", () => {
     }
   });
 
+  // Measured (T1529): idle 2171 ms, 3x load 5092 ms; budget 7x.
   it("every authority × role combination: allowed iff role bundle or authority grants it", async () => {
     for (const authority of AUTHORITIES) {
       for (const role of ROLES) {
@@ -113,7 +114,7 @@ describe("authorize: role × capability against the database", () => {
         }
       }
     }
-  });
+  }, 40_000);
 });
 
 describe("authorize: the denial", () => {
