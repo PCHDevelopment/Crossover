@@ -47,6 +47,17 @@ type ComputeBudgetName = (typeof COMPUTE_BUDGET_FIELDS)[number]["name"];
 type ComputeBudgetValues = Partial<Record<ComputeBudgetName, number | null>>;
 type ComputeBudgetForm = Record<ComputeBudgetName, { value: string; unlimited: boolean }>;
 
+function preserveEditedBudgetFields<
+  T extends Record<string, { value: string; unlimited: boolean }>,
+>(incoming: T, current: T, edited: ReadonlySet<string>): T {
+  return Object.fromEntries(
+    Object.entries(incoming).map(([name, field]) => [
+      name,
+      edited.has(name) ? current[name] : field,
+    ]),
+  ) as T;
+}
+
 interface BudgetAgentStatus {
   participant_id: string;
   display_name: string;
@@ -224,12 +235,17 @@ export function OwnerControlsView(props: {
   const [roomComputeBudgetForm, setRoomComputeBudgetForm] = useState<ComputeBudgetForm>(() =>
     computeBudgetForm({}),
   );
+  const roomBudgetEdits = useRef(new Set<BudgetName>());
+  const roomComputeBudgetEdits = useRef(new Set<ComputeBudgetName>());
   const [budgetTargetId, setBudgetTargetId] = useState("");
   const budgetTargetIdRef = useRef("");
   const [agentBudgetForm, setAgentBudgetForm] = useState<BudgetForm>(() => budgetForm({}));
   const [agentComputeBudgetForm, setAgentComputeBudgetForm] = useState<ComputeBudgetForm>(() =>
     computeBudgetForm({}),
   );
+  const agentBudgetEdits = useRef(new Set<BudgetName>());
+  const agentComputeBudgetEdits = useRef(new Set<ComputeBudgetName>());
+  const agentBudgetEditsTarget = useRef("");
   const [budgetLoading, setBudgetLoading] = useState(false);
 
   useEffect(() => setRetentionDaysInput(String(retentionDays)), [retentionDays]);
@@ -261,16 +277,45 @@ export function OwnerControlsView(props: {
     setBudgetLoading(true);
     try {
       const status = await refreshBudgetStatus();
-      setRoomBudgetForm(budgetForm(status.room_budgets));
-      setRoomComputeBudgetForm(computeBudgetForm(status.compute_budgets));
+      setRoomBudgetForm((current) =>
+        preserveEditedBudgetFields(
+          budgetForm(status.room_budgets),
+          current,
+          roomBudgetEdits.current,
+        ),
+      );
+      setRoomComputeBudgetForm((current) =>
+        preserveEditedBudgetFields(
+          computeBudgetForm(status.compute_budgets),
+          current,
+          roomComputeBudgetEdits.current,
+        ),
+      );
       const target =
         status.agents.find((agent) => agent.participant_id === budgetTargetIdRef.current) ??
         status.agents[0];
       const nextTargetId = target?.participant_id ?? "";
+      if (agentBudgetEditsTarget.current !== nextTargetId) {
+        agentBudgetEdits.current.clear();
+        agentComputeBudgetEdits.current.clear();
+        agentBudgetEditsTarget.current = nextTargetId;
+      }
       budgetTargetIdRef.current = nextTargetId;
       setBudgetTargetId(nextTargetId);
-      setAgentBudgetForm(budgetForm(target?.budgets ?? {}));
-      setAgentComputeBudgetForm(computeBudgetForm(target?.compute_budgets ?? {}));
+      setAgentBudgetForm((current) =>
+        preserveEditedBudgetFields(
+          budgetForm(target?.budgets ?? {}),
+          current,
+          agentBudgetEdits.current,
+        ),
+      );
+      setAgentComputeBudgetForm((current) =>
+        preserveEditedBudgetFields(
+          computeBudgetForm(target?.compute_budgets ?? {}),
+          current,
+          agentComputeBudgetEdits.current,
+        ),
+      );
     } finally {
       setBudgetLoading(false);
     }
@@ -382,6 +427,7 @@ export function OwnerControlsView(props: {
     if (!window.confirm("Replace the room's default limits for every agent?")) return;
     void perform("Save room budgets", async () => {
       await room.api.budgets.set({ budgets });
+      roomBudgetEdits.current.clear();
       await loadBudgetControls();
     });
   };
@@ -398,6 +444,7 @@ export function OwnerControlsView(props: {
     if (!window.confirm("Replace the room's daily sandbox CPU limits?")) return;
     void perform("Save sandbox CPU limits", async () => {
       await room.api.budgets.set({ compute_budgets });
+      roomComputeBudgetEdits.current.clear();
       await loadBudgetControls();
     });
   };
@@ -421,6 +468,8 @@ export function OwnerControlsView(props: {
     if (!target || !window.confirm(`Replace ${target.display_name}'s budget overrides?`)) return;
     void perform(`Save ${target.display_name}'s budgets`, async () => {
       await room.api.budgets.set({ participant_id: budgetTargetId, budgets, compute_budgets });
+      agentBudgetEdits.current.clear();
+      agentComputeBudgetEdits.current.clear();
       await loadBudgetControls();
     });
   };
@@ -717,12 +766,13 @@ export function OwnerControlsView(props: {
                 step={1}
                 value={roomBudgetForm[name].value}
                 disabled={busy || roomBudgetForm[name].unlimited}
-                onChange={(event) =>
+                onChange={(event) => {
+                  roomBudgetEdits.current.add(name);
                   setRoomBudgetForm((current) => ({
                     ...current,
                     [name]: { ...current[name], value: event.target.value },
-                  }))
-                }
+                  }));
+                }}
               />
               <span>
                 <input
@@ -730,12 +780,13 @@ export function OwnerControlsView(props: {
                   type="checkbox"
                   checked={roomBudgetForm[name].unlimited}
                   disabled={busy}
-                  onChange={(event) =>
+                  onChange={(event) => {
+                    roomBudgetEdits.current.add(name);
                     setRoomBudgetForm((current) => ({
                       ...current,
                       [name]: { ...current[name], unlimited: event.target.checked },
-                    }))
-                  }
+                    }));
+                  }}
                 />
                 No limit
               </span>
@@ -762,12 +813,13 @@ export function OwnerControlsView(props: {
                 step={1}
                 value={roomComputeBudgetForm[name].value}
                 disabled={busy || roomComputeBudgetForm[name].unlimited}
-                onChange={(event) =>
+                onChange={(event) => {
+                  roomComputeBudgetEdits.current.add(name);
                   setRoomComputeBudgetForm((current) => ({
                     ...current,
                     [name]: { ...current[name], value: event.target.value },
-                  }))
-                }
+                  }));
+                }}
               />
               <span>
                 <input
@@ -775,12 +827,13 @@ export function OwnerControlsView(props: {
                   type="checkbox"
                   checked={roomComputeBudgetForm[name].unlimited}
                   disabled={busy}
-                  onChange={(event) =>
+                  onChange={(event) => {
+                    roomComputeBudgetEdits.current.add(name);
                     setRoomComputeBudgetForm((current) => ({
                       ...current,
                       [name]: { ...current[name], unlimited: event.target.checked },
-                    }))
-                  }
+                    }));
+                  }}
                 />
                 No limit
               </span>
@@ -806,6 +859,9 @@ export function OwnerControlsView(props: {
                 const target = budgetStatus?.agents.find(
                   (agent) => agent.participant_id === participantId,
                 );
+                agentBudgetEdits.current.clear();
+                agentComputeBudgetEdits.current.clear();
+                agentBudgetEditsTarget.current = participantId;
                 setAgentBudgetForm(budgetForm(target?.budgets ?? {}));
                 setAgentComputeBudgetForm(computeBudgetForm(target?.compute_budgets ?? {}));
               }}
@@ -830,12 +886,13 @@ export function OwnerControlsView(props: {
                     step={1}
                     value={agentBudgetForm[name].value}
                     disabled={busy || agentBudgetForm[name].unlimited}
-                    onChange={(event) =>
+                    onChange={(event) => {
+                      agentBudgetEdits.current.add(name);
                       setAgentBudgetForm((current) => ({
                         ...current,
                         [name]: { ...current[name], value: event.target.value },
-                      }))
-                    }
+                      }));
+                    }}
                   />
                   <span>
                     <input
@@ -843,12 +900,13 @@ export function OwnerControlsView(props: {
                       type="checkbox"
                       checked={agentBudgetForm[name].unlimited}
                       disabled={busy}
-                      onChange={(event) =>
+                      onChange={(event) => {
+                        agentBudgetEdits.current.add(name);
                         setAgentBudgetForm((current) => ({
                           ...current,
                           [name]: { ...current[name], unlimited: event.target.checked },
-                        }))
-                      }
+                        }));
+                      }}
                     />
                     No limit
                   </span>
@@ -863,15 +921,16 @@ export function OwnerControlsView(props: {
                   step={1}
                   value={agentComputeBudgetForm.agent_vcpu_hours_per_day.value}
                   disabled={busy || agentComputeBudgetForm.agent_vcpu_hours_per_day.unlimited}
-                  onChange={(event) =>
+                  onChange={(event) => {
+                    agentComputeBudgetEdits.current.add("agent_vcpu_hours_per_day");
                     setAgentComputeBudgetForm((current) => ({
                       ...current,
                       agent_vcpu_hours_per_day: {
                         ...current.agent_vcpu_hours_per_day,
                         value: event.target.value,
                       },
-                    }))
-                  }
+                    }));
+                  }}
                 />
                 <span>
                   <input
@@ -879,15 +938,16 @@ export function OwnerControlsView(props: {
                     type="checkbox"
                     checked={agentComputeBudgetForm.agent_vcpu_hours_per_day.unlimited}
                     disabled={busy}
-                    onChange={(event) =>
+                    onChange={(event) => {
+                      agentComputeBudgetEdits.current.add("agent_vcpu_hours_per_day");
                       setAgentComputeBudgetForm((current) => ({
                         ...current,
                         agent_vcpu_hours_per_day: {
                           ...current.agent_vcpu_hours_per_day,
                           unlimited: event.target.checked,
                         },
-                      }))
-                    }
+                      }));
+                    }}
                   />
                   No limit
                 </span>

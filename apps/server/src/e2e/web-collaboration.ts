@@ -129,6 +129,50 @@ export function registerWebCollaborationStart(fixture: WebFixture): void {
           sections: { room: { settings: Record<string, unknown> | null } };
         }>()
       ).response.sections.room.settings;
+    const healthCommandUrl = `**/v1/rooms/${roomId}/commands`;
+    let markHealthRefreshFetched!: () => void;
+    let markHealthRefreshCompleted!: () => void;
+    let releaseHealthRefresh!: () => void;
+    const healthRefreshFetched = new Promise<void>((resolve) => {
+      markHealthRefreshFetched = resolve;
+    });
+    const healthRefreshCompleted = new Promise<void>((resolve) => {
+      markHealthRefreshCompleted = resolve;
+    });
+    const healthRefreshReleased = new Promise<void>((resolve) => {
+      releaseHealthRefresh = resolve;
+    });
+    let healthRefreshHeld = false;
+    const holdHealthRefresh = async (route: Route) => {
+      let method: unknown;
+      try {
+        method = (route.request().postDataJSON() as { method?: unknown }).method;
+      } catch {
+        // Let malformed or unrelated requests continue to the real server.
+      }
+      if (method !== "room.get_state") {
+        await route.continue();
+        return;
+      }
+      const response = await route.fetch();
+      const body = (await response.json()) as {
+        response?: { sections?: { room?: { settings?: Record<string, unknown> | null } } };
+      };
+      if (
+        body.response?.sections?.room?.settings?.health_command === "npm run typecheck && npm test"
+      ) {
+        if (!healthRefreshHeld) {
+          healthRefreshHeld = true;
+          markHealthRefreshFetched();
+        }
+        await healthRefreshReleased;
+        await route.fulfill({ response, body: JSON.stringify(body) });
+        markHealthRefreshCompleted();
+        return;
+      }
+      await route.fulfill({ response, body: JSON.stringify(body) });
+    };
+    await page.route(healthCommandUrl, holdHealthRefresh);
     const healthSuggestionResponse = waitForOwnerCommand("room.set_health", {
       health_command: "npm run typecheck && npm test",
     });
@@ -140,14 +184,22 @@ export function registerWebCollaborationStart(fixture: WebFixture): void {
     await expect
       .poll(async () => (await readHealthSettings())?.health_command)
       .toBe("npm run typecheck && npm test");
-    await page.reload();
-    await page.getByTestId("room-title").waitFor();
-    await page.getByTestId("tab-setup").click();
+    try {
+      await expect.poll(() => healthRefreshHeld).toBe(true);
+      await healthRefreshFetched;
+      await page.getByTestId("health-command").fill("node --check package.json");
+      await page.getByTestId("health-image").fill("node:22-bookworm-slim");
+      await page.getByTestId("health-image").fill("");
+    } finally {
+      releaseHealthRefresh();
+      if (healthRefreshHeld) await healthRefreshCompleted;
+      await page.unroute(healthCommandUrl, holdHealthRefresh);
+    }
     await expect
       .poll(() => page.getByTestId("health-command").inputValue())
-      .toBe("npm run typecheck && npm test");
-    await page.getByTestId("health-command").fill("node --check package.json");
-    await page.getByTestId("health-image").fill("");
+      .toBe("node --check package.json");
+    await expect.poll(() => page.getByTestId("health-image").inputValue()).toBe("");
+    await expect.poll(() => page.getByTestId("health-save").isEnabled()).toBe(true);
     const healthSaveResponse = waitForOwnerCommand("room.set_health", {
       health_command: "node --check package.json",
       health_image: null,
@@ -278,9 +330,7 @@ export function registerWebCollaborationStart(fixture: WebFixture): void {
       .poll(() => page.getByTestId("notice").textContent())
       .toContain("The server refused this action");
     await finishClaimRefusal();
-    await page.reload();
-    await page.getByTestId("room-title").waitFor();
-    await page.getByTestId("tab-tasks").click();
+    await expect.poll(() => claimable.getByTestId("task-claim").isEnabled()).toBe(true);
     await claimable.getByTestId("task-claim").click();
     await expect.poll(async () => claimable.textContent()).toContain("Peter");
 
@@ -346,14 +396,59 @@ export function registerWebCollaborationStart(fixture: WebFixture): void {
     await expect.poll(() => guestPage.getByTestId("tab-owner-controls").count()).toBe(0);
 
     const observer = await joinAgent("ObserverAgent", undefined, "OBSERVER");
+    const commandUrl = `**/v1/rooms/${roomId}/commands`;
+    let markInitialBudgetFetched!: () => void;
+    let markInitialBudgetCompleted!: () => void;
+    let releaseInitialBudget!: () => void;
+    const initialBudgetFetched = new Promise<void>((resolve) => {
+      markInitialBudgetFetched = resolve;
+    });
+    const initialBudgetCompleted = new Promise<void>((resolve) => {
+      markInitialBudgetCompleted = resolve;
+    });
+    const initialBudgetReleased = new Promise<void>((resolve) => {
+      releaseInitialBudget = resolve;
+    });
+    let initialBudgetHeld = false;
+    const holdInitialBudgetLoad = async (route: Route) => {
+      let method: unknown;
+      try {
+        method = (route.request().postDataJSON() as { method?: unknown }).method;
+      } catch {
+        // Let malformed or non-command requests continue to the real server.
+      }
+      if (initialBudgetHeld || method !== "budgets.get") {
+        await route.continue();
+        return;
+      }
+      initialBudgetHeld = true;
+      const response = await route.fetch();
+      markInitialBudgetFetched();
+      await initialBudgetReleased;
+      await route.fulfill({ response });
+      markInitialBudgetCompleted();
+    };
+    await page.route(commandUrl, holdInitialBudgetLoad);
     const initialBudgetLoad = waitForOwnerCommand("budgets.get", {});
     await page.getByTestId("tab-owner-controls").click();
     await page.getByTestId("owner-controls").waitFor();
+    try {
+      await expect.poll(() => initialBudgetHeld).toBe(true);
+      await initialBudgetFetched;
+      await expect
+        .poll(() => page.getByTestId("refresh-budgets").textContent())
+        .toBe("Loading budgets…");
+      await page.getByTestId("room-budget-messages").fill("8");
+    } finally {
+      releaseInitialBudget();
+      if (initialBudgetHeld) await initialBudgetCompleted;
+      await page.unroute(commandUrl, holdInitialBudgetLoad);
+    }
     expect((await initialBudgetLoad).status()).toBe(200);
     await expect
       .poll(() => page.getByTestId("refresh-budgets").textContent())
       .toBe("Refresh budget status");
-    await expect.poll(() => page.getByTestId("room-budget-messages").isEnabled()).toBe(true);
+    await expect.poll(() => page.getByTestId("room-budget-messages").inputValue()).toBe("8");
 
     // The notice below can still show the previous action's "... complete." right after a click,
     // so each save is awaited by polling the state it writes, then the notice is checked.
@@ -369,7 +464,6 @@ export function registerWebCollaborationStart(fixture: WebFixture): void {
     }
     const budgetState = async () => (await owner.api.budgets.get<BudgetState>({})).response;
 
-    await page.getByTestId("room-budget-messages").fill("8");
     const roomBudgetSaveResponse = waitForOwnerCommand("budgets.set", {
       budgets: { messages: 8 },
     });
