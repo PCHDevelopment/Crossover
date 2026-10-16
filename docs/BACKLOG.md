@@ -1711,7 +1711,7 @@ From the tech-debt register. T1518 (#253) moved compute sampling out, but `packa
 
 Step 1: put the exit code, whether the call timed out, and the first 500 bytes of stderr in the cleanup error (and in the network path). Step 2: on the next capture, root-cause it. Also check whether the test's sweep can see containers that belong to other Docker test files running in parallel, and scope it to its own label value if it can. A failed cleanup of real containers is a product bug until shown otherwise.
 
-### T1529 · Audit heavy tests for measured timeouts — Q1
+### T1529 · Audit heavy tests for measured timeouts — S2 (moved from Q1 on 2026-10-16)
 
 Review 15's rule: a test that takes over 2 s gets an explicit timeout with its measurements in a comment. Older tests on vitest's 5 s default have failed unrelated PRs (T1510, T1517, T1522, T1527). Do exactly these steps, and post the results of step 3 before any code.
 
