@@ -31,4 +31,23 @@ describe("RedisOAuthStateStore", () => {
       probe.disconnect();
     }
   });
+
+  it("fails fast when Redis is unreachable", async () => {
+    const store = new RedisOAuthStateStore("redis://127.0.0.1:1");
+    stores.push(store);
+    const started = Date.now();
+    await expect(store.save("state", { provider: "github", verifier: "v" })).rejects.toThrow();
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  it("leaves a caller-supplied client open on close", async () => {
+    const client = new Redis(redisUrl);
+    client.on("error", () => {});
+    try {
+      await new RedisOAuthStateStore(client).close();
+      expect(await client.ping()).toBe("PONG");
+    } finally {
+      client.disconnect();
+    }
+  });
 });
