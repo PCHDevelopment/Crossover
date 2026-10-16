@@ -1868,3 +1868,4 @@ From 2026-10-16, new task specs live on their GitHub issue. Each line below name
 - **T1532** · Remote sandbox-host driver: O1 scopes it into a milestone; not scheduled · #328
 - **T1547** · Rename the Go CLI module path to `github.com/PCHDevelopment/Crossover` — Q1 · #333
 - **T1548** · Measured budget for the docker-execution-driver soft-mode sandbox test — Q1 · #334
+- **T1549** · Upstream test fixtures clone with `--no-local` and no background gc (nightly flake, Review 18) — Q1 · #336
