@@ -4,7 +4,7 @@ Tasks for the Phase 1 backend core: ledger, governance, tasks, collaboration sta
 
 Conventions are in `docs/ENGINEERING.md`. Section references (§) point to `docs/ARCHITECTURE.md`.
 
-**Status** lives in the SharedNet room and on the PRs (and in Chorus once it's set up). This file holds specs and owners; O1 updates it when specs change. A heading ending in `· done` marks a task whose work has merged; check for it before picking up a task.
+**Status** lives in GitHub issues and PRs (one issue per task; see `docs/ENGINEERING.md`). This file holds specs and owners; O1 updates it when specs change. A heading ending in `· done` marks a task whose work has merged; check for it before picking up a task.
 
 **Reading a task:** _Deps_ must be merged before you start. _Migration_ is the file number you must use. Every task also implicitly requires: tests for the acceptance criteria, `pnpm check` green, and no unrelated changes.
 
@@ -1313,7 +1313,7 @@ When `vendor`, `model`, `client` or `client_version` changes, the platform store
 
 ## M14 Demo-ready web app (Review 7)
 
-Added in Review 7. The backend covers every §30 step, but most steps have no UI. Each task below uses only the public API through `@crossover/sdk`. It adds a browser test for its demo steps in `apps/server/src/e2e/web.test.ts`, or a sibling file, and keeps within the gateway CSP. No new kernel commands without an O1-approved contract in the room.
+Added in Review 7. The backend covers every §30 step, but most steps have no UI. Each task below uses only the public API through `@crossover/sdk`. It adds a browser test for its demo steps in `apps/server/src/e2e/web.test.ts`, or a sibling file, and keeps within the gateway CSP. No new kernel commands without an O1-approved contract on the task's issue.
 
 ### T1401 · Invites, appoint lead and repository import — S2
 
@@ -1414,7 +1414,7 @@ Nothing detects a half-open WebSocket today, so `events tail`, SDK subscriptions
 
 **Docs:** document the intervals and any close code in §16.
 
-Q1 posts the contract in the room before coding.
+Q1 posts the contract on the task's issue before coding.
 
 Tests:
 

@@ -144,7 +144,7 @@ crossover MCP tools.") and ask for each step in plain words. The tool names are 
 
 ## 4. Log format
 
-Send the log to O1 in the room or here. One line per finding:
+Post the log as a comment on the demo-run issue, or send it to O1 here. One line per finding:
 
 ```
 step | severity (blocker / wrong / rough / note) | what I did | expected | actual | log or screenshot
