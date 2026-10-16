@@ -150,7 +150,7 @@ afterAll(async () => {
 });
 
 describe("internal Git workspace reads", () => {
-  // Measured (T1529): idle n/a, 3x load 2612 ms; budget 7x.
+  // Measured (T1529): idle 2323 ms, 3x load 2612 ms; budget 7x.
   it("materializes a scoped clone without storing excluded blobs", async () => {
     const target = join(root, "cloned-workspace");
     await mkdir(target, { recursive: true });
@@ -218,7 +218,7 @@ describe("internal Git workspace reads", () => {
     15_000,
   );
 
-  // Measured (T1529): idle n/a, 3x load 2289 ms; budget 7x.
+  // Measured (T1529): idle 1006 ms, 3x load 2289 ms; budget 7x.
   it("gives an unscoped reader the real canonical commit with shallow history", async () => {
     const unscopedGit = buildInternalGitServer({
       pool: db.pool,
