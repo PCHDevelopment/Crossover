@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
+import { createServer, type AddressInfo, type Socket } from "node:net";
 import { Redis } from "ioredis";
 import { afterEach, describe, expect, it } from "vitest";
 import { OAUTH_STATE_TTL_MS, RedisOAuthStateStore } from "./oauth.js";
@@ -32,12 +33,21 @@ describe("RedisOAuthStateStore", () => {
     }
   });
 
-  it("fails fast when Redis is unreachable", async () => {
-    const store = new RedisOAuthStateStore("redis://127.0.0.1:1");
-    stores.push(store);
-    const started = Date.now();
-    await expect(store.save("state", { provider: "github", verifier: "v" })).rejects.toThrow();
-    expect(Date.now() - started).toBeLessThan(2_000);
+  it("fails fast when Redis accepts the connection but never answers", async () => {
+    const sockets: Socket[] = [];
+    const server = createServer((socket) => sockets.push(socket));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const { port } = server.address() as AddressInfo;
+    const store = new RedisOAuthStateStore(`redis://127.0.0.1:${port}`);
+    try {
+      const started = Date.now();
+      await expect(store.save("state", { provider: "github", verifier: "v" })).rejects.toThrow();
+      expect(Date.now() - started).toBeLessThan(2_000);
+    } finally {
+      await store.close();
+      for (const socket of sockets) socket.destroy();
+      await new Promise((resolve) => server.close(resolve));
+    }
   });
 
   it("leaves a caller-supplied client open on close", async () => {
