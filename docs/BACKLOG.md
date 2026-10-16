@@ -4,7 +4,7 @@ Tasks for the Phase 1 backend core: ledger, governance, tasks, collaboration sta
 
 Conventions are in `docs/ENGINEERING.md`. Section references (§) point to `docs/ARCHITECTURE.md`.
 
-**Status** lives in the SharedNet room and on the PRs (and in Chorus once it's set up). This file holds specs and owners; O1 updates it when specs change. A heading ending in `· done` marks a task whose work has merged; check for it before picking up a task.
+**Status** lives in GitHub issues and PRs (one issue per task; see `docs/ENGINEERING.md`). This file holds specs and owners; O1 updates it when specs change. A heading ending in `· done` marks a task whose work has merged; check for it before picking up a task.
 
 **Reading a task:** _Deps_ must be merged before you start. _Migration_ is the file number you must use. Every task also implicitly requires: tests for the acceptance criteria, `pnpm check` green, and no unrelated changes.
 
@@ -1313,7 +1313,7 @@ When `vendor`, `model`, `client` or `client_version` changes, the platform store
 
 ## M14 Demo-ready web app (Review 7)
 
-Added in Review 7. The backend covers every §30 step, but most steps have no UI. Each task below uses only the public API through `@crossover/sdk`. It adds a browser test for its demo steps in `apps/server/src/e2e/web.test.ts`, or a sibling file, and keeps within the gateway CSP. No new kernel commands without an O1-approved contract in the room.
+Added in Review 7. The backend covers every §30 step, but most steps have no UI. Each task below uses only the public API through `@crossover/sdk`. It adds a browser test for its demo steps in `apps/server/src/e2e/web.test.ts`, or a sibling file, and keeps within the gateway CSP. No new kernel commands without an O1-approved contract on the task's issue.
 
 ### T1401 · Invites, appoint lead and repository import — S2
 
@@ -1414,7 +1414,7 @@ Nothing detects a half-open WebSocket today, so `events tail`, SDK subscriptions
 
 **Docs:** document the intervals and any close code in §16.
 
-Q1 posts the contract in the room before coding.
+Q1 posts the contract on the task's issue before coding.
 
 Tests:
 
@@ -1574,7 +1574,7 @@ Messages, inbox, sandbox and the `room mcp` stdio shim.
 
 D9 fidelity with no functional change. Last.
 
-### T1509 3b · Tier-3 grant rules in the policy — S1
+### T1509 3b · Tier-3 grant rules in the policy — S2 (moved from S1) · done
 
 Start after #287 or #290 merges, and after T1533. The decision moves into Rego. Every message, error code and detail stays byte-for-byte the same.
 
@@ -1599,7 +1599,7 @@ Start after #287 or #290 merges, and after T1533. The decision moves into Rego. 
 6. Rego unit tests in `grants_test.rego` for each reason and each boundary. Existing kernel tests pass unchanged.
 7. Include a mutation check in the PR text: change `86400000` to `86400001` in Rego and show the oracle fail.
 
-### T1509 3c · `holdsGatedScope` in the policy — S1
+### T1509 3c · `holdsGatedScope` in the policy — S2 (moved from S1) · done
 
 After 3b. Exact semantics to keep, from `packages/kernel/src/modules/tools/tools.ts:231`: true if some live grant has `requires_approval` and its capability equals `capability` or starts with `capability + ":"`, and no live deny has a capability exactly equal to `capability`.
 
@@ -1693,11 +1693,11 @@ In #279, S1 found that the bug also left a gap in the circuit breaker's protecte
 
 From Reviews 13 and 14. `packages/gateway/src/server.ts` is 676 lines, and the export route (about 110 lines) is inline. Move it next to `room-export.ts` and register it from `server.ts`, as was done for `execution.ts`. Behaviour must not change: existing tests pass unchanged, and the diff moves code rather than rewriting it. Document beside the endpoint that exports refuse with `UNAVAILABLE` when Redis is down.
 
-### T1525 · Split kernel dispatcher.ts by command family — S1
+### T1525 · Split kernel dispatcher.ts by command family — S2 (moved from S1 on 2026-10-16)
 
 From the tech-debt register (Reviews 11–14). `packages/kernel/src/dispatcher.ts` is 1,793 lines and every new command adds to it. Move the handlers into modules by command family (tasks, messages, decisions, memory, workspace and so on), keeping registration, the transaction wrapper and authorization in `dispatcher.ts`. Behaviour must not change: existing tests pass unchanged, and the diff moves code rather than rewriting it, as in T1518 and T1524. Post the module split before writing code, and ship it as more than one PR if any one PR would be over 400 non-test lines.
 
-### T1526 · Split workspace execution.ts by concern — S2
+### T1526 · Split workspace execution.ts by concern — S2 · done
 
 From the tech-debt register. T1518 (#253) moved compute sampling out, but `packages/workspace/src/execution.ts` is still 1,921 lines. Split the rest of `ExecutionService` by concern (for example sandbox lifecycle, exec and cancel, output streaming, workspace materialization), keeping `ExecutionService` as the public facade so no import outside the file changes. Behaviour must not change: existing tests pass unchanged, and the diff moves code rather than rewriting it. Prove it the way T1525 did: a TypeScript-parser declaration comparison after only the allowed edits, plus a check that the package's exported names are identical on main and on the branch. Post the module split before any code. Ship more than one PR if needed; pure moves with that proof may go over 400 lines.
 
@@ -1705,7 +1705,7 @@ From the tech-debt register. T1518 (#253) moved compute sampling out, but `packa
 
 #287's CI (run 38421887493, job 115381065803; log saved by O1 before any rerun) failed in `packages/policy/src/scope-oracle.test.ts:168`, "covers a requested capability exactly as capabilityMatches() does": `Test timed out in 5000ms`. The file took 8.8 s in a 79 s parallel run. #287 does not touch the policy package. The exhaustive oracle from #280 is deterministic and CPU-bound, so it needs a measured budget, as in T1510: time it in isolation and under `pnpm check`, then set an explicit per-test timeout with the measurements in a comment. Keep every case. Do not sample the corpus or weaken an assertion. Check the other oracle tests (`bundles-oracle.test.ts`) at the same time.
 
-### T1528 · Plugin-runner stale-resource cleanup fails without saying why — S2
+### T1528 · Plugin-runner stale-resource cleanup fails without saying why — S2 · done
 
 #287's second CI run (run 38428716074, job 115404900246; log saved by O1 before any rerun) failed in `apps/server/src/plugin-runner.docker.test.ts` › "removes stale labeled containers and networks during startup cleanup" with `Error: Docker container cleanup failed`, thrown from `PluginResourceSweeper.remove` (`plugin-runner-docker.ts:150`). #287 changes only kernel files. The error drops Docker's exit code and stderr, so the cause cannot be told from the log. It could be a sweep timeout under load, a container another parallel Docker test is still using, or a Docker message that `isSuccessfulCleanup` does not recognise.
 
@@ -1721,7 +1721,7 @@ Review 15's rule: a test that takes over 2 s gets an explicit timeout with its m
 4. After O1 approves the table: for each row, pass the budget as the test's timeout argument. Add a one-line comment above the test: `// Measured (T1529): idle <x> ms, 3x load <y> ms; budget 7x.` Change nothing else: no assertions, no cases, no product code.
 5. One PR per package, at most 400 changed lines each.
 
-### T1530 · Archive retention, unarchive and purge — S2
+### T1530 · Archive retention, unarchive and purge — S2 · done
 
 From T1519. Plan before code, and split if any PR goes over 400 non-test lines:
 
@@ -1741,9 +1741,10 @@ The tests must cover: unarchive after retention has ended is refused; the notice
 - Any successful change clears `retention_notice_sent_at`.
 - There is no persistent export store, so purge phases are `WORKSPACE` (bare repository, workspace directories, remaining sandbox volumes) and then `DATABASE`.
 - Events are `room.unarchived` and `room.retention_changed`.
+- Once `purge_started_at` is set, `rooms.set_retention` and `rooms.unarchive` are refused with `CONFLICT_VERSION` "room deletion is in progress", with one test each.
 - Unarchive clears `archived_at`, so re-archiving starts a new retention period.
 
-### T1531 · Single-host mode guardrails — S1
+### T1531 · Single-host mode guardrails — S2 (moved from S1) · done
 
 From T1418, after T1509 3c. Every deployment today is single-host, because `DockerExecutionDriver` is the only driver. Exact change:
 
@@ -1767,7 +1768,7 @@ From T1418, after T1509 3c. Every deployment today is single-host, because `Dock
 
 From T1418. An `ExecutionDriver` that runs sandboxes on separate sandbox hosts over an authenticated channel (mutual TLS or signed requests), with host registration, health checks and capacity, and the same lifecycle, output streaming and compute accounting as `DockerExecutionDriver`. It is required before any multi-tenant or untrusted deployment. It is not needed for the MVP demo. Scope and split it into a milestone when it is scheduled.
 
-### T1533 · Stop wasted CI runs — S1
+### T1533 · Stop wasted CI runs — S2 (moved from S1) · done
 
 From Peter, 2026-10-13. The repository is private and CI runs on one self-hosted runner, so every unneeded run delays the ones people are waiting for. O1 has already investigated, so this is the whole change.
 
@@ -1784,3 +1785,84 @@ concurrency:
 Change nothing else: no trigger, `runs-on`, port or service changes. A PR run joins its PR's group, and a newer push cancels the older run. Every other run (push to `main`, nightly, manual) gets a group of its own from `run_id`, so it is never cancelled or replaced. A shared group would let a third push to `main` drop the second while it waits, even with `cancel-in-progress` false.
 
 **Proof, in the PR text, with run links:** (a) two pushes to the PR a minute apart, where the first run shows `cancelled`; (b) after merge, two pushes to `main` in quick succession, where both run to completion. O1 checks the history as well.
+
+### T1534 · Health checks under Docker Compose mount a path the host cannot see — S2 (moved from S1, Review 16) · done
+
+Found by O1 while preparing Peter's hands-on run (17:50). This is a product bug, and it blocks demo steps 2 and 13 under the Compose stack.
+
+`DockerHealthRunner.createCheckout` (`packages/workspace/src/health-runner.ts:740`) creates the checkout with `mkdtemp(join(tmpdir(), "crossover-health-"))`. Under Compose that path is inside the server container. The runner then passes `--volume ${checkout}:/workspace` (line 400) to the **host** Docker daemon, which mounts a host path that does not exist, so the health command runs in an empty directory. The e2e tests run the server on the host, so they never see it.
+
+Do this first: it goes ahead of T1533 and 3b. The exact change:
+
+1. In `DockerHealthRunnerOptions`, add `checkoutRoot?: string`, documented as "Directory for health checkouts. It must be at the same absolute path for this process and the Docker daemon (as `WORKSPACE_ROOT` is)."
+2. In `createCheckout`, use `const root = this.options.checkoutRoot ?? tmpdir()`, then `await mkdir(root, { recursive: true, mode: 0o750 })`, then `mkdtemp(join(root, "crossover-health-"))`. Everything else stays as it is, including the chmod, the cleanup and the install checkout at line 632.
+3. In `apps/server/src/compose.ts`, where `DockerHealthRunner` is constructed (around line 339), pass `checkoutRoot: join(config.workspaceRoot, ".health-checkouts")`.
+4. Tests:
+   - A unit test in `health-runner.test.ts` with a fake runner, asserting that the `--volume` source starts with `checkoutRoot`.
+   - Extend `apps/server/src/e2e/deploy-topology.test.ts`, which runs the real server image with the same-path workspace mount:
+     - Set the room's health command to `node --check index.js` on a fixture with a valid `index.js`, then expect GREEN.
+     - Repeat with a broken `index.js`, then expect RED. The RED/GREEN pair proves the files were mounted.
+   - Give the new e2e case a measured timeout, as T1529 does.
+5. No other changes.
+
+### T1535 · Dev UI proxies `/mcp` — S2 · done
+
+Found by O1 while preparing Peter's hands-on run. In development the web app runs on Vite (:5173), which proxies only `/v1` to the server (:8080). The Setup tab's MCP example (`apps/web/src/RoomSetupView.tsx`, `mcpConfigExample`) builds its URL from `window.location.origin`, so under Vite it points agents at `http://localhost:5173/mcp`, which returns the web app. In production the server serves both, so the URL is right there.
+
+The exact change:
+
+1. In `apps/web/vite.config.ts`, add `"/mcp": { target: "http://127.0.0.1:8080", changeOrigin: false }` to `server.proxy`, next to `/v1`. No `ws`; MCP here is plain HTTP.
+2. Update the comment above `defineConfig` to say it proxies `/v1` and `/mcp`.
+3. Change nothing else: not `RoomSetupView.tsx`, not the server.
+
+**Proof, in the PR text:** with the server on :8080 and `pnpm --filter @crossover/web dev`, run `curl -sS -o /dev/null -w '%{http_code} %{content_type}\n' -X POST http://localhost:5173/mcp -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'` before and after. Before shows the web app (`text/html`); after shows the server's JSON error for a missing token (401 or the MCP error envelope). Paste both lines.
+
+### T1536 · Harden three timing-sensitive tests — S2 · done
+
+From Review 17. Each of these failed once under load on 2026-10-13 and passed on rerun. T1529 covers `apply.test`. The exact change:
+
+1. `apps/server/src/e2e/web-editor.ts:103`: change `await expect.poll(async () => lines.textContent()).toContain("ONE");` to pass `{ timeout: 10_000 }` as the second argument of `expect.poll`, the same as the `onServer` poll a few lines above. It currently uses the 1 s default, and the WebSocket push of another participant's change can take longer under load (run 38467301118 failed here). Change no other line in this file.
+2. `packages/workspace/src/docker-execution-driver.test.ts`, test "restarts the sandbox to kill a detached setsid child" (timeout `30_000`, it timed out on main run 38465499250): measure it 5 times idle and 5 times under 3× CPU load, the same way as T1534. Replace `30_000` with the T1529 budget: load max × 7, rounded up to the next 5,000 ms, minimum 15,000. Add a comment with the measurements. Change nothing else in the test.
+3. `apps/server/src/plugin-runner.docker.test.ts`, test "removes stale labeled containers and networks during startup cleanup": on main run 38465499250 it failed with `Docker container cleanup failed (exit code: 143, timed out: true)`, so an inner `docker` call timed out. Do not change code for this one. Measure how long `docker rm -f` of a running `busybox sleep 300` container takes, 5 times idle and 5 times under 3× load, and put the numbers in the PR text with the name and value of the timeout that cleanup uses in `plugin-runner.ts`. O1 decides the fix from those numbers.
+
+One PR. The PR text has the before and after for items 1 and 2, and the measurements for item 3.
+
+### T1537 · Plugin-runner cleanup says which step failed — S2 · done
+
+From #307's CI (run 38490900840, attempt 2): `plugin-runner.docker.test.ts` "allows a declared public host…" failed with only `Plugin runner cleanup failed`. `DockerToolRunner.cleanup` (`apps/server/src/plugin-runner.ts`, around line 367) sets a single `failed` flag over three docker calls, and `run()`'s `finally` (around line 329) replaces the error with a new one that has no cause. The failure cannot be diagnosed. The exact change:
+
+1. In `cleanup()`, replace `let failed = false` with `const failures: string[] = []`. For each of the three calls, when it fails (the existing `code !== 0 && !isMissingDockerResource(...)` test), push `` `${step} failed (exit code: ${result.code}, timed out: ${result.timedOut}, stderr: ${JSON.stringify(result.stderr.slice(0, 500))})` ``. Use `step` = `docker container rm`, `docker network disconnect` and `docker network rm`. At the end: `if (failures.length) throw new Error(`Plugin runner cleanup failed: ${failures.join("; ")}`)`.
+2. In `run()`'s `finally`, change the three `catch {` blocks to `catch (error) {` and pass `{ cause: error }` as the second argument of each `new Error(...)`. The messages stay the same.
+3. `plugin-runner.test.ts`: add one test where the injected `invoke` returns `{ code: 1, timedOut: false, stderr: "boom" }` for `network rm` (and success for everything else). Assert that `run()` rejects with an error whose `cause.message` contains `docker network rm failed (exit code: 1, timed out: false, stderr: "boom")`.
+
+Change nothing else. After it merges, S2 merges main into #307 so #307 gets a fresh run.
+
+### T1538 · Measured budgets for the two timed egress-visibility tests — S2 · done
+
+`apps/server/src/e2e/egress-visibility.test.ts` › "every MCP read tool…" (line 500) timed out at its 15,000 ms budget in #307's first run (run 38490900840) after T1516 raised it from 5 s. Passing runs in saved CI logs reach 8,174 ms. T1529 skips tests that already pass a timeout, so this one needs its own measurement. Do exactly this:
+
+1. On main, run only this file four times: twice idle and twice under 3× load (the T1529 step 2 burners), with `pnpm vitest run apps/server/src/e2e/egress-visibility.test.ts --reporter=json --outputFile=ev-<idle|load>-N.json`. Kill the burners afterwards.
+2. Post one row per test for line 251 ("every read command…", now 30,000 ms) and line 500 ("every MCP read tool…", now 15,000 ms): idle max, load max, and budget. Budget = the larger of load max × 7 and 8,174 × 7, rounded up to the next 5,000 ms, and never below the current value. Wait for O1's approval before step 3.
+3. Set each approved budget as the test's timeout argument. Replace the trailing comment on line 278 and add one above line 500: `// Measured (T1538): idle <x> ms, 3x load <y> ms; budget 7x.` Change nothing else.
+
+### T1539 · Health-runner abort test waits longer for its container — S2 · done
+
+`packages/workspace/src/health-runner.test.ts` › "kills and removes a container when aborted" failed in S2's local `pnpm check` (2026-10-14, seq 1471): `vi.waitFor` at line 1209 expired after 5,000 ms with no container yet. Before the container exists, `run()` makes a checkout and creates the container, which takes longer than 5 s on a busy host. The whole test has passed CI in up to 4,838 ms. Do exactly this:
+
+1. Line 1211: change `{ timeout: 5_000 }` to `{ timeout: 15_000 }`, with the comment `// container start includes the checkout; 5 s failed under local load (T1539)`.
+2. Replace this test's `DOCKER_CASE_TIMEOUT_MS` (30,000) with `45_000`, so that abort and cleanup still get 30 s after the longer wait.
+
+Change nothing else, and leave `DOCKER_CASE_TIMEOUT_MS` itself as it is.
+
+## Tracked in GitHub issues (2026-10-16)
+
+From 2026-10-16, new task specs live on their GitHub issue. Each line below names the owner and links the issue.
+
+- **T1540** · Intermittent web e2e failure: room budget save poll times out — S2 · #315
+- **T1541** · `RedisOAuthStateStore` fails fast and accepts a shared client — Q1 · #323
+- **T1542** · Move `DEFAULT_PROTECTED_PATHS` to `@crossover/protocol` — Q1 · #324
+- **T1543** · Purge: derive the delete order from the schema (plan first) — S2 · #325
+- **T1544** · MCP owner tools: checkpoints, roles, pause and grants — S2, blocked on Peter (#313) · #326
+- **T1545** · §30 step 17: GitHub App connection for export to a PR — S2, blocked on Peter (#313) · #327
+- **T1546** · health-runner tests: raise the 30 s Docker case timeout to the measured budget — Q1 · #329
+- **T1532** · Remote sandbox-host driver: O1 scopes it into a milestone; not scheduled · #328
