@@ -14,7 +14,7 @@ afterEach(async () => {
 });
 
 describe("adjacent-hunk rule (§10.4)", () => {
-  // Measured (T1529): idle n/a, 3x load 2456 ms; budget 7x.
+  // Measured (T1529): idle 359 ms, 3x load 2456 ms; budget 7x.
   it.each([
     { later: 11, reverse: false, clean: false },
     { later: 11, reverse: true, clean: false },
