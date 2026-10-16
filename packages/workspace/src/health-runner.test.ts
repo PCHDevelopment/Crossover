@@ -557,6 +557,7 @@ describe("DockerHealthRunner", () => {
     expect(invoke).not.toHaveBeenCalled();
   });
 
+  // Measured (T1529): idle n/a, 3x load 2586 ms; budget 7x.
   it("installs dependencies once per cache key and keeps health runs isolated", async () => {
     await db.pool.query("DELETE FROM health_install_runs WHERE room_id = $1", ["room_health"]);
     const { repository } = await makeRepo();
@@ -666,7 +667,7 @@ describe("DockerHealthRunner", () => {
       ["room_health"],
     );
     expect(rows.map((row) => row.status)).toEqual(["SUCCEEDED", "SUCCEEDED", "SUCCEEDED"]);
-  });
+  }, 20_000);
 
   it("reinstalls when the selected cache volume exists without labels", async () => {
     await db.pool.query("DELETE FROM health_install_runs WHERE room_id = $1", ["room_health"]);
@@ -692,6 +693,7 @@ describe("DockerHealthRunner", () => {
     expect(docker.cacheVolumes()).toHaveLength(1);
   });
 
+  // Measured (T1529): idle n/a, 3x load 2795 ms; budget 7x.
   it("continues cache GC after one volume cannot be removed", async () => {
     await db.pool.query("DELETE FROM health_install_runs WHERE room_id = $1", ["room_health"]);
     const { repository } = await makeRepo();
@@ -722,7 +724,7 @@ describe("DockerHealthRunner", () => {
       expect.stringContaining("failed to remove dependency cache volume"),
       expect.any(Error),
     );
-  });
+  }, 20_000);
 
   it("does not mount a leftover volume from a failed reinstall", async () => {
     await db.pool.query("DELETE FROM health_install_runs WHERE room_id = $1", ["room_health"]);
@@ -800,6 +802,7 @@ describe("DockerHealthRunner", () => {
     expect(rows.map((row) => row.status)).toEqual(["SUCCEEDED", "FAILED", "SUCCEEDED"]);
   });
 
+  // Measured (T1529): idle n/a, 3x load 4522 ms; budget 7x.
   it("keeps the selected cache across best-effort GC failures and protects it during collection", async () => {
     await db.pool.query("DELETE FROM health_install_runs WHERE room_id = $1", ["room_health"]);
     const { repository } = await makeRepo();
@@ -883,7 +886,7 @@ describe("DockerHealthRunner", () => {
     expect(docker.installCount()).toBe(3);
     expect(docker.healthCount()).toBe(5);
     expect(logError).toHaveBeenCalled();
-  });
+  }, 35_000);
 
   it("records install failure as ERROR and skips the health command", async () => {
     await db.pool.query("DELETE FROM health_install_runs WHERE room_id = $1", ["room_health"]);

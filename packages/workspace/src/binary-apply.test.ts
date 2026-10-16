@@ -23,6 +23,7 @@ afterAll(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
+// Measured (T1529): idle n/a, 3x load 2146 ms; budget 7x.
 it("applies and replays arbitrary binary bytes while keeping the durable payload JSONB-safe", async () => {
   const room = newId("room");
   await db.pool.query(
@@ -94,7 +95,7 @@ it("applies and replays arbitrary binary bytes while keeping the durable payload
       },
     }),
   ).rejects.toMatchObject({ code: "VALIDATION", details: { reason: "binary_requires_base64" } });
-});
+}, 20_000);
 
 it.each(["A", "!!!!", "Zg", "Zh==", "Zm9=", "Zg==\n"])(
   "rejects malformed/noncanonical base64 %j",

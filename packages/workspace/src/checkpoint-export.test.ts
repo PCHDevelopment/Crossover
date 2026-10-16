@@ -290,6 +290,7 @@ const workspaceTree = async (s: Awaited<ReturnType<typeof setup>>, revision: num
 };
 
 describe("checkpoints.export (§24.3, T805)", () => {
+  // Measured (T1529): idle n/a, 3x load 3872 ms; budget 7x.
   it("squashed: one commit per checkpoint, with the right tree, author and co-author trailers, on top of the synced upstream commit", async () => {
     const s = await setup();
     const importedSha = (await s.upstreamRow()).last_synced_sha as string;
@@ -334,8 +335,9 @@ describe("checkpoints.export (§24.3, T805)", () => {
     expect((await s.events("checkpoint.exported"))[0]!.payload).toMatchObject({
       tip: await s.remoteGit("rev-parse", branch),
     });
-  });
+  }, 30_000);
 
+  // Measured (T1529): idle 1565 ms, 3x load 2739 ms; budget 7x.
   it("exports only what is new: the next export builds on the last, and the same checkpoint twice is refused", async () => {
     const s = await setup();
     await s.edit("src/a.ts", "export const a = 1;\n");
@@ -350,8 +352,9 @@ describe("checkpoints.export (§24.3, T805)", () => {
     expect(await s.remoteGit("rev-parse", `${branch}~1`)).toBe(tip1);
     await rejects(s.exportIt({ checkpoint_id: first.id }), "already_exported");
     await rejects(s.exportIt(), "already_exported");
-  });
+  }, 20_000);
 
+  // Measured (T1529): idle 1945 ms, 3x load 5072 ms; budget 7x.
   it("per_changeset: one commit per applied ChangeSet, none for a pulled upstream change, ending at the checkpointed tree", async () => {
     const s = await setup();
     await s.edit("src/a.ts", "export const a = 'x';\n"); // revision 2
@@ -372,8 +375,9 @@ describe("checkpoints.export (§24.3, T805)", () => {
     expect(cp.revision).toBe(4);
     const body = await s.remoteGit("log", "-1", "--format=%B", branch);
     expect(body).toContain("Co-authored-by: Dev");
-  });
+  }, 40_000);
 
+  // Measured (T1529): idle n/a, 3x load 3327 ms; budget 7x.
   it("only room/* branches are pushed to: anything else is refused before anything is pushed", async () => {
     const s = await setup();
     await s.edit("src/a.ts", "export const a = 1;\n");
@@ -393,8 +397,9 @@ describe("checkpoints.export (§24.3, T805)", () => {
     await s.exportIt({ branch: "room/custom" });
     expect(s.pushes).toEqual([{ branch: "room/custom", commit: expect.any(String) }]);
     expect(await s.remoteGit("rev-parse", "main")).toBe((await s.upstreamRow()).last_synced_sha);
-  });
+  }, 25_000);
 
+  // Measured (T1529): idle 1807 ms, 3x load 2866 ms; budget 7x.
   it("exporting the same range again makes the same commits", async () => {
     const s = await setup();
     await s.edit("src/a.ts", "export const a = 1;\n");
@@ -405,7 +410,7 @@ describe("checkpoints.export (§24.3, T805)", () => {
     expect((a.response as { commits: string[] }).commits).toEqual(
       (b.response as { commits: string[] }).commits,
     );
-  });
+  }, 25_000);
 
   it("a branch that moved on is push_rejected, and nothing is recorded", async () => {
     const s = await setup();
@@ -449,6 +454,7 @@ describe("checkpoints.export (§24.3, T805)", () => {
     );
   });
 
+  // Measured (T1529): idle n/a, 3x load 4124 ms; budget 7x.
   it("with pull_request it opens one from the branch into the upstream's branch, and returns its URL", async () => {
     const s = await setup();
     await s.edit("src/a.ts", "export const a = 1;\n");
@@ -474,16 +480,18 @@ describe("checkpoints.export (§24.3, T805)", () => {
     const plain = await s.exportIt();
     expect((plain.response as { pull_request?: unknown }).pull_request).toBeUndefined();
     expect(s.opened).toHaveLength(1);
-  });
+  }, 30_000);
 
+  // Measured (T1529): idle n/a, 3x load 2136 ms; budget 7x.
   it("no provider configured: refused before anything is pushed", async () => {
     const s = await setup({ pullRequests: false });
     await s.edit("src/a.ts", "export const a = 1;\n");
     await s.checkpoint("x");
     await rejects(s.exportIt({ pull_request: {} }), "no_pull_request_provider");
     expect(s.pushes).toEqual([]);
-  });
+  }, 15_000);
 
+  // Measured (T1529): idle n/a, 3x load 3111 ms; budget 7x.
   it("a pull request that can't be opened leaves the branch pushed and nothing recorded; exporting again opens it", async () => {
     const s = await setup();
     await s.edit("src/a.ts", "export const a = 1;\n");
@@ -498,8 +506,9 @@ describe("checkpoints.export (§24.3, T805)", () => {
     expect((again.response as { tip: string }).tip).toBe(pushedTip); // same commits
     expect(again.response).toMatchObject({ pull_request: { number: 1 } });
     expect(s.opened).toHaveLength(1);
-  });
+  }, 25_000);
 
+  // Measured (T1529): idle n/a, 3x load 3010 ms; budget 7x.
   it("what the pull request provider says is scrubbed of the credential it was given", async () => {
     const s = await setup();
     await s.edit("src/a.ts", "export const a = 1;\n");
@@ -516,8 +525,9 @@ describe("checkpoints.export (§24.3, T805)", () => {
     expect(
       JSON.stringify([(refused as CrossoverError).message, (refused as CrossoverError).details]),
     ).not.toContain("tok_push_secret");
-  });
+  }, 25_000);
 
+  // Measured (T1529): idle 2373 ms, 3x load 5089 ms; budget 7x.
   it("needs an upstream and a checkpoint; asks for write access; no credential leaves the pusher", async () => {
     const s = await setup();
     await rejects(s.exportIt(), "no_checkpoint");
@@ -537,5 +547,5 @@ describe("checkpoints.export (§24.3, T805)", () => {
     await t.checkpoint("x");
     await db.pool.query("DELETE FROM upstreams WHERE room_id = $1", [t.roomId]);
     await rejects(t.exportIt(), "no_upstream");
-  });
+  }, 40_000);
 });

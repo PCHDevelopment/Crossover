@@ -177,6 +177,7 @@ it("safely refreshes symlink-to-directory and executable mode changes", async ()
   }
 });
 
+// Measured (T1529): idle n/a, 3x load 2471 ms; budget 7x.
 it("falls back to a full rebuild after a partial incremental update", async () => {
   const root = await mkdtemp(join(tmpdir(), "crossover-search-fallback-"));
   try {
@@ -218,8 +219,9 @@ it("falls back to a full rebuild after a partial incremental update", async () =
   } finally {
     await rm(root, { recursive: true, force: true });
   }
-});
+}, 20_000);
 
+// Measured (T1529): idle n/a, 3x load 3991 ms; budget 7x.
 it("serializes cache refreshes with readers, replaces deleted files and repairs missing cache", async () => {
   const root = await mkdtemp(join(tmpdir(), "crossover-search-tree-"));
   try {
@@ -270,7 +272,7 @@ it("serializes cache refreshes with readers, replaces deleted files and repairs 
   } finally {
     await rm(root, { recursive: true, force: true });
   }
-});
+}, 30_000);
 
 it("streams literal/regex/case/glob results, skips symlinks/binaries, bounds matches and rejects bad queries", async () => {
   const root = await mkdtemp(join(tmpdir(), "crossover-search-runner-"));

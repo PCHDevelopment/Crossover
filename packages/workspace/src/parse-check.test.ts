@@ -46,6 +46,7 @@ describe("parseConflicts", () => {
     ]);
   });
 
+  // Measured (T1529): idle n/a, 3x load 3028 ms; budget 7x.
   it("rejects syntax broken by the merged tree when both input versions parse", async () => {
     const f = await fixture();
     const head = await materialize(f.repo, f.base, [
@@ -62,8 +63,9 @@ describe("parseConflicts", () => {
     await expect(parseConflicts(f.repo, head, candidate, { clean: true, tree })).resolves.toEqual([
       "src/main.ts",
     ]);
-  });
+  }, 25_000);
 
+  // Measured (T1529): idle n/a, 3x load 2048 ms; budget 7x.
   it("allows a candidate source file that was already syntactically invalid", async () => {
     const f = await fixture();
     const head = await materialize(f.repo, f.base, [
@@ -77,8 +79,9 @@ describe("parseConflicts", () => {
     await expect(parseConflicts(f.repo, head, candidate, { clean: true, tree })).resolves.toEqual(
       [],
     );
-  });
+  }, 15_000);
 
+  // Measured (T1529): idle n/a, 3x load 3313 ms; budget 7x.
   it("checks a newly added file whose missing head version is valid", async () => {
     const f = await fixture();
     const head = f.base;
@@ -93,7 +96,7 @@ describe("parseConflicts", () => {
     await expect(parseConflicts(f.repo, head, candidate, { clean: true, tree })).resolves.toEqual([
       "src/new.py",
     ]);
-  });
+  }, 25_000);
 
   it("uses TSX only for .tsx files, while JSX is a .ts syntax error", async () => {
     const f = await fixture();
@@ -136,6 +139,7 @@ describe("parseConflicts", () => {
     );
   });
 
+  // Measured (T1529): idle 2035 ms, 3x load 4765 ms; budget 7x.
   it("stops scheduling files when the per-apply byte budget is exhausted", async () => {
     const f = await fixture();
     const padding = "x".repeat(900_000);
@@ -164,8 +168,9 @@ describe("parseConflicts", () => {
     const conflicts = await parseConflicts(f.repo, base, base, { clean: true, tree });
     expect(conflicts).toHaveLength(4);
     expect(conflicts).not.toContain(paths[4]);
-  });
+  }, 35_000);
 
+  // Measured (T1529): idle n/a, 3x load 2526 ms; budget 7x.
   it("ignores files outside the supported source grammars", async () => {
     const f = await fixture();
     const head = await materialize(f.repo, f.base, [
@@ -182,5 +187,5 @@ describe("parseConflicts", () => {
     await expect(parseConflicts(f.repo, head, candidate, { clean: true, tree })).resolves.toEqual(
       [],
     );
-  });
+  }, 20_000);
 });

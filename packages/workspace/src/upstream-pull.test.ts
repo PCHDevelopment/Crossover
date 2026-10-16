@@ -192,6 +192,7 @@ const rejects = async (p: Promise<unknown>, reason: string) => {
 };
 
 describe("git.pull_upstream (§24.2, T803)", () => {
+  // Measured (T1529): idle n/a, 3x load 2601 ms; budget 7x.
   it("brings an upstream change in as an UPSTREAM ChangeSet; the room tree equals the upstream tip's", async () => {
     const s = await setup();
     const sha = await s.up.commit(async (dir) => {
@@ -237,7 +238,7 @@ describe("git.pull_upstream (§24.2, T803)", () => {
       last_synced_room_revision: 2,
     });
     expect(await s.events("workspace.upstream_synced")).toHaveLength(2); // the import, then this
-  });
+  }, 20_000);
 
   it("an upstream that hasn't moved is UP_TO_DATE: no revision, no event", async () => {
     const s = await setup();
@@ -247,6 +248,7 @@ describe("git.pull_upstream (§24.2, T803)", () => {
     expect(await s.events("workspace.upstream_synced")).toHaveLength(1);
   });
 
+  // Measured (T1529): idle 1569 ms, 3x load 2197 ms; budget 7x.
   it("non-overlapping room and upstream edits merge; the room's edit is kept", async () => {
     const s = await setup();
     await s.edit("src/b.ts", "export const b = 'room';\n"); // revision 2, after the sync at 1
@@ -260,8 +262,9 @@ describe("git.pull_upstream (§24.2, T803)", () => {
     expect(out.response).toMatchObject({ status: "APPLIED", applied_revision: 3 });
     expect(await s.read("src/a.ts")).toContain("'upstream'");
     expect(await s.read("src/b.ts")).toContain("'room'");
-  });
+  }, 20_000);
 
+  // Measured (T1529): idle n/a, 3x load 5048 ms; budget 7x.
   it("overlapping edits conflict: the caller is the submitter of record, nothing advances, a second pull is refused, and resolving applies the pull", async () => {
     const s = await setup();
     const before = await s.upstreamRow();
@@ -308,7 +311,7 @@ describe("git.pull_upstream (§24.2, T803)", () => {
     expect((await s.events("workspace.upstream_synced")).length).toBe(2);
     // …and the next pull sees nothing new.
     expect((await s.pull()).response).toMatchObject({ status: "UP_TO_DATE" });
-  });
+  }, 40_000);
 
   it("a room that never imported has no upstream → VALIDATION", async () => {
     const s = await setup();
@@ -372,6 +375,7 @@ describe("git.pull_upstream (§24.2, T803)", () => {
     ).toBe(await s.up.tree());
   }, 60_000);
 
+  // Measured (T1529): idle 3381 ms, 3x load 5122 ms; budget 7x.
   it("a file the room and the upstream both added is a conflict to resolve, not a wedged room (add/add)", async () => {
     const s = await setup();
     await s.call(s.devP, "workspace.apply_changeset", {
@@ -397,8 +401,9 @@ describe("git.pull_upstream (§24.2, T803)", () => {
       await writeFile(join(dir, "src/same.ts"), "same\n");
     });
     expect((await t.pull()).response).toMatchObject({ status: "UP_TO_DATE" });
-  });
+  }, 40_000);
 
+  // Measured (T1529): idle 1942 ms, 3x load 4218 ms; budget 7x.
   it("a pull is bounded overall: more files, or more new bytes, than the limit is refused before anything is applied", async () => {
     const s = await setup({ pullLimits: { files: 3, bytes: 50 } });
     await s.up.commit(async (dir) => {
@@ -412,7 +417,7 @@ describe("git.pull_upstream (§24.2, T803)", () => {
     });
     await rejects(t.pull(), "too_many_changes");
     expect(Number((await t.head()).revision)).toBe(1);
-  });
+  }, 30_000);
 
   it("a conflict in the last part of a split pull: the first part is in, the position waits, resolving it advances", async () => {
     const s = await setup();

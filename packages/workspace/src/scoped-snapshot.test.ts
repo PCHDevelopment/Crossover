@@ -59,6 +59,7 @@ async function fixture() {
 }
 
 describe("createScopedSnapshotRepository", () => {
+  // Measured (T1529): idle n/a, 3x load 2009 ms; budget 7x.
   it("advertises only readable paths and their blobs", async () => {
     const source = await fixture();
     const scoped = await createScopedSnapshotRepository({
@@ -112,7 +113,7 @@ describe("createScopedSnapshotRepository", () => {
         timeoutMs: 10_000,
       }),
     ).rejects.toThrow();
-  });
+  }, 15_000);
 
   it("creates the same nonempty snapshot for the same canonical revision and scope", async () => {
     const source = await fixture();

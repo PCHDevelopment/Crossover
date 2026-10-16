@@ -271,6 +271,7 @@ describe("git.import (§24.1, T801)", () => {
     expect(fetcher.requests).toEqual([]);
   });
 
+  // Measured (T1529): idle n/a, 3x load 3064 ms; budget 7x.
   it("suggests a health command from the repository, never applies it, and says null when there is none", async () => {
     const up = await upstreamRepo(async (dir) => {
       await rm(join(dir, "package.json"));
@@ -289,7 +290,7 @@ describe("git.import (§24.1, T801)", () => {
     });
     const r2 = await room({ fetcher: new FixtureFetcher(bare.dir) });
     expect((await r2.importIt()).response).toMatchObject({ suggested_health_command: null });
-  });
+  }, 25_000);
 
   it("the room changed while the upstream was fetched: CONFLICT_VERSION, nothing imported, nothing left behind", async () => {
     const up = await upstreamRepo();
@@ -338,6 +339,7 @@ describe("git.import (§24.1, T801)", () => {
     expect(fetcher.requests).toHaveLength(1);
   });
 
+  // Measured (T1529): idle n/a, 3x load 2415 ms; budget 7x.
   it("the fetch's temporary files are cleaned up, on success and on refusal", async () => {
     const ok = await upstreamRepo();
     const f1 = new FixtureFetcher(ok.dir);
@@ -349,8 +351,9 @@ describe("git.import (§24.1, T801)", () => {
     const f2 = new FixtureFetcher(bad.dir);
     await rejects((await room({ fetcher: f2 })).importIt(), "unsupported_entry");
     expect(f2.cleaned).toBe(1);
-  });
+  }, 20_000);
 
+  // Measured (T1529): idle n/a, 3x load 2179 ms; budget 7x.
   it("refuses what a workspace can't hold, naming the path: symlinks and submodules", async () => {
     const link = await upstreamRepo(async (d) => {
       await symlink("README.md", join(d, "docs-link"));
@@ -370,7 +373,7 @@ describe("git.import (§24.1, T801)", () => {
       "unsupported_entry",
     );
     expect(err2.details).toMatchObject({ path: "vendor/lib", kind: "submodule" });
-  });
+  }, 20_000);
 
   it("a refused import changes nothing: no revision, no upstream, no ChangeSet", async () => {
     const link = await upstreamRepo(async (d) => {
@@ -404,6 +407,7 @@ describe("credentials never leak (§24.1)", () => {
     }),
   };
 
+  // Measured (T1529): idle n/a, 3x load 2509 ms; budget 7x.
   it("the provider's credential reaches the fetcher, and nothing the room can read", async () => {
     const up = await upstreamRepo();
     const fetcher = new FixtureFetcher(up.dir);
@@ -424,14 +428,15 @@ describe("credentials never leak (§24.1)", () => {
       ).rows,
     });
     expect(everything).not.toContain(SECRET);
-  });
+  }, 20_000);
 
+  // Measured (T1529): idle n/a, 3x load 2771 ms; budget 7x.
   it("a public repository needs none", async () => {
     const up = await upstreamRepo();
     const fetcher = new FixtureFetcher(up.dir);
     await (await room({ fetcher, credentials: noCredentials })).importIt();
     expect(fetcher.requests[0]!.credential).toBeNull();
-  });
+  }, 20_000);
 
   it("a URL carrying credentials is refused before anything is fetched", async () => {
     const up = await upstreamRepo();
