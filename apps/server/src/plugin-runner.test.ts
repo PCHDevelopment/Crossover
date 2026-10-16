@@ -270,6 +270,31 @@ describe("DockerToolRunner", () => {
     expect(calls.some((call) => call.args[0] === "network" && call.args[1] === "rm")).toBe(true);
   });
 
+  it("preserves the failing Docker network removal details as the cleanup cause", async () => {
+    const invoke: PluginDockerInvoker = async (_binary, args) => {
+      if (args[0] === "run") return { code: 0, stdout: '{"result":{}}', stderr: "" };
+      if (args[0] === "network" && args[1] === "rm")
+        return { code: 1, timedOut: false, stdout: "", stderr: "boom" };
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    const runner = new DockerToolRunner({
+      registry: registry(),
+      egressProxyContainer: "crossover-egress-proxy",
+      egressProxySecret: SECRET,
+      invoke,
+      sweepResources: false,
+    });
+
+    await expect(runner.run(invocation, new AbortController().signal)).rejects.toMatchObject({
+      message: "Plugin runner cleanup failed",
+      cause: {
+        message: expect.stringContaining(
+          'docker network rm failed (exit code: 1, timed out: false, stderr: "boom")',
+        ),
+      },
+    });
+  });
+
   it("fails with a stable validation error before starting Docker when the room host list is empty", async () => {
     const calls: { args: readonly string[]; options: Parameters<PluginDockerInvoker>[2] }[] = [];
     const invoke: PluginDockerInvoker = async (_binary, args, options) => {
@@ -574,6 +599,10 @@ describe("DockerToolRunner", () => {
         ["container", "ls"],
         ["network", "ls"],
       ]);
+      expect(calls.map((args) => args[args.indexOf("--filter") + 1])).toEqual([
+        "label=crossover.plugin-run=true",
+        "label=crossover.plugin-run=true",
+      ]);
 
       await vi.advanceTimersByTimeAsync(PLUGIN_SWEEP_INTERVAL_MS);
       expect(calls).toHaveLength(4);
@@ -581,6 +610,75 @@ describe("DockerToolRunner", () => {
       await sweeper.stop();
       vi.useRealTimers();
     }
+  });
+
+  it("allows tests to scope cleanup sweeps to a plugin-run label value", async () => {
+    const calls: string[][] = [];
+    const runner = new DockerToolRunner({
+      registry: registry({ hosts: [] }),
+      invoke: async (_binary, args) => {
+        calls.push([...args]);
+        return args[0] === "run"
+          ? { code: 0, stdout: JSON.stringify({ result: { ok: true } }), stderr: "" }
+          : { code: 0, stdout: "", stderr: "" };
+      },
+      pluginRunLabelValue: "test-run-42",
+    });
+
+    await runner.run(invocation, new AbortController().signal);
+    await runner.sweepStaleResources();
+    await runner.close();
+
+    expect(calls.find((args) => args[0] === "run")).toContain("crossover.plugin-run=test-run-42");
+    expect(
+      calls
+        .filter((args) => args.includes("--filter"))
+        .map((args) => args[args.indexOf("--filter") + 1]),
+    ).toEqual(["label=crossover.plugin-run=test-run-42", "label=crossover.plugin-run=test-run-42"]);
+  });
+
+  it("includes exit code, timeout status, and at most 500 stderr bytes for container cleanup", async () => {
+    const resourceId = "abcdef123456";
+    const stderr = `${"x".repeat(500)}truncated`;
+    const invoke: PluginDockerInvoker = async (_binary, args) => {
+      if (args[0] === "container" && args[1] === "ls")
+        return { code: 0, stdout: `${resourceId}\n`, stderr: "" };
+      if (args[0] === "container" && args[1] === "inspect")
+        return { code: 0, stdout: `0\t1970-01-01T00:00:00Z\t${resourceId}\n`, stderr: "" };
+      if (args[0] === "container" && args[1] === "rm")
+        return { code: 17, stdout: "", stderr, timedOut: true };
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    const sweeper = new PluginResourceSweeper("docker", invoke);
+
+    await expect(sweeper.sweepNow()).rejects.toThrow(
+      `Docker container cleanup failed (exit code: 17, timed out: true, stderr: "${"x".repeat(500)}")`,
+    );
+  });
+
+  it("includes Docker failure details when the network cleanup retry fails", async () => {
+    const resourceId = "fedcba654321";
+    const stderr = `${"n".repeat(500)}truncated`;
+    let removalAttempts = 0;
+    const invoke: PluginDockerInvoker = async (_binary, args) => {
+      if (args[0] === "network" && args[1] === "ls")
+        return { code: 0, stdout: `${resourceId}\n`, stderr: "" };
+      if (args[0] === "network" && args[1] === "inspect")
+        return { code: 0, stdout: `0\t1970-01-01T00:00:00Z\t${resourceId}\n`, stderr: "" };
+      if (args[0] === "network" && args[1] === "rm") {
+        removalAttempts++;
+        return removalAttempts === 1
+          ? { code: 1, stdout: "", stderr: "network has active endpoints" }
+          : { code: 137, stdout: "", stderr, timedOut: true };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    const sweeper = new PluginResourceSweeper("docker", invoke);
+
+    await expect(sweeper.sweepNow()).rejects.toThrow(
+      `Docker network cleanup failed (exit code: 137, timed out: true, stderr: "${"n".repeat(500)}")`,
+    );
+    expect(removalAttempts).toBe(2);
   });
 
   it("tolerates concurrent container removal and retries an active network after the container pass", async () => {

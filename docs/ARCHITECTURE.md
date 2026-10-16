@@ -181,6 +181,12 @@ Start as a **modular monolith**:
 
 - **App nodes** run the gateway, room kernel, workspace service and plugin runner as modules in one TypeScript/Node process (plugin runner child processes are isolated per invocation).
 - **Sandbox hosts** are separate EC2 instances. They are a hard security boundary and never share a host with app nodes.
+- **Single-host mode** (decided 2026-10-13, T1418) is allowed until the remote sandbox-host driver (T1532) exists. App node and sandboxes share one host, and sandboxes run through that host's Docker. It is permitted only under these limits:
+  - one organisation whose users all trust each other;
+  - `SANDBOX_RUNTIME=runsc` (gVisor) is required, and the server refuses to start in single-host mode without it;
+  - the Docker socket is reachable only by the server process;
+  - the compose file and the server's startup log say "single-host mode: not for multi-tenant or untrusted use".
+  Separate sandbox hosts (T1532) are required before any deployment where people who do not trust each other run agents.
 - **Shared infrastructure:** PostgreSQL (RDS), Redis (ElastiCache), S3, Secrets Manager.
 
 Logical module boundaries are explicit in code (separate packages with interface contracts) so subsystems can be split into services later.
@@ -201,19 +207,21 @@ Each active room is owned by exactly one app node at a time.
 ```text
 ACTIVE ──freeze──▶ PAUSED ──resume──▶ ACTIVE
   │                  │
-  └──archive──▶ ARCHIVED ──(30-day grace)──▶ DELETED
-                  │
-                  └──export bundle
+  └──archive──▶ ARCHIVED ──(retention ends, default 1 year)──▶ DELETED
+                  │  ▲
+                  │  └──unarchive (owner, within retention)──▶ ACTIVE
+                  └──export bundle (until deletion)
 ```
 
 | State | Behavior |
 |---|---|
 | `ACTIVE` | Normal operation |
 | `PAUSED` | Owner froze the room. All agent mutations rejected with `ROOM_PAUSED`; agent sandboxes stopped (volumes kept); humans can read, owner can still act |
-| `ARCHIVED` | Read-only. Sandboxes destroyed. Repository, ledger, memory, tasks and decisions retained (default 1 year). Exportable as a bundle |
-| `DELETED` | Hard-deleted after a 30-day grace period from the delete request |
+| `ARCHIVED` | Read-only. Sandboxes destroyed. Repository, ledger, memory, tasks and decisions retained for the room's retention period (default 1 year; the owner can set 30 days to 1 year). Exportable as a bundle until deletion. The owner can unarchive back to `ACTIVE` while retention lasts |
+| `DELETED` | Hard-deleted when retention ends: repository, events, memory, tasks, decisions and stored exports. The owner is notified 7 days before. Not reversible |
 
 - **Archive triggers:** owner action, or 30 days with no mutations (owner notified 7 days before).
+- **Retention** (decided 2026-10-13, T1519): it counts from the moment of archiving, and unarchiving stops the clock. A purge job deletes rooms whose retention has ended. The owner gets a notice 7 days before.
 - **Export bundle:** `git bundle` of the full repository + `events.jsonl` + `memory.json` + `tasks.json` + `decisions.json`.
 - This resolves the v0.1 tension: rooms are bounded projects (agents and sandboxes live and die with them), but their history persists.
 
@@ -882,6 +890,8 @@ ROOM
   room.set_lead            owner/admin
   room.transfer_lead / room.accept_lead
   room.freeze / room.resume / room.archive          owner
+  rooms.set_retention {retention_days: 30..365}     owner; archived deadline stays at least 7 days away
+  rooms.unarchive                                   owner; returns an unexpired archive to ACTIVE
   room.invite              owner/admin
 
 PARTICIPANTS & PRESENCE
@@ -1198,7 +1208,8 @@ If the node crashes between steps 2 and 3, the new owner reconciles on startup b
 ## 19.5 Event catalog
 
 ```text
-room.created / room.paused / room.resumed / room.archived / room.exported
+room.created / room.paused / room.resumed / room.archived / room.unarchived / room.exported
+room.retention_changed
 room.egress_allowlist_changed / room.protected_paths_changed / room.health_settings_changed
 room.budgets_changed
 lead.changed / lead.transfer_offered
@@ -1251,7 +1262,7 @@ The ledger is immutable in structure, but payloads can be redacted:
 
 ## 19.7 Retention
 
-Active rooms: indefinite. Archived rooms: 1 year by default, then deleted with the room.
+Active rooms: indefinite. Archiving starts the retention clock. The default is 365 days; the owner can set 30–365 days. While archived, the owner may change the period only when its new deadline is at least 7 days away. Each changed deadline resets the one-time inbox notice, sent 7 days before deletion. The owner can unarchive an unexpired room; this clears the archive timestamp, returns it to `ACTIVE`, and does not recreate its sandboxes. Once purge starts, retention changes and unarchive are refused. The room-lease holder removes workspace resources and room data, then writes a deletion audit row outside the room. A failed purge resumes from its recorded phase.
 
 ---
 
@@ -1315,7 +1326,7 @@ Full autonomy applies to every tier the agent has been granted. Approval gates (
 - Every command passes through `authorize(principal, action, resource, context)`, evaluated by **OPA** compiled to WASM and embedded in the Node process (`@open-policy-agent/opa-wasm`), so there is no network hop.
 - Policies (Rego) encode role bundles, path scopes, authority rules (§6.3), tier rules, budgets, approval gates and room status.
 - Policy bundles are versioned in the platform repository and unit-tested with `opa test`.
-- Implemented (T1509, step 1): `authorize()` reads the facts in the command's transaction (the participant's row, the room's status, the live grants and denies, and whether the capability and path match) and `packages/policy/policy/authz.rego` decides, in this order: room mismatch, not a participant, paused, other statuses, room state (deleted, frozen, archived), invalid path, revoked, a covering grant (with its approval gate), the role bundle, the per-path gate, unknown capability, missing capability. `authorize()` turns the decision into the §16.3 error and its details. The compiled module `policy/policy.wasm` is committed; `pnpm --filter @crossover/policy gen:wasm` rebuilds it with the pinned `opa`, and CI runs `opa test`, `opa fmt` and `gen:wasm -- --check` so the module always matches the source. The server loads it before it listens and logs its SHA-256. Any failure to load or evaluate the module, or an answer that is not exactly one well-formed decision, refuses the command (`UNAVAILABLE`); a missing or mistyped fact is a refusal inside the policy. Step 2a: the role bundles and authority powers are Rego data too. `gen:wasm` writes `policy/bundles.gen.rego` from `bundles.ts`, which stays the single source, and `--check` fails when it is stale; the facts carry the participant's role, authority and the capability asked for, and the policy decides what they cover and whether the capability exists. An exhaustive test compares the compiled policy with `effectiveCapabilities()` for every role, authority and capability. Step 2b: capability parsing, scope and path-glob matching, the safe-path check and the per-path gate are in the policy too (`policy/scope.rego`); the facts carry the raw action, the resource path and the participant's live grants and revocations. Globs become anchored, fully escaped regular expressions, matched with RE2, which runs in linear time whatever the pattern. The TypeScript matchers stay for validating grants when they are created, and `scope-oracle.test.ts` compares them with the policy on a fixed and a seeded random corpus in CI, so the two cannot drift apart.
+- Implemented (T1509, step 1): `authorize()` reads the facts in the command's transaction (the participant's row, the room's status, the live grants and denies, and whether the capability and path match) and `packages/policy/policy/authz.rego` decides, in this order: room mismatch, not a participant, paused, other statuses, room state (deleted, frozen, archived), invalid path, revoked, a covering grant (with its approval gate), the role bundle, the per-path gate, unknown capability, missing capability. `authorize()` turns the decision into the §16.3 error and its details. The compiled module `policy/policy.wasm` is committed; `pnpm --filter @crossover/policy gen:wasm` rebuilds it with the pinned `opa`, and CI runs `opa test`, `opa fmt` and `gen:wasm -- --check` so the module always matches the source. The server loads it before it listens and logs its SHA-256. Any failure to load or evaluate the module, or an answer that is not exactly one well-formed decision, refuses the command (`UNAVAILABLE`); a missing or mistyped fact is a refusal inside the policy. Step 2a: the role bundles and authority powers are Rego data too. `gen:wasm` writes `policy/bundles.gen.rego` from `bundles.ts`, which stays the single source, and `--check` fails when it is stale; the facts carry the participant's role, authority and the capability asked for, and the policy decides what they cover and whether the capability exists. An exhaustive test compares the compiled policy with `effectiveCapabilities()` for every role, authority and capability. Step 2b: capability parsing, scope and path-glob matching, the safe-path check and the per-path gate are in the policy too (`policy/scope.rego`); the facts carry the raw action, the resource path and the participant's live grants and revocations. Globs become anchored, fully escaped regular expressions, matched with RE2, which runs in linear time whatever the pattern. The TypeScript matchers stay for validating grants when they are created, and `scope-oracle.test.ts` compares them with the policy on a fixed and a seeded random corpus in CI, so the two cannot drift apart. Step 3a: the tier of a capability (§21.2) is decided by the policy too (`policy/tiers.rego`, a second entrypoint of the same module). `tiers.ts` keeps the data, with the scope-dependent tiers as a declarative table (`SCOPED_TIER_RULES`) instead of a function, and `gen:wasm` writes `policy/tiers.gen.rego` from it and from the capability catalog (`--check` covers it). `tierOf()` stays synchronous: it reads the engine that `initPolicy()` loaded before the server listens, and throws `UNAVAILABLE` if there is none (never a lower tier, never a TypeScript fallback). Tests of the packages that depend on `@crossover/policy` load it in `vitest.policy-setup.mjs`. `capabilityTier()` stays as the reference and `tiers-oracle.test.ts` compares it with the policy on every catalog, external and scoped capability against a scope corpus and a seeded random one in CI.
 - Every denial emits `capability.denied`; allows on Tier 2–3 capabilities are logged as `tool.invoked`.
 
 ## 21.4 Plugin Runner (D10)

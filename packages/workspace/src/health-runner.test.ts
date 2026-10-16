@@ -297,6 +297,27 @@ afterEach(async () => {
 const DOCKER_CASE_TIMEOUT_MS = 30_000;
 
 describe("DockerHealthRunner", () => {
+  it("creates Docker health checkouts under the configured host-visible root", async () => {
+    const { repository, revision } = await makeRepo();
+    const checkoutRoot = await mkdtemp(join(tmpdir(), "crossover-health-root-"));
+    directories.push(checkoutRoot);
+    let volume = "";
+    const invoke = vi.fn(async (_binary: string, args: readonly string[]) => {
+      if (args[0] === "create") volume = args[args.indexOf("--volume") + 1]!;
+      return {
+        code: 0,
+        timedOut: false,
+        output: args[0] === "create" ? "container-id" : "",
+      };
+    });
+    const runner = new DockerHealthRunner({ checkoutRoot }, invoke);
+
+    await runner.run({ repository, revision, command: "npm test" });
+
+    expect(volume.startsWith(`${checkoutRoot}/crossover-health-`)).toBe(true);
+    expect(volume.endsWith(":/workspace:rw")).toBe(true);
+  });
+
   it("maps root UID/GID to unprivileged 1000:1000 and changes checkout ownership", async () => {
     const checkout = await mkdtemp(join(tmpdir(), "crossover-health-root-test-"));
     directories.push(checkout);
@@ -1187,14 +1208,14 @@ describe("DockerHealthRunner", () => {
       }).run({ repository, revision, command, signal: controller.signal });
       await vi.waitFor(
         () => expect(dockerHealthContainers(command).length).toBeGreaterThan(before.length),
-        { timeout: 5_000 },
+        { timeout: 15_000 }, // container start includes the checkout; 5 s failed under local load (T1539)
       );
 
       controller.abort();
       await expect(running).resolves.toMatchObject({ status: "ERROR" });
       expect(dockerHealthContainers(command)).toEqual(before);
     },
-    DOCKER_CASE_TIMEOUT_MS,
+    45_000,
   );
 
   it("persists results against the exact room-scoped workspace revision", async () => {

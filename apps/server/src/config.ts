@@ -34,6 +34,8 @@ const envSchema = z.object({
   DEV_LOGIN: flag,
   /** Explicitly permit the no-credential development login when NODE_ENV=production. */
   DEV_LOGIN_ALLOW_PRODUCTION: flag,
+  /** Development-only opt-out of the required gVisor runtime for single-host sandboxes. */
+  ALLOW_UNSANDBOXED_DEV: z.literal("1").optional(),
   /** Public origin used for exact OAuth callback URLs; required with OAuth credentials. */
   OAUTH_PUBLIC_BASE_URL: z.string().url().optional(),
   GITHUB_OAUTH_CLIENT_ID: z.string().trim().min(1).max(200).optional(),
@@ -141,6 +143,8 @@ export interface ServerConfig {
   port: number;
   nodeId: string;
   devLogin: boolean;
+  /** The local-development exception that permits sandboxes without gVisor. */
+  allowUnsandboxedDev?: boolean;
   /** Secure cookie mode follows the public HTTPS origin, with production as a safe fallback. */
   secureCookies?: boolean;
   oauth?: {
@@ -207,6 +211,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   };
   if (env.NODE_ENV === "production" && e.DEV_LOGIN && !e.DEV_LOGIN_ALLOW_PRODUCTION) {
     invalidConfig("DEV_LOGIN is forbidden in production unless DEV_LOGIN_ALLOW_PRODUCTION=true");
+  }
+  if (e.SANDBOX_RUNTIME !== "runsc" && e.ALLOW_UNSANDBOXED_DEV !== "1") {
+    invalidConfig(
+      "SANDBOX_RUNTIME=runsc is required: sandboxes share this host (single-host mode, ARCHITECTURE §4.1). Set ALLOW_UNSANDBOXED_DEV=1 only for local development.",
+    );
+  }
+  if (e.ALLOW_UNSANDBOXED_DEV === "1" && env.NODE_ENV === "production") {
+    invalidConfig("ALLOW_UNSANDBOXED_DEV is refused when NODE_ENV=production");
   }
   const hasGitHubClientId = Boolean(e.GITHUB_OAUTH_CLIENT_ID);
   const hasGitHubClientSecret = Boolean(e.GITHUB_OAUTH_CLIENT_SECRET);
@@ -303,6 +315,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     port: e.PORT,
     nodeId: e.NODE_ID ?? `${hostname()}-${process.pid}`,
     devLogin: e.DEV_LOGIN,
+    allowUnsandboxedDev: e.ALLOW_UNSANDBOXED_DEV === "1",
     secureCookies: e.OAUTH_PUBLIC_BASE_URL
       ? new URL(e.OAUTH_PUBLIC_BASE_URL).protocol === "https:"
       : env.NODE_ENV === "production",

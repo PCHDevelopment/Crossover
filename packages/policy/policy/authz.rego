@@ -37,8 +37,8 @@ else := deny("FORBIDDEN", "invalid_participant") if not valid_participant
 # The room's own state (§5). A deleted room is not there at all, for anyone and for reads too.
 else := deny("NOT_FOUND", "room_deleted") if input.room_status == "DELETED"
 
-# A frozen room (PAUSED) accepts mutations from its owner only; an archived room accepts none.
-# Reads always pass this gate.
+# A frozen room accepts mutations from its owner. Archived rooms stay read-only except for the
+# owner's retention and unarchive controls.
 else := deny("ROOM_PAUSED", "room_not_active") if {
 	input.room_status != "ACTIVE"
 	input.mutating == true
@@ -177,11 +177,18 @@ owner_may_act if {
 	input.participant.authority == "OWNER"
 }
 
+owner_may_act if {
+	input.room_status == "ARCHIVED"
+	input.participant.authority == "OWNER"
+	input.method in {"rooms.set_retention", "rooms.unarchive"}
+}
+
 well_formed if {
 	every fact in ["room_match", "mutating", "approved", "per_path"] {
 		is_boolean(input[fact])
 	}
 	is_string(input.room_status)
+	is_string(input.method)
 	is_string(input.action)
 	input.resource_path == null
 	grants_well_formed
@@ -193,6 +200,7 @@ well_formed if {
 		is_boolean(input[fact])
 	}
 	is_string(input.room_status)
+	is_string(input.method)
 	is_string(input.action)
 	is_string(input.resource_path)
 	grants_well_formed

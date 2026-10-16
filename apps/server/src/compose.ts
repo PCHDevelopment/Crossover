@@ -25,6 +25,7 @@ import {
   type BudgetLimiter,
   LeaseRenewer,
   LeaseSweeper,
+  RoomRetentionSweeper,
   RedisEventPublisher,
   RedisEventSubscriber,
   RedisPresenceSubscriber,
@@ -59,6 +60,7 @@ import {
   registerEventsRedactCommand,
   registerRoomEventsCommand,
   registerRoomLifecycleCommands,
+  registerRoomRetentionCommands,
   registerRoomProtectedPathsCommand,
   registerRoomHealthSettingsCommand,
   registerTaskCommands,
@@ -75,7 +77,8 @@ import {
 import { CrossoverError } from "@crossover/protocol";
 import { normalizeRoomEgressAllowlist, postWebhook } from "@crossover/security";
 import { authorize, tierOf } from "@crossover/policy";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { rm } from "node:fs/promises";
 import { DockerToolRunner } from "./plugin-runner.js";
 import { AwsKmsDataKeyOperations, KmsRoomDataKeyProvider } from "./kms-secret-keys.js";
 import { ConfigKeyRoomDataKeyProvider, EnvelopeSecretStore } from "./secret-store.js";
@@ -178,6 +181,7 @@ export async function composeServer(
   let redis: RedisEventPublisher | undefined;
   let escalations: ConflictEscalationSweeper | undefined;
   let leaseSweeper: LeaseSweeper | undefined;
+  let roomRetentionSweeper: RoomRetentionSweeper | undefined;
   let wakeWebhooks: WakeWebhookService | undefined;
   let executionService: ExecutionService | undefined;
   let pluginRunner: DockerToolRunner | undefined;
@@ -327,7 +331,16 @@ export async function composeServer(
       nodeId: config.nodeId,
       publisher,
       budgets,
-      onLeaseAcquire: (roomId) => reconcileRef(pool, roomId),
+      onLeaseAcquire: async (roomId) => {
+        const { rows } = await pool.query<{ status: string; purge_started_at: Date | null }>(
+          "SELECT status, purge_started_at FROM rooms WHERE id = $1",
+          [roomId],
+        );
+        const room = rows[0];
+        if (!(room?.status === "ARCHIVED" && room.purge_started_at)) {
+          await reconcileRef(pool, roomId);
+        }
+      },
       ...(overrides.leaseTtlMs !== undefined ? { leaseTtlMs: overrides.leaseTtlMs } : {}),
     });
     executionService.setSandboxEventSink(async (roomId, events) => {
@@ -338,6 +351,7 @@ export async function composeServer(
     });
     const healthRunner = new DockerHealthRunner({
       allowedImages: config.healthImages,
+      checkoutRoot: join(config.workspaceRoot, ".health-checkouts"),
       nodeId: config.nodeId,
       ...(config.sandboxRuntime ? { runtime: config.sandboxRuntime } : {}),
       ...(config.sandboxEgressProxyContainer
@@ -484,6 +498,20 @@ export async function composeServer(
         : {}),
     });
     leaseSweeper.start();
+    roomRetentionSweeper = new RoomRetentionSweeper({
+      pool,
+      dispatcher,
+      now,
+      purgeWorkspace: async (roomId, repoPath) => {
+        await executionService!.destroyRoom(roomId);
+        const expectedRepoPath = resolve(config.workspaceRoot, `${roomId}.git`);
+        if (repoPath && resolve(repoPath) !== expectedRepoPath) {
+          throw new Error(`Refusing to remove unexpected workspace path for ${roomId}`);
+        }
+        await rm(expectedRepoPath, { recursive: true, force: true });
+      },
+    });
+    roomRetentionSweeper.start();
     // Runs without a key too: then it sends nothing and only keeps the outbox from growing.
     wakeWebhooks = new WakeWebhookService({
       pool,
@@ -574,6 +602,7 @@ export async function composeServer(
       (closing ??= (async () => {
         await escalations?.stop();
         await leaseSweeper?.stop();
+        await roomRetentionSweeper?.stop();
         if (healthInstallSweepTimer) clearInterval(healthInstallSweepTimer);
         if (sandboxLogSweepTimer) clearInterval(sandboxLogSweepTimer);
         await wakeWebhooks?.stop();
@@ -601,6 +630,7 @@ export async function composeServer(
   } catch (err) {
     await escalations?.stop();
     await leaseSweeper?.stop();
+    await roomRetentionSweeper?.stop();
     if (healthInstallSweepTimer) clearInterval(healthInstallSweepTimer);
     if (sandboxLogSweepTimer) clearInterval(sandboxLogSweepTimer);
     await wakeWebhooks?.stop();
@@ -665,6 +695,7 @@ function registerCommands(
       if (to === "ARCHIVED") return execution.destroyRoom(room_id);
     },
   });
+  registerRoomRetentionCommands(dispatcher);
   registerRoomEventsCommand(dispatcher);
   registerEventsRedactCommand(dispatcher);
   registerRoomDigestCommand(dispatcher);

@@ -2,10 +2,12 @@ import type { Pool, PoolClient } from "@crossover/db";
 import {
   effectiveCapabilities,
   capabilityMatches,
+  grantCheck,
   isAuthorityPower,
   isCapability,
   loadLiveGrants,
   parseCapability,
+  PolicyEngineError,
   ROLE_BUNDLES,
   tierOf,
   type Authority,
@@ -14,9 +16,6 @@ import {
 import { CrossoverError, newId } from "@crossover/protocol";
 import { z } from "zod";
 import type { Dispatcher } from "../../dispatcher.js";
-
-/** A Tier 3 grant (§21.2) lives at most this long. */
-export const TIER3_MAX_TTL_MS = 24 * 60 * 60 * 1000;
 
 const capabilityString = z.string().superRefine((value, ctx) => {
   try {
@@ -59,18 +58,28 @@ export const capabilitiesGrantParams = z
   .superRefine((params, ctx) => {
     // Tier 3 needs an expiry whoever asks, so that is a VALIDATION error, ahead of the
     // owner-only check (which needs the database).
-    let tier: number;
+    if (params.expires_at !== undefined) return;
+
+    let check: ReturnType<typeof grantCheck>;
     try {
-      tier = tierOf(params.capability);
-    } catch {
-      return; // the capability field reports it
+      const { base, scope } = parseCapability(params.capability);
+      check = grantCheck(base, scope, null);
+    } catch (error) {
+      // A malformed capability is reported by the capability field; a policy that is not there
+      // (UNAVAILABLE) must not be mistaken for it.
+      if (error instanceof CrossoverError && error.code === "VALIDATION") return;
+      throw error;
     }
-    if (tier === 3 && params.expires_at === undefined) {
+    if (!check.allow && check.reason === "tier3_needs_expiry") {
       ctx.addIssue({
         code: "custom",
         path: ["expires_at"],
         message: "Tier 3 capabilities need an expires_at, at most 24 hours ahead",
       });
+    } else if (!check.allow) {
+      throw new PolicyEngineError(
+        "The grant policy returned an unexpected refusal without an expiry",
+      );
     }
   });
 
@@ -110,7 +119,7 @@ export function registerCapabilityCommands(dispatcher: Dispatcher): void {
     mutating: true,
     params: capabilitiesGrantParams,
     execute: async (ctx, params) => {
-      const { base } = parseCapability(params.capability);
+      const { base, scope } = parseCapability(params.capability);
       const tier = tierOf(params.capability);
       if (isAuthorityPower(base)) {
         throw validation(
@@ -120,17 +129,23 @@ export function registerCapabilityCommands(dispatcher: Dispatcher): void {
       }
 
       let expiresAt: Date | undefined;
+      let expiresInMs: number | null = null;
       if (params.expires_at !== undefined) {
         expiresAt = new Date(params.expires_at);
         const now = Date.now();
-        if (expiresAt.getTime() <= now) {
+        expiresInMs = expiresAt.getTime() - now;
+      }
+      const check = grantCheck(base, scope, expiresInMs);
+      if (!check.allow) {
+        if (check.reason === "expiry_not_in_future") {
           throw validation("expires_at must be in the future", { expires_at: params.expires_at });
         }
-        if (tier === 3 && expiresAt.getTime() > now + TIER3_MAX_TTL_MS) {
+        if (check.reason === "tier3_expiry_too_long") {
           throw validation("Tier 3 capabilities expire within 24 hours", {
             expires_at: params.expires_at,
           });
         }
+        throw validation("Tier 3 capabilities need an expires_at, at most 24 hours ahead");
       }
       if (tier === 3) await ctx.authorize("capabilities.grant_tier3");
 

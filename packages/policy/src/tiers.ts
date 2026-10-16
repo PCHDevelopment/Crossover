@@ -19,10 +19,23 @@ export const EXTERNAL_TIERS: Readonly<Record<string, Tier>> = {
   "aws.deploy_lambda": 3,
 };
 
-/** Capabilities whose risk tier depends on their concrete scope. Missing scope stays strict. */
-export const SCOPED_TIERS: Readonly<Record<string, (scope: string | undefined) => Tier>> = {
-  "aws.deploy_lambda": (scope) => (scope?.startsWith("staging-") ? 2 : 3),
+/**
+ * A capability whose risk tier depends on its concrete scope: a scope that starts with `prefix`
+ * is `tier`, any other scope, and no scope at all, is `otherwise` (a missing scope stays strict).
+ * This is data, not a function, so `gen:wasm` can write it into the policy (tiers.gen.rego).
+ */
+export interface ScopedTierRule {
+  prefix: string;
+  tier: Tier;
+  otherwise: Tier;
+}
+
+export const SCOPED_TIER_RULES: Readonly<Record<string, ScopedTierRule>> = {
+  "aws.deploy_lambda": { prefix: "staging-", tier: 2, otherwise: 3 },
 };
+
+/** Catalog capabilities that are Tier 3 whatever their `mutating` flag says. */
+export const CATALOG_TIER_3: ReadonlySet<string> = new Set(["capabilities.grant_tier3"]);
 
 /**
  * The risk tier of a capability's base and optional concrete scope:
@@ -33,13 +46,16 @@ export const SCOPED_TIERS: Readonly<Record<string, (scope: string | undefined) =
  * - **3 for anything unknown**, so a capability nobody classified can't be handed out as if it
  *   were harmless (fail closed).
  * `capabilities.grant_tier3` is itself Tier 3.
+ *
+ * This is the reference implementation. The decision is made by the policy (policy/tiers.rego,
+ * through `tierOf`); `tiers-oracle.test.ts` keeps the two equal.
  */
 export function capabilityTier(base: string, scope?: string): Tier {
-  const scoped = SCOPED_TIERS[base];
-  if (scoped) return scoped(scope);
+  const scoped = Object.hasOwn(SCOPED_TIER_RULES, base) ? SCOPED_TIER_RULES[base] : undefined;
+  if (scoped) return scope?.startsWith(scoped.prefix) ? scoped.tier : scoped.otherwise;
   if (Object.hasOwn(EXTERNAL_TIERS, base)) return EXTERNAL_TIERS[base]!;
   if (isCapability(base)) {
-    if (base === "capabilities.grant_tier3") return 3;
+    if (CATALOG_TIER_3.has(base)) return 3;
     return CAPABILITIES[base].mutating ? 1 : 0;
   }
   return 3;

@@ -43,6 +43,8 @@ services:
       DEV_LOGIN: "true"
       # This service is the explicitly labelled development/demo stack, never production.
       DEV_LOGIN_ALLOW_PRODUCTION: "true"
+      # development stack only; production requires SANDBOX_RUNTIME=runsc (§4.1)
+      ALLOW_UNSANDBOXED_DEV: "1"
       SANDBOX_DISK_ENFORCEMENT: soft
       GIT_INTERNAL_HOST: crossover-server
       GIT_INTERNAL_NETWORK: ${GIT_INTERNAL_NETWORK:-crossover-git}

@@ -7,8 +7,8 @@ export type RoomStatus = "ACTIVE" | "PAUSED" | "ARCHIVED" | "DELETED";
 export type LifecycleCommand = "room.freeze" | "room.resume" | "room.archive";
 
 /**
- * The room state machine (ARCHITECTURE §5). `DELETED` is reached by the grace-period job,
- * never by these commands, and `ARCHIVED` has no way back.
+ * The room state machine (ARCHITECTURE §5). `DELETED` is reached by the retention sweeper,
+ * never by these lifecycle commands. `rooms.unarchive` handles the owner's return path.
  */
 export const ROOM_TRANSITIONS: Readonly<
   Record<LifecycleCommand, { from: readonly RoomStatus[]; to: RoomStatus }>
@@ -71,7 +71,10 @@ export function registerRoomLifecycleCommands(
         }
         await ctx.client.query(
           `UPDATE rooms SET status = $2,
-                            archived_at = CASE WHEN $2 = 'ARCHIVED' THEN clock_timestamp() ELSE archived_at END
+                            archived_at = CASE WHEN $2 = 'ARCHIVED' THEN clock_timestamp() ELSE archived_at END,
+                            retention_notice_sent_at = CASE WHEN $2 = 'ARCHIVED' THEN NULL ELSE retention_notice_sent_at END,
+                            purge_started_at = CASE WHEN $2 = 'ARCHIVED' THEN NULL ELSE purge_started_at END,
+                            purge_phase = CASE WHEN $2 = 'ARCHIVED' THEN NULL ELSE purge_phase END
            WHERE id = $1`,
           [ctx.room_id, to],
         );

@@ -1,6 +1,7 @@
-// Generate policy/bundles.gen.rego from bundles.ts and compile it with policy/authz.rego to
-// policy/policy.wasm (`gen:wasm`), or with `--check` fail if either committed file is stale. Needs `opa` (OPA_BIN, or on PATH) at the version pinned here and in
-// .github/workflows/ci.yml.
+// Generate policy/bundles.gen.rego (from bundles.ts) and policy/tiers.gen.rego (from tiers.ts) and
+// compile them with the hand-written policy files to policy/policy.wasm (`gen:wasm`), or with
+// `--check` fail if any committed file is stale. Needs `opa` (OPA_BIN, or on PATH) at the version
+// pinned here and in .github/workflows/ci.yml.
 import { execFileSync } from "node:child_process";
 import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -8,13 +9,25 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
 import { renderBundlesRego } from "./bundles-rego.js";
+import { renderTiersRego } from "./tiers-rego.js";
 
 const OPA_VERSION = "1.21.2";
 const root = fileURLToPath(new URL("..", import.meta.url));
 const opa = process.env["OPA_BIN"] ?? "opa";
 const policyDir = join(root, "policy");
-const WRITTEN = ["authz.rego", "scope.rego"];
-const SOURCES = [...WRITTEN, "bundles.gen.rego"];
+const WRITTEN = ["authz.rego", "scope.rego", "tiers.rego", "grants.rego"];
+const GENERATED: [string, () => string][] = [
+  ["bundles.gen.rego", renderBundlesRego],
+  ["tiers.gen.rego", renderTiersRego],
+];
+const SOURCES = [...WRITTEN, ...GENERATED.map(([name]) => name)];
+// The first entrypoint is the module's default one (`PolicyEngine.decide`); the others are asked for by name.
+const ENTRYPOINTS = [
+  "crossover/authz/decision",
+  "crossover/tiers/tier",
+  "crossover/grants/grant_check",
+  "crossover/grants/holds_gated_scope",
+];
 
 main();
 
@@ -35,15 +48,17 @@ function main(): void {
     // Built in a scratch directory so the generated file never has to be on disk first, and so
     // `--check` compares what the sources produce with what is committed.
     for (const name of WRITTEN) copyFileSync(join(policyDir, name), join(work, name));
-    writeFileSync(join(work, "bundles.gen.rego"), renderBundlesRego());
-    // CI requires every file in policy/ to be `opa fmt` clean, this one included.
-    execFileSync(opa, ["fmt", "--write", "bundles.gen.rego"], { cwd: work, stdio: "inherit" });
+    // CI requires every file in policy/ to be `opa fmt` clean, the generated ones included.
+    for (const [name, render] of GENERATED) {
+      writeFileSync(join(work, name), render());
+      execFileSync(opa, ["fmt", "--write", name], { cwd: work, stdio: "inherit" });
+    }
     const bundle = join(work, "bundle.tar.gz");
     execFileSync(
       opa,
       [
         "build",
-        ...["-t", "wasm", "-e", "crossover/authz/decision", "-o", bundle],
+        ...["-t", "wasm", ...ENTRYPOINTS.flatMap((entrypoint) => ["-e", entrypoint]), "-o", bundle],
         // Relative to the working directory: the module embeds the source paths it was built
         // from, so absolute ones would make it differ from machine to machine.
         ...SOURCES,
@@ -51,7 +66,7 @@ function main(): void {
       { cwd: work, stdio: "inherit" },
     );
     const outputs: [string, Buffer][] = [
-      ["bundles.gen.rego", readFileSync(join(work, "bundles.gen.rego"))],
+      ...GENERATED.map(([name]): [string, Buffer] => [name, readFileSync(join(work, name))]),
       ["policy.wasm", fileFromTar(gunzipSync(readFileSync(bundle)), "policy.wasm")],
     ];
     if (!process.argv.includes("--check")) {
@@ -74,7 +89,7 @@ function main(): void {
       );
       process.exit(1);
     }
-    process.stdout.write("policy/bundles.gen.rego and policy/policy.wasm are up to date\n");
+    process.stdout.write("the generated policy files and policy/policy.wasm are up to date\n");
   } finally {
     rmSync(work, { recursive: true, force: true });
   }

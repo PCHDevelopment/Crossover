@@ -1,0 +1,90 @@
+# Tier-3 grant lifetime checks (ARCHITECTURE §21.2). The grant command calls this policy before
+# persisting a grant; it uses the same tier rules as `crossover.tiers`.
+package crossover.grants
+
+import data.crossover.tiers
+import rego.v1
+
+grant_check := {"allow": false, "reason": "expiry_not_in_future"} if {
+	valid_input
+	is_number(input.expires_in_ms)
+	input.expires_in_ms <= 0
+}
+
+else := {"allow": false, "reason": "tier3_needs_expiry"} if {
+	valid_input
+	grant_tier == 3
+	input.expires_in_ms == null
+}
+
+else := {"allow": false, "reason": "tier3_expiry_too_long"} if {
+	valid_input
+	grant_tier == 3
+	input.expires_in_ms > 86400000
+}
+
+else := {"allow": true} if valid_input
+
+grant_tier := tier if {
+	tier := tiers.tier with input as {"base": input.base, "scope": input.scope}
+}
+
+valid_input if {
+	is_object(input)
+	is_string(input.base)
+	valid_scope
+	valid_expiry
+}
+
+valid_scope if {
+	input.scope == null
+}
+
+else if {
+	is_string(input.scope)
+}
+
+valid_expiry if {
+	input.expires_in_ms == null
+}
+
+else if {
+	is_number(input.expires_in_ms)
+}
+
+holds_gated_scope if {
+	valid_gated_input
+	some grant in input.grants
+	grant.requires_approval
+	grant_covers(input.capability, grant.capability)
+	not exact_gated_deny
+}
+
+else := false if valid_gated_input
+
+grant_covers(capability, candidate) if candidate == capability
+
+else if {
+	startswith(candidate, sprintf("%s:", [capability]))
+}
+
+exact_gated_deny if {
+	some deny in input.denies
+	deny.capability == input.capability
+}
+
+valid_gated_input if {
+	is_object(input)
+	is_string(input.capability)
+	is_array(input.grants)
+	every grant in input.grants {
+		is_object(grant)
+		is_string(grant.capability)
+		is_boolean(grant.requires_approval)
+	}
+	is_array(input.denies)
+	every deny in input.denies {
+		is_object(deny)
+		is_string(deny.capability)
+	}
+}

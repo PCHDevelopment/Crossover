@@ -1380,6 +1380,9 @@ describe("DockerExecutionDriver", () => {
         await driver.destroy({ sandbox_id: sandboxId, resources });
       }
     },
-    30_000,
+    // Measured durations: idle 3,790, 2,548, 2,515, 2,544, 2,499 ms;
+    // 3x CPU load 4,363, 5,223, 4,611, 4,740, 4,251 ms. 5,223 * 7 = 36,561;
+    // rounded up to the next 5,000 ms gives a 40,000 ms budget.
+    40_000,
   );
 });

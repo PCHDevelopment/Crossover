@@ -4,6 +4,8 @@ import { describe, expect, it } from "vitest";
 import {
   createPolicyEngine,
   parseDecision,
+  parseGrantCheck,
+  parseHoldsGatedScope,
   PolicyEngineError,
   initPolicy,
   type AuthzFacts,
@@ -13,6 +15,7 @@ const WASM = new URL("../policy/policy.wasm", import.meta.url);
 
 /** An active member of an active room whose role bundle covers the action. */
 const allowed: AuthzFacts = {
+  method: "messages.send",
   room_match: true,
   participant: { status: "ACTIVE", authority: "MEMBER", role: "DEVELOPER" },
   room_status: "ACTIVE",
@@ -40,6 +43,24 @@ describe("the compiled policy", () => {
         participant: { status: "PAUSED", authority: "MEMBER", role: "DEVELOPER" },
       }),
     ).toEqual({ allow: false, code: "PARTICIPANT_PAUSED", reason: "participant_paused" });
+  });
+
+  it("answers whether a gated grant covers a capability without an exact deny", async () => {
+    const engine = await createPolicyEngine(await readFile(WASM));
+    expect(
+      engine.holdsGatedScope(
+        "tools.invoke",
+        [{ capability: "tools.invoke:repo/main", requires_approval: true }],
+        [],
+      ),
+    ).toBe(true);
+    expect(
+      engine.holdsGatedScope(
+        "tools.invoke",
+        [{ capability: "tools.invoke:repo/main", requires_approval: true }],
+        [{ capability: "tools.invoke" }],
+      ),
+    ).toBe(false);
   });
 
   it("refuses facts that are missing or of the wrong type instead of guessing", async () => {
@@ -111,5 +132,53 @@ describe("parseDecision accepts exactly one well-formed answer", () => {
     ],
   ])("rejects %s", (_name, result) => {
     expect(() => parseDecision(result)).toThrow(PolicyEngineError);
+  });
+});
+
+describe("parseGrantCheck accepts exactly one well-formed answer", () => {
+  it("takes an allow and each known refusal reason", () => {
+    expect(parseGrantCheck([{ result: { allow: true } }])).toEqual({ allow: true });
+    for (const reason of ["expiry_not_in_future", "tier3_needs_expiry", "tier3_expiry_too_long"]) {
+      expect(parseGrantCheck([{ result: { allow: false, reason } }])).toEqual({
+        allow: false,
+        reason,
+      });
+    }
+  });
+
+  it.each([
+    ["no result", undefined],
+    ["an empty result set", []],
+    ["two results", [{ result: { allow: true } }, { result: { allow: true } }]],
+    ["an undefined decision", [{}]],
+    ["a non-object decision", [{ result: "allow" }]],
+    ["a string allow", [{ result: { allow: "true" } }]],
+    ["an allow carrying another field", [{ result: { allow: true, reason: "x" } }]],
+    ["a refusal without a reason", [{ result: { allow: false } }]],
+    ["a refusal with an unknown reason", [{ result: { allow: false, reason: "unknown" } }]],
+    [
+      "a refusal with an extra field",
+      [{ result: { allow: false, reason: "tier3_needs_expiry", code: "FORBIDDEN" } }],
+    ],
+  ])("rejects %s", (_name, result) => {
+    expect(() => parseGrantCheck(result)).toThrow(PolicyEngineError);
+  });
+});
+
+describe("parseHoldsGatedScope accepts exactly one boolean answer", () => {
+  it("takes true and false", () => {
+    expect(parseHoldsGatedScope([{ result: true }])).toBe(true);
+    expect(parseHoldsGatedScope([{ result: false }])).toBe(false);
+  });
+
+  it.each([
+    ["no result", undefined],
+    ["an empty result set", []],
+    ["two results", [{ result: true }, { result: false }]],
+    ["an undefined result", [{}]],
+    ["a non-boolean result", [{ result: 1 }]],
+    ["a result with another field", [{ result: true, extra: false }]],
+  ])("rejects %s", (_name, result) => {
+    expect(() => parseHoldsGatedScope(result)).toThrow(PolicyEngineError);
   });
 });

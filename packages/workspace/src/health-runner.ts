@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { chmod, chown, lchown, mkdtemp, readdir, rm } from "node:fs/promises";
+import { chmod, chown, lchown, mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { Pool } from "@crossover/db";
@@ -63,6 +63,8 @@ export interface DockerHealthRunnerOptions {
   egressProxyContainer?: string;
   egressProxyPort?: number;
   egressProxySecret?: string;
+  /** Directory for health checkouts. It must be at the same absolute path for this process and the Docker daemon (as `WORKSPACE_ROOT` is). */
+  checkoutRoot?: string;
   /** Identifies this server process so a sweep never expires another node's live install. */
   nodeId?: string;
 }
@@ -279,6 +281,7 @@ export class DockerHealthRunner implements HealthRunner {
   private readonly egressProxyContainer: string | undefined;
   private readonly egressProxyPort: number;
   private readonly egressProxySecret: string | undefined;
+  private readonly checkoutRoot: string | undefined;
 
   constructor(
     options: DockerHealthRunnerOptions,
@@ -308,6 +311,7 @@ export class DockerHealthRunner implements HealthRunner {
       throw new RangeError("SANDBOX_EGRESS_PROXY_PORT must be a port from 1 to 65535");
     }
     this.egressProxySecret = options.egressProxySecret;
+    this.checkoutRoot = options.checkoutRoot;
     if (this.egressProxyContainer && !this.egressProxySecret)
       throw new Error(
         "SANDBOX_EGRESS_PROXY_SECRET is required with SANDBOX_EGRESS_PROXY_CONTAINER",
@@ -737,7 +741,9 @@ export class DockerHealthRunner implements HealthRunner {
     revision: string,
     signal?: AbortSignal,
   ): Promise<string> {
-    const checkout = await mkdtemp(join(tmpdir(), "crossover-health-"));
+    const root = this.checkoutRoot ?? tmpdir();
+    await mkdir(root, { recursive: true, mode: 0o750 });
+    const checkout = await mkdtemp(join(root, "crossover-health-"));
     try {
       await chmod(checkout, 0o755);
       const repository = resolve(repositoryPath);

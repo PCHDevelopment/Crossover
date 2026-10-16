@@ -1,6 +1,7 @@
 import { CrossoverError } from "@crossover/protocol";
 import { pathGlobMatch, plainGlobMatch } from "./glob.js";
-import { capabilityTier, type Tier } from "./tiers.js";
+import { loadedPolicy } from "./engine.js";
+import type { Tier } from "./tiers.js";
 
 /** Resources whose scope is a workspace path (matched with path globs). */
 export const PATH_SCOPED_RESOURCES: ReadonlySet<string> = new Set(["workspace"]);
@@ -98,10 +99,19 @@ export function capabilityMatches(granted: string, requested: string): boolean {
     : plainGlobMatch(g.scope, r.scope);
 }
 
-/** The risk tier (§21.2) of a capability string; throws `VALIDATION` if it is malformed. */
+/**
+ * The risk tier (§21.2) of a capability string; throws `VALIDATION` if it is malformed. The tier
+ * is the policy's (policy/tiers.rego), so the policy must be loaded (`initPolicy()`): if it is
+ * not, or fails, this throws `UNAVAILABLE`. It never falls back to a lower tier.
+ */
 export function tierOf(capability: string): Tier {
   const parsed = parseCapability(capability);
-  return capabilityTier(parsed.base, parsed.scope);
+  try {
+    return loadedPolicy().tier(parsed.base, parsed.scope);
+  } catch (error) {
+    if (error instanceof CrossoverError) throw error;
+    throw new CrossoverError("UNAVAILABLE", "The authorization policy is unavailable");
+  }
 }
 
 /**
