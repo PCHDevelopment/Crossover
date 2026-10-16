@@ -243,8 +243,23 @@ describe.skipIf(!image)("deployed server topology", () => {
       if (ids.length) await docker(["container", "rm", "--force", ...ids]).catch(() => {});
       if (volumes.size) await docker(["volume", "rm", "--force", ...volumes]).catch(() => {});
     }
-    if (containerCreated)
+    if (containerCreated) {
+      // The server runs as the image's `node` user and creates private (0700) directories, such
+      // as .sandbox-exec-logs, in the bind-mounted workspace. When the host user's uid differs (a
+      // GitHub-hosted runner is 1001), the rm below cannot read them, so hand them back first.
+      if (workspaceRoot && process.getuid && process.getgid)
+        await docker([
+          "exec",
+          "--user",
+          "0",
+          containerName,
+          "chown",
+          "-R",
+          `${process.getuid()}:${process.getgid()}`,
+          workspaceRoot,
+        ]).catch(() => {});
       await docker(["container", "rm", "--force", containerName]).catch(() => {});
+    }
     await db?.drop();
     if (workspaceRoot) await rm(workspaceRoot, { recursive: true, force: true });
   }, 30_000);
