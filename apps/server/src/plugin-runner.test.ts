@@ -412,6 +412,7 @@ describe("DockerToolRunner", () => {
     expect(runLimit).toBe(200 * 1024);
   });
 
+  // Measured (T1529): idle 610 ms, 3x load 2973 ms; budget 7x.
   it("keeps Docker CLI settings in the server environment, not plugin credentials", async () => {
     const root = await mkdtemp(join(tmpdir(), "crossover-plugin-cli-env-"));
     const docker = join(root, "docker");
@@ -461,7 +462,7 @@ describe("DockerToolRunner", () => {
       else process.env["CROSSOVER_TEST_RECORD"] = previousRecord;
       await rm(root, { recursive: true, force: true });
     }
-  });
+  }, 25_000);
 
   it("kills and removes a hung container when the per-run timeout expires", async () => {
     const calls: string[][] = [];

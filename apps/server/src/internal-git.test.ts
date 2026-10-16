@@ -150,6 +150,7 @@ afterAll(async () => {
 });
 
 describe("internal Git workspace reads", () => {
+  // Measured (T1529): idle 2323 ms, 3x load 2612 ms; budget 7x.
   it("materializes a scoped clone without storing excluded blobs", async () => {
     const target = join(root, "cloned-workspace");
     await mkdir(target, { recursive: true });
@@ -180,8 +181,9 @@ describe("internal Git workspace reads", () => {
     ).rejects.toMatchObject({
       code: "ENOENT",
     });
-  });
+  }, 20_000);
 
+  // Measured (T1529): idle 740 ms, 3x load 2041 ms; budget 7x.
   it.each([
     { protocol: "0", description: "canonical commit", object: () => canonicalCommit },
     { protocol: "0", description: "out-of-scope blob", object: () => secretBlob },
@@ -213,8 +215,10 @@ describe("internal Git workspace reads", () => {
         git(["cat-file", "-e", object()], { cwd: target, timeoutMs: 10_000 }),
       ).rejects.toThrow();
     },
+    15_000,
   );
 
+  // Measured (T1529): idle 1006 ms, 3x load 2289 ms; budget 7x.
   it("gives an unscoped reader the real canonical commit with shallow history", async () => {
     const unscopedGit = buildInternalGitServer({
       pool: db.pool,
@@ -246,7 +250,7 @@ describe("internal Git workspace reads", () => {
     } finally {
       await unscopedGit.close();
     }
-  });
+  }, 20_000);
 
   it("rejects a token issued for another room", async () => {
     const otherRoomToken = createSandboxReadToken(
@@ -267,6 +271,7 @@ describe("internal Git workspace reads", () => {
     expect(response.statusCode).toBe(401);
   });
 
+  // Measured (T1529): idle 2360 ms, 3x load 3705 ms; budget 7x.
   it.each(["0", "2"])(
     "refuses deleted-path history over protocol v%s even with current unscoped read",
     async (protocol) => {
@@ -313,6 +318,7 @@ describe("internal Git workspace reads", () => {
         await server.close();
       }
     },
+    30_000,
   );
 
   it("fails closed when the revision's Git object was garbage collected", async () => {
