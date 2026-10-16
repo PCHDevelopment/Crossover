@@ -2,7 +2,7 @@ import { pathGlobMatch } from "@crossover/policy";
 import { GitError, git } from "./git.js";
 import { treeChanges } from "./tree-changes.js";
 
-export { DEFAULT_PROTECTED_PATHS } from "./protected-paths.js";
+export { DEFAULT_PROTECTED_PATHS } from "@crossover/protocol";
 
 export type CircuitBreakerReason =
   "mass_delete" | "lines_removed" | "protected_path" | "rejection_streak";

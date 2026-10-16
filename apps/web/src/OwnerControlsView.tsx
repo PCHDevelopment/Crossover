@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import type { RoomClient, SdkEvent } from "@crossover/sdk";
-import { DEFAULT_PROTECTED_PATHS } from "@crossover/workspace/protected-paths";
+import { DEFAULT_PROTECTED_PATHS } from "@crossover/protocol";
 import type { Participant } from "./model.js";
 
 type Settings = Record<string, unknown> | null;
