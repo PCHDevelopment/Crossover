@@ -183,7 +183,7 @@ describe("internal Git workspace reads", () => {
     });
   }, 20_000);
 
-  // Measured (T1529): idle n/a, 3x load 2041 ms; budget 7x.
+  // Measured (T1529): idle 740 ms, 3x load 2041 ms; budget 7x.
   it.each([
     { protocol: "0", description: "canonical commit", object: () => canonicalCommit },
     { protocol: "0", description: "out-of-scope blob", object: () => secretBlob },
@@ -271,7 +271,7 @@ describe("internal Git workspace reads", () => {
     expect(response.statusCode).toBe(401);
   });
 
-  // Measured (T1529): idle n/a, 3x load 3705 ms; budget 7x.
+  // Measured (T1529): idle 2360 ms, 3x load 3705 ms; budget 7x.
   it.each(["0", "2"])(
     "refuses deleted-path history over protocol v%s even with current unscoped read",
     async (protocol) => {
