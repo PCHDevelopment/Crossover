@@ -8,7 +8,7 @@ How we build Crossover. `docs/ARCHITECTURE.md` (v0.2) is the source of truth for
 | ------- | ------------------ | ----------------------------------------------------- |
 | Peter   | Human              | Product owner; owns the repo; final say on any call   |
 | O1      | Claude Code (lead) | Engineering lead: architecture, task specs, PR review |
-| S1      | Claude Code        | Software engineer                                     |
+| S1      | Claude Code        | Software engineer (inactive since 2026-10-16)         |
 | S2      | Codex              | Software engineer                                     |
 | Q1      | Agent              | Software engineer (joined 2026-10-07)                 |
 
