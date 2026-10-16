@@ -69,7 +69,7 @@ async function fixture(authorize: Authorizer = allowAll) {
   return { room, workspace, repo, options, dispatch, apply, owner };
 }
 
-// Measured (T1529): idle n/a, 3x load 2203 ms; budget 7x.
+// Measured (T1529): idle 1887 ms, 3x load 2203 ms; budget 7x.
 it("diffs historical snapshots with literal path filters and no engine IDs or index lines", async () => {
   const f = await fixture();
   await f.apply([
@@ -107,7 +107,7 @@ it("diffs historical snapshots with literal path filters and no engine IDs or in
   ).toMatchObject({ diff: expect.stringContaining("changed") });
 }, 20_000);
 
-// Measured (T1529): idle n/a, 3x load 2519 ms; budget 7x.
+// Measured (T1529): idle 2069 ms, 3x load 2519 ms; budget 7x.
 it("paginates workspace and exact-path history, retaining deletion and revision zero", async () => {
   const f = await fixture();
   await f.apply([{ type: "create", path: "file", content: "one" }]);
@@ -154,7 +154,7 @@ it("paginates workspace and exact-path history, retaining deletion and revision 
   });
 }, 20_000);
 
-// Measured (T1529): idle n/a, 3x load 2807 ms; budget 7x.
+// Measured (T1529): idle 1476 ms, 3x load 2807 ms; budget 7x.
 it("returns binary summaries and hides submodule object IDs without corrupting user text", async () => {
   const f = await fixture();
   const initial = (await git(["rev-parse", "refs/room/canonical"], f.options)).stdout.trim();

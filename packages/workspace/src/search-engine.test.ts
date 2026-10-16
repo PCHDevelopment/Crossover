@@ -177,7 +177,7 @@ it("safely refreshes symlink-to-directory and executable mode changes", async ()
   }
 });
 
-// Measured (T1529): idle n/a, 3x load 2471 ms; budget 7x.
+// Measured (T1529): idle 415 ms, 3x load 2471 ms; budget 7x.
 it("falls back to a full rebuild after a partial incremental update", async () => {
   const root = await mkdtemp(join(tmpdir(), "crossover-search-fallback-"));
   try {
@@ -221,7 +221,7 @@ it("falls back to a full rebuild after a partial incremental update", async () =
   }
 }, 20_000);
 
-// Measured (T1529): idle n/a, 3x load 3991 ms; budget 7x.
+// Measured (T1529): idle 341 ms, 3x load 3991 ms; budget 7x.
 it("serializes cache refreshes with readers, replaces deleted files and repairs missing cache", async () => {
   const root = await mkdtemp(join(tmpdir(), "crossover-search-tree-"));
   try {

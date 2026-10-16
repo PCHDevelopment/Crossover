@@ -23,7 +23,7 @@ afterAll(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-// Measured (T1529): idle n/a, 3x load 2146 ms; budget 7x.
+// Measured (T1529): idle 3525 ms, 3x load 2146 ms; budget 7x.
 it("applies and replays arbitrary binary bytes while keeping the durable payload JSONB-safe", async () => {
   const room = newId("room");
   await db.pool.query(

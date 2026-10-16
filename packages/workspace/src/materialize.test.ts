@@ -33,7 +33,7 @@ describe("materialize", () => {
   const patch = (path = "file", before = "old", after = "new") =>
     `--- a/${path}\n+++ b/${path}\n@@ -1 +1 @@\n-${before}\n+${after}\n`;
 
-  // Measured (T1529): idle n/a, 3x load 2443 ms; budget 7x.
+  // Measured (T1529): idle 968 ms, 3x load 2443 ms; budget 7x.
   it("applies patches in sequence with full-content operations and quoted filenames", async () => {
     const f = await fixture();
     const commit = await materialize(f.repo, f.base, [

@@ -78,7 +78,7 @@ async function fixture(authorize: Authorizer = allowAll) {
   return { room, workspace, repo, options, dispatch, apply, owner };
 }
 
-// Measured (T1529): idle n/a, 3x load 4244 ms; budget 7x.
+// Measured (T1529): idle 4537 ms, 3x load 4244 ms; budget 7x.
 it("attributes edits by two actors, merges adjacent ranges, and reads history despite stale refs", async () => {
   const f = await fixture();
   await f.apply([{ type: "create", path: "file[1]", content: "one\ntwo\nthree\nfour\n" }]);
@@ -112,7 +112,7 @@ it("attributes edits by two actors, merges adjacent ranges, and reads history de
   });
 }, 30_000);
 
-// Measured (T1529): idle n/a, 3x load 2255 ms; budget 7x.
+// Measured (T1529): idle 1602 ms, 3x load 2255 ms; budget 7x.
 it("counts empty, blank, CRLF and unterminated lines, including unusual path names", async () => {
   const f = await fixture();
   const files = [
@@ -132,7 +132,7 @@ it("counts empty, blank, CRLF and unterminated lines, including unusual path nam
   }
 }, 20_000);
 
-// Measured (T1529): idle n/a, 3x load 2404 ms; budget 7x.
+// Measured (T1529): idle 1268 ms, 3x load 2404 ms; budget 7x.
 it("maps imported ancestry to revision zero without leaking Git authors or object IDs", async () => {
   const f = await fixture();
   const { materialize } = await import("./materialize.js");

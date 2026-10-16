@@ -274,7 +274,7 @@ describe("workspace.apply_changeset", () => {
     await queue.close();
   }, 35_000);
 
-  // Measured (T1529): idle n/a, 3x load 3714 ms; budget 7x.
+  // Measured (T1529): idle 2682 ms, 3x load 3714 ms; budget 7x.
   it("does not schedule health checks for conflicted or rejected ChangeSets", async () => {
     const scheduled: number[] = [];
     const f = await fixture(allowAll, {
@@ -312,7 +312,7 @@ describe("workspace.apply_changeset", () => {
     expect(await f.rowsFor("changesets")).toEqual([]);
   });
 
-  // Measured (T1529): idle n/a, 3x load 2437 ms; budget 7x.
+  // Measured (T1529): idle 1975 ms, 3x load 2437 ms; budget 7x.
   it("lets the lead resolve a conflict and supersedes its original ChangeSet", async () => {
     const f = await fixture();
     const lead = newId("part");
@@ -499,7 +499,7 @@ describe("workspace.apply_changeset", () => {
     ]);
   });
 
-  // Measured (T1529): idle n/a, 3x load 2086 ms; budget 7x.
+  // Measured (T1529): idle 1968 ms, 3x load 2086 ms; budget 7x.
   it("sends escalation to the owner when the lead submitted the conflict", async () => {
     const f = await fixture();
     const owner = newId("part");
@@ -572,7 +572,7 @@ describe("workspace.apply_changeset", () => {
     expect(rows).toEqual([{ participant_id: lead }]);
   }, 40_000);
 
-  // Measured (T1529): idle n/a, 3x load 2319 ms; budget 7x.
+  // Measured (T1529): idle 1624 ms, 3x load 2319 ms; budget 7x.
   it("sweeps agent conflicts at the 10-minute boundary using its injected clock", async () => {
     const f = await fixture();
     const agent = newId("part");
@@ -627,7 +627,7 @@ describe("workspace.apply_changeset", () => {
     expect(rows).toEqual([{ participant_id: lead }]);
   }, 20_000);
 
-  // Measured (T1529): idle n/a, 3x load 2435 ms; budget 7x.
+  // Measured (T1529): idle 1600 ms, 3x load 2435 ms; budget 7x.
   it("does not sweep conflicts in rooms this node does not hold", async () => {
     const f = await fixture();
     const agent = newId("part");
@@ -716,7 +716,7 @@ describe("workspace.apply_changeset", () => {
     }
   }, 40_000);
 
-  // Measured (T1529): idle n/a, 3x load 4201 ms; budget 7x.
+  // Measured (T1529): idle 4554 ms, 3x load 4201 ms; budget 7x.
   it("rejects abandoning missing, foreign-room, and terminal conflicts", async () => {
     const f = await fixture();
     const other = await fixture();
@@ -792,7 +792,7 @@ describe("workspace.apply_changeset", () => {
     }
   }, 40_000);
 
-  // Measured (T1529): idle n/a, 3x load 3297 ms; budget 7x.
+  // Measured (T1529): idle 2380 ms, 3x load 3297 ms; budget 7x.
   it("returns NOT_FOUND for unknown and cross-room conflict IDs", async () => {
     const f = await fixture();
     const otherRoom = await fixture();
@@ -853,7 +853,7 @@ describe("workspace.apply_changeset", () => {
     expect(await f.rowsFor("events")).toHaveLength(1);
   });
 
-  // Measured (T1529): idle n/a, 3x load 3781 ms; budget 7x.
+  // Measured (T1529): idle 1770 ms, 3x load 3781 ms; budget 7x.
   it("persists conflict data and its event while applying none of the operations", async () => {
     const f = await fixture();
     await f.apply([{ type: "create", path: "file", content: "old\n" }]);
@@ -912,7 +912,7 @@ describe("workspace.apply_changeset", () => {
     expect(await f.rowsFor("events")).toHaveLength(3);
   }, 30_000);
 
-  // Measured (T1529): idle n/a, 3x load 5024 ms; budget 7x.
+  // Measured (T1529): idle 1533 ms, 3x load 5024 ms; budget 7x.
   it("records only applied changesets between base and head that touched conflict paths", async () => {
     const f = await fixture();
     await f.apply([{ type: "create", path: "file", content: "base\n" }]);
@@ -933,7 +933,7 @@ describe("workspace.apply_changeset", () => {
     expect(row.counterparty_changesets).not.toContain(unrelatedId);
   }, 40_000);
 
-  // Measured (T1529): idle n/a, 3x load 5055 ms; budget 7x.
+  // Measured (T1529): idle 1356 ms, 3x load 5055 ms; budget 7x.
   it("records rename/deletion history and per-path revisions", async () => {
     const f = await fixture();
     await f.apply([{ type: "create", path: "old", content: "one" }]);
@@ -953,7 +953,7 @@ describe("workspace.apply_changeset", () => {
     });
   }, 40_000);
 
-  // Measured (T1529): idle n/a, 3x load 2363 ms; budget 7x.
+  // Measured (T1529): idle 711 ms, 3x load 2363 ms; budget 7x.
   it("authorizes both normalized rename paths and rolls back a denial", async () => {
     const paths: string[] = [];
     const f = await fixture(async (_principal, _action, resource) => {
@@ -1006,7 +1006,7 @@ describe("workspace.apply_changeset", () => {
     expect(await f.head()).toBe(head);
   });
 
-  // Measured (T1529): idle n/a, 3x load 4509 ms; budget 7x.
+  // Measured (T1529): idle 1535 ms, 3x load 4509 ms; budget 7x.
   it("authorizes an implicit destination when Git carries a stale edit through a head rename", async () => {
     let deny = false;
     const f = await fixture(async (_principal, _action, resource) => {
@@ -1024,7 +1024,7 @@ describe("workspace.apply_changeset", () => {
     expect(await f.head()).toBe(head);
   }, 35_000);
 
-  // Measured (T1529): idle n/a, 3x load 2340 ms; budget 7x.
+  // Measured (T1529): idle 1120 ms, 3x load 2340 ms; budget 7x.
   it("serializes racing applications from the same base and preserves both edits", async () => {
     const f = await fixture();
     const results = await Promise.all(
@@ -1210,7 +1210,7 @@ describe("workspace.apply_changeset — secret scanning (T901)", () => {
     expect(response.response).toMatchObject({ status: "APPLIED" });
   });
 
-  // Measured (T1529): idle n/a, 3x load 2876 ms; budget 7x.
+  // Measured (T1529): idle 1314 ms, 3x load 2876 ms; budget 7x.
   it("does not block an edit to a non-ASCII (café.ts) file that leaves a pre-existing secret untouched", async () => {
     // Sabotage for the ls-tree regression: an intermediate `git ls-tree` C-quotes
     // non-ASCII paths ("src/caf\303\251.ts"), so the base lookup misses, every
@@ -1242,7 +1242,7 @@ describe("workspace.apply_changeset — secret scanning (T901)", () => {
     expect(response.response).toMatchObject({ status: "APPLIED" });
   }, 25_000);
 
-  // Measured (T1529): idle n/a, 3x load 2303 ms; budget 7x.
+  // Measured (T1529): idle 912 ms, 3x load 2303 ms; budget 7x.
   it("rejects a ChangeSet whose newline path desyncs the base batch (scanner bypass)", async () => {
     // A path may contain a newline (normalizePath rejects only NUL). cat-file
     // --batch reads one ref per line, so a newline path splits into two refs

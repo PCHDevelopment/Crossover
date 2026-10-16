@@ -46,7 +46,7 @@ describe("parseConflicts", () => {
     ]);
   });
 
-  // Measured (T1529): idle n/a, 3x load 3028 ms; budget 7x.
+  // Measured (T1529): idle 1391 ms, 3x load 3028 ms; budget 7x.
   it("rejects syntax broken by the merged tree when both input versions parse", async () => {
     const f = await fixture();
     const head = await materialize(f.repo, f.base, [
@@ -65,7 +65,7 @@ describe("parseConflicts", () => {
     ]);
   }, 25_000);
 
-  // Measured (T1529): idle n/a, 3x load 2048 ms; budget 7x.
+  // Measured (T1529): idle 770 ms, 3x load 2048 ms; budget 7x.
   it("allows a candidate source file that was already syntactically invalid", async () => {
     const f = await fixture();
     const head = await materialize(f.repo, f.base, [
@@ -81,7 +81,7 @@ describe("parseConflicts", () => {
     );
   }, 15_000);
 
-  // Measured (T1529): idle n/a, 3x load 3313 ms; budget 7x.
+  // Measured (T1529): idle 1026 ms, 3x load 3313 ms; budget 7x.
   it("checks a newly added file whose missing head version is valid", async () => {
     const f = await fixture();
     const head = f.base;
@@ -170,7 +170,7 @@ describe("parseConflicts", () => {
     expect(conflicts).not.toContain(paths[4]);
   }, 35_000);
 
-  // Measured (T1529): idle n/a, 3x load 2526 ms; budget 7x.
+  // Measured (T1529): idle 1424 ms, 3x load 2526 ms; budget 7x.
   it("ignores files outside the supported source grammars", async () => {
     const f = await fixture();
     const head = await materialize(f.repo, f.base, [

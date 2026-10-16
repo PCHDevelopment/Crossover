@@ -53,7 +53,7 @@ async function rejected(
 }
 
 describe("workspace ignore rules", () => {
-  // Measured (T1529): idle n/a, 3x load 2822 ms; budget 7x.
+  // Measured (T1529): idle 1529 ms, 3x load 2822 ms; budget 7x.
   it("respects nested negations, root anchoring, globstars and directory exclusions", async () => {
     const f = await fixture({
       ".gitignore": "*.log\n/root-only\ncache/\n**/generated/*.txt\n",
@@ -98,7 +98,7 @@ describe("workspace ignore rules", () => {
     await rejected(f, { type: "rename", from: "allowed.txt", to: "new.log" }, "new.log");
   });
 
-  // Measured (T1529): idle n/a, 3x load 3060 ms; budget 7x.
+  // Measured (T1529): idle 1741 ms, 3x load 3060 ms; budget 7x.
   it("treats .roomignore as additional root rules below .gitignore negations", async () => {
     const f = await fixture({
       ".roomignore": "*.log\nprivate/\n",

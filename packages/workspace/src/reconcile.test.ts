@@ -95,7 +95,7 @@ async function fixture() {
   };
 }
 
-// Measured (T1529): idle n/a, 3x load 3725 ms; budget 7x.
+// Measured (T1529): idle 2921 ms, 3x load 3725 ms; budget 7x.
 it("repairs a post-commit crash, rejects jumping a lagging ref, and resumes guarded writes", async () => {
   const f = await fixture();
   const initial = await f.ref();

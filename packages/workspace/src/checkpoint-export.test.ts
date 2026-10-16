@@ -290,7 +290,7 @@ const workspaceTree = async (s: Awaited<ReturnType<typeof setup>>, revision: num
 };
 
 describe("checkpoints.export (§24.3, T805)", () => {
-  // Measured (T1529): idle n/a, 3x load 3872 ms; budget 7x.
+  // Measured (T1529): idle 4380 ms, 3x load 3872 ms; budget 7x.
   it("squashed: one commit per checkpoint, with the right tree, author and co-author trailers, on top of the synced upstream commit", async () => {
     const s = await setup();
     const importedSha = (await s.upstreamRow()).last_synced_sha as string;
@@ -377,7 +377,7 @@ describe("checkpoints.export (§24.3, T805)", () => {
     expect(body).toContain("Co-authored-by: Dev");
   }, 40_000);
 
-  // Measured (T1529): idle n/a, 3x load 3327 ms; budget 7x.
+  // Measured (T1529): idle 1526 ms, 3x load 3327 ms; budget 7x.
   it("only room/* branches are pushed to: anything else is refused before anything is pushed", async () => {
     const s = await setup();
     await s.edit("src/a.ts", "export const a = 1;\n");
@@ -454,7 +454,7 @@ describe("checkpoints.export (§24.3, T805)", () => {
     );
   });
 
-  // Measured (T1529): idle n/a, 3x load 4124 ms; budget 7x.
+  // Measured (T1529): idle 2690 ms, 3x load 4124 ms; budget 7x.
   it("with pull_request it opens one from the branch into the upstream's branch, and returns its URL", async () => {
     const s = await setup();
     await s.edit("src/a.ts", "export const a = 1;\n");
@@ -482,7 +482,7 @@ describe("checkpoints.export (§24.3, T805)", () => {
     expect(s.opened).toHaveLength(1);
   }, 30_000);
 
-  // Measured (T1529): idle n/a, 3x load 2136 ms; budget 7x.
+  // Measured (T1529): idle 1700 ms, 3x load 2136 ms; budget 7x.
   it("no provider configured: refused before anything is pushed", async () => {
     const s = await setup({ pullRequests: false });
     await s.edit("src/a.ts", "export const a = 1;\n");
@@ -491,7 +491,7 @@ describe("checkpoints.export (§24.3, T805)", () => {
     expect(s.pushes).toEqual([]);
   }, 15_000);
 
-  // Measured (T1529): idle n/a, 3x load 3111 ms; budget 7x.
+  // Measured (T1529): idle 2178 ms, 3x load 3111 ms; budget 7x.
   it("a pull request that can't be opened leaves the branch pushed and nothing recorded; exporting again opens it", async () => {
     const s = await setup();
     await s.edit("src/a.ts", "export const a = 1;\n");
@@ -508,7 +508,7 @@ describe("checkpoints.export (§24.3, T805)", () => {
     expect(s.opened).toHaveLength(1);
   }, 25_000);
 
-  // Measured (T1529): idle n/a, 3x load 3010 ms; budget 7x.
+  // Measured (T1529): idle 1898 ms, 3x load 3010 ms; budget 7x.
   it("what the pull request provider says is scrubbed of the credential it was given", async () => {
     const s = await setup();
     await s.edit("src/a.ts", "export const a = 1;\n");

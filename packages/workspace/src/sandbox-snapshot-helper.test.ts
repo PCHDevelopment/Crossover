@@ -75,7 +75,7 @@ const path64 = (path: string) => Buffer.from(path).toString("base64");
 const decodePath = (path: string) => Buffer.from(path, "base64").toString();
 
 describe("sandbox snapshot helper", () => {
-  // Measured (T1529): idle n/a, 3x load 3648 ms; budget 7x.
+  // Measured (T1529): idle 2794 ms, 3x load 3648 ms; budget 7x.
   it("reads one working-copy file without following links or accepting a missing path", async () => {
     const root = await mkdtemp(join(tmpdir(), "crossover-sandbox-snapshot-"));
     roots.push(root);
@@ -217,7 +217,7 @@ describe("sandbox snapshot helper", () => {
     expect(changed).toMatchObject({ code: 1, error: "changed_during_read" });
   });
 
-  // Measured (T1529): idle n/a, 3x load 2436 ms; budget 7x.
+  // Measured (T1529): idle 920 ms, 3x load 2436 ms; budget 7x.
   it("installs a rebased delta without following an existing sandbox symlink", async () => {
     const root = await mkdtemp(join(tmpdir(), "crossover-sandbox-snapshot-"));
     roots.push(root);

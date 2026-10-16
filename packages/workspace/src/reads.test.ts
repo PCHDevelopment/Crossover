@@ -120,7 +120,7 @@ it("reads old contents and file revisions after later modification/deletion, ind
   ).toBe("3");
 }, 40_000);
 
-// Measured (T1529): idle n/a, 3x load 2302 ms; budget 7x.
+// Measured (T1529): idle 1477 ms, 3x load 2302 ms; budget 7x.
 it("lists only sorted direct children, preserving full literal room paths and historical metadata", async () => {
   const f = await fixture();
   await f.apply(
@@ -269,7 +269,7 @@ it("redacts unreadable touched paths and returns applied contents at that revisi
   });
 });
 
-// Measured (T1529): idle n/a, 3x load 2704 ms; budget 7x.
+// Measured (T1529): idle 1781 ms, 3x load 2704 ms; budget 7x.
 it("returns binary and large text bytes as base64", async () => {
   const f = await fixture();
   for (const [path, content] of [

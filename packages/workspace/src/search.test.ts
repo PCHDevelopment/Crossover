@@ -168,7 +168,7 @@ it("supports literal defaults, regex, case sensitivity and globs; rejects non-he
     });
 });
 
-// Measured (T1529): idle n/a, 3x load 3407 ms; budget 7x.
+// Measured (T1529): idle 2870 ms, 3x load 3407 ms; budget 7x.
 it("caps match counts and Unicode line previews without splitting characters", async () => {
   const f = await fixture();
   await f.apply([{ type: "create", path: "file", content: "needle\n".repeat(201) }]);

@@ -557,7 +557,7 @@ describe("DockerHealthRunner", () => {
     expect(invoke).not.toHaveBeenCalled();
   });
 
-  // Measured (T1529): idle n/a, 3x load 2586 ms; budget 7x.
+  // Measured (T1529): idle 1203 ms, 3x load 2586 ms; budget 7x.
   it("installs dependencies once per cache key and keeps health runs isolated", async () => {
     await db.pool.query("DELETE FROM health_install_runs WHERE room_id = $1", ["room_health"]);
     const { repository } = await makeRepo();
@@ -693,7 +693,7 @@ describe("DockerHealthRunner", () => {
     expect(docker.cacheVolumes()).toHaveLength(1);
   });
 
-  // Measured (T1529): idle n/a, 3x load 2795 ms; budget 7x.
+  // Measured (T1529): idle 2284 ms, 3x load 2795 ms; budget 7x.
   it("continues cache GC after one volume cannot be removed", async () => {
     await db.pool.query("DELETE FROM health_install_runs WHERE room_id = $1", ["room_health"]);
     const { repository } = await makeRepo();
@@ -802,7 +802,7 @@ describe("DockerHealthRunner", () => {
     expect(rows.map((row) => row.status)).toEqual(["SUCCEEDED", "FAILED", "SUCCEEDED"]);
   });
 
-  // Measured (T1529): idle n/a, 3x load 4522 ms; budget 7x.
+  // Measured (T1529): idle 2118 ms, 3x load 4522 ms; budget 7x.
   it("keeps the selected cache across best-effort GC failures and protects it during collection", async () => {
     await db.pool.query("DELETE FROM health_install_runs WHERE room_id = $1", ["room_health"]);
     const { repository } = await makeRepo();

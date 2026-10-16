@@ -7,7 +7,7 @@ import { git } from "./git.js";
 import { materialize } from "./materialize.js";
 import { initRoomRepo } from "./repo.js";
 
-// Measured (T1529): idle n/a, 3x load 2033 ms; budget 7x.
+// Measured (T1529): idle 286 ms, 3x load 2033 ms; budget 7x.
 it("attributes ranges across edits and renames at explicit commits, including unusual paths", async () => {
   const root = await mkdtemp(join(tmpdir(), "crossover-attribution-"));
   try {

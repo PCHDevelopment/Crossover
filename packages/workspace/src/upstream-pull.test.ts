@@ -192,7 +192,7 @@ const rejects = async (p: Promise<unknown>, reason: string) => {
 };
 
 describe("git.pull_upstream (§24.2, T803)", () => {
-  // Measured (T1529): idle n/a, 3x load 2601 ms; budget 7x.
+  // Measured (T1529): idle 2751 ms, 3x load 2601 ms; budget 7x.
   it("brings an upstream change in as an UPSTREAM ChangeSet; the room tree equals the upstream tip's", async () => {
     const s = await setup();
     const sha = await s.up.commit(async (dir) => {
@@ -264,7 +264,7 @@ describe("git.pull_upstream (§24.2, T803)", () => {
     expect(await s.read("src/b.ts")).toContain("'room'");
   }, 20_000);
 
-  // Measured (T1529): idle n/a, 3x load 5048 ms; budget 7x.
+  // Measured (T1529): idle 3107 ms, 3x load 5048 ms; budget 7x.
   it("overlapping edits conflict: the caller is the submitter of record, nothing advances, a second pull is refused, and resolving applies the pull", async () => {
     const s = await setup();
     const before = await s.upstreamRow();

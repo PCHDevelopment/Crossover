@@ -127,7 +127,7 @@ describe("binary and large file policy", () => {
     });
   });
 
-  // Measured (T1529): idle n/a, 3x load 2220 ms; budget 7x.
+  // Measured (T1529): idle 2498 ms, 3x load 2220 ms; budget 7x.
   it("rejects a patch whose resulting blob crosses the size limit", async () => {
     const content = "x".repeat(25 * 1024 * 1024 - 7) + "\nlast\n";
     const f = await fixture(content);
@@ -155,7 +155,7 @@ describe("binary and large file policy", () => {
     }
   });
 
-  // Measured (T1529): idle n/a, 3x load 3366 ms; budget 7x.
+  // Measured (T1529): idle 2075 ms, 3x load 3366 ms; budget 7x.
   it("retains native text conflicts alongside a forced binary conflict", async () => {
     const f = await fixture("old\0data");
     const base = await materialize(f.repo, f.base, [

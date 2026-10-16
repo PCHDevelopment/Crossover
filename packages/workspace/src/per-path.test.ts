@@ -160,7 +160,7 @@ function listConflicts(
   return f.dispatcher.dispatch(who, { id: newId("cmd"), method: "conflicts.list", params });
 }
 
-// Measured (T1529): idle n/a, 3x load 2794 ms; budget 7x.
+// Measured (T1529): idle 2086 ms, 3x load 2794 ms; budget 7x.
 it("a reviewer with workspace.write:docs/** applies a ChangeSet touching docs/ only", async () => {
   const f = await fixture();
   await f.apply(f.owner, [{ type: "create", path: "src/a.ts", content: "a" }], 0);
@@ -183,7 +183,7 @@ it("a reviewer with workspace.write:docs/** applies a ChangeSet touching docs/ o
   expect(await f.revision()).toBe(2); // nothing was applied
 }, 20_000);
 
-// Measured (T1529): idle n/a, 3x load 3518 ms; budget 7x.
+// Measured (T1529): idle 2332 ms, 3x load 3518 ms; budget 7x.
 it("enforces the conflict submitter's real path grant on resolution ChangeSets", async () => {
   const f = await fixture();
   await f.apply(f.owner, [{ type: "create", path: "docs/file.txt", content: "base\n" }], 0);
@@ -218,7 +218,7 @@ it("enforces the conflict submitter's real path grant on resolution ChangeSets",
   expect(await f.revision()).toBe(2);
 }, 25_000);
 
-// Measured (T1529): idle n/a, 3x load 4201 ms; budget 7x.
+// Measured (T1529): idle 2907 ms, 3x load 4201 ms; budget 7x.
 it("lets a reviewer abandon their own conflict through the conflict capability", async () => {
   const f = await fixture();
   await f.apply(f.owner, [{ type: "create", path: "docs/file.txt", content: "base\n" }], 0);
@@ -246,7 +246,7 @@ it("lets a reviewer abandon their own conflict through the conflict capability",
   expect(result.events.map((event) => event.type)).toEqual(["workspace.conflict.abandoned"]);
 }, 30_000);
 
-// Measured (T1529): idle n/a, 3x load 2483 ms; budget 7x.
+// Measured (T1529): idle 1405 ms, 3x load 2483 ms; budget 7x.
 it("declares per-path authorization on the commands that authorize every path, and only those", async () => {
   const f = await fixture();
   await f.apply(f.owner, [{ type: "create", path: "a.txt", content: "x" }], 0);
@@ -269,7 +269,7 @@ it("declares per-path authorization on the commands that authorize every path, a
   ]);
 }, 20_000);
 
-// Measured (T1529): idle n/a, 3x load 4755 ms; budget 7x.
+// Measured (T1529): idle 2679 ms, 3x load 4755 ms; budget 7x.
 it("hides denied paths from listings, diff, and unfiltered history under real policy", async () => {
   const f = await fixture();
   await f.apply(
@@ -430,7 +430,7 @@ it("redacts unauthorized conflict paths and content", async () => {
   expect(conflict.response).toMatchObject({ counterparty_changesets: [] });
 });
 
-// Measured (T1529): idle n/a, 3x load 3323 ms; budget 7x.
+// Measured (T1529): idle 2116 ms, 3x load 3323 ms; budget 7x.
 it("conflicts.get redacts every message path and omits counterparties for the submitter", async () => {
   const { f, conflictId, seededChangesetId } = await conflictReadFixture();
   const ownerView = await getConflict(f, f.owner, conflictId);
@@ -452,7 +452,7 @@ it("conflicts.get redacts every message path and omits counterparties for the su
   expect(JSON.stringify(submitterView.response)).not.toContain("private conflicting content");
 }, 25_000);
 
-// Measured (T1529): idle n/a, 3x load 3469 ms; budget 7x.
+// Measured (T1529): idle 1563 ms, 3x load 3469 ms; budget 7x.
 it("conflicts.list filters status arrays and submitter, paginates to a null last cursor", async () => {
   const { f, conflictId, secondConflictId } = await conflictReadFixture();
   const firstPage = await listConflicts(f, f.reviewer, {
@@ -493,7 +493,7 @@ it("conflicts.list filters status arrays and submitter, paginates to a null last
   expect(resolved.response).toMatchObject({ conflicts: [{ id: secondConflictId }] });
 }, 25_000);
 
-// Measured (T1529): idle n/a, 3x load 2179 ms; budget 7x.
+// Measured (T1529): idle 1941 ms, 3x load 2179 ms; budget 7x.
 it("conflicts.list and conflicts.get do not cross room boundaries", async () => {
   const { f: roomA, conflictId } = await conflictReadFixture();
   const roomB = await fixture();

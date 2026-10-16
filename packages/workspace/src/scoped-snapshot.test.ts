@@ -59,7 +59,7 @@ async function fixture() {
 }
 
 describe("createScopedSnapshotRepository", () => {
-  // Measured (T1529): idle n/a, 3x load 2009 ms; budget 7x.
+  // Measured (T1529): idle 181 ms, 3x load 2009 ms; budget 7x.
   it("advertises only readable paths and their blobs", async () => {
     const source = await fixture();
     const scoped = await createScopedSnapshotRepository({

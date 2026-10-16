@@ -118,7 +118,7 @@ describe("checkpoints (§24.3, T804)", () => {
     });
   });
 
-  // Measured (T1529): idle n/a, 3x load 2872 ms; budget 7x.
+  // Measured (T1529): idle 2138 ms, 3x load 2872 ms; budget 7x.
   it("an empty workspace has nothing to mark, and a revision is marked once", async () => {
     const s = await setup(null);
     await rejects(
@@ -182,7 +182,7 @@ describe("checkpoints (§24.3, T804)", () => {
     ]);
   });
 
-  // Measured (T1529): idle n/a, 3x load 2003 ms; budget 7x.
+  // Measured (T1529): idle 1223 ms, 3x load 2003 ms; budget 7x.
   it("an override on a green head isn't recorded as one", async () => {
     const s = await setup("npm test");
     const rev = await s.edit();
@@ -191,7 +191,7 @@ describe("checkpoints (§24.3, T804)", () => {
     expect(out.response).toMatchObject({ health_status: "GREEN", overridden: false });
   }, 15_000);
 
-  // Measured (T1529): idle n/a, 3x load 4370 ms; budget 7x.
+  // Measured (T1529): idle 2695 ms, 3x load 4370 ms; budget 7x.
   it("lists oldest first in pages, and an unknown cursor is NOT_FOUND", async () => {
     const s = await setup(null);
     for (const m of ["a", "b", "c"]) {
