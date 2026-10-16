@@ -170,6 +170,7 @@ describe("security.scanSecrets", () => {
     expect(findings).toEqual([]);
   });
 
+  // Measured (T1529): idle 588 ms, 3x load 2913 ms; budget 7x.
   it("scans a file just under the 2 MiB bound within a time bound", () => {
     // The per-file bound is MAX_SCAN_BYTES (2 MiB). A file just under it is
     // scanned (not skipped) and must be fast — this is the bound O1 asked to
@@ -183,7 +184,7 @@ describe("security.scanSecrets", () => {
     expect(ms).toBeLessThan(2000);
     expect(findings.some((f) => f.rule === "aws_access_key_id")).toBe(true);
     expect(findings.some((f) => f.rule === "scan_skipped")).toBe(false);
-  });
+  }, 25_000);
 
   it("skips a file just over the 2 MiB bound as scan_skipped", () => {
     const text = "x".repeat(MAX_SCAN_BYTES + 1);
