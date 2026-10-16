@@ -53,6 +53,7 @@ async function rejected(
 }
 
 describe("workspace ignore rules", () => {
+  // Measured (T1529): idle 1529 ms, 3x load 2822 ms; budget 7x.
   it("respects nested negations, root anchoring, globstars and directory exclusions", async () => {
     const f = await fixture({
       ".gitignore": "*.log\n/root-only\ncache/\n**/generated/*.txt\n",
@@ -72,7 +73,7 @@ describe("workspace ignore rules", () => {
       { type: "create", path: "sub/root-only", content: "nested" },
     ]);
     expect((await git(["show", `${commit}:sub/keep.log`], f.options)).stdout).toBe("kept");
-  });
+  }, 20_000);
 
   it("does not reinclude files beneath an excluded parent directory", async () => {
     const f = await fixture({ ".gitignore": "logs/\n", "logs/.gitignore": "!keep.log\n" });
@@ -97,6 +98,7 @@ describe("workspace ignore rules", () => {
     await rejected(f, { type: "rename", from: "allowed.txt", to: "new.log" }, "new.log");
   });
 
+  // Measured (T1529): idle 1741 ms, 3x load 3060 ms; budget 7x.
   it("treats .roomignore as additional root rules below .gitignore negations", async () => {
     const f = await fixture({
       ".roomignore": "*.log\nprivate/\n",
@@ -110,7 +112,7 @@ describe("workspace ignore rules", () => {
       { type: "create", path: "root.log", content: "x" },
       { type: "create", path: "sub/keep.log", content: "x" },
     ]);
-  });
+  }, 25_000);
 
   it("uses the base snapshot even when operations remove an ignore rule", async () => {
     const f = await fixture({ ".gitignore": "*.log\n" });

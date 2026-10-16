@@ -69,6 +69,7 @@ async function fixture(authorize: Authorizer = allowAll, deps: WorkspaceCommandD
   return { room, workspace, repo, options, dispatch, apply };
 }
 
+// Measured (T1529): idle 1890 ms, 3x load 4977 ms; budget 7x.
 it("sees changes immediately, refreshes after commit, and repairs a lagging cache without trusting refs", async () => {
   const f = await fixture();
   await f.apply([{ type: "create", path: "file", content: "old needle\n" }]);
@@ -99,7 +100,7 @@ it("sees changes immediately, refreshes after commit, and repairs a lagging cach
     matches: [],
     truncated: false,
   });
-});
+}, 35_000);
 
 it("authorizes distinct matched paths once and silently excludes forbidden paths", async () => {
   const paths: string[] = [];
@@ -167,6 +168,7 @@ it("supports literal defaults, regex, case sensitivity and globs; rejects non-he
     });
 });
 
+// Measured (T1529): idle 2870 ms, 3x load 3407 ms; budget 7x.
 it("caps match counts and Unicode line previews without splitting characters", async () => {
   const f = await fixture();
   await f.apply([{ type: "create", path: "file", content: "needle\n".repeat(201) }]);
@@ -192,7 +194,7 @@ it("caps match counts and Unicode line previews without splitting characters", a
     .response as typeof result;
   expect(exactMatches.matches).toHaveLength(200);
   expect(exactMatches.truncated).toBe(false);
-});
+}, 25_000);
 
 it("caps the complete UTF-8 response at one MiB even with long paths and Unicode previews", async () => {
   const f = await fixture();

@@ -95,6 +95,7 @@ async function fixture() {
   };
 }
 
+// Measured (T1529): idle 2921 ms, 3x load 3725 ms; budget 7x.
 it("repairs a post-commit crash, rejects jumping a lagging ref, and resumes guarded writes", async () => {
   const f = await fixture();
   const initial = await f.ref();
@@ -126,7 +127,7 @@ it("repairs a post-commit crash, rejects jumping a lagging ref, and resumes guar
   expect((await f.apply("three", 2)).response).toMatchObject({ applied_revision: 3 });
   expect(await f.ref()).toBe(await f.head());
   expect(f.errors).toHaveLength(2);
-});
+}, 30_000);
 
 it("restores a missing canonical ref from revision zero", async () => {
   const f = await fixture();

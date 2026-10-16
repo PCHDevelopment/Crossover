@@ -87,6 +87,7 @@ async function fixture(authorize: Authorizer = allowAll) {
   };
 }
 
+// Measured (T1529): idle 1656 ms, 3x load 5163 ms; budget 7x.
 it("reads old contents and file revisions after later modification/deletion, independent of cached refs", async () => {
   const f = await fixture();
   const initial = (await git(["rev-parse", "refs/room/canonical"], f.options)).stdout.trim();
@@ -117,8 +118,9 @@ it("reads old contents and file revisions after later modification/deletion, ind
   expect(
     (await db.pool.query("SELECT count(*) FROM events WHERE room_id = $1", [f.room])).rows[0].count,
   ).toBe("3");
-});
+}, 40_000);
 
+// Measured (T1529): idle 1477 ms, 3x load 2302 ms; budget 7x.
 it("lists only sorted direct children, preserving full literal room paths and historical metadata", async () => {
   const f = await fixture();
   await f.apply(
@@ -149,7 +151,7 @@ it("lists only sorted direct children, preserving full literal room paths and hi
     content: "dir[1]/a",
   });
   expect(JSON.stringify(root.response)).not.toMatch(/[a-f0-9]{40}/);
-});
+}, 20_000);
 
 it("reads submitted candidate content with non-conflicting edits for the review ladder only", async () => {
   const f = await fixture();
@@ -267,6 +269,7 @@ it("redacts unreadable touched paths and returns applied contents at that revisi
   });
 });
 
+// Measured (T1529): idle 1781 ms, 3x load 2704 ms; budget 7x.
 it("returns binary and large text bytes as base64", async () => {
   const f = await fixture();
   for (const [path, content] of [
@@ -291,7 +294,7 @@ it("returns binary and large text bytes as base64", async () => {
       file_revision: 1,
     });
   }
-});
+}, 20_000);
 
 it("distinguishes symlinks/submodules and reads link targets without following them", async () => {
   const f = await fixture();

@@ -160,6 +160,7 @@ function listConflicts(
   return f.dispatcher.dispatch(who, { id: newId("cmd"), method: "conflicts.list", params });
 }
 
+// Measured (T1529): idle 2086 ms, 3x load 2794 ms; budget 7x.
 it("a reviewer with workspace.write:docs/** applies a ChangeSet touching docs/ only", async () => {
   const f = await fixture();
   await f.apply(f.owner, [{ type: "create", path: "src/a.ts", content: "a" }], 0);
@@ -180,8 +181,9 @@ it("a reviewer with workspace.write:docs/** applies a ChangeSet touching docs/ o
     expect((err as CrossoverError).code).toBe("FORBIDDEN");
   }
   expect(await f.revision()).toBe(2); // nothing was applied
-});
+}, 20_000);
 
+// Measured (T1529): idle 2332 ms, 3x load 3518 ms; budget 7x.
 it("enforces the conflict submitter's real path grant on resolution ChangeSets", async () => {
   const f = await fixture();
   await f.apply(f.owner, [{ type: "create", path: "docs/file.txt", content: "base\n" }], 0);
@@ -214,8 +216,9 @@ it("enforces the conflict submitter's real path grant on resolution ChangeSets",
     (await db.pool.query("SELECT id FROM changesets WHERE room_id = $1", [f.room])).rows,
   ).toHaveLength(3);
   expect(await f.revision()).toBe(2);
-});
+}, 25_000);
 
+// Measured (T1529): idle 2907 ms, 3x load 4201 ms; budget 7x.
 it("lets a reviewer abandon their own conflict through the conflict capability", async () => {
   const f = await fixture();
   await f.apply(f.owner, [{ type: "create", path: "docs/file.txt", content: "base\n" }], 0);
@@ -241,8 +244,9 @@ it("lets a reviewer abandon their own conflict through the conflict capability",
     status: "ABANDONED",
   });
   expect(result.events.map((event) => event.type)).toEqual(["workspace.conflict.abandoned"]);
-});
+}, 30_000);
 
+// Measured (T1529): idle 1405 ms, 3x load 2483 ms; budget 7x.
 it("declares per-path authorization on the commands that authorize every path, and only those", async () => {
   const f = await fixture();
   await f.apply(f.owner, [{ type: "create", path: "a.txt", content: "x" }], 0);
@@ -263,8 +267,9 @@ it("declares per-path authorization on the commands that authorize every path, a
     { method: "workspace.list", perPath: true },
     { method: "workspace.history", perPath: true },
   ]);
-});
+}, 20_000);
 
+// Measured (T1529): idle 2679 ms, 3x load 4755 ms; budget 7x.
 it("hides denied paths from listings, diff, and unfiltered history under real policy", async () => {
   const f = await fixture();
   await f.apply(
@@ -344,7 +349,7 @@ it("hides denied paths from listings, diff, and unfiltered history under real po
   expect(history.response).toMatchObject({ entries: [{ workspace_revision: 0 }] });
   expect(JSON.stringify(history.response)).not.toContain("hidden");
   expect(new Set(f.pathChecks).size).toBe(f.pathChecks.length);
-});
+}, 35_000);
 
 it("redacts unauthorized conflict paths and content", async () => {
   let mergeCalls = 0;
@@ -425,6 +430,7 @@ it("redacts unauthorized conflict paths and content", async () => {
   expect(conflict.response).toMatchObject({ counterparty_changesets: [] });
 });
 
+// Measured (T1529): idle 2116 ms, 3x load 3323 ms; budget 7x.
 it("conflicts.get redacts every message path and omits counterparties for the submitter", async () => {
   const { f, conflictId, seededChangesetId } = await conflictReadFixture();
   const ownerView = await getConflict(f, f.owner, conflictId);
@@ -444,8 +450,9 @@ it("conflicts.get redacts every message path and omits counterparties for the su
   expect(submitterView.response).not.toHaveProperty("counterparty_changesets");
   expect(JSON.stringify(submitterView.response)).not.toContain("secrets/file.txt");
   expect(JSON.stringify(submitterView.response)).not.toContain("private conflicting content");
-});
+}, 25_000);
 
+// Measured (T1529): idle 1563 ms, 3x load 3469 ms; budget 7x.
 it("conflicts.list filters status arrays and submitter, paginates to a null last cursor", async () => {
   const { f, conflictId, secondConflictId } = await conflictReadFixture();
   const firstPage = await listConflicts(f, f.reviewer, {
@@ -484,8 +491,9 @@ it("conflicts.list filters status arrays and submitter, paginates to a null last
     submitter_id: f.reviewer.participant_id,
   });
   expect(resolved.response).toMatchObject({ conflicts: [{ id: secondConflictId }] });
-});
+}, 25_000);
 
+// Measured (T1529): idle 1941 ms, 3x load 2179 ms; budget 7x.
 it("conflicts.list and conflicts.get do not cross room boundaries", async () => {
   const { f: roomA, conflictId } = await conflictReadFixture();
   const roomB = await fixture();
@@ -496,7 +504,7 @@ it("conflicts.list and conflicts.get do not cross room boundaries", async () => 
     response: { conflicts: [], next_cursor: null },
   });
   expect(roomA.room).not.toBe(roomB.room);
-});
+}, 20_000);
 
 it("conflicts.list rejects garbage and malformed base64 cursors", async () => {
   const f = await fixture();

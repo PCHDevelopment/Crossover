@@ -127,6 +127,7 @@ describe("binary and large file policy", () => {
     });
   });
 
+  // Measured (T1529): idle 2498 ms, 3x load 2220 ms; budget 7x.
   it("rejects a patch whose resulting blob crosses the size limit", async () => {
     const content = "x".repeat(25 * 1024 * 1024 - 7) + "\nlast\n";
     const f = await fixture(content);
@@ -137,7 +138,7 @@ describe("binary and large file policy", () => {
       code: "VALIDATION",
       details: { path: "file", reason: "file_too_large" },
     });
-  });
+  }, 20_000);
 
   it("uses strict size and first-8-KiB binary boundaries", async () => {
     const f = await fixture("small");
@@ -154,6 +155,7 @@ describe("binary and large file policy", () => {
     }
   });
 
+  // Measured (T1529): idle 2075 ms, 3x load 3366 ms; budget 7x.
   it("retains native text conflicts alongside a forced binary conflict", async () => {
     const f = await fixture("old\0data");
     const base = await materialize(f.repo, f.base, [
@@ -173,7 +175,7 @@ describe("binary and large file policy", () => {
         expect.objectContaining({ path: "text", kind: "CONTENT" }),
       ]),
     );
-  });
+  }, 25_000);
 
   it("preserves untouched oversized imported files", async () => {
     const f = await fixture("old");
