@@ -1901,3 +1901,5 @@ From 2026-10-16, new task specs live on their GitHub issue. Each line below name
 - **T1558** · Egress-proxy test can miss the tunnel's close event and leave the participant PAUSED — Q1 · #362
 - **T1559** · Web e2e flake: T1402 step 5 reads the memory mirror but the pane shows the decision file — Q1 · #365
 - **T1560** · `integrations.connect`: a failed DB write after `consume()` loses the pending GitHub connection (CodeRabbit on #351) — S2 · #366
+- **T1561** · §30 step 17 by hand: pass the GitHub App config to the server container, fail on incomplete config, show install failures (Review 19) — S2; ahead of T1560 · #367
+- **T1562** · One Redis client in compose; shared base for the Redis-backed stores (Review 19) — S2; after T1560 · #368
