@@ -103,19 +103,26 @@ export interface EventSubscriber {
  */
 export class RedisRoomFanout<T> {
   private readonly redis: Redis;
+  private readonly ownsClient: boolean;
   private readonly handlers = new Map<string, Set<(message: T) => void>>();
 
   constructor(
-    url: string,
+    source: string | Redis,
     private readonly channelOf: (roomId: string) => string,
     parse: (raw: string) => T | undefined,
     options: RedisOptions = {},
   ) {
-    this.redis = new Redis(url, {
-      retryStrategy: (n: number) => Math.min(n * 200, 2_000),
-      ...options,
-    } as never);
-    this.redis.on("error", () => {});
+    if (typeof source === "string") {
+      this.redis = new Redis(source, {
+        retryStrategy: (n: number) => Math.min(n * 200, 2_000),
+        ...options,
+      } as never);
+      this.redis.on("error", () => {});
+      this.ownsClient = true;
+    } else {
+      this.redis = source;
+      this.ownsClient = false;
+    }
     this.redis.on("message", (channel: string, raw: string) => {
       const set = this.handlers.get(channel);
       if (!set) return;
@@ -157,13 +164,13 @@ export class RedisRoomFanout<T> {
   }
 
   async close(): Promise<void> {
-    this.redis.disconnect();
+    if (this.ownsClient) this.redis.disconnect();
   }
 }
 
 /** Room events from Redis, one subscriber connection per node. */
 export class RedisEventSubscriber extends RedisRoomFanout<RoomEvent> implements EventSubscriber {
-  constructor(url: string, options: RedisOptions = {}) {
-    super(url, roomChannel, (raw) => JSON.parse(raw) as RoomEvent, options);
+  constructor(source: string | Redis, options: RedisOptions = {}) {
+    super(source, roomChannel, (raw) => JSON.parse(raw) as RoomEvent, options);
   }
 }

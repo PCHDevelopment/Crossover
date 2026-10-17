@@ -173,8 +173,8 @@ export class RedisEditIntentSubscriber
   extends RedisRoomFanout<true>
   implements EditIntentSubscriber
 {
-  constructor(url: string, options: RedisOptions = {}) {
-    super(url, editIntentChannel, (raw) => (raw === "changed" ? true : undefined), options);
+  constructor(source: string | Redis, options: RedisOptions = {}) {
+    super(source, editIntentChannel, (raw) => (raw === "changed" ? true : undefined), options);
   }
 }
 

@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { createTestDatabase, type TestDatabase } from "@crossover/db/testing";
+import { createRedisClient } from "@crossover/gateway";
 import type { Authorizer, EventPublisher } from "@crossover/kernel";
 import { CrossoverError, newId, type RoomEvent } from "@crossover/protocol";
 import {
@@ -2242,6 +2243,43 @@ describe("composeServer", () => {
     await walkthrough(server.app);
     await server.close();
     await server.close();
+  });
+
+  it("shares one Redis command client and one subscriber across composed stores", async () => {
+    const cfg = config({
+      oauth: {
+        publicBaseUrl: "https://crossover.example.com",
+        google: { clientId: "google-client", clientSecret: "google-secret" },
+      },
+      githubApp: {
+        appId: "12345",
+        slug: "crossover-fixture",
+        clientId: "github-client",
+        clientSecret: "github-secret",
+        privateKey: "not used by startup",
+      },
+      integrationSecretKey: new Uint8Array(32).fill(7),
+    });
+    const probe = createRedisClient(cfg.redisUrl);
+    const countClients = async () =>
+      ((await probe.client("LIST")) as string).trim().split(/\r?\n/).filter(Boolean).length;
+    let server: CrossoverServer | undefined;
+    try {
+      if (probe.status !== "ready")
+        await new Promise<void>((resolve) => probe.once("ready", resolve));
+      await probe.ping();
+      const before = await countClients();
+      server = await composeServer(cfg, { pool: db.pool });
+      let after = before;
+      for (let attempt = 0; attempt < 20 && after < before + 2; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        after = await countClients();
+      }
+      expect(after - before).toBe(2);
+    } finally {
+      await server?.close();
+      probe.disconnect();
+    }
   });
 
   it("registers Google OAuth from Google-only configuration", async () => {

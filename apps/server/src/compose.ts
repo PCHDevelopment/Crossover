@@ -4,6 +4,7 @@ import {
   RedisOAuthStateStore,
   RedisGitHubInstallStore,
   RedisRoomExportLimiter,
+  createRedisClient,
   type RouteRateLimiter,
   type RoomExportLimiter,
   type SandboxOutputMetadata,
@@ -178,6 +179,10 @@ export async function composeServer(
   overrides: ComposeOverrides = {},
 ): Promise<CrossoverServer> {
   const pool = overrides.pool ?? createPool(config.databaseUrl);
+  const redisClient = createRedisClient(config.redisUrl);
+  const redisSubscriberClient = createRedisClient(config.redisUrl, {
+    retryStrategy: (times: number) => Math.min(times * 200, 2_000),
+  });
   let publisher: EventPublisher;
   let redis: RedisEventPublisher | undefined;
   let escalations: ConflictEscalationSweeper | undefined;
@@ -188,16 +193,16 @@ export async function composeServer(
   let pluginRunner: DockerToolRunner | undefined;
   let kmsOperations: AwsKmsDataKeyOperations | undefined;
   let gitApp: ReturnType<typeof buildInternalGitServer> | undefined;
-  const oauthStateStore = config.oauth ? new RedisOAuthStateStore(config.redisUrl) : undefined;
+  const oauthStateStore = config.oauth ? new RedisOAuthStateStore(redisClient) : undefined;
   const githubInstallStore = config.githubApp
-    ? new RedisGitHubInstallStore(config.redisUrl)
+    ? new RedisGitHubInstallStore(redisClient)
     : undefined;
   let healthInstallSweepTimer: NodeJS.Timeout | undefined;
   let sandboxLogSweepTimer: NodeJS.Timeout | undefined;
   if (overrides.publisher) {
     publisher = overrides.publisher;
   } else {
-    redis = new RedisEventPublisher(config.redisUrl);
+    redis = new RedisEventPublisher(redisClient);
     publisher = redis;
   }
 
@@ -206,19 +211,19 @@ export async function composeServer(
   if (overrides.subscriber) {
     subscriber = overrides.subscriber;
   } else {
-    redisSubscriber = new RedisEventSubscriber(config.redisUrl);
+    redisSubscriber = new RedisEventSubscriber(redisSubscriberClient);
     subscriber = redisSubscriber;
   }
 
-  const intentStore = new RedisEditIntentStore(config.redisUrl);
-  const intentSubscriber = new RedisEditIntentSubscriber(config.redisUrl);
-  const presenceStore = new RedisPresenceStore(config.redisUrl);
-  const presenceSubscriber = new RedisPresenceSubscriber(config.redisUrl);
-  const ownBudgets = overrides.budgets ? undefined : new RedisBudgetLimiter(config.redisUrl);
+  const intentStore = new RedisEditIntentStore(redisClient);
+  const intentSubscriber = new RedisEditIntentSubscriber(redisSubscriberClient);
+  const presenceStore = new RedisPresenceStore(redisClient);
+  const presenceSubscriber = new RedisPresenceSubscriber(redisSubscriberClient);
+  const ownBudgets = overrides.budgets ? undefined : new RedisBudgetLimiter(redisClient);
   const budgets = overrides.budgets ?? ownBudgets!;
   const ownRoomExportLimiter = overrides.roomExportLimiter
     ? undefined
-    : new RedisRoomExportLimiter(config.redisUrl);
+    : new RedisRoomExportLimiter(redisClient);
   const roomExportLimiter = overrides.roomExportLimiter ?? ownRoomExportLimiter!;
   const now = overrides.now ?? (() => new Date());
   const authRouteLimiter: RouteRateLimiter = {
@@ -642,6 +647,8 @@ export async function composeServer(
         await ownRoomExportLimiter?.close();
         await oauthStateStore?.close();
         await githubInstallStore?.close();
+        await redisClient.quit().catch(() => redisClient.disconnect());
+        await redisSubscriberClient.quit().catch(() => redisSubscriberClient.disconnect());
         if (!overrides.pool) await pool.end();
       })());
 
@@ -667,6 +674,8 @@ export async function composeServer(
     await ownRoomExportLimiter?.close();
     await oauthStateStore?.close();
     await githubInstallStore?.close();
+    await redisClient.quit().catch(() => redisClient.disconnect());
+    await redisSubscriberClient.quit().catch(() => redisSubscriberClient.disconnect());
     if (!overrides.pool) await pool.end();
     throw err;
   }

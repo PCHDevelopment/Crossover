@@ -137,8 +137,8 @@ export class RedisPresenceSubscriber
   extends RedisRoomFanout<Presence>
   implements PresenceSubscriber
 {
-  constructor(url: string, options: RedisOptions = {}) {
-    super(url, presenceChannel, parsePresence, options);
+  constructor(source: string | Redis, options: RedisOptions = {}) {
+    super(source, presenceChannel, parsePresence, options);
   }
 }
 
