@@ -245,7 +245,7 @@ jobs:
           tags: crossover-egress-proxy:test
           load: true
           cache-from: type=gha,scope=egress-proxy
-          cache-to: ${{ github.event_name != 'pull_request' && 'type=gha,mode=max,scope=egress-proxy' || '' }}
+          cache-to: type=gha,mode=max,scope=egress-proxy
       - name: Build browser plugin image
         uses: docker/build-push-action@v6
         with:
@@ -255,7 +255,7 @@ jobs:
           tags: crossover-browser-plugin:test
           load: true
           cache-from: type=gha,scope=browser-plugin
-          cache-to: ${{ github.event_name != 'pull_request' && 'type=gha,mode=max,scope=browser-plugin' || '' }}
+          cache-to: type=gha,mode=max,scope=browser-plugin
       - name: Build git-fetcher image
         uses: docker/build-push-action@v6
         with:
@@ -264,7 +264,7 @@ jobs:
           tags: crossover-git-fetcher:test
           load: true
           cache-from: type=gha,scope=git-fetcher
-          cache-to: ${{ github.event_name != 'pull_request' && 'type=gha,mode=max,scope=git-fetcher' || '' }}
+          cache-to: type=gha,mode=max,scope=git-fetcher
       - name: Build GitHub plugin image
         uses: docker/build-push-action@v6
         with:
@@ -273,7 +273,7 @@ jobs:
           tags: crossover-github-plugin:test
           load: true
           cache-from: type=gha,scope=github-plugin
-          cache-to: ${{ github.event_name != 'pull_request' && 'type=gha,mode=max,scope=github-plugin' || '' }}
+          cache-to: type=gha,mode=max,scope=github-plugin
       - name: Build production server image
         uses: docker/build-push-action@v6
         with:
@@ -282,7 +282,7 @@ jobs:
           tags: crossover-server:test
           load: true
           cache-from: type=gha,scope=server
-          cache-to: ${{ github.event_name != 'pull_request' && 'type=gha,mode=max,scope=server' || '' }}
+          cache-to: type=gha,mode=max,scope=server
       - name: Smoke test GitHub plugin stdin/stdout with network disabled
         shell: bash
         run: |
@@ -382,7 +382,7 @@ jobs:
           tags: crossover-git-fetcher:test
           load: true
           cache-from: type=gha,scope=git-fetcher
-          cache-to: ${{ github.event_name != 'pull_request' && 'type=gha,mode=max,scope=git-fetcher' || '' }}
+          cache-to: type=gha,mode=max,scope=git-fetcher
       - name: Test the web app in a browser
         run: pnpm exec vitest run apps/server/src/e2e/web.test.ts
 
