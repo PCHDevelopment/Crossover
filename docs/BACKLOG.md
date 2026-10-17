@@ -1898,9 +1898,10 @@ From 2026-10-16, new task specs live on their GitHub issue. Each line below name
 - **T1555** · Dockerfiles: install dependencies before copying the source — Q1 · #357 · closed, not planned (saved ~1 s; see #358)
 - **T1556** · Web e2e times out intermittently in several steps — Q1 · #356 · done (#359)
 - **T1557** · Web e2e leaves sandbox containers (and volumes) behind on the host — Q1 · #360
-- **T1558** · Egress-proxy test can miss the tunnel's close event and leave the participant PAUSED — Q1 · #362
+- **T1558** · Egress-proxy test can miss the tunnel's close event and leave the participant PAUSED — Q1 · #362 · done (#374)
 - **T1559** · Web e2e flake: T1402 step 5 reads the memory mirror but the pane shows the decision file — Q1 · #365
 - **T1560** · `integrations.connect`: a failed DB write after `consume()` loses the pending GitHub connection (CodeRabbit on #351) — S2 · #366 · done (#370)
 - **T1561** · §30 step 17 by hand: pass the GitHub App config to the server container, fail on incomplete config, show install failures (Review 19) — S2; ahead of T1560 · #367 · done (#372)
 - **T1562** · One Redis client in compose; shared base for the Redis-backed stores (Review 19) — S2; after T1560 · #368
-- **T1563** · GitHub install callback sends a fixed failure reason the web notice already reads (O1 review of #372) — S2 · #373
+- **T1563** · GitHub install callback sends a fixed failure reason the web notice already reads (O1 review of #372) — S2 · #373 · done (#376)
+- **T1564** · Split `OwnerControlsView.tsx` by section, no behaviour change (plan first; Review 19 debt) — S2; after T1562 · #377
