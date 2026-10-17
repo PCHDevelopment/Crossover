@@ -1270,33 +1270,52 @@ describe("MCP owner and lead tools (T1544)", () => {
 
     const paused = await call(s.lead, "participants_pause", { participant_id: s.otherId });
     expect(paused.body).toMatchObject({ status: "PAUSED", changed: true });
+    expect(paused.text).toContain('trust="participant"');
     expect(await events(s.room, "participant.paused")).toHaveLength(1);
     const resumed = await call(s.lead, "participants_resume", { participant_id: s.otherId });
     expect(resumed.body).toMatchObject({ status: "ACTIVE", changed: true });
+    expect(resumed.text).toContain('trust="participant"');
     expect(await events(s.room, "participant.resumed")).toHaveLength(1);
     const role = await call(s.lead, "participants_set_role", {
       participant_id: s.otherId,
       role: "REVIEWER",
     });
     expect(role.isError).toBe(false);
+    expect(role.text).toContain('trust="participant"');
     expect(await events(s.room, "participant.role_changed")).toHaveLength(1);
   });
 
-  it("an agent developer is FORBIDDEN from every mutating tool", async () => {
+  it("an agent developer is FORBIDDEN from every mutating tool, by the capability check", async () => {
     const s = await setup();
     const dev = await connect(s.url, s.agent.access_token);
+    // Targets are agents (so no command rule such as lead_human could refuse); one is paused.
+    const joinAgent = async (name: string) => {
+      const invite = await dispatchOwner(s, "room.invite", { role: "DEVELOPER" });
+      const joined = await s.dispatcher.dispatchAnonymous(
+        "room.join",
+        { token: (invite.one_time as RoomInviteSecret).token, manifest: { ...manifest, name } },
+        s.room,
+      );
+      return (joined.response as { participant_id: string }).participant_id;
+    };
+    const activeId = await joinAgent("C2");
+    const pausedId = await joinAgent("C3");
+    await dispatchOwner(s, "participants.pause", { participant_id: pausedId });
     const args: Record<string, Record<string, unknown>> = {
       checkpoints_create: { message: "x" },
       checkpoints_export: {},
-      participants_pause: { participant_id: s.ownerId },
-      participants_resume: { participant_id: s.ownerId },
-      participants_set_role: { participant_id: s.ownerId, role: "OBSERVER" },
+      participants_pause: { participant_id: activeId },
+      participants_resume: { participant_id: pausedId },
+      participants_set_role: { participant_id: activeId, role: "OBSERVER" },
     };
     expect(Object.keys(args).sort()).toEqual([...MUTATING].sort());
     for (const name of MUTATING) {
       const r = await call(dev, name, args[name]!);
       expect(r.isError, name).toBe(true);
-      expect(r.body, name).toMatchObject({ error: { code: "FORBIDDEN" } });
+      const method = OWNER_LEAD_TOOLS.find((t) => t.name === name)!.method;
+      expect(r.body, name).toMatchObject({
+        error: { code: "FORBIDDEN", details: { missing_capability: method } },
+      });
     }
   });
 
