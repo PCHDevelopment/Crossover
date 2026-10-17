@@ -4,6 +4,7 @@ import {
   RedisOAuthStateStore,
   RedisGitHubInstallStore,
   RedisRoomExportLimiter,
+  REDIS_STORE_OPTIONS,
   createRedisClient,
   type RouteRateLimiter,
   type RoomExportLimiter,
@@ -180,6 +181,7 @@ export async function composeServer(
 ): Promise<CrossoverServer> {
   const pool = overrides.pool ?? createPool(config.databaseUrl);
   const redisClient = createRedisClient(config.redisUrl, {
+    ...REDIS_STORE_OPTIONS,
     connectionName: `crossover:${config.nodeId}`,
   });
   const redisSubscriberClient = createRedisClient(config.redisUrl, {

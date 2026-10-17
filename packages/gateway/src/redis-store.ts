@@ -1,6 +1,6 @@
 import { Redis, type RedisOptions } from "ioredis";
 
-const REDIS_STORE_OPTIONS: RedisOptions = {
+export const REDIS_STORE_OPTIONS: RedisOptions = {
   enableOfflineQueue: false,
   maxRetriesPerRequest: 1,
   connectTimeout: 1_000,
