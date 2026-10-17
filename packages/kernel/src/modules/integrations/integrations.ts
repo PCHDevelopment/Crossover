@@ -409,6 +409,28 @@ async function prepareConnection(
     if (new Set(repositories).size !== repositories.length) throw invalidPending();
     const repositoryIds = repositories.map((name) => available.get(name));
     if (repositoryIds.some((id) => id === undefined)) throw invalidPending();
+    const wrappedKeyResult = await ctx.pool.query<IntegrationKeyRow>(
+      "SELECT key_strategy, wrapped_data_key FROM integration_room_keys WHERE room_id = $1",
+      [ctx.room_id],
+    );
+    const { rows: existing } = wrappedKeyResult;
+    const installationId = pending.installation_id;
+    const publicConfig = { installation_id: installationId, repositories };
+    let encrypted: EncryptedSecret;
+    try {
+      encrypted = await options.secretStore.seal(
+        ctx.room_id,
+        "github",
+        JSON.stringify({
+          installation_id: installationId,
+          repositories_json: JSON.stringify(repositories),
+          repository_ids_json: JSON.stringify(repositoryIds),
+        }),
+        existing[0]?.wrapped_data_key,
+      );
+    } catch {
+      throw new CrossoverError("PROVIDER_UNAVAILABLE", "Integration secret storage is unavailable");
+    }
     let consumed: GitHubPendingConnection | undefined;
     try {
       consumed = await pendingStore.consume(params.pending_id!, binding);
@@ -435,28 +457,6 @@ async function prepareConnection(
       consumedRepositoryIds.some((id, index) => id !== repositoryIds[index])
     ) {
       throw invalidPending();
-    }
-    const wrappedKeyResult = await ctx.pool.query<IntegrationKeyRow>(
-      "SELECT key_strategy, wrapped_data_key FROM integration_room_keys WHERE room_id = $1",
-      [ctx.room_id],
-    );
-    const { rows: existing } = wrappedKeyResult;
-    const installationId = consumed.installation_id;
-    const publicConfig = { installation_id: installationId, repositories };
-    let encrypted: EncryptedSecret;
-    try {
-      encrypted = await options.secretStore.seal(
-        ctx.room_id,
-        "github",
-        JSON.stringify({
-          installation_id: installationId,
-          repositories_json: JSON.stringify(repositories),
-          repository_ids_json: JSON.stringify(consumedRepositoryIds),
-        }),
-        existing[0]?.wrapped_data_key,
-      );
-    } catch {
-      throw new CrossoverError("PROVIDER_UNAVAILABLE", "Integration secret storage is unavailable");
     }
     return {
       provider: "github",
