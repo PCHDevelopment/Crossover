@@ -12,10 +12,89 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# The required check is the last job, `check`, which needs the others. Everything it needs to know is
+# whether each of them succeeded; a cancelled or skipped job is not a pass. The jobs run in parallel
+# (T1553): `static` and `go` need no services, `test` is everything but the Chromium-backed web E2E,
+# which runs in `web-e2e` on its own runner, so no Docker test is changing bridge networks under it.
 jobs:
-  check:
+  static:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm format:check
+      - run: pnpm lint
+      # gen:wasm --check below needs the built packages.
+      - run: pnpm typecheck
+      # The authorization policy (D9) is Rego compiled to packages/policy/policy/policy.wasm, which is
+      # committed together with the role bundles it is built from (policy/bundles.gen.rego, generated from
+      # bundles.ts). A pinned, checksum-verified opa binary kept under the job's temp dir (nothing is
+      # installed system-wide) runs the Rego unit tests and checks that the committed module and bundles are what
+      # the sources build, so a changed policy cannot ship with an old module. The version also
+      # appears in packages/policy/src/wasm-cli.ts.
+      - name: Test the authorization policy (OPA)
+        run: |
+          set -euo pipefail
+          version=1.21.2
+          case "$(uname -m)" in
+            x86_64) arch=amd64; sum=830ab11f61ffec760b5e19db0d7ad02bf037e13f5ef4d665faeaf17632177527 ;;
+            aarch64) arch=arm64; sum=ed13bb8647b8a81e1f11741dd18babe02aced7a304314bd6bf8007793b6d4ff1 ;;
+            *) echo "No pinned opa for $(uname -m)"; exit 1 ;;
+          esac
+          dir="$RUNNER_TEMP/opa"
+          mkdir -p "$dir"
+          curl -fsSL -o "$dir/opa" "https://github.com/open-policy-agent/opa/releases/download/v$version/opa_linux_${arch}_static"
+          echo "$sum  $dir/opa" | sha256sum -c -
+          chmod +x "$dir/opa"
+          "$dir/opa" fmt --list --fail packages/policy/policy
+          "$dir/opa" test packages/policy/policy
+          OPA_BIN="$dir/opa" pnpm --filter @crossover/policy gen:wasm -- --check
+
+  go:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.5"
+          # go.sum is in clients/go, not at the repository root, where setup-go looks by default.
+          cache-dependency-path: clients/go/go.sum
+      - name: Test Go CLI
+        working-directory: clients/go
+        run: go test ./...
+      # Cheap with the build cache, and it catches Windows- and macOS-only breaks on every PR.
+      - name: Cross-compile Go CLI release binaries
+        working-directory: clients/go
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
+            os="${target%/*}"
+            arch="${target#*/}"
+            suffix=
+            if [ "$os" = windows ]; then suffix=.exe; fi
+            output="dist/room-${os}-${arch}${suffix}"
+            echo "Building $output"
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -buildvcs=false -trimpath -ldflags='-s -w' -o "$output" ./cmd/room
+          done
+      # Only a release uses the binaries, so pull requests don't upload them.
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        with:
+          name: room-cli-release
+          path: clients/go/dist/room-*
+          if-no-files-found: error
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     services:
       postgres:
         image: postgres:16
@@ -47,34 +126,7 @@ jobs:
           node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm format:check
-      - run: pnpm lint
       - run: pnpm typecheck
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.26.5"
-      - name: Test Go CLI
-        working-directory: clients/go
-        run: go test ./...
-      - name: Cross-compile Go CLI release binaries
-        working-directory: clients/go
-        run: |
-          set -euo pipefail
-          mkdir -p dist
-          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
-            os="${target%/*}"
-            arch="${target#*/}"
-            suffix=
-            if [ "$os" = windows ]; then suffix=.exe; fi
-            output="dist/room-${os}-${arch}${suffix}"
-            echo "Building $output"
-            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -buildvcs=false -trimpath -ldflags='-s -w' -o "$output" ./cmd/room
-          done
-      - uses: actions/upload-artifact@v4
-        with:
-          name: room-cli-release
-          path: clients/go/dist/room-*
-          if-no-files-found: error
       # workspace.search runs ripgrep. A pinned, checksum-verified binary needs no sudo, so it works
       # on any runner.
       - name: Install ripgrep
@@ -91,48 +143,56 @@ jobs:
           echo "$sum  $dir/rg.tar.gz" | sha256sum -c -
           tar -xzf "$dir/rg.tar.gz" -C "$dir" --strip-components=1
           echo "$dir" >> "$GITHUB_PATH"
-      # The authorization policy (D9) is Rego compiled to packages/policy/policy/policy.wasm, which is
-      # committed together with the role bundles it is built from (policy/bundles.gen.rego, generated from
-      # bundles.ts). A pinned, checksum-verified opa binary kept under the job's temp dir (nothing is
-      # installed system-wide) runs the Rego unit tests and checks that the committed module and bundles are what
-      # the sources build, so a changed policy cannot ship with an old module. The version also
-      # appears in packages/policy/src/wasm-cli.ts.
-      - name: Test the authorization policy (OPA)
-        run: |
-          set -euo pipefail
-          version=1.21.2
-          case "$(uname -m)" in
-            x86_64) arch=amd64; sum=830ab11f61ffec760b5e19db0d7ad02bf037e13f5ef4d665faeaf17632177527 ;;
-            aarch64) arch=arm64; sum=ed13bb8647b8a81e1f11741dd18babe02aced7a304314bd6bf8007793b6d4ff1 ;;
-            *) echo "No pinned opa for $(uname -m)"; exit 1 ;;
-          esac
-          dir="$RUNNER_TEMP/opa"
-          mkdir -p "$dir"
-          curl -fsSL -o "$dir/opa" "https://github.com/open-policy-agent/opa/releases/download/v$version/opa_linux_${arch}_static"
-          echo "$sum  $dir/opa" | sha256sum -c -
-          chmod +x "$dir/opa"
-          "$dir/opa" fmt --list --fail packages/policy/policy
-          "$dir/opa" test packages/policy/policy
-          OPA_BIN="$dir/opa" pnpm --filter @crossover/policy gen:wasm -- --check
-      # --with-deps installs Chromium's system libraries through sudo. Hosted runners allow it; where
-      # sudo needs a password, the libraries must already be on the machine.
-      - name: Install Chromium
-        run: |
-          if sudo -n true 2>/dev/null; then
-            pnpm --filter @crossover/server exec playwright-core install --with-deps chromium
-          else
-            pnpm --filter @crossover/server exec playwright-core install chromium
-          fi
+      - uses: docker/setup-buildx-action@v3
       - run: docker pull node:22-bookworm-slim
       - run: docker pull node:22-bookworm-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392
       - run: docker pull busybox:1.36.1-musl@sha256:3c6ae8008e2c2eedd141725c30b20d9c36b026eb796688f88205845ef17aa213
-      - run: docker build -f apps/egress-proxy/Dockerfile -t crossover-egress-proxy:test .
-      - run: docker build --target test -f plugins/browser/Dockerfile -t crossover-browser-plugin:test .
-      - run: docker build -f apps/git-fetcher/Dockerfile -t crossover-git-fetcher:test .
-      - run: docker build -f plugins/github/Dockerfile -t crossover-github-plugin:test .
+      - name: Build egress-proxy image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/egress-proxy/Dockerfile
+          tags: crossover-egress-proxy:test
+          load: true
+          cache-from: type=gha,scope=egress-proxy
+          cache-to: type=gha,mode=max,scope=egress-proxy
+      - name: Build browser plugin image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: plugins/browser/Dockerfile
+          target: test
+          tags: crossover-browser-plugin:test
+          load: true
+          cache-from: type=gha,scope=browser-plugin
+          cache-to: type=gha,mode=max,scope=browser-plugin
+      - name: Build git-fetcher image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/git-fetcher/Dockerfile
+          tags: crossover-git-fetcher:test
+          load: true
+          cache-from: type=gha,scope=git-fetcher
+          cache-to: type=gha,mode=max,scope=git-fetcher
+      - name: Build GitHub plugin image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: plugins/github/Dockerfile
+          tags: crossover-github-plugin:test
+          load: true
+          cache-from: type=gha,scope=github-plugin
+          cache-to: type=gha,mode=max,scope=github-plugin
       - name: Build production server image
-        run: docker build -f apps/server/Dockerfile -t crossover-server:test .
-        timeout-minutes: 10
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/server/Dockerfile
+          tags: crossover-server:test
+          load: true
+          cache-from: type=gha,scope=server
+          cache-to: type=gha,mode=max,scope=server
       - name: Smoke test GitHub plugin stdin/stdout with network disabled
         shell: bash
         run: |
@@ -145,12 +205,92 @@ jobs:
           test "$status" -eq 1
           printf '%s\n' "$output" | node --input-type=module -e 'let input="";for await(const chunk of process.stdin)input+=chunk;const value=JSON.parse(input);if(value.error?.code!=="unavailable"||input.includes("fixture-token"))process.exit(1);'
       - run: docker run --rm --network none --entrypoint git crossover-git-fetcher:test --version
-      # Run Chromium-backed web E2E after Docker tests finish changing bridge networks.
       - name: Test, including deployed server topology
-        run: pnpm test
+        run: pnpm exec vitest run --exclude apps/server/src/e2e/web.test.ts
         env:
           CROSSOVER_SERVER_IMAGE: crossover-server:test
-        timeout-minutes: 15
+
+  # The Chromium-backed web E2E (the only Playwright user), on its own runner.
+  web-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: crossover
+          POSTGRES_PASSWORD: crossover
+          POSTGRES_DB: crossover
+        ports:
+          - 5434:5432
+        options: >-
+          --health-cmd "pg_isready -U crossover"
+          --health-interval 2s
+          --health-retries 15
+      redis:
+        image: redis:7
+        ports:
+          - 6380:6379
+    env:
+      # The service containers publish on 5434/6380 so they don't collide with a local Postgres or
+      # Redis when this job runs on a developer's machine (for example with act); the URLs must use
+      # the same ports.
+      DATABASE_URL: postgres://crossover:crossover@localhost:5434/crossover
+      REDIS_URL: redis://localhost:6380
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - name: Resolve the Playwright version
+        id: playwright
+        run: echo "version=$(pnpm --filter @crossover/server exec node -p "require('playwright-core/package.json').version")" >> "$GITHUB_OUTPUT"
+      # The browser download is cached; the system libraries (apt) are not.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ steps.playwright.outputs.version }}
+      # --with-deps installs Chromium's system libraries through sudo. Hosted runners allow it; where
+      # sudo needs a password, the libraries must already be on the machine.
+      - name: Install Chromium
+        run: |
+          if sudo -n true 2>/dev/null; then
+            pnpm --filter @crossover/server exec playwright-core install --with-deps chromium
+          else
+            pnpm --filter @crossover/server exec playwright-core install chromium
+          fi
+      # web-fixture.ts runs health checks and a git fetcher in Docker.
+      - uses: docker/setup-buildx-action@v3
+      - run: docker pull node:22-bookworm-slim
+      - run: docker pull node:22-bookworm-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392
+      - name: Build git-fetcher image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/git-fetcher/Dockerfile
+          tags: crossover-git-fetcher:test
+          load: true
+          cache-from: type=gha,scope=git-fetcher
+          cache-to: type=gha,mode=max,scope=git-fetcher
+      - name: Test the web app in a browser
+        run: pnpm exec vitest run apps/server/src/e2e/web.test.ts
+
+  check:
+    if: always()
+    needs: [static, go, test, web-e2e]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every job to have succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          echo "$NEEDS" | jq -e 'all(.[]; .result == "success")' > /dev/null
 
   workspace-benchmark:
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
