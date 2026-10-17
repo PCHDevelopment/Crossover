@@ -105,6 +105,8 @@ export class RedisRoomFanout<T> {
   private readonly redis: Redis;
   private readonly ownsClient: boolean;
   private readonly handlers = new Map<string, Set<(message: T) => void>>();
+  private readonly messageListener: (channel: string, raw: string) => void;
+  private closed = false;
 
   constructor(
     source: string | Redis,
@@ -123,7 +125,7 @@ export class RedisRoomFanout<T> {
       this.redis = source;
       this.ownsClient = false;
     }
-    this.redis.on("message", (channel: string, raw: string) => {
+    this.messageListener = (channel: string, raw: string) => {
       const set = this.handlers.get(channel);
       if (!set) return;
       let message: T | undefined;
@@ -140,10 +142,12 @@ export class RedisRoomFanout<T> {
           // One listener's failure must not stop the others.
         }
       }
-    });
+    };
+    this.redis.on("message", this.messageListener);
   }
 
   async subscribe(roomId: string, handler: (message: T) => void) {
+    if (this.closed) throw new Error("Cannot subscribe after RedisRoomFanout is closed");
     const channel = this.channelOf(roomId);
     let set = this.handlers.get(channel);
     if (!set) {
@@ -151,6 +155,7 @@ export class RedisRoomFanout<T> {
       this.handlers.set(channel, set);
       await this.redis.subscribe(channel);
     }
+    if (this.closed) throw new Error("Cannot subscribe after RedisRoomFanout is closed");
     set.add(handler);
     return async () => {
       const current = this.handlers.get(channel);
@@ -164,6 +169,14 @@ export class RedisRoomFanout<T> {
   }
 
   async close(): Promise<void> {
+    if (this.closed) return;
+    this.closed = true;
+    this.redis.off("message", this.messageListener);
+    const channels = [...this.handlers.keys()];
+    this.handlers.clear();
+    await Promise.all(
+      channels.map((channel) => this.redis.unsubscribe(channel).catch(() => undefined)),
+    );
     if (this.ownsClient) this.redis.disconnect();
   }
 }
