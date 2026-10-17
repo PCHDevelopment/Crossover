@@ -5,7 +5,7 @@ import { CrossoverError } from "@crossover/protocol";
 import {
   readConnectedIntegrationSecretConfig,
   type AwsRoleVerifier,
-  type GitHubConnectionVerifier,
+  type GitHubPendingRepository,
   type SecretStore,
   type ToolExecutionSpec,
   type ToolInvocation,
@@ -57,13 +57,12 @@ export class IntegrationCredentialBroker {
     };
   };
 
-  readonly verifyGitHubConnection: GitHubConnectionVerifier = async (input) => {
+  readonly authorizeGitHubInstallation = async (input: {
+    installation_id: number;
+    code: string;
+  }): Promise<GitHubPendingRepository[]> => {
     const app = this.options.github;
     if (!app) throw new Error("GitHub integration is unavailable");
-    const requested = input.repositories.map((name) => name.toLowerCase());
-    if (new Set(requested).size !== requested.length)
-      throw new Error("Invalid repository selection");
-
     const token = await this.exchangeCode(app, input.code);
     try {
       const installations = await this.githubPages<{ id: number }>(
@@ -79,16 +78,22 @@ export class IntegrationCredentialBroker {
         token,
         "repositories",
       );
-      const byName = new Map(
-        available.map((repository) => [repository.full_name.toLowerCase(), repository]),
-      );
-      const repository_ids = requested.map((name) => {
-        const repository = byName.get(name);
-        if (!repository || !Number.isSafeInteger(repository.id) || repository.id <= 0)
-          throw new Error("Repository is not accessible through this installation");
-        return String(repository.id);
+      const names = new Set<string>();
+      const ids = new Set<number>();
+      return available.map(({ id, full_name }) => {
+        if (
+          !Number.isSafeInteger(id) ||
+          id <= 0 ||
+          !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(full_name) ||
+          names.has(full_name.toLowerCase()) ||
+          ids.has(id)
+        ) {
+          throw new Error("GitHub returned an invalid repository list");
+        }
+        names.add(full_name.toLowerCase());
+        ids.add(id);
+        return { name: full_name, id: String(id) };
       });
-      return { repository_ids };
     } finally {
       await this.revokeOAuthToken(app, token);
     }

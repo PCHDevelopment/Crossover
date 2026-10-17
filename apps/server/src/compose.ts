@@ -2,6 +2,7 @@ import { createPool, withTransaction, type Pool } from "@crossover/db";
 import {
   buildGateway,
   RedisOAuthStateStore,
+  RedisGitHubInstallStore,
   RedisRoomExportLimiter,
   type RouteRateLimiter,
   type RoomExportLimiter,
@@ -188,6 +189,9 @@ export async function composeServer(
   let kmsOperations: AwsKmsDataKeyOperations | undefined;
   let gitApp: ReturnType<typeof buildInternalGitServer> | undefined;
   const oauthStateStore = config.oauth ? new RedisOAuthStateStore(config.redisUrl) : undefined;
+  const githubInstallStore = config.githubApp
+    ? new RedisGitHubInstallStore(config.redisUrl)
+    : undefined;
   let healthInstallSweepTimer: NodeJS.Timeout | undefined;
   let sandboxLogSweepTimer: NodeJS.Timeout | undefined;
   if (overrides.publisher) {
@@ -253,6 +257,7 @@ export async function composeServer(
   try {
     if (redis) await redis.ready();
     await oauthStateStore?.ready();
+    await githubInstallStore?.ready();
     await intentStore.ready();
     await presenceStore.ready();
     await ownBudgets?.ready();
@@ -462,9 +467,9 @@ export async function composeServer(
       ...(overrides.integrations?.verifyAwsRole || !credentialBroker
         ? {}
         : { verifyAwsRole: credentialBroker.verifyAwsRole }),
-      ...(overrides.integrations?.verifyGitHubConnection || !credentialBroker || !config.githubApp
+      ...(overrides.integrations?.githubPendingConnections || !githubInstallStore
         ? {}
-        : { verifyGitHubConnection: credentialBroker.verifyGitHubConnection }),
+        : { githubPendingConnections: githubInstallStore }),
     };
     registerCommands(
       dispatcher,
@@ -577,6 +582,16 @@ export async function composeServer(
               },
             }
           : undefined,
+      ...(config.githubApp && credentialBroker && githubInstallStore
+        ? {
+            githubAppInstall: {
+              slug: config.githubApp.slug,
+              stateStore: githubInstallStore,
+              pendingConnections: githubInstallStore,
+              authorizeInstallation: credentialBroker.authorizeGitHubInstallation,
+            },
+          }
+        : {}),
       trustProxy: config.trustProxy && config.trustProxy.length > 0 ? config.trustProxy : false,
       refreshLimit: authRouteLimit,
       oauthStartLimit: authRouteLimit,
@@ -623,6 +638,7 @@ export async function composeServer(
         await ownBudgets?.close();
         await ownRoomExportLimiter?.close();
         await oauthStateStore?.close();
+        await githubInstallStore?.close();
         if (!overrides.pool) await pool.end();
       })());
 
@@ -647,6 +663,7 @@ export async function composeServer(
     await ownBudgets?.close();
     await ownRoomExportLimiter?.close();
     await oauthStateStore?.close();
+    await githubInstallStore?.close();
     if (!overrides.pool) await pool.end();
     throw err;
   }

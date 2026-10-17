@@ -9,6 +9,8 @@ import {
   readConnectedIntegrationSecretConfig,
   registerIntegrationCommands,
   type IntegrationCommandsOptions,
+  type GitHubPendingConnection,
+  type GitHubPendingConnectionStore,
 } from "./integrations.js";
 import { ensureRoomDataKey } from "./room-key.js";
 import type { EncryptedSecret, SecretStore } from "./secret-store.js";
@@ -102,6 +104,28 @@ async function setup(
   return { roomId, owner, admin, member, lead, dispatcher };
 }
 
+function pendingConnectionStore(initial?: GitHubPendingConnection) {
+  let value = initial;
+  let available = true;
+  const matches = (pendingId: string, binding: { room_id: string; owner_participant_id: string }) =>
+    value !== undefined &&
+    pendingId === "p".repeat(43) &&
+    binding.room_id === value.room_id &&
+    binding.owner_participant_id === value.owner_participant_id;
+  const store: GitHubPendingConnectionStore = {
+    save: vi.fn(async () => {}),
+    peek: vi.fn(async (pendingId, binding) =>
+      available && matches(pendingId, binding) ? value : undefined,
+    ),
+    consume: vi.fn(async (pendingId, binding) => {
+      if (!available || !matches(pendingId, binding)) return undefined;
+      available = false;
+      return value;
+    }),
+  };
+  return { store, set: (next: GitHubPendingConnection) => (value = next) };
+}
+
 const dispatch = (
   fixture: Awaited<ReturnType<typeof setup>>,
   principal: Principal,
@@ -153,19 +177,19 @@ describe("room integration commands", () => {
     expect(JSON.stringify(stored)).not.toContain(accessToken);
   });
 
-  it("does not persist a GitHub OAuth code when the verifier is unavailable", async () => {
+  it("rejects the removed GitHub code contract without persisting it", async () => {
     const f = await setup();
     const authorizationCode = "github-authorization-code-secret";
     const withCode = await dispatch(f, f.owner, "integrations.connect", {
       provider: "github",
-      installation_id: 123456,
+      pending_id: "p".repeat(43),
       code: authorizationCode,
       repositories: ["Example/Service"],
     }).then(
       () => null,
       (error: unknown) => error,
     );
-    expect(withCode).toMatchObject({ code: "PROVIDER_UNAVAILABLE" });
+    expect(withCode).toMatchObject({ code: "VALIDATION" });
     expect(JSON.stringify(withCode)).not.toContain(authorizationCode);
     const stored = await pool.query("SELECT 1 FROM integrations WHERE room_id = $1", [f.roomId]);
     expect(stored.rowCount).toBe(0);
@@ -175,38 +199,48 @@ describe("room integration commands", () => {
     expect(key.rowCount).toBe(0);
   });
 
-  it("stores only the verified explicit GitHub repository selection", async () => {
-    const code = "one-time-github-oauth-code";
-    const verifier = vi.fn(
-      async (input: { installation_id: number; repositories: readonly string[] }) => ({
-        installation_id: String(input.installation_id),
-        repositories: [...input.repositories],
-        repository_ids: ["8910"],
-      }),
+  it("stores only the selected repository from the owner and room-bound pending record", async () => {
+    const pending = pendingConnectionStore();
+    const connectedFixture = await setup(testSecretStore, {
+      githubPendingConnections: pending.store,
+    });
+    pending.set({
+      room_id: connectedFixture.roomId,
+      owner_participant_id: connectedFixture.owner.participant_id,
+      installation_id: "123456",
+      repositories: [{ name: "Example/Service", id: "8910" }],
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const result = await dispatch(
+      connectedFixture,
+      connectedFixture.owner,
+      "integrations.connect",
+      {
+        provider: "github",
+        pending_id: "p".repeat(43),
+        repositories: ["Example/Service"],
+      },
     );
-    const f = await setup(testSecretStore, { verifyGitHubConnection: verifier });
-    const result = await dispatch(f, f.owner, "integrations.connect", {
-      provider: "github",
-      installation_id: 123456,
-      code,
-      repositories: ["Example/Service"],
-    });
 
-    expect(verifier).toHaveBeenCalledWith({
-      installation_id: 123456,
-      code,
-      repositories: ["example/service"],
+    expect(pending.store.peek).toHaveBeenCalledWith("p".repeat(43), {
+      room_id: connectedFixture.roomId,
+      owner_participant_id: connectedFixture.owner.participant_id,
     });
-    expect(JSON.stringify(result)).not.toContain(code);
+    expect(pending.store.consume).toHaveBeenCalledWith("p".repeat(43), {
+      room_id: connectedFixture.roomId,
+      owner_participant_id: connectedFixture.owner.participant_id,
+    });
+    expect(JSON.stringify(result)).not.toContain("p".repeat(43));
     expect(result.response).toMatchObject({
       provider: "github",
       status: "CONNECTED",
       config: { installation_id: "123456", repositories: ["example/service"] },
     });
     const encrypted = (
-      await pool.query("SELECT encrypted_secret FROM integrations WHERE room_id = $1", [f.roomId])
+      await pool.query("SELECT encrypted_secret FROM integrations WHERE room_id = $1", [
+        connectedFixture.roomId,
+      ])
     ).rows[0].encrypted_secret;
-    expect(JSON.stringify(encrypted)).not.toContain(code);
     expect(
       secretValues.get(Buffer.from(encrypted.ciphertext, "base64url").toString("utf8")),
     ).toEqual(
@@ -216,6 +250,196 @@ describe("room integration commands", () => {
         repository_ids_json: '["8910"]',
       }),
     );
+    const replay = await dispatch(
+      connectedFixture,
+      connectedFixture.owner,
+      "integrations.connect",
+      {
+        provider: "github",
+        pending_id: "p".repeat(43),
+        repositories: ["Example/Service"],
+      },
+    ).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(replay).toMatchObject({ code: "VALIDATION" });
+  });
+
+  it("keeps a pending GitHub connection bound to its room for the same user", async () => {
+    const pending = pendingConnectionStore();
+    const roomA = await setup(testSecretStore, { githubPendingConnections: pending.store });
+    const roomB = await setup(testSecretStore, { githubPendingConnections: pending.store });
+    const sharedUserId = newId("usr");
+    await pool.query(
+      `INSERT INTO users (id, display_name, provider, provider_subject)
+       VALUES ($1, 'Shared owner', 'test', $2)`,
+      [sharedUserId, `integration-user-${++serial}`],
+    );
+    await pool.query("UPDATE participants SET user_id = $1 WHERE id = ANY($2::text[])", [
+      sharedUserId,
+      [roomA.owner.participant_id, roomB.owner.participant_id],
+    ]);
+    const record: GitHubPendingConnection = {
+      room_id: roomA.roomId,
+      owner_participant_id: roomA.owner.participant_id,
+      installation_id: "123456",
+      repositories: [{ name: "Example/Service", id: "8910" }],
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+    };
+    pending.set(record);
+
+    const crossRoomError = await dispatch(roomB, roomB.owner, "integrations.connect", {
+      provider: "github",
+      pending_id: "p".repeat(43),
+      repositories: ["Example/Service"],
+    }).then(
+      () => null,
+      (error: unknown) => error,
+    );
+
+    expect(crossRoomError).toMatchObject({ code: "VALIDATION" });
+    expect(
+      await pending.store.peek("p".repeat(43), {
+        room_id: roomA.roomId,
+        owner_participant_id: roomA.owner.participant_id,
+      }),
+    ).toEqual(record);
+    const connected = await dispatch(roomA, roomA.owner, "integrations.connect", {
+      provider: "github",
+      pending_id: "p".repeat(43),
+      repositories: ["Example/Service"],
+    });
+    expect(connected.response).toMatchObject({
+      provider: "github",
+      status: "CONNECTED",
+      config: { installation_id: "123456", repositories: ["example/service"] },
+    });
+  });
+
+  it("allows only one concurrent connect for a pending GitHub connection", async () => {
+    const pending = pendingConnectionStore();
+    const f = await setup(testSecretStore, { githubPendingConnections: pending.store });
+    const peek = pending.store.peek.bind(pending.store);
+    let peekCount = 0;
+    let releasePeeks!: () => void;
+    const bothPeeked = new Promise<void>((resolve) => {
+      releasePeeks = resolve;
+    });
+    pending.store.peek = vi.fn(async (pendingId, binding) => {
+      const record = await peek(pendingId, binding);
+      if (++peekCount === 2) releasePeeks();
+      await bothPeeked;
+      return record;
+    });
+    pending.set({
+      room_id: f.roomId,
+      owner_participant_id: f.owner.participant_id,
+      installation_id: "123456",
+      repositories: [{ name: "Example/Service", id: "8910" }],
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+    });
+
+    const outcomes = await Promise.allSettled([
+      dispatch(f, f.owner, "integrations.connect", {
+        provider: "github",
+        pending_id: "p".repeat(43),
+        repositories: ["Example/Service"],
+      }),
+      dispatch(f, f.owner, "integrations.connect", {
+        provider: "github",
+        pending_id: "p".repeat(43),
+        repositories: ["Example/Service"],
+      }),
+    ]);
+
+    const connected = outcomes.filter((outcome) => outcome.status === "fulfilled");
+    const refused = outcomes.filter((outcome) => outcome.status === "rejected");
+    expect(pending.store.peek).toHaveBeenCalledTimes(2);
+    expect(pending.store.consume).toHaveBeenCalledTimes(2);
+    expect(connected).toHaveLength(1);
+    expect(connected[0]).toMatchObject({
+      status: "fulfilled",
+      value: {
+        response: {
+          provider: "github",
+          status: "CONNECTED",
+          config: { installation_id: "123456", repositories: ["example/service"] },
+        },
+      },
+    });
+    expect(refused).toHaveLength(1);
+    expect(refused[0]).toMatchObject({ status: "rejected", reason: { code: "VALIDATION" } });
+  });
+
+  it("keeps a pending GitHub connection available when secret sealing fails", async () => {
+    const pending = pendingConnectionStore();
+    let failSeal = true;
+    const retryableSecretStore: SecretStore = {
+      async seal(roomId, provider, plaintext, wrappedDataKey) {
+        if (failSeal) throw new Error("temporary KMS failure");
+        return testSecretStore.seal(roomId, provider, plaintext, wrappedDataKey);
+      },
+      open: testSecretStore.open,
+    };
+    const f = await setup(retryableSecretStore, { githubPendingConnections: pending.store });
+    const record: GitHubPendingConnection = {
+      room_id: f.roomId,
+      owner_participant_id: f.owner.participant_id,
+      installation_id: "123456",
+      repositories: [{ name: "Example/Service", id: "8910" }],
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+    };
+    pending.set(record);
+    const params = {
+      provider: "github",
+      pending_id: "p".repeat(43),
+      repositories: ["Example/Service"],
+    };
+
+    const firstAttempt = await dispatch(f, f.owner, "integrations.connect", params).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(firstAttempt).toMatchObject({ code: "PROVIDER_UNAVAILABLE" });
+    expect(pending.store.consume).not.toHaveBeenCalled();
+    expect(
+      await pending.store.peek("p".repeat(43), {
+        room_id: f.roomId,
+        owner_participant_id: f.owner.participant_id,
+      }),
+    ).toEqual(record);
+
+    failSeal = false;
+    const retry = await dispatch(f, f.owner, "integrations.connect", params);
+    expect(retry.response).toMatchObject({
+      provider: "github",
+      status: "CONNECTED",
+      config: { installation_id: "123456", repositories: ["example/service"] },
+    });
+    expect(pending.store.consume).toHaveBeenCalledOnce();
+  });
+
+  it("does not consume a GitHub pending record for a repository outside the verified list", async () => {
+    const pending = pendingConnectionStore();
+    const g = await setup(testSecretStore, { githubPendingConnections: pending.store });
+    pending.set({
+      room_id: g.roomId,
+      owner_participant_id: g.owner.participant_id,
+      installation_id: "123456",
+      repositories: [{ name: "Example/Service", id: "8910" }],
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const error = await dispatch(g, g.owner, "integrations.connect", {
+      provider: "github",
+      pending_id: "p".repeat(43),
+      repositories: ["Example/Unverified"],
+    }).then(
+      () => null,
+      (reason: unknown) => reason,
+    );
+    expect(error).toMatchObject({ code: "VALIDATION" });
+    expect(pending.store.consume).not.toHaveBeenCalled();
   });
 
   it("retries a pending AWS role verification without returning its external ID", async () => {
