@@ -110,3 +110,5 @@ The server runs as the image's non-root `node` user, with `DOCKER_GID` added for
 the host Docker daemon can mount canonical repositories into sandboxes.
 The Compose server is for development and demos on a single host: sandboxes share the app host
 through its Docker socket, unlike the separate sandbox hosts described in ARCHITECTURE §4.1.
+
+<!-- T1554 docs-only probe: a throwaway change to show the code jobs are skipped. Not for merging. -->
