@@ -84,6 +84,20 @@ interface BudgetStatus {
   agents: BudgetAgentStatus[];
 }
 
+interface RoomIntegration {
+  provider: string;
+  status: string;
+  status_reason: string | null;
+  config?: Record<string, unknown>;
+}
+
+interface PendingGitHubRepositories {
+  repositories: { name: string }[];
+}
+
+const GITHUB_PENDING_ID = /^[A-Za-z0-9_-]{43}$/;
+const GITHUB_REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+
 const budgetForm = (values: BudgetValues): BudgetForm =>
   Object.fromEntries(
     BUDGET_FIELDS.map(({ name }) => {
@@ -195,6 +209,8 @@ export function OwnerControlsView(props: {
   archivedAt: string | null;
   retentionDays: number;
   settings: Settings;
+  githubPendingId: string | undefined;
+  onGitHubPendingHandled: () => void;
   onEvent: EventListener;
   onRefresh: () => Promise<void>;
 }) {
@@ -208,6 +224,8 @@ export function OwnerControlsView(props: {
     archivedAt,
     retentionDays,
     settings,
+    githubPendingId,
+    onGitHubPendingHandled,
     onEvent,
     onRefresh,
   } = props;
@@ -247,6 +265,10 @@ export function OwnerControlsView(props: {
   const agentComputeBudgetEdits = useRef(new Set<ComputeBudgetName>());
   const agentBudgetEditsTarget = useRef("");
   const [budgetLoading, setBudgetLoading] = useState(false);
+  const [integrations, setIntegrations] = useState<RoomIntegration[]>([]);
+  const [pendingRepositories, setPendingRepositories] = useState<string[]>([]);
+  const [selectedRepositories, setSelectedRepositories] = useState<string[]>([]);
+  const [pendingRepositoriesLoading, setPendingRepositoriesLoading] = useState(false);
 
   useEffect(() => setRetentionDaysInput(String(retentionDays)), [retentionDays]);
 
@@ -272,6 +294,64 @@ export function OwnerControlsView(props: {
     setBudgetStatus(result.response);
     return result.response;
   }, [room]);
+
+  const refreshIntegrations = useCallback(async () => {
+    const result = await room.api.integrations.list<{ integrations: RoomIntegration[] }>({});
+    setIntegrations(result.response.integrations);
+  }, [room]);
+
+  useEffect(() => {
+    void refreshIntegrations().catch((err: unknown) => setError(errorText(err)));
+  }, [refreshIntegrations]);
+
+  useEffect(() => {
+    if (!githubPendingId) {
+      setPendingRepositories([]);
+      setSelectedRepositories([]);
+      return;
+    }
+    if (!GITHUB_PENDING_ID.test(githubPendingId)) {
+      setError("The GitHub connection link is invalid or expired. Start again to reconnect.");
+      onGitHubPendingHandled();
+      return;
+    }
+    let cancelled = false;
+    setPendingRepositoriesLoading(true);
+    void (async () => {
+      try {
+        const response = await fetch(
+          `/v1/rooms/${encodeURIComponent(room.roomId)}/integrations/github/pending?pending_id=${encodeURIComponent(githubPendingId)}`,
+          { credentials: "same-origin", headers: { accept: "application/json" } },
+        );
+        if (!response.ok) throw new Error("The GitHub repository list is unavailable or expired.");
+        const value: unknown = await response.json();
+        const repositories =
+          typeof value === "object" && value !== null && "repositories" in value
+            ? (value as PendingGitHubRepositories).repositories
+            : undefined;
+        if (
+          !Array.isArray(repositories) ||
+          repositories.length === 0 ||
+          repositories.some(
+            (repository) =>
+              !repository ||
+              typeof repository.name !== "string" ||
+              !GITHUB_REPOSITORY.test(repository.name),
+          )
+        ) {
+          throw new Error("GitHub returned an invalid repository list.");
+        }
+        if (!cancelled) setPendingRepositories(repositories.map(({ name }) => name));
+      } catch (err) {
+        if (!cancelled) setError(errorText(err));
+      } finally {
+        if (!cancelled) setPendingRepositoriesLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [githubPendingId, onGitHubPendingHandled, room.roomId]);
 
   const loadBudgetControls = useCallback(async () => {
     setBudgetLoading(true);
@@ -340,8 +420,18 @@ export function OwnerControlsView(props: {
       if (event.type === "budget.exceeded") {
         void refreshBudgetStatus().catch((err: unknown) => setError(errorText(err)));
       }
+      if (event.type === "integration.connected" || event.type === "integration.disconnected") {
+        void refreshIntegrations().catch((err: unknown) => setError(errorText(err)));
+      }
     });
-  }, [loadBudgetControls, onEvent, refreshApprovals, refreshBudgetStatus, refreshCapabilities]);
+  }, [
+    loadBudgetControls,
+    onEvent,
+    refreshApprovals,
+    refreshBudgetStatus,
+    refreshCapabilities,
+    refreshIntegrations,
+  ]);
 
   useEffect(() => {
     void loadBudgetControls().catch((err: unknown) => setError(errorText(err)));
@@ -360,6 +450,39 @@ export function OwnerControlsView(props: {
     } finally {
       setBusy(false);
     }
+  };
+
+  const githubIntegration = integrations.find(({ provider }) => provider === "github");
+  const startGitHubInstall = () => {
+    window.location.assign(
+      `/v1/rooms/${encodeURIComponent(room.roomId)}/integrations/github/install`,
+    );
+  };
+  const connectGitHub = () => {
+    if (!githubPendingId || selectedRepositories.length === 0) return;
+    void perform("Connect GitHub", async () => {
+      await room.api.integrations.connect({
+        provider: "github",
+        pending_id: githubPendingId,
+        repositories: selectedRepositories,
+      });
+      await refreshIntegrations();
+      onGitHubPendingHandled();
+      setPendingRepositories([]);
+      setSelectedRepositories([]);
+    });
+  };
+  const verifyGitHub = () =>
+    void perform("Verify GitHub", async () => {
+      await room.api.integrations.verify({ provider: "github" });
+      await refreshIntegrations();
+    });
+  const disconnectGitHub = () => {
+    if (!window.confirm("Disconnect GitHub from this room?")) return;
+    void perform("Disconnect GitHub", async () => {
+      await room.api.integrations.disconnect({ provider: "github" });
+      await refreshIntegrations();
+    });
   };
 
   const remove = (participant: Participant) => {
@@ -591,6 +714,92 @@ export function OwnerControlsView(props: {
           {notice}
         </p>
       )}
+
+      <section aria-label="Integrations" data-testid="owner-integrations">
+        <h3>Integrations</h3>
+        <h4>GitHub</h4>
+        <p>
+          Status:{" "}
+          <strong data-testid="github-integration-status">
+            {githubIntegration?.status ?? "Not connected"}
+          </strong>
+          {githubIntegration?.status_reason ? ` · ${githubIntegration.status_reason}` : ""}
+        </p>
+        {Array.isArray(githubIntegration?.config?.["repositories"]) && (
+          <p data-testid="github-connected-repositories">
+            Repositories: {(githubIntegration.config["repositories"] as string[]).join(", ")}
+          </p>
+        )}
+        <button
+          type="button"
+          data-testid="github-connect"
+          disabled={busy}
+          onClick={startGitHubInstall}
+        >
+          Connect GitHub
+        </button>{" "}
+        {githubIntegration?.status === "CONNECTED" && (
+          <>
+            <button
+              type="button"
+              data-testid="github-verify"
+              disabled={busy}
+              onClick={verifyGitHub}
+            >
+              Verify
+            </button>{" "}
+            <button
+              type="button"
+              data-testid="github-disconnect"
+              disabled={busy}
+              onClick={disconnectGitHub}
+            >
+              Disconnect
+            </button>
+          </>
+        )}
+        {githubPendingId && (
+          <div data-testid="github-repository-picker">
+            <h4>Choose repositories</h4>
+            {pendingRepositoriesLoading ? (
+              <p className="muted">Loading repositories…</p>
+            ) : pendingRepositories.length === 0 ? (
+              <p className="muted">
+                No verified repositories are available. Start the connection again.
+              </p>
+            ) : (
+              <fieldset disabled={busy}>
+                <legend>Allow Crossover to use these repositories</legend>
+                {pendingRepositories.map((repository) => (
+                  <label key={repository}>
+                    <input
+                      type="checkbox"
+                      data-testid="github-repository-option"
+                      checked={selectedRepositories.includes(repository)}
+                      onChange={(event) =>
+                        setSelectedRepositories((selected) =>
+                          event.target.checked
+                            ? [...selected, repository]
+                            : selected.filter((name) => name !== repository),
+                        )
+                      }
+                    />
+                    {repository}
+                  </label>
+                ))}
+              </fieldset>
+            )}
+            <button
+              type="button"
+              data-testid="github-connect-selected"
+              disabled={busy || pendingRepositoriesLoading || selectedRepositories.length === 0}
+              onClick={connectGitHub}
+            >
+              Connect selected repositories
+            </button>
+          </div>
+        )}
+      </section>
 
       <section aria-label="Room lifecycle">
         <h3>Room lifecycle</h3>

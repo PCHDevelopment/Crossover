@@ -57,6 +57,24 @@ export class IntegrationCredentialBroker {
     };
   };
 
+  readonly verifyGitHubInstallation = async ({ installation_id }: { installation_id: string }) => {
+    const app = this.options.github;
+    if (!app || !/^[1-9]\d{0,15}$/.test(installation_id)) return { connected: false };
+    try {
+      const installation = await this.request(
+        `${API}/app/installations/${encodeURIComponent(installation_id)}`,
+        { headers: this.appHeaders(app) },
+      );
+      return {
+        connected:
+          installation.id === Number(installation_id) &&
+          (installation.suspended_at === null || installation.suspended_at === undefined),
+      };
+    } catch {
+      return { connected: false };
+    }
+  };
+
   readonly authorizeGitHubInstallation = async (input: {
     installation_id: number;
     code: string;

@@ -467,6 +467,9 @@ export async function composeServer(
       ...(overrides.integrations?.verifyAwsRole || !credentialBroker
         ? {}
         : { verifyAwsRole: credentialBroker.verifyAwsRole }),
+      ...(overrides.integrations?.verifyGitHubInstallation || !credentialBroker || !config.githubApp
+        ? {}
+        : { verifyGitHubInstallation: credentialBroker.verifyGitHubInstallation }),
       ...(overrides.integrations?.githubPendingConnections || !githubInstallStore
         ? {}
         : { githubPendingConnections: githubInstallStore }),

@@ -129,6 +129,33 @@ function broker(options: {
 }
 
 describe("IntegrationCredentialBroker", () => {
+  it("verifies a GitHub App installation without minting an installation token", async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const fetcher: typeof fetch = async (input, init) => {
+      const url = String(input);
+      requests.push({ url, ...(init ? { init } : {}) });
+      if (url.endsWith("/app/installations/41"))
+        return Response.json({ id: 41, suspended_at: null });
+      if (url.endsWith("/app/installations/42"))
+        return Response.json({ id: 42, suspended_at: "2026-10-01T00:00:00Z" });
+      throw new Error("Unexpected GitHub request");
+    };
+    const service = broker({ secret: {}, fetcher });
+
+    await expect(service.verifyGitHubInstallation({ installation_id: "41" })).resolves.toEqual({
+      connected: true,
+    });
+    await expect(service.verifyGitHubInstallation({ installation_id: "42" })).resolves.toEqual({
+      connected: false,
+    });
+    expect(requests.map(({ url }) => url)).toEqual([
+      "https://api.github.com/app/installations/41",
+      "https://api.github.com/app/installations/42",
+    ]);
+    expect(requests.every(({ init }) => init?.headers !== undefined)).toBe(true);
+    expect(requests.every(({ url }) => !url.includes("access_tokens"))).toBe(true);
+  });
+
   it("exchanges, verifies and revokes the GitHub OAuth token without retaining the code", async () => {
     const requests: Array<{ url: string; init?: RequestInit }> = [];
     const fetcher: typeof fetch = async (input, init) => {
