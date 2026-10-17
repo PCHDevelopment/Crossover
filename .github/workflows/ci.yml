@@ -139,6 +139,11 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # The main vitest run in two shards that run side by side; `check` needs the whole matrix.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ["1/2", "2/2"]
     services:
       postgres:
         image: postgres:16
@@ -170,6 +175,17 @@ jobs:
           node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # Vitest orders the files it runs longest-first from the timings of the last run. CI never kept
+      # them, so every run started its long files late. Each shard has its own file set and its own
+      # timings; a run falls back to the newest ones from its own branch, then from main. This only
+      # reorders files: which tests run does not depend on it.
+      - uses: actions/cache@v4
+        with:
+          path: node_modules/.vite/vitest
+          key: vitest-results-${{ github.ref_name }}-${{ strategy.job-index }}-${{ github.run_id }}
+          restore-keys: |
+            vitest-results-${{ github.ref_name }}-${{ strategy.job-index }}-
+            vitest-results-main-${{ strategy.job-index }}-
       - run: pnpm typecheck
       # workspace.search runs ripgrep. A pinned, checksum-verified binary needs no sudo, so it works
       # on any runner.
@@ -250,7 +266,7 @@ jobs:
           printf '%s\n' "$output" | node --input-type=module -e 'let input="";for await(const chunk of process.stdin)input+=chunk;const value=JSON.parse(input);if(value.error?.code!=="unavailable"||input.includes("fixture-token"))process.exit(1);'
       - run: docker run --rm --network none --entrypoint git crossover-git-fetcher:test --version
       - name: Test, including deployed server topology
-        run: pnpm exec vitest run --exclude apps/server/src/e2e/web.test.ts
+        run: pnpm exec vitest run --exclude apps/server/src/e2e/web.test.ts --shard=${{ matrix.shard }}
         env:
           CROSSOVER_SERVER_IMAGE: crossover-server:test
 
