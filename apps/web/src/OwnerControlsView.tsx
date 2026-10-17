@@ -466,10 +466,10 @@ export function OwnerControlsView(props: {
         pending_id: githubPendingId,
         repositories: selectedRepositories,
       });
-      await refreshIntegrations();
       onGitHubPendingHandled();
       setPendingRepositories([]);
       setSelectedRepositories([]);
+      await refreshIntegrations();
     });
   };
   const verifyGitHub = () =>
