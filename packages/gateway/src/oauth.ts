@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
-import { Redis } from "ioredis";
+import type { Redis } from "ioredis";
 import type { ProviderIdentity } from "@crossover/kernel";
+import { RedisBackedStore } from "./redis-store.js";
 
 export const OAUTH_STATE_TTL_MS = 10 * 60_000;
 
@@ -37,43 +38,14 @@ const stateKey = (state: string) =>
   `oauth:state:${createHash("sha256").update(state).digest("hex")}`;
 
 /** Redis-backed one-use OAuth transactions shared by all gateway replicas. */
-export class RedisOAuthStateStore implements OAuthStateStore {
-  private readonly redis: Redis;
-  private readonly ownsClient: boolean;
-
+export class RedisOAuthStateStore extends RedisBackedStore implements OAuthStateStore {
   constructor(source: string | Redis) {
-    if (typeof source === "string") {
-      this.redis = new Redis(source, {
-        enableOfflineQueue: false,
-        maxRetriesPerRequest: 1,
-        connectTimeout: 1_000,
-        commandTimeout: 500,
-        retryStrategy: (times: number) => Math.min(times * 200, 2_000),
-      } as never);
-      this.redis.on("error", () => {});
-      this.ownsClient = true;
-    } else {
-      this.redis = source;
-      this.ownsClient = false;
-    }
+    super(source);
   }
 
   /** Wait for Redis first, since the client intentionally has no offline queue. */
   async ready(timeoutMs = 5_000): Promise<void> {
-    if (this.redis.status !== "ready") {
-      await new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(() => {
-          this.redis.off("ready", onReady);
-          reject(new Error(`OAuth Redis not ready after ${timeoutMs} ms`));
-        }, timeoutMs);
-        const onReady = () => {
-          clearTimeout(timer);
-          resolve();
-        };
-        this.redis.once("ready", onReady);
-      });
-    }
-    await this.redis.ping();
+    await this.waitForRedis(timeoutMs, `OAuth Redis not ready after ${timeoutMs} ms`);
   }
 
   async save(state: string, value: OAuthState): Promise<void> {
@@ -104,6 +76,6 @@ export class RedisOAuthStateStore implements OAuthStateStore {
   }
 
   async close(): Promise<void> {
-    if (this.ownsClient) await this.redis.quit().catch(() => this.redis.disconnect());
+    await this.closeRedis();
   }
 }
