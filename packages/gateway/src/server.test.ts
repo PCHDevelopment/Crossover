@@ -934,6 +934,109 @@ describe("GitHub App installation", () => {
     ).rejects.toThrow(/browser sign-in \(OAuth or dev-login\)/);
   });
 
+  it("reports a fixed reason for invalid state and GitHub access denial", async () => {
+    const state = "s".repeat(43);
+    const stateStore: GitHubInstallStateStore = {
+      async saveState() {},
+      async consumeState(value) {
+        return value === state
+          ? { room_id: "room_fixture", owner_participant_id: "part_fixture" }
+          : undefined;
+      },
+    };
+    const pendingConnections: GitHubPendingConnectionStore = {
+      async save() {},
+      async peek() {
+        return undefined;
+      },
+      async consume() {
+        return undefined;
+      },
+      async restore() {
+        return false;
+      },
+    };
+    const s = await setup(undefined, true, {
+      githubAppInstall: {
+        slug: "crossover-github",
+        stateStore,
+        pendingConnections,
+        authorizeInstallation: async () => [],
+      },
+    });
+
+    const invalid = await s.app.inject({
+      method: "GET",
+      url: "/v1/auth/github-app/callback?state=bad",
+    });
+    expect(invalid.statusCode).toBe(303);
+    expect(invalid.headers.location).toBe("/?github_install=failed&github_install_reason=invalid");
+
+    const denied = await s.app.inject({
+      method: "GET",
+      url: `/v1/auth/github-app/callback?state=${state}&error=access_denied&error_description=private-provider-text`,
+      headers: { cookie: `crossover_github_install_state_${state}=1` },
+    });
+    expect(denied.statusCode).toBe(303);
+    expect(denied.headers.location).toBe(
+      "/?github_install=failed&github_install_reason=access_denied",
+    );
+    expect(denied.headers.location).not.toContain("private-provider-text");
+    expect(denied.body).not.toContain("private-provider-text");
+  });
+
+  it("reports an unavailable reason when GitHub authorization throws", async () => {
+    const state = "u".repeat(43);
+    const transaction: { current?: GitHubInstallState } = {};
+    const s = await setup(undefined, true, {
+      githubAppInstall: {
+        slug: "crossover-github",
+        stateStore: {
+          async saveState() {},
+          async consumeState() {
+            return transaction.current;
+          },
+        },
+        pendingConnections: {
+          async save() {},
+          async peek() {
+            return undefined;
+          },
+          async consume() {
+            return undefined;
+          },
+          async restore() {
+            return false;
+          },
+        },
+        authorizeInstallation: async () => {
+          throw new Error("private provider failure detail");
+        },
+      },
+    });
+    const { rows } = await pool.query<{ id: string; user_id: string }>(
+      "SELECT id, user_id FROM participants WHERE room_id = $1 AND authority = 'OWNER' AND kind = 'HUMAN'",
+      [s.room],
+    );
+    const ownerId = rows[0]!.id;
+    transaction.current = { room_id: s.room, owner_participant_id: ownerId };
+    const session = await createUserSession(pool, rows[0]!.user_id);
+    const callback = await s.app.inject({
+      method: "GET",
+      url: `/v1/auth/github-app/callback?state=${state}&code=callback-code&installation_id=41`,
+      headers: {
+        cookie: `crossover_session=${session.session_token}; crossover_github_install_state_${state}=1`,
+      },
+    });
+
+    expect(callback.statusCode).toBe(303);
+    expect(callback.headers.location).toBe(
+      "/?github_install=failed&github_install_reason=unavailable",
+    );
+    expect(callback.headers.location).not.toContain("private provider failure detail");
+    expect(callback.body).not.toContain("private provider failure detail");
+  });
+
   it("requires a room owner, exchanges callback data server-side, and stores only a bound pending record", async () => {
     const states = new Map<string, GitHubInstallState>();
     const pending = new Map<string, GitHubPendingConnection>();
@@ -1107,9 +1210,35 @@ describe("GitHub App installation", () => {
       headers: { cookie: `${ownerCookie}; ${stateCookie}` },
     });
     expect(replay.statusCode).toBe(303);
-    expect(replay.headers.location).toBe("/?github_install=failed");
+    expect(replay.headers.location).toBe("/?github_install=failed&github_install_reason=invalid");
     expect(authorizeInstallation).toHaveBeenCalledOnce();
     expect(replay.body).not.toContain(code);
+
+    const inaccessibleStart = await s.app.inject({
+      method: "GET",
+      url: `/v1/rooms/${s.room}/integrations/github/install`,
+      headers: { cookie: ownerCookie, origin: "http://localhost" },
+    });
+    const inaccessibleState = new URL(inaccessibleStart.headers.location!).searchParams.get(
+      "state",
+    )!;
+    const inaccessibleCookieHeader = inaccessibleStart.headers["set-cookie"];
+    const inaccessibleStateCookie = (
+      Array.isArray(inaccessibleCookieHeader)
+        ? inaccessibleCookieHeader[0]
+        : inaccessibleCookieHeader
+    )!.split(";", 1)[0]!;
+    authorizeInstallation.mockResolvedValueOnce([]);
+    const inaccessible = await s.app.inject({
+      method: "GET",
+      url: `/v1/auth/github-app/callback?state=${inaccessibleState}&code=local-code&installation_id=41`,
+      headers: { cookie: `${ownerCookie}; ${inaccessibleStateCookie}` },
+    });
+    expect(inaccessible.statusCode).toBe(303);
+    expect(inaccessible.headers.location).toBe(
+      "/?github_install=failed&github_install_reason=invalid",
+    );
+    expect(inaccessible.body).not.toContain("Example/Service");
   });
 });
 
