@@ -1,5 +1,6 @@
 export * from "./errors.js";
 export * from "./oauth.js";
+export * from "./github-install.js";
 export * from "./server.js";
 export * from "./room-export.js";
 export * from "./static.js";

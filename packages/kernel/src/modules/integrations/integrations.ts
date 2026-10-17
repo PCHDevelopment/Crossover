@@ -6,6 +6,12 @@ import type { Dispatcher, PrepareContext } from "../../dispatcher.js";
 import type { EncryptedSecret, SecretStore } from "./secret-store.js";
 import { ensureRoomDataKey } from "./room-key.js";
 
+export type {
+  GitHubPendingConnection,
+  GitHubPendingConnectionStore,
+  GitHubPendingRepository,
+} from "./github-pending.js";
+
 const PROVIDER_PATTERN = /^(?:github|aws|oauth:[a-z][a-z0-9_]{1,31})$/;
 const ROLE_ARN_PATTERN =
   /^arn:(?:aws|aws-us-gov|aws-cn):iam::\d{12}:role\/[A-Za-z0-9+=,.@/_-]{1,512}$/;
