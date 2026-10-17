@@ -2,6 +2,27 @@
 
 Periodic big-picture reviews by O1: is the merged code building the product in ARCHITECTURE.md, in the right order? Newest first.
 
+## 2026-10-17 · Review 20 (20:20 UTC; 5 PRs merged since Review 19)
+
+**State.** Merged since Review 19: #370 (T1560), #372 (T1561), #374 (T1558), #376 (T1563), #375 (T1562). O1 reviewed each one before merging. CI on `main` was green through `b037fa6`; the run on `eed7842` (#375) was in progress at writing.
+
+- **Step 17 can now be done by hand.** Compose passes the GitHub App and integration-secret settings into the server (#372). An App configured without a secret store fails at startup. A failed install now tells the owner why: canceled, unavailable or invalid (#376). The runbook matches. Peter's hands-on run (#314) is unblocked.
+- **The pending GitHub connection survives a rolled-back write** (#370). This was CodeRabbit's finding on #351.
+- **One Redis command client and one subscriber per server** (#375), down from about 10 connections. The OAuth and GitHub-install stores share `RedisBackedStore`. Tests cover client identity, the scoped `CLIENT LIST` count and fanout routing on a shared subscriber.
+- **The egress-proxy test hang is fixed** (#374): the close listener now attaches first, and the participant is reset after every test.
+
+**On track?** Yes. No §30 step lacks code or a by-hand path. Peter's hands-on run (#314) is the remaining MVP gate.
+
+**Course corrections.**
+1. **S2:** #378 (T1565, `RedisRoomFanout.close()` on a borrowed client), then #377 (T1564, split `OwnerControlsView` after a plan).
+2. **Q1:** #365 (T1559, T1402 step-5 read race, treated as a product fix), #360 (T1557, e2e leaves containers), then #364/#353 timing runs once both are on `main`.
+3. **Merging on CodeRabbit:** keep requiring green CI on the exact head as well. On #375 CodeRabbit reported "low merge risk" while `web-e2e` was red. That red run did not reproduce (T1105a 10/10 on the branch and on `main`), but CodeRabbit never weighs CI.
+
+**Tech-debt register** (changes since Review 19):
+- Closed: the duplicated Redis store base (T1562) and the step-17 config path (T1561).
+- Added: T1565, fanout close semantics on a shared subscriber.
+- Unchanged: `OwnerControlsView.tsx` (T1564), `docker-execution-driver.ts` (T1550, post-MVP), T1509 (S1, inactive).
+
 ## 2026-10-17 · Review 19 (16:30 UTC; 19 PRs merged since Review 18)
 
 **State.** Merged since Review 18 (`26c675c`): #332, #337, #338, #339, #343, #344, #345, #346, #347, #348, #349, #350, #351, #354, #355, #359, #361, docs PRs #335 and #363. That is 49 files, +3,458/−420. No migrations were added; the latest is still `0034`. CI on `main` was green at `7d198ab` (#359); the run on `4f5d58f` (#351) was in progress at writing.
