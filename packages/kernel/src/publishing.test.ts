@@ -376,7 +376,7 @@ describe("RedisEventPublisher", () => {
 });
 
 describe("RedisRoomFanout on a shared subscriber", () => {
-  it("routes messages by channel and keeps the other fanout live after unsubscribe", async () => {
+  it("routes messages by channel and closes one fanout on a shared subscriber", async () => {
     const room = newId("room");
     const channelA = (roomId: string) => `test:fanout:a:${roomId}`;
     const channelB = (roomId: string) => `test:fanout:b:${roomId}`;
@@ -399,14 +399,20 @@ describe("RedisRoomFanout on a shared subscriber", () => {
       expect(receivedA).toEqual(["a1"]);
       expect(receivedB).toEqual(["b1"]);
 
-      await stopA();
+      await fanoutA.close();
       stopA = undefined;
+      await expect(fanoutA.subscribe(room, () => {})).rejects.toThrow(
+        "Cannot subscribe after RedisRoomFanout is closed",
+      );
       await publisher.publish(channelA(room), "a2");
       await publisher.publish(channelB(room), "b2");
       await expect.poll(() => receivedB.length).toBe(2);
       await sleep(100);
       expect(receivedA).toEqual(["a1"]);
       expect(receivedB).toEqual(["b1", "b2"]);
+      await expect(publisher.pubsub("CHANNELS", channelA(room))).resolves.not.toContain(
+        channelA(room),
+      );
     } finally {
       await stopA?.();
       await stopB?.();
