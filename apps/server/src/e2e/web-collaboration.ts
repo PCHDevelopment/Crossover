@@ -1,4 +1,4 @@
-import { DEFAULT_PROTECTED_PATHS } from "@crossover/workspace/protected-paths";
+import { DEFAULT_PROTECTED_PATHS } from "@crossover/protocol";
 import { CrossoverClient, type RoomClient } from "@crossover/sdk";
 import { manifest, type WebFixture } from "./web-fixture.js";
 import { refuseNextCommand } from "./web-refusal.js";

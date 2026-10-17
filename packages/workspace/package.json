@@ -7,10 +7,6 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
-    },
-    "./protected-paths": {
-      "types": "./dist/protected-paths.d.ts",
-      "default": "./dist/protected-paths.js"
     }
   },
   "dependencies": {

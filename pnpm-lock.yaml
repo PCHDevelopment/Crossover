@@ -115,9 +115,6 @@ importers:
       '@crossover/sdk':
         specifier: workspace:*
         version: link:../../packages/sdk
-      '@crossover/workspace':
-        specifier: workspace:*
-        version: link:../../packages/workspace
       monaco-editor:
         specifier: ^0.57.0
         version: 0.57.0
