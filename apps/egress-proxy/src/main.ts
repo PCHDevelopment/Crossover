@@ -55,7 +55,3 @@ main().catch((error: unknown) => {
   console.error("[egress-proxy] startup failed", error instanceof Error ? error.message : error);
   process.exit(1);
 });
-// T1554 CI probe 1
-// T1554 CI probe 2
-// T1554 CI probe 3
-// T1554 CI probe 4
