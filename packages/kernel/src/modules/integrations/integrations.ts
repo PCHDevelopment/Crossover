@@ -3,8 +3,15 @@ import type { Pool, PoolClient } from "@crossover/db";
 import { CrossoverError } from "@crossover/protocol";
 import { z } from "zod";
 import type { Dispatcher, PrepareContext } from "../../dispatcher.js";
+import type { GitHubPendingConnection, GitHubPendingConnectionStore } from "./github-pending.js";
 import type { EncryptedSecret, SecretStore } from "./secret-store.js";
 import { ensureRoomDataKey } from "./room-key.js";
+
+export type {
+  GitHubPendingConnection,
+  GitHubPendingConnectionStore,
+  GitHubPendingRepository,
+} from "./github-pending.js";
 
 const PROVIDER_PATTERN = /^(?:github|aws|oauth:[a-z][a-z0-9_]{1,31})$/;
 const ROLE_ARN_PATTERN =
