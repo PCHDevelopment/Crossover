@@ -81,7 +81,6 @@ export interface AwsRoleVerifier {
 export interface GitHubInstallationVerifier {
   (input: { installation_id: string }): Promise<{ connected: boolean }>;
 }
-
 export interface IntegrationCommandsOptions {
   /** Encrypts all provider secrets before the command opens its PostgreSQL transaction. */
   secretStore?: SecretStore;
@@ -293,12 +292,16 @@ export function registerIntegrationCommands(
       const installationId = row.configuration.installation_id;
       if (!installationId || !/^[1-9]\d{0,15}$/.test(installationId))
         throw new CrossoverError("PROVIDER_UNAVAILABLE", "Integration credential is unavailable");
-      const connected = await options
-        .verifyGitHubInstallation({ installation_id: installationId })
-        .then(
-          (result) => result.connected,
-          () => false,
-        );
+      let connected: boolean;
+      try {
+        connected = (await options.verifyGitHubInstallation({ installation_id: installationId }))
+          .connected;
+      } catch (cause) {
+        throw new CrossoverError("PROVIDER_UNAVAILABLE", "GitHub verification is unavailable", {
+          retryable: true,
+          cause,
+        });
+      }
       return { provider: "github" as const, connected, encrypted_secret: row.encrypted_secret };
     },
     execute: async (ctx) => {

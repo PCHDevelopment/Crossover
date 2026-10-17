@@ -25,12 +25,13 @@ permissions to **Contents: Read and write**, **Pull requests: Read and write**, 
 No webhook permissions or events are needed for this flow.
 
 Set the App's **Callback URL** to
-`https://<PUBLIC_BASE_URL>/v1/auth/github-app/callback`, then enable **Request user authorization
+`<PUBLIC_ORIGIN>/v1/auth/github-app/callback` (for this local demo, `http://localhost:5173`, the
+web UI origin that proxies `/v1`), then enable **Request user authorization
 (OAuth) during installation**. GitHub disables the separate **Setup URL** field while that option is
 enabled, so leave it blank; the callback verifies the installation, fetches its repositories, and
 returns the owner to the room's repository picker ([callback URL docs](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/about-the-user-authorization-callback-url),
 [setup URL docs](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/about-the-setup-url)). The room-specific install start URL is
-`https://<PUBLIC_BASE_URL>/v1/rooms/<ROOM_ID>/integrations/github/install`; owners launch it with
+`<PUBLIC_ORIGIN>/v1/rooms/<ROOM_ID>/integrations/github/install`; owners launch it with
 **Owner controls → Integrations → Connect GitHub**. Do not configure that per-room URL as the App's
 Setup URL.
 

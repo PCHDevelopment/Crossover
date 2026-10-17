@@ -466,10 +466,10 @@ export function OwnerControlsView(props: {
         pending_id: githubPendingId,
         repositories: selectedRepositories,
       });
-      await refreshIntegrations();
       onGitHubPendingHandled();
       setPendingRepositories([]);
       setSelectedRepositories([]);
+      await refreshIntegrations();
     });
   };
   const verifyGitHub = () =>
@@ -748,15 +748,17 @@ export function OwnerControlsView(props: {
             >
               Verify
             </button>{" "}
-            <button
-              type="button"
-              data-testid="github-disconnect"
-              disabled={busy}
-              onClick={disconnectGitHub}
-            >
-              Disconnect
-            </button>
           </>
+        )}
+        {githubIntegration && (
+          <button
+            type="button"
+            data-testid="github-disconnect"
+            disabled={busy}
+            onClick={disconnectGitHub}
+          >
+            Disconnect
+          </button>
         )}
         {githubPendingId && (
           <div data-testid="github-repository-picker">
