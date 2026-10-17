@@ -270,7 +270,7 @@ describe("room integration commands", () => {
     const pending = pendingConnectionStore();
     const roomA = await setup(testSecretStore, { githubPendingConnections: pending.store });
     const roomB = await setup(testSecretStore, { githubPendingConnections: pending.store });
-    const sharedUserId = newId("user");
+    const sharedUserId = newId("usr");
     await pool.query(
       `INSERT INTO users (id, display_name, provider, provider_subject)
        VALUES ($1, 'Shared owner', 'test', $2)`,
