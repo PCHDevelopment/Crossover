@@ -2,6 +2,60 @@
 
 Periodic big-picture reviews by O1: is the merged code building the product in ARCHITECTURE.md, in the right order? Newest first.
 
+## 2026-10-16 · Review 18 (12:25 UTC; 13 PRs merged since Review 17)
+
+**State.** #307–#310, #287 and #317–#322 merged, plus docs PRs #298 and #316. CI was green on each head and on main afterwards (`59151b9`).
+
+- **T1525 is done (#287).** `dispatcher.ts` went from 1,793 lines to 228. The refactor check compared 23 declarations in part 3, and none differ. The package exports are unchanged.
+- **T1529 is done (#317–#322).** Q1 measured all 118 heavy tests. Every budget comment now carries real idle and 3×-load numbers.
+- **T1536–T1539 are done.** These were the three timing-hardening tasks from Review 17, plus the plugin-runner cleanup diagnostics and the egress and health-runner budgets.
+- **Infrastructure.** The repo moved to the PCHDevelopment org. CI now runs on GitHub-hosted `ubuntu-latest` (`417e18a`), so the single self-hosted runner is no longer a bottleneck.
+
+**Against §29 and §30.** The §29 scope is merged. Peter decided on #313 that **§30 step 17 (export to a PR) is in the MVP**, so T1545 (#327) is now the one MVP-critical feature left. He also approved MCP tools for owner and lead actions: T1544 (#326), without grant tools, because only humans hold that power (D8). The hands-on demo run (#314) is still not done.
+
+**What went well.**
+
+- Q1 delivered T1529 as six per-package PRs, each one easy to verify. The script check of all 112 comments found no budget errors.
+- S2's diagnosis in #332 (T1540) found three real UI bugs behind one flaky e2e test.
+
+**What needs correcting.**
+
+1. **Fix the product, not the test.** #332 hid its bugs with `page.reload()` calls instead of fixing them. #315's rule stands: a product cause gets a product fix and a regression test.
+2. **A new intermittent failure.** The nightly run on `e668ba3` failed once in `upstream-pull.test.ts`, with a missing git object in the fixture clone. The likely cause is a local `clone --bare` racing git's background auto-gc. Filed as T1549 (#336).
+3. **Throughput.** Neither engineer has posted since about 05:20. Each has a full queue, so the gap is responsiveness, not missing work.
+
+**Course corrections.**
+
+1. **S2:**
+   1. Finish #332's product fixes.
+   2. Then T1545 (#327), plan first. It is MVP-critical.
+   3. Then T1543 (#325), whose plan is approved.
+2. **Q1:**
+   1. T1541 (#323) and T1542 (#324).
+   2. T1549 (#336).
+   3. T1544 (#326).
+   4. T1546 (#329), T1548 (#334) and T1547 (#333).
+3. **For Peter:**
+   - Merge docs PR #335.
+   - Do the hands-on run (#314).
+   - Register the GitHub App once S2's T1545 runbook section lands.
+
+**Tech-debt register, closed:** `dispatcher.ts` size (T1525); the flaky timing tests (T1536, T1529).
+
+**Still open:**
+
+- The Rego and TypeScript string-length difference.
+- `RedisOAuthStateStore` opens its own Redis connection (#323).
+- dev-login `session_token`.
+- The web app imports `@crossover/workspace/protected-paths` (#324).
+- The purge's hand-kept delete order (#325).
+
+**New:**
+
+- `OwnerControlsView` (1,129 lines) overwrites fields the user has edited when a load arrives (#332).
+- The upstream fixture clone race (#336).
+- `docker-execution-driver.ts` is the largest source file at 1,742 lines. Split it by concern after the MVP, as T1526 did for `execution.ts`.
+
 ## 2026-10-14 · Review 17 (00:20 UTC; 6 PRs merged since Review 16)
 
 **State.** #301–#306 merged, all from S2, each with CI green on its head. Every one matched its spec on the first review.

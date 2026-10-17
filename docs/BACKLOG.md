@@ -1693,7 +1693,7 @@ In #279, S1 found that the bug also left a gap in the circuit breaker's protecte
 
 From Reviews 13 and 14. `packages/gateway/src/server.ts` is 676 lines, and the export route (about 110 lines) is inline. Move it next to `room-export.ts` and register it from `server.ts`, as was done for `execution.ts`. Behaviour must not change: existing tests pass unchanged, and the diff moves code rather than rewriting it. Document beside the endpoint that exports refuse with `UNAVAILABLE` when Redis is down.
 
-### T1525 · Split kernel dispatcher.ts by command family — S2 (moved from S1 on 2026-10-16)
+### T1525 · Split kernel dispatcher.ts by command family — S2 (moved from S1 on 2026-10-16) · done
 
 From the tech-debt register (Reviews 11–14). `packages/kernel/src/dispatcher.ts` is 1,793 lines and every new command adds to it. Move the handlers into modules by command family (tasks, messages, decisions, memory, workspace and so on), keeping registration, the transaction wrapper and authorization in `dispatcher.ts`. Behaviour must not change: existing tests pass unchanged, and the diff moves code rather than rewriting it, as in T1518 and T1524. Post the module split before writing code, and ship it as more than one PR if any one PR would be over 400 non-test lines.
 
@@ -1711,7 +1711,7 @@ From the tech-debt register. T1518 (#253) moved compute sampling out, but `packa
 
 Step 1: put the exit code, whether the call timed out, and the first 500 bytes of stderr in the cleanup error (and in the network path). Step 2: on the next capture, root-cause it. Also check whether the test's sweep can see containers that belong to other Docker test files running in parallel, and scope it to its own label value if it can. A failed cleanup of real containers is a product bug until shown otherwise.
 
-### T1529 · Audit heavy tests for measured timeouts — Q1
+### T1529 · Audit heavy tests for measured timeouts — Q1 · done
 
 Review 15's rule: a test that takes over 2 s gets an explicit timeout with its measurements in a comment. Older tests on vitest's 5 s default have failed unrelated PRs (T1510, T1517, T1522, T1527). Do exactly these steps, and post the results of step 3 before any code.
 
@@ -1862,7 +1862,10 @@ From 2026-10-16, new task specs live on their GitHub issue. Each line below name
 - **T1541** · `RedisOAuthStateStore` fails fast and accepts a shared client — Q1 · #323
 - **T1542** · Move `DEFAULT_PROTECTED_PATHS` to `@crossover/protocol` — Q1 · #324
 - **T1543** · Purge: derive the delete order from the schema (plan first) — S2 · #325
-- **T1544** · MCP owner tools: checkpoints, roles, pause and grants — S2, blocked on Peter (#313) · #326
-- **T1545** · §30 step 17: GitHub App connection for export to a PR — S2, blocked on Peter (#313) · #327
+- **T1544** · MCP owner/lead tools: checkpoints, roles, pause/resume (no grant tools: only humans hold that power, D8) — Q1 (moved from S2; Peter approved 2026-10-16) · #326
+- **T1545** · §30 step 17: connect a GitHub App installation so export opens a PR — S2; in the MVP (Peter, 2026-10-16); plan first · #327
 - **T1546** · health-runner tests: raise the 30 s Docker case timeout to the measured budget — Q1 · #329
 - **T1532** · Remote sandbox-host driver: O1 scopes it into a milestone; not scheduled · #328
+- **T1547** · Rename the Go CLI module path to `github.com/PCHDevelopment/Crossover` — Q1 · #333
+- **T1548** · Measured budget for the docker-execution-driver soft-mode sandbox test — Q1 · #334
+- **T1549** · Upstream test fixtures clone with `--no-local` and no background gc (nightly flake, Review 18) — Q1 · #336
