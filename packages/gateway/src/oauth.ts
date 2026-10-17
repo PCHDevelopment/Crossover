@@ -39,13 +39,40 @@ const stateKey = (state: string) =>
 /** Redis-backed one-use OAuth transactions shared by all gateway replicas. */
 export class RedisOAuthStateStore implements OAuthStateStore {
   private readonly redis: Redis;
+  private readonly ownsClient: boolean;
 
-  constructor(url: string) {
-    this.redis = new Redis(url, { maxRetriesPerRequest: 1 });
-    this.redis.on("error", () => {});
+  constructor(source: string | Redis) {
+    if (typeof source === "string") {
+      this.redis = new Redis(source, {
+        enableOfflineQueue: false,
+        maxRetriesPerRequest: 1,
+        connectTimeout: 1_000,
+        commandTimeout: 500,
+        retryStrategy: (times: number) => Math.min(times * 200, 2_000),
+      } as never);
+      this.redis.on("error", () => {});
+      this.ownsClient = true;
+    } else {
+      this.redis = source;
+      this.ownsClient = false;
+    }
   }
 
-  async ready(): Promise<void> {
+  /** Wait for Redis first, since the client intentionally has no offline queue. */
+  async ready(timeoutMs = 5_000): Promise<void> {
+    if (this.redis.status !== "ready") {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          this.redis.off("ready", onReady);
+          reject(new Error(`OAuth Redis not ready after ${timeoutMs} ms`));
+        }, timeoutMs);
+        const onReady = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+        this.redis.once("ready", onReady);
+      });
+    }
     await this.redis.ping();
   }
 
@@ -77,6 +104,6 @@ export class RedisOAuthStateStore implements OAuthStateStore {
   }
 
   async close(): Promise<void> {
-    this.redis.disconnect();
+    if (this.ownsClient) await this.redis.quit().catch(() => this.redis.disconnect());
   }
 }
