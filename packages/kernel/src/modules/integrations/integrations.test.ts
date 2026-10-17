@@ -122,6 +122,20 @@ function pendingConnectionStore(initial?: GitHubPendingConnection) {
       available = false;
       return value;
     }),
+    restore: vi.fn(async (pendingId, binding, restored) => {
+      if (
+        available ||
+        pendingId !== "p".repeat(43) ||
+        restored.room_id !== binding.room_id ||
+        restored.owner_participant_id !== binding.owner_participant_id ||
+        Date.parse(restored.expires_at) <= Date.now()
+      ) {
+        return false;
+      }
+      value = restored;
+      available = true;
+      return true;
+    }),
   };
   return { store, set: (next: GitHubPendingConnection) => (value = next) };
 }
@@ -418,6 +432,65 @@ describe("room integration commands", () => {
       config: { installation_id: "123456", repositories: ["example/service"] },
     });
     expect(pending.store.consume).toHaveBeenCalledOnce();
+  });
+
+  it("restores a consumed GitHub connection when the integration transaction rolls back", async () => {
+    const pending = pendingConnectionStore();
+    let failKeyWrite = true;
+    const retryableSecretStore: SecretStore = {
+      async seal(roomId, provider, plaintext, wrappedDataKey) {
+        const encrypted = await testSecretStore.seal(roomId, provider, plaintext, wrappedDataKey);
+        return {
+          ...encrypted,
+          wrapped_data_key: failKeyWrite ? "kms-wrapped-wrong" : (wrappedDataKey ?? null),
+        };
+      },
+      open: testSecretStore.open,
+    };
+    const f = await setup(retryableSecretStore, { githubPendingConnections: pending.store });
+    const record: GitHubPendingConnection = {
+      room_id: f.roomId,
+      owner_participant_id: f.owner.participant_id,
+      installation_id: "123456",
+      repositories: [{ name: "Example/Service", id: "8910" }],
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+    };
+    const binding = { room_id: f.roomId, owner_participant_id: f.owner.participant_id };
+    const pendingId = "p".repeat(43);
+    pending.set(record);
+    await pool.query(
+      `INSERT INTO integration_room_keys (room_id, key_strategy, wrapped_data_key)
+       VALUES ($1, 'KMS', 'kms-wrapped-existing')`,
+      [f.roomId],
+    );
+    const params = {
+      provider: "github",
+      pending_id: pendingId,
+      repositories: ["Example/Service"],
+    };
+
+    const firstAttempt = await dispatch(f, f.owner, "integrations.connect", params).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(firstAttempt).toMatchObject({
+      code: "CONFLICT_VERSION",
+      retryable: true,
+      details: { reason: "integration_key_changed" },
+    });
+    expect(pending.store.restore).toHaveBeenCalledWith(pendingId, binding, record);
+    expect(await pending.store.peek(pendingId, binding)).toEqual(record);
+
+    failKeyWrite = false;
+    const retry = await dispatch(f, f.owner, "integrations.connect", params);
+    expect(retry.response).toMatchObject({
+      provider: "github",
+      status: "CONNECTED",
+      config: { installation_id: "123456", repositories: ["example/service"] },
+    });
+    expect(pending.store.consume).toHaveBeenCalledTimes(2);
+    expect(pending.store.restore).toHaveBeenCalledOnce();
+    expect(await pending.store.peek(pendingId, binding)).toBeUndefined();
   });
 
   it("does not consume a GitHub pending record for a repository outside the verified list", async () => {

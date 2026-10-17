@@ -24,4 +24,10 @@ export interface GitHubPendingConnectionStore {
     pendingId: string,
     binding: { room_id: string; owner_participant_id: string },
   ): Promise<GitHubPendingConnection | undefined>;
+  /** Restore a consumed record after its database write rolls back, only if the key is still absent. */
+  restore(
+    pendingId: string,
+    binding: { room_id: string; owner_participant_id: string },
+    value: GitHubPendingConnection,
+  ): Promise<boolean>;
 }
