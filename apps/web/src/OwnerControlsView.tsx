@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import type { RoomClient, SdkEvent } from "@crossover/sdk";
 import { DEFAULT_PROTECTED_PATHS } from "@crossover/protocol";
+import { IntegrationsSection, type RoomIntegration } from "./owner-controls/integrations.js";
+import {
+  ParticipantAccessSection,
+  type AssignableRole,
+} from "./owner-controls/participant-access.js";
+import { RoomLifecycleSection } from "./owner-controls/room-lifecycle.js";
 import type { Participant } from "./model.js";
 
 type Settings = Record<string, unknown> | null;
@@ -28,8 +34,6 @@ interface Approval {
   expires_at: string;
 }
 
-type AssignableRole = Exclude<Participant["role"], "LEAD">;
-const ASSIGNABLE_ROLES: readonly AssignableRole[] = ["DEVELOPER", "REVIEWER", "OBSERVER"];
 const BUDGET_FIELDS = [
   { name: "commands", label: "Commands", window: "per minute", default: 120 },
   { name: "messages", label: "Messages", window: "per minute", default: 10 },
@@ -82,13 +86,6 @@ interface BudgetStatus {
     reserved_vcpu_hours: number;
   };
   agents: BudgetAgentStatus[];
-}
-
-interface RoomIntegration {
-  provider: string;
-  status: string;
-  status_reason: string | null;
-  config?: Record<string, unknown>;
 }
 
 interface PendingGitHubRepositories {
@@ -721,237 +718,47 @@ export function OwnerControlsView(props: {
         </p>
       )}
 
-      <section aria-label="Integrations" data-testid="owner-integrations">
-        <h3>Integrations</h3>
-        <h4>GitHub</h4>
-        <p>
-          Status:{" "}
-          <strong data-testid="github-integration-status">
-            {githubIntegration?.status ?? "Not connected"}
-          </strong>
-          {githubIntegration?.status_reason ? ` · ${githubIntegration.status_reason}` : ""}
-        </p>
-        {Array.isArray(githubIntegration?.config?.["repositories"]) && (
-          <p data-testid="github-connected-repositories">
-            Repositories: {(githubIntegration.config["repositories"] as string[]).join(", ")}
-          </p>
-        )}
-        <button
-          type="button"
-          data-testid="github-connect"
-          disabled={busy}
-          onClick={startGitHubInstall}
-        >
-          Connect GitHub
-        </button>{" "}
-        {githubIntegration?.status === "CONNECTED" && (
-          <>
-            <button
-              type="button"
-              data-testid="github-verify"
-              disabled={busy}
-              onClick={verifyGitHub}
-            >
-              Verify
-            </button>{" "}
-          </>
-        )}
-        {githubIntegration && (
-          <button
-            type="button"
-            data-testid="github-disconnect"
-            disabled={busy}
-            onClick={disconnectGitHub}
-          >
-            Disconnect
-          </button>
-        )}
-        {githubPendingId && (
-          <div data-testid="github-repository-picker">
-            <h4>Choose repositories</h4>
-            {pendingRepositoriesLoading ? (
-              <p className="muted">Loading repositories…</p>
-            ) : pendingRepositories.length === 0 ? (
-              <p className="muted">
-                No verified repositories are available. Start the connection again.
-              </p>
-            ) : (
-              <fieldset disabled={busy}>
-                <legend>Allow Crossover to use these repositories</legend>
-                {pendingRepositories.map((repository) => (
-                  <label key={repository}>
-                    <input
-                      type="checkbox"
-                      data-testid="github-repository-option"
-                      checked={selectedRepositories.includes(repository)}
-                      onChange={(event) =>
-                        setSelectedRepositories((selected) =>
-                          event.target.checked
-                            ? [...selected, repository]
-                            : selected.filter((name) => name !== repository),
-                        )
-                      }
-                    />
-                    {repository}
-                  </label>
-                ))}
-              </fieldset>
-            )}
-            <button
-              type="button"
-              data-testid="github-connect-selected"
-              disabled={busy || pendingRepositoriesLoading || selectedRepositories.length === 0}
-              onClick={connectGitHub}
-            >
-              Connect selected repositories
-            </button>
-          </div>
-        )}
-      </section>
+      <IntegrationsSection
+        busy={busy}
+        githubIntegration={githubIntegration}
+        githubPendingId={githubPendingId}
+        pendingRepositories={pendingRepositories}
+        selectedRepositories={selectedRepositories}
+        pendingRepositoriesLoading={pendingRepositoriesLoading}
+        setSelectedRepositories={setSelectedRepositories}
+        startGitHubInstall={startGitHubInstall}
+        verifyGitHub={verifyGitHub}
+        disconnectGitHub={disconnectGitHub}
+        connectGitHub={connectGitHub}
+      />
 
-      <section aria-label="Room lifecycle">
-        <h3>Room lifecycle</h3>
-        <p>
-          Room status: <strong data-testid="owner-room-status">{roomStatus}</strong>
-        </p>
-        {roomStatus === "ACTIVE" ? (
-          <button data-testid="freeze-room" disabled={busy} onClick={freeze}>
-            Freeze room
-          </button>
-        ) : roomStatus === "PAUSED" ? (
-          <button data-testid="resume-room" disabled={busy} onClick={resume}>
-            Resume room
-          </button>
-        ) : roomStatus === "ARCHIVED" ? (
-          <button data-testid="unarchive-room" disabled={busy} onClick={unarchive}>
-            Unarchive room
-          </button>
-        ) : (
-          <p className="muted">Lifecycle controls are unavailable for this room status.</p>
-        )}
-        {(roomStatus === "ACTIVE" || roomStatus === "PAUSED") && (
-          <button data-testid="archive-room" disabled={busy} onClick={archive}>
-            Archive room
-          </button>
-        )}
-        <form onSubmit={submitRetention}>
-          <label>
-            Retain archived room for
-            <select
-              data-testid="room-retention-days"
-              value={retentionDaysInput}
-              onChange={(event) => setRetentionDaysInput(event.target.value)}
-              disabled={busy}
-            >
-              {[30, 60, 90, 180, 365].map((days) => (
-                <option key={days} value={days}>
-                  {days} days
-                </option>
-              ))}
-              {![30, 60, 90, 180, 365].includes(retentionDays) && (
-                <option value={retentionDays}>{retentionDays} days (current)</option>
-              )}
-            </select>
-          </label>
-          <button
-            data-testid="save-room-retention"
-            disabled={busy || Number(retentionDaysInput) === retentionDays}
-          >
-            Save retention
-          </button>
-        </form>
-        {roomStatus === "ARCHIVED" && archivedAt && (
-          <p data-testid="room-retention-deadline">
-            Scheduled deletion:{" "}
-            {new Date(Date.parse(archivedAt) + retentionDays * 86_400_000).toLocaleString()}
-          </p>
-        )}
-      </section>
+      <RoomLifecycleSection
+        roomStatus={roomStatus}
+        retentionDays={retentionDays}
+        archivedAt={archivedAt}
+        retentionDaysInput={retentionDaysInput}
+        setRetentionDaysInput={setRetentionDaysInput}
+        busy={busy}
+        freeze={freeze}
+        resume={resume}
+        archive={archive}
+        unarchive={unarchive}
+        submitRetention={submitRetention}
+      />
 
-      <section aria-label="Participant access">
-        <h3>Change participant role</h3>
-        <label>
-          Participant
-          <select
-            data-testid="role-participant"
-            value={roleTargetId}
-            onChange={(event) => {
-              const id = event.target.value;
-              const participant = targets.find((item) => item.id === id);
-              setRoleTargetId(id);
-              setNextRole(
-                participant && participant.role !== "LEAD" ? participant.role : "DEVELOPER",
-              );
-            }}
-          >
-            <option value="">Choose a participant</option>
-            {targets.map((participant) => (
-              <option key={participant.id} value={participant.id}>
-                {participant.display_name}
-                {participant.id === selfId ? " (you)" : ""}
-              </option>
-            ))}
-          </select>
-        </label>
-        {roleTargetId &&
-        targets.find((participant) => participant.id === roleTargetId)?.role === "LEAD" ? (
-          <p className="muted" data-testid="role-lead-guidance">
-            Appoint another lead before changing this participant’s role.
-          </p>
-        ) : (
-          <form onSubmit={changeRole}>
-            <label>
-              New role
-              <select
-                data-testid="participant-role-value"
-                value={nextRole}
-                onChange={(event) => setNextRole(event.target.value as AssignableRole)}
-              >
-                {ASSIGNABLE_ROLES.map((role) => (
-                  <option key={role} value={role}>
-                    {role}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <button
-              data-testid="change-participant-role"
-              disabled={
-                busy ||
-                !roleTargetId ||
-                targets.find((item) => item.id === roleTargetId)?.role === nextRole
-              }
-            >
-              Change role
-            </button>
-          </form>
-        )}
-
-        <h3>Remove participant</h3>
-        <ul className="list">
-          {participants
-            .filter((participant) => participant.id !== selfId)
-            .map((participant) => (
-              <li key={participant.id} data-testid="owner-participant">
-                {participant.display_name}{" "}
-                <span className="muted">
-                  ({participant.role}, {participant.status})
-                </span>{" "}
-                {participant.id === leadParticipantId ? (
-                  <span className="muted">Appoint another lead before removal.</span>
-                ) : (
-                  <button
-                    data-testid="remove-participant"
-                    disabled={busy}
-                    onClick={() => remove(participant)}
-                  >
-                    Remove
-                  </button>
-                )}
-              </li>
-            ))}
-        </ul>
-      </section>
+      <ParticipantAccessSection
+        participants={participants}
+        targets={targets}
+        selfId={selfId}
+        leadParticipantId={leadParticipantId}
+        busy={busy}
+        roleTargetId={roleTargetId}
+        setRoleTargetId={setRoleTargetId}
+        nextRole={nextRole}
+        setNextRole={setNextRole}
+        changeRole={changeRole}
+        remove={remove}
+      />
 
       <section aria-label="Budgets">
         <h3>Agent budgets</h3>
