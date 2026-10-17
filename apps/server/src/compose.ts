@@ -179,8 +179,11 @@ export async function composeServer(
   overrides: ComposeOverrides = {},
 ): Promise<CrossoverServer> {
   const pool = overrides.pool ?? createPool(config.databaseUrl);
-  const redisClient = createRedisClient(config.redisUrl);
+  const redisClient = createRedisClient(config.redisUrl, {
+    connectionName: `crossover:${config.nodeId}`,
+  });
   const redisSubscriberClient = createRedisClient(config.redisUrl, {
+    connectionName: `crossover:${config.nodeId}`,
     retryStrategy: (times: number) => Math.min(times * 200, 2_000),
   });
   let publisher: EventPublisher;
@@ -648,7 +651,7 @@ export async function composeServer(
         await oauthStateStore?.close();
         await githubInstallStore?.close();
         await redisClient.quit().catch(() => redisClient.disconnect());
-        await redisSubscriberClient.quit().catch(() => redisSubscriberClient.disconnect());
+        redisSubscriberClient.disconnect();
         if (!overrides.pool) await pool.end();
       })());
 
@@ -675,7 +678,7 @@ export async function composeServer(
     await oauthStateStore?.close();
     await githubInstallStore?.close();
     await redisClient.quit().catch(() => redisClient.disconnect());
-    await redisSubscriberClient.quit().catch(() => redisSubscriberClient.disconnect());
+    redisSubscriberClient.disconnect();
     if (!overrides.pool) await pool.end();
     throw err;
   }

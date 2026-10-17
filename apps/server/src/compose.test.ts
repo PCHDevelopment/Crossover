@@ -2262,20 +2262,21 @@ describe("composeServer", () => {
     });
     const probe = createRedisClient(cfg.redisUrl);
     const countClients = async () =>
-      ((await probe.client("LIST")) as string).trim().split(/\r?\n/).filter(Boolean).length;
+      ((await probe.client("LIST")) as string)
+        .split(/\r?\n/)
+        .filter((line) => line.split(" ").includes(`name=crossover:${cfg.nodeId}`)).length;
     let server: CrossoverServer | undefined;
     try {
       if (probe.status !== "ready")
         await new Promise<void>((resolve) => probe.once("ready", resolve));
       await probe.ping();
-      const before = await countClients();
       server = await composeServer(cfg, { pool: db.pool });
-      let after = before;
-      for (let attempt = 0; attempt < 20 && after < before + 2; attempt++) {
+      let after = 0;
+      for (let attempt = 0; attempt < 20 && after !== 2; attempt++) {
         await new Promise((resolve) => setTimeout(resolve, 25));
         after = await countClients();
       }
-      expect(after - before).toBe(2);
+      expect(after).toBe(2);
     } finally {
       await server?.close();
       probe.disconnect();
