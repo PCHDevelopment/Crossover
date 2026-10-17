@@ -1879,17 +1879,25 @@ Change nothing else, and leave `DOCKER_CASE_TIMEOUT_MS` itself as it is.
 
 From 2026-10-16, new task specs live on their GitHub issue. Each line below names the owner and links the issue.
 
-- **T1540** · Intermittent web e2e failure: room budget save poll times out — S2 · #315
-- **T1541** · `RedisOAuthStateStore` fails fast and accepts a shared client — Q1 · #323
-- **T1542** · Move `DEFAULT_PROTECTED_PATHS` to `@crossover/protocol` — Q1 · #324
-- **T1543** · Purge: derive the delete order from the schema (plan first) — S2 · #325
-- **T1544** · MCP owner/lead tools: checkpoints, roles, pause/resume (no grant tools: only humans hold that power, D8) — Q1 (moved from S2; Peter approved 2026-10-16) · #326
-- **T1545** · §30 step 17: connect a GitHub App installation so export opens a PR — S2; in the MVP (Peter, 2026-10-16); plan first · #327
+- **T1540** · Intermittent web e2e failure: room budget save poll times out — S2 · #315 · done (#332)
+- **T1541** · `RedisOAuthStateStore` fails fast and accepts a shared client — Q1 · #323 · done (#338)
+- **T1542** · Move `DEFAULT_PROTECTED_PATHS` to `@crossover/protocol` — Q1 · #324 · done (#337)
+- **T1543** · Purge: derive the delete order from the schema (plan first) — S2 · #325 · done (#361)
+- **T1544** · MCP owner/lead tools: checkpoints, roles, pause/resume (no grant tools: only humans hold that power, D8) — Q1 (moved from S2; Peter approved 2026-10-16) · #326 · done (#343)
+- **T1545** · §30 step 17: connect a GitHub App installation so export opens a PR — S2; in the MVP (Peter, 2026-10-16); plan first · #327 · done (#347, #348, #349, #351)
 - **T1546** · health-runner tests: raise the 30 s Docker case timeout to the measured budget — Q1 · #329 · done (#339)
-- **T1532** · Remote sandbox-host driver: O1 scopes it into a milestone; not scheduled · #328
-- **T1547** · Rename the Go CLI module path to `github.com/PCHDevelopment/Crossover` — Q1 · #333
-- **T1548** · Measured budget for the docker-execution-driver soft-mode sandbox test — Q1 · #334
-- **T1549** · Upstream test fixtures clone with `--no-local` and no background gc (nightly flake, Review 18) — Q1 · #336
+- **T1532** · Remote sandbox-host driver: milestone added to this file (#363); implementation waits on Peter's answers on #328 · #328
+- **T1547** · Rename the Go CLI module path to `github.com/PCHDevelopment/Crossover` — Q1 · #333 · done (#345)
+- **T1548** · Measured budget for the docker-execution-driver soft-mode sandbox test — Q1 · #334 · done (#344)
+- **T1549** · Upstream test fixtures clone with `--no-local` and no background gc (nightly flake, Review 18) — Q1 · #336 · done (#354)
 - **T1550** · Split `docker-execution-driver.ts` by concern (plan first; post-MVP) — unassigned · #340
-- **T1551** · Policy: count capability length in code points in TypeScript, as Rego does (post-MVP) — unassigned · #341
-- **T1552** · dev-login: no `session_token` in the body for browser requests (post-MVP) — unassigned · #342
+- **T1551** · Policy: count capability length in code points in TypeScript, as Rego does (post-MVP) — Q1 · #341 · done (#346)
+- **T1552** · dev-login: no `session_token` in the body for browser requests (post-MVP) — Q1 · #342 · done (#350)
+- **T1553** · CI: run the check's independent parts as parallel jobs and cache the cold steps — Q1 · #352 · done (#355)
+- **T1554** · CI phase 2: shard the test job, keep vitest's duration cache, skip code jobs on docs-only PRs — Q1 · #353 · PR #364 (draft)
+- **T1555** · Dockerfiles: install dependencies before copying the source — Q1 · #357 · closed, not planned (saved ~1 s; see #358)
+- **T1556** · Web e2e times out intermittently in several steps — Q1 · #356 · done (#359)
+- **T1557** · Web e2e leaves sandbox containers (and volumes) behind on the host — Q1 · #360
+- **T1558** · Egress-proxy test can miss the tunnel's close event and leave the participant PAUSED — Q1 · #362
+- **T1559** · Web e2e flake: T1402 step 5 reads the memory mirror but the pane shows the decision file — Q1 · #365
+- **T1560** · `integrations.connect`: a failed DB write after `consume()` loses the pending GitHub connection (CodeRabbit on #351) — S2 · #366
