@@ -30,7 +30,8 @@ export interface ClientOptions {
 /** A user's session, from signing in. */
 export interface UserSession {
   user: { id: string; display_name: string };
-  session_token: string;
+  /** Absent for browser sign-ins when the server uses cookie auth: the session is in the cookie. */
+  session_token?: string;
   expires_at: string;
 }
 

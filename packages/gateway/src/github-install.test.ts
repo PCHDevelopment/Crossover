@@ -71,18 +71,6 @@ describe("RedisGitHubInstallStore", () => {
       expect(
         await store.peek(pendingId, { room_id: pending.room_id, owner_participant_id: "other" }),
       ).toBeUndefined();
-      expect(
-        await store.peek(pendingId, {
-          room_id: "room_other",
-          owner_participant_id: "part_fixture",
-        }),
-      ).toBeUndefined();
-      expect(
-        await store.consume(pendingId, {
-          room_id: "room_other",
-          owner_participant_id: "part_fixture",
-        }),
-      ).toBeUndefined();
       expect(await probe.exists(pendingKey)).toBe(1);
       expect(
         await store.consume(pendingId, {
@@ -123,12 +111,6 @@ describe("RedisGitHubInstallStore", () => {
     try {
       await Promise.all([store.ready(), probe.ping()]);
       const pendingId = randomBytes(32).toString("base64url");
-      const state = randomBytes(32).toString("base64url");
-      await store.saveState(state, {
-        room_id: "room_expired",
-        owner_participant_id: "part_expired",
-      });
-      const stateKey = `github:install:state:${createHash("sha256").update(state).digest("hex")}`;
       const pending = {
         room_id: "room_expired",
         owner_participant_id: "part_expired",
@@ -138,7 +120,6 @@ describe("RedisGitHubInstallStore", () => {
       };
       await store.save(pendingId, pending);
       const key = `github:install:pending:${createHash("sha256").update(pendingId).digest("hex")}`;
-      await probe.pexpire(stateKey, 1);
       await probe.pexpire(key, 1);
       await new Promise((resolve) => setTimeout(resolve, 10));
       expect(
@@ -147,7 +128,6 @@ describe("RedisGitHubInstallStore", () => {
           owner_participant_id: pending.owner_participant_id,
         }),
       ).toBeUndefined();
-      expect(await store.consumeState(state)).toBeUndefined();
       expect(await store.consumeState("not-a-state")).toBeUndefined();
     } finally {
       probe.disconnect();

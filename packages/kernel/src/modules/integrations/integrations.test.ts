@@ -317,6 +317,61 @@ describe("room integration commands", () => {
     });
   });
 
+  it("allows only one concurrent connect for a pending GitHub connection", async () => {
+    const pending = pendingConnectionStore();
+    const f = await setup(testSecretStore, { githubPendingConnections: pending.store });
+    const peek = pending.store.peek.bind(pending.store);
+    let peekCount = 0;
+    let releasePeeks!: () => void;
+    const bothPeeked = new Promise<void>((resolve) => {
+      releasePeeks = resolve;
+    });
+    pending.store.peek = vi.fn(async (pendingId, binding) => {
+      const record = await peek(pendingId, binding);
+      if (++peekCount === 2) releasePeeks();
+      await bothPeeked;
+      return record;
+    });
+    pending.set({
+      room_id: f.roomId,
+      owner_participant_id: f.owner.participant_id,
+      installation_id: "123456",
+      repositories: [{ name: "Example/Service", id: "8910" }],
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+    });
+
+    const outcomes = await Promise.allSettled([
+      dispatch(f, f.owner, "integrations.connect", {
+        provider: "github",
+        pending_id: "p".repeat(43),
+        repositories: ["Example/Service"],
+      }),
+      dispatch(f, f.owner, "integrations.connect", {
+        provider: "github",
+        pending_id: "p".repeat(43),
+        repositories: ["Example/Service"],
+      }),
+    ]);
+
+    const connected = outcomes.filter((outcome) => outcome.status === "fulfilled");
+    const refused = outcomes.filter((outcome) => outcome.status === "rejected");
+    expect(pending.store.peek).toHaveBeenCalledTimes(2);
+    expect(pending.store.consume).toHaveBeenCalledTimes(2);
+    expect(connected).toHaveLength(1);
+    expect(connected[0]).toMatchObject({
+      status: "fulfilled",
+      value: {
+        response: {
+          provider: "github",
+          status: "CONNECTED",
+          config: { installation_id: "123456", repositories: ["example/service"] },
+        },
+      },
+    });
+    expect(refused).toHaveLength(1);
+    expect(refused[0]).toMatchObject({ status: "rejected", reason: { code: "VALIDATION" } });
+  });
+
   it("does not consume a GitHub pending record for a repository outside the verified list", async () => {
     const pending = pendingConnectionStore();
     const g = await setup(testSecretStore, { githubPendingConnections: pending.store });
