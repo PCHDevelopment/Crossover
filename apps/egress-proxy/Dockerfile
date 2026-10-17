@@ -1,8 +1,12 @@
 FROM node:22-bookworm-slim AS build
 WORKDIR /repo
 RUN corepack enable
+# Fetch the dependencies from the lockfile alone, so this layer is cached until the lockfile changes.
+# `pnpm fetch` also links a node_modules; it is deleted so the install below creates it as it always did.
+COPY pnpm-lock.yaml pnpm-workspace.yaml package.json ./
+RUN pnpm fetch --frozen-lockfile && rm -rf node_modules
 COPY . .
-RUN pnpm install --frozen-lockfile
+RUN pnpm install --offline --frozen-lockfile
 RUN pnpm --filter @crossover/egress-proxy build
 
 FROM node:22-bookworm-slim

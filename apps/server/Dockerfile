@@ -2,8 +2,12 @@ FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18
 
 WORKDIR /repo
 RUN corepack enable
+# Fetch the dependencies from the lockfile alone, so this layer is cached until the lockfile changes.
+# `pnpm fetch` also links a node_modules; it is deleted so the install below creates it as it always did.
+COPY pnpm-lock.yaml pnpm-workspace.yaml package.json ./
+RUN pnpm fetch --frozen-lockfile && rm -rf node_modules
 COPY . .
-RUN pnpm install --frozen-lockfile \
+RUN pnpm install --offline --frozen-lockfile \
     && pnpm --filter @crossover/server... build \
     && pnpm --filter @crossover/server deploy --prod --legacy /prod/server
 RUN find /prod/server -type f \( -name '*.map' -o -name '*.tsbuildinfo' -o -name '*.test.js' -o -name '*.test.d.ts' \) -exec rm -f '{}' \; \
