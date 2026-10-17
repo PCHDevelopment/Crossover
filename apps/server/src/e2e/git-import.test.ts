@@ -1,4 +1,5 @@
 import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
+import { generateKeyPairSync } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTestDatabase, type TestDatabase } from "@crossover/db/testing";
@@ -19,7 +20,25 @@ let upstreamSha: string;
 let fetches = 0;
 let remoteDir: string;
 const pushed: string[] = [];
-const opened: string[] = [];
+const pullRequestPosts: Record<string, unknown>[] = [];
+const githubRequests: { url: string; method: string }[] = [];
+const githubCallbackCode = "e2e-github-callback-code-secret";
+const githubUserToken = "e2e-github-user-access-token-secret";
+const githubInstallationToken = "e2e-github-installation-token-secret";
+const githubClientSecret = "e2e-github-client-secret";
+const githubApp = {
+  appId: "12345",
+  slug: "crossover-fixture",
+  clientId: "e2e-client-id",
+  clientSecret: githubClientSecret,
+  privateKey: String(
+    generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({
+      type: "pkcs8",
+      format: "pem",
+    }),
+  ),
+};
+const originalFetch = globalThis.fetch;
 let serial = 0;
 const identity = {
   GIT_AUTHOR_NAME: "T",
@@ -44,6 +63,59 @@ const fetcher: UpstreamFetcher = {
 };
 
 beforeAll(async () => {
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(String(input));
+    const method = init?.method ?? "GET";
+    if (url.hostname === "github.com" || url.hostname === "api.github.com") {
+      githubRequests.push({ url: url.toString(), method });
+      if (url.hostname === "github.com" && url.pathname === "/login/oauth/access_token")
+        return Response.json({ access_token: githubUserToken });
+      if (url.hostname === "api.github.com" && url.pathname === "/user/installations")
+        return Response.json({ installations: [{ id: 41 }] });
+      if (
+        url.hostname === "api.github.com" &&
+        url.pathname === "/user/installations/41/repositories"
+      )
+        return Response.json({ repositories: [{ id: 9823, full_name: "acme/widgets" }] });
+      if (
+        url.hostname === "api.github.com" &&
+        url.pathname === "/applications/e2e-client-id/token" &&
+        method === "DELETE"
+      )
+        return new Response(null, { status: 204 });
+      if (
+        url.hostname === "api.github.com" &&
+        url.pathname === "/app/installations/41/access_tokens" &&
+        method === "POST"
+      )
+        return Response.json({
+          token: githubInstallationToken,
+          expires_at: new Date(Date.now() + 30 * 60_000).toISOString(),
+        });
+      if (
+        url.hostname === "api.github.com" &&
+        url.pathname === "/installation/token" &&
+        method === "DELETE"
+      )
+        return new Response(null, { status: 204 });
+      if (
+        url.hostname === "api.github.com" &&
+        url.pathname === "/repos/acme/widgets/pulls" &&
+        method === "GET"
+      )
+        return Response.json([]);
+      if (
+        url.hostname === "api.github.com" &&
+        url.pathname === "/repos/acme/widgets/pulls" &&
+        method === "POST"
+      ) {
+        pullRequestPosts.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        return Response.json({ number: 42 });
+      }
+      throw new Error(`Unexpected fake GitHub API request: ${method} ${url.pathname}`);
+    }
+    return originalFetch(input, init);
+  };
   db = await createTestDatabase();
   root = await mkdtemp(join(tmpdir(), "crossover-git-import-e2e-"));
   upstreamDir = await mkdtemp(join(tmpdir(), "crossover-e2e-upstream-"));
@@ -66,6 +138,8 @@ beforeAll(async () => {
     nodeId: `import-e2e-${process.pid}`,
     devLogin: true,
     healthImages: ["node:22-bookworm-slim"],
+    githubApp,
+    integrationSecretKey: Buffer.alloc(32, 7),
   };
   const publisher: EventPublisher = { publish: async () => undefined };
   server = await composeServer(config, {
@@ -74,12 +148,6 @@ beforeAll(async () => {
     upstream: {
       fetcher,
       resolve: async () => ["93.184.216.34"],
-      pullRequests: {
-        async create(request) {
-          opened.push(`${request.head} -> ${request.base}`);
-          return { url: "https://github.com/acme/widgets/pull/7", number: 7 };
-        },
-      },
       pusher: {
         async push(request) {
           pushed.push(request.branch);
@@ -95,6 +163,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await server?.close();
+  globalThis.fetch = originalFetch;
   await db?.drop();
   await Promise.all([root, upstreamDir].map((d) => d && rm(d, { recursive: true, force: true })));
 });
@@ -121,9 +190,16 @@ async function ok(res: Awaited<ReturnType<typeof post>>, status = 200) {
 }
 
 async function newRoom() {
-  const login = await ok(
-    await post("/v1/auth/dev-login", { subject: `imp-${newId("usr")}`, display_name: "Owner" }),
-  );
+  const loginResponse = await post("/v1/auth/dev-login", {
+    subject: `imp-${newId("usr")}`,
+    display_name: "Owner",
+  });
+  const login = await ok(loginResponse);
+  const cookieHeader = loginResponse.headers["set-cookie"];
+  const sessionCookie = (Array.isArray(cookieHeader) ? cookieHeader : [cookieHeader])
+    .find((cookie) => cookie?.startsWith("crossover_session="))
+    ?.split(";", 1)[0];
+  if (!sessionCookie) throw new Error("Dev login did not set the browser session cookie");
   const created = await ok(
     await post(
       "/v1/commands",
@@ -164,7 +240,110 @@ async function newRoom() {
   ).tokens.access_token as string;
   const call = (token: string, method: string, params: Record<string, unknown> = {}) =>
     post(`/v1/rooms/${roomId}/commands`, envelope(method, params), token);
-  return { roomId, owner, dev, call };
+  return { roomId, owner, dev, sessionCookie, call };
+}
+
+type ImportRoom = Awaited<ReturnType<typeof newRoom>>;
+
+async function installAndConnectGitHub(room: ImportRoom) {
+  const start = await server.app.inject({
+    method: "GET",
+    url: `/v1/rooms/${room.roomId}/integrations/github/install`,
+    headers: { cookie: room.sessionCookie, origin: "http://localhost" },
+  });
+  expect(start.statusCode).toBe(302);
+  const destination = new URL(start.headers.location!);
+  const state = destination.searchParams.get("state");
+  const stateCookieHeader = start.headers["set-cookie"];
+  const stateCookie = (Array.isArray(stateCookieHeader) ? stateCookieHeader : [stateCookieHeader])
+    .find((cookie) => cookie?.startsWith("crossover_github_install_state_"))
+    ?.split(";", 1)[0];
+  expect(state).toMatch(/^[A-Za-z0-9_-]{43}$/);
+  expect(stateCookie).toBe(`crossover_github_install_state_${state}=1`);
+
+  const callbackUrl = new URL("http://localhost/v1/auth/github-app/callback");
+  callbackUrl.searchParams.set("state", state!);
+  callbackUrl.searchParams.set("code", githubCallbackCode);
+  callbackUrl.searchParams.set("installation_id", "41");
+  const callback = await server.app.inject({
+    method: "GET",
+    url: callbackUrl.pathname + callbackUrl.search,
+    headers: { cookie: `${room.sessionCookie}; ${stateCookie}` },
+  });
+  expect(callback.statusCode).toBe(303);
+  expect(callback.headers.location).toMatch(
+    new RegExp(`^/rooms/${room.roomId}#github_pending=[A-Za-z0-9_-]{43}$`),
+  );
+  const pendingId = callback.headers.location!.split("github_pending=")[1]!;
+  const pendingResponse = await server.app.inject({
+    method: "GET",
+    url: `/v1/rooms/${room.roomId}/integrations/github/pending?pending_id=${pendingId}`,
+    headers: { cookie: room.sessionCookie, origin: "http://localhost" },
+  });
+  expect(pendingResponse.statusCode).toBe(200);
+  expect(pendingResponse.json()).toEqual({ repositories: [{ name: "acme/widgets" }] });
+
+  const connected = await room.call(room.owner, "integrations.connect", {
+    provider: "github",
+    pending_id: pendingId,
+    repositories: ["acme/widgets"],
+  });
+  expect(connected.statusCode).toBe(200);
+  expect(connected.json().response).toMatchObject({
+    provider: "github",
+    status: "CONNECTED",
+    config: { repositories: ["acme/widgets"] },
+  });
+  return { start, callback, pendingResponse, connect: connected };
+}
+
+function captureRuntimeLogs() {
+  const entries: string[] = [];
+  const consoleDescriptors = new Map<string, PropertyDescriptor>();
+  for (const name of Object.getOwnPropertyNames(console)) {
+    const descriptor = Object.getOwnPropertyDescriptor(console, name);
+    if (
+      !descriptor ||
+      typeof descriptor.value !== "function" ||
+      name.startsWith("_") ||
+      name === "Console"
+    )
+      continue;
+    consoleDescriptors.set(name, descriptor);
+    Object.defineProperty(console, name, {
+      ...descriptor,
+      value: (...args: unknown[]) =>
+        entries.push(
+          args
+            .map((value) => {
+              if (typeof value === "string") return value;
+              if (value instanceof Error)
+                return `${value.name}: ${value.message}\n${value.stack ?? ""}`;
+              try {
+                return JSON.stringify(value) ?? String(value);
+              } catch {
+                return String(value);
+              }
+            })
+            .join(" "),
+        ),
+    });
+  }
+  const warningDescriptor = Object.getOwnPropertyDescriptor(process, "emitWarning");
+  if (!warningDescriptor || typeof warningDescriptor.value !== "function")
+    throw new Error("process.emitWarning is not available");
+  Object.defineProperty(process, "emitWarning", {
+    ...warningDescriptor,
+    value: (...args: unknown[]) => entries.push(args.map(String).join(" ")),
+  });
+  return {
+    entries,
+    restore() {
+      for (const [name, descriptor] of consoleDescriptors)
+        Object.defineProperty(console, name, descriptor);
+      Object.defineProperty(process, "emitWarning", warningDescriptor);
+    },
+  };
 }
 
 describe("git.import over HTTP", () => {
@@ -369,34 +548,91 @@ describe("checkpoints.export over HTTP", () => {
 });
 
 describe("checkpoints.export with a pull request over HTTP", () => {
-  it("needs the github.create_pull_request capability: without it nothing is pushed; with it the URL comes back", async () => {
-    const r = await newRoom();
-    await ok(
-      await r.call(r.owner, "git.import", {
-        url: "https://github.com/acme/widgets",
-        branch: "main",
-      }),
-    );
-    await ok(await r.call(r.owner, "checkpoints.create", { message: "imported" }));
-    const before = pushed.length;
-    const denied = await r.call(r.owner, "checkpoints.export", { pull_request: {} });
-    expect(denied.statusCode).toBe(403);
-    expect(pushed.length).toBe(before);
-    expect(opened).toEqual([]);
+  it("installs GitHub, connects a verified repo, and opens a PR without leaking credentials", async () => {
+    const captured = captureRuntimeLogs();
+    try {
+      const r = await newRoom();
+      const installationFlow = await installAndConnectGitHub(r);
+      await ok(
+        await r.call(r.owner, "git.import", {
+          url: "https://github.com/acme/widgets",
+          branch: "main",
+        }),
+      );
+      await ok(await r.call(r.owner, "checkpoints.create", { message: "imported" }));
+      const before = pushed.length;
+      const pullRequestsBefore = pullRequestPosts.length;
+      const denied = await r.call(r.owner, "checkpoints.export", { pull_request: {} });
+      expect(denied.statusCode).toBe(403);
+      expect(pushed.length).toBe(before);
+      expect(pullRequestPosts).toHaveLength(pullRequestsBefore);
 
-    const ownerId = (await db.pool.query("SELECT owner_id FROM rooms WHERE id = $1", [r.roomId]))
-      .rows[0].owner_id as string;
-    await ok(
-      await r.call(r.owner, "capabilities.grant", {
-        participant_id: ownerId,
-        capability: "github.create_pull_request:acme/widgets",
-      }),
-    );
-    const out = await ok(await r.call(r.owner, "checkpoints.export", { pull_request: {} }));
-    expect(out.response.pull_request).toEqual({
-      url: "https://github.com/acme/widgets/pull/7",
-      number: 7,
-    });
-    expect(opened).toHaveLength(1);
+      const ownerId = (await db.pool.query("SELECT owner_id FROM rooms WHERE id = $1", [r.roomId]))
+        .rows[0].owner_id as string;
+      await ok(
+        await r.call(r.owner, "capabilities.grant", {
+          participant_id: ownerId,
+          capability: "github.create_pull_request:acme/widgets",
+        }),
+      );
+      const out = await ok(
+        await r.call(r.owner, "checkpoints.export", {
+          pull_request: { title: "T1545 installation export" },
+        }),
+      );
+      expect(out.response.pull_request).toEqual({
+        url: "https://github.com/acme/widgets/pull/42",
+        number: 42,
+      });
+      expect(pullRequestPosts).toHaveLength(pullRequestsBefore + 1);
+      const roomSlug = (
+        await db.pool.query<{ slug: string }>("SELECT slug FROM rooms WHERE id = $1", [r.roomId])
+      ).rows[0]!.slug;
+      expect(pullRequestPosts.at(-1)).toMatchObject({
+        head: `room/${roomSlug}`,
+        base: "main",
+        title: "T1545 installation export",
+      });
+      expect(pushed.slice(before)).toEqual([`room/${roomSlug}`]);
+      expect(
+        githubRequests.some(({ url }) => url.includes("/applications/e2e-client-id/token")),
+      ).toBe(true);
+      expect(githubRequests.some(({ url }) => url.includes("/installation/token"))).toBe(true);
+
+      const eventList = await ok(await r.call(r.owner, "room.events.list", { limit: 500 }));
+      const persisted = await db.pool.query(
+        "SELECT public_config, encrypted_secret FROM integrations WHERE room_id = $1",
+        [r.roomId],
+      );
+      const observable = JSON.stringify({
+        installStart: {
+          headers: installationFlow.start.headers,
+          body: installationFlow.start.body,
+        },
+        callback: {
+          headers: installationFlow.callback.headers,
+          body: installationFlow.callback.body,
+        },
+        repositories: {
+          headers: installationFlow.pendingResponse.headers,
+          body: installationFlow.pendingResponse.body,
+        },
+        connected: installationFlow.connect.json(),
+        exported: out,
+        events: eventList.response,
+        persisted: persisted.rows,
+      });
+      for (const secret of [
+        githubCallbackCode,
+        githubUserToken,
+        githubInstallationToken,
+        githubClientSecret,
+      ]) {
+        expect(observable).not.toContain(secret);
+        expect(captured.entries.join("\n")).not.toContain(secret);
+      }
+    } finally {
+      captured.restore();
+    }
   });
 });

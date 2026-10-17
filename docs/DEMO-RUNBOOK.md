@@ -10,13 +10,46 @@ format is at the end.
 
 ## Known limits before you start
 
-- **Step 17 (export and pull request):** this needs a GitHub App plus a credential integration, and
-  the integration has no web UI. In this run, create the checkpoint and skip the export. The
-  `room/<slug>` push and the pull request are not covered.
+- **Step 17 (export and pull request):** configure the GitHub App below before starting the stack.
+  The owner connects it in Owner controls; the lead needs a `github.create_pull_request:<owner/repo>`
+  capability grant to export a checkpoint as a pull request.
 - **No network in sandboxes or health checks:** without the egress proxy, `npm install` can't run.
   Use a repository with no dependencies (below).
 - **No MCP tools for some actions:** roles, pause, capability grants and checkpoints have no MCP
   tools. Do those in the web UI as the owner.
+
+## GitHub App setup for step 17
+
+Create a GitHub App under **Settings → Developer settings → GitHub Apps**. Set repository
+permissions to **Contents: Read and write**, **Pull requests: Read and write**, and **Metadata: Read-only**.
+No webhook permissions or events are needed for this flow.
+
+Set the App's **Callback URL** to
+`<PUBLIC_ORIGIN>/v1/auth/github-app/callback` (for this local demo, `http://localhost:5173`, the
+web UI origin that proxies `/v1`), then enable **Request user authorization
+(OAuth) during installation**. GitHub disables the separate **Setup URL** field while that option is
+enabled, so leave it blank; the callback verifies the installation, fetches its repositories, and
+returns the owner to the room's repository picker ([callback URL docs](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/about-the-user-authorization-callback-url),
+[setup URL docs](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/about-the-setup-url)). The room-specific install start URL is
+`<PUBLIC_ORIGIN>/v1/rooms/<ROOM_ID>/integrations/github/install`; owners launch it with
+**Owner controls → Integrations → Connect GitHub**. Do not configure that per-room URL as the App's
+Setup URL.
+
+Set the following values in the server's local `.env` before starting or restarting the stack:
+
+```dotenv
+GITHUB_APP_ID=<numeric App ID>
+GITHUB_APP_SLUG=<App slug from its GitHub URL>
+GITHUB_CLIENT_ID=<App client ID>
+GITHUB_CLIENT_SECRET=<App client secret>
+GITHUB_APP_PRIVATE_KEY=<App private key PEM>
+INTEGRATION_SECRET_KEY=<64 hex characters for local development>
+```
+
+Use KMS configuration for production instead of `INTEGRATION_SECRET_KEY`. Keep `.env` and the
+private key out of Git. The callback exchanges the one-time code on the server, confirms that the
+installation belongs to the authorizing GitHub user, lists repositories, and revokes the temporary
+user token before presenting the picker.
 
 ## 0. Prepare a demo repository (once)
 
@@ -125,22 +158,22 @@ cd clients/go && CGO_ENABLED=0 go build -buildvcs=false -o room ./cmd/room && su
 Give each Claude Code session a short role prompt ("You are ArchitectAgent, the room lead. Use the
 crossover MCP tools.") and ask for each step in plain words. The tool names are listed in brackets.
 
-| #   | Who / where              | Do                                                                                                                                                | Expect                                                                                   |
-| --- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| 4   | Peter, Setup             | Appoint ArchitectAgent as lead. Change your own role to Developer in Owner controls; if the UI refuses, note it.                                  | Lead badge on ArchitectAgent.                                                            |
-| 5   | Lead and agents          | Lead proposes "session tokens vs JWT" (`decisions_propose`); A and B add positions (`decisions_add_position`); lead decides (`decisions_decide`). | The decision under "Inbox, decisions & memory", mirrored to memory `decisions/…`.        |
-| 6   | Lead                     | Create four tasks with a reviewer (`tasks_create`), assign them (`tasks_assign`); A and B claim and start theirs (`tasks_claim`, `tasks_start`).  | Tasks tab shows the owners and states.                                                   |
-| 7   | Peter, Files; Agent A    | Open `auth.js`. Agent A sets an edit intent on lines 40–62 of `auth.js` (`presence_set_intent`).                                                  | The intent is marked in your editor.                                                     |
-| 8   | A and B                  | Edit in their sandboxes (`sandbox_write_file`, `sandbox_exec` running `node --test`).                                                             | A sandbox container appears (`docker ps`); exec output streams.                          |
-| 9   | Peter, Files             | Edit a different part of `auth.js`, e.g. rename a helper that `routes.js` uses.                                                                   | Your draft flushes within seconds; agents can read it.                                   |
-| 10  | Agent A                  | `sandbox_sync`, then `submit_changes`.                                                                                                            | A clean merge; the diff shows in Changes.                                                |
-| 11  | Agent C                  | Ask C to apply an overlapping change from a stale base on purpose (`apply_changeset` with an old base revision).                                  | A CONFLICT, sent to C.                                                                   |
-| 12  | C, then lead             | C syncs and tries twice to resolve it with stale content; then the lead resolves it (`apply_changeset`, source RESOLUTION).                       | It escalates to the lead's inbox and is then resolved.                                   |
-| 13  | Agent B                  | B uses the helper Peter renamed.                                                                                                                  | Health turns RED; B gets an inbox item (`inbox_list`), fixes it, and health turns GREEN. |
-| 14  | Agent B                  | `tools_invoke` with `aws.deploy_lambda` and function `prod-api`.                                                                                  | Denied; the denial shows in Activity.                                                    |
-| 15  | Peter, Overview          | Pause Agent C, try an action as C, then resume.                                                                                                   | C's action is refused while paused.                                                      |
-| 16  | A/B, then lead           | `tasks_submit` with evidence; the lead approves (`tasks_review`, approve).                                                                        | Tasks done; health GREEN.                                                                |
-| 17  | Peter, "Review & export" | Create a checkpoint. Skip export and PR in this run.                                                                                              | A checkpoint on the green head.                                                          |
+| #   | Who / where                      | Do                                                                                                                                                                                                                                     | Expect                                                                                   |
+| --- | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| 4   | Peter, Setup                     | Appoint ArchitectAgent as lead. Change your own role to Developer in Owner controls; if the UI refuses, note it.                                                                                                                       | Lead badge on ArchitectAgent.                                                            |
+| 5   | Lead and agents                  | Lead proposes "session tokens vs JWT" (`decisions_propose`); A and B add positions (`decisions_add_position`); lead decides (`decisions_decide`).                                                                                      | The decision under "Inbox, decisions & memory", mirrored to memory `decisions/…`.        |
+| 6   | Lead                             | Create four tasks with a reviewer (`tasks_create`), assign them (`tasks_assign`); A and B claim and start theirs (`tasks_claim`, `tasks_start`).                                                                                       | Tasks tab shows the owners and states.                                                   |
+| 7   | Peter, Files; Agent A            | Open `auth.js`. Agent A sets an edit intent on lines 40–62 of `auth.js` (`presence_set_intent`).                                                                                                                                       | The intent is marked in your editor.                                                     |
+| 8   | A and B                          | Edit in their sandboxes (`sandbox_write_file`, `sandbox_exec` running `node --test`).                                                                                                                                                  | A sandbox container appears (`docker ps`); exec output streams.                          |
+| 9   | Peter, Files                     | Edit a different part of `auth.js`, e.g. rename a helper that `routes.js` uses.                                                                                                                                                        | Your draft flushes within seconds; agents can read it.                                   |
+| 10  | Agent A                          | `sandbox_sync`, then `submit_changes`.                                                                                                                                                                                                 | A clean merge; the diff shows in Changes.                                                |
+| 11  | Agent C                          | Ask C to apply an overlapping change from a stale base on purpose (`apply_changeset` with an old base revision).                                                                                                                       | A CONFLICT, sent to C.                                                                   |
+| 12  | C, then lead                     | C syncs and tries twice to resolve it with stale content; then the lead resolves it (`apply_changeset`, source RESOLUTION).                                                                                                            | It escalates to the lead's inbox and is then resolved.                                   |
+| 13  | Agent B                          | B uses the helper Peter renamed.                                                                                                                                                                                                       | Health turns RED; B gets an inbox item (`inbox_list`), fixes it, and health turns GREEN. |
+| 14  | Agent B                          | `tools_invoke` with `aws.deploy_lambda` and function `prod-api`.                                                                                                                                                                       | Denied; the denial shows in Activity.                                                    |
+| 15  | Peter, Overview                  | Pause Agent C, try an action as C, then resume.                                                                                                                                                                                        | C's action is refused while paused.                                                      |
+| 16  | A/B, then lead                   | `tasks_submit` with evidence; the lead approves (`tasks_review`, approve).                                                                                                                                                             | Tasks done; health GREEN.                                                                |
+| 17  | Peter, Owner controls, then lead | Connect the GitHub App, select the demo repository, and grant ArchitectAgent `github.create_pull_request:<owner/repo>` in Owner controls. Create a checkpoint, then have the lead call `checkpoints_export` with a pull-request title. | The checkpoint is pushed to `room/<slug>` and the pull request opens against `main`.     |
 
 ## 4. Log format
 
