@@ -193,7 +193,7 @@ describe("IntegrationCredentialBroker", () => {
     expect(requests.some(({ init }) => JSON.stringify(init).includes("one-time-code"))).toBe(true);
   });
 
-  it("revokes the GitHub user token when the selected installation is not user-authorized", async () => {
+  it("returns no repositories and revokes the token when the installation is not user-authorized", async () => {
     const requests: Array<{ url: string; init?: RequestInit }> = [];
     const fetcher: typeof fetch = async (input, init) => {
       const url = String(input);
@@ -210,7 +210,7 @@ describe("IntegrationCredentialBroker", () => {
 
     await expect(
       service.authorizeGitHubInstallation({ installation_id: 41, code: "one-time-code" }),
-    ).rejects.toThrow("Installation is not controlled by the authorizing user");
+    ).resolves.toEqual([]);
     expect(requests.some(({ url }) => url.includes("/repositories?"))).toBe(false);
     expect(requests.at(-1)?.init?.body).toContain("temporary-user-token");
   });
