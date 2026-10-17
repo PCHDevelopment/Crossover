@@ -350,10 +350,11 @@ export function OwnerControlsView(props: {
         void loadBudgetControls().catch((err: unknown) => setError(errorText(err)));
       }
       if (event.type === "budget.exceeded") {
-        void refreshBudgetStatus().catch((err: unknown) => setError(errorText(err)));
+        // Through the same load as every other read, so a newer read never discards the forms'.
+        void loadBudgetControls().catch((err: unknown) => setError(errorText(err)));
       }
     });
-  }, [loadBudgetControls, onEvent, refreshApprovals, refreshBudgetStatus, refreshCapabilities]);
+  }, [loadBudgetControls, onEvent, refreshApprovals, refreshCapabilities]);
 
   useEffect(() => {
     void loadBudgetControls().catch((err: unknown) => setError(errorText(err)));

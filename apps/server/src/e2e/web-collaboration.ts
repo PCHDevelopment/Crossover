@@ -12,6 +12,7 @@ import { expect, it } from "vitest";
  */
 async function holdBudgetReads(page: Page, agentId: string) {
   type Read = {
+    answered: boolean;
     sawLimit: number | undefined;
     release: () => void;
     delivered: Promise<void>;
@@ -26,6 +27,7 @@ async function holdBudgetReads(page: Page, agentId: string) {
     let release!: () => void;
     let delivered!: () => void;
     const read: Read = {
+      answered: false,
       sawLimit: undefined,
       release: () => release(),
       delivered: new Promise<void>((resolve) => (delivered = resolve)),
@@ -38,13 +40,24 @@ async function holdBudgetReads(page: Page, agentId: string) {
     };
     read.sawLimit = status.response?.agents?.find((agent) => agent.participant_id === agentId)
       ?.effective?.messages;
+    read.answered = true;
     await released;
     await route.fulfill({ response });
     delivered();
   });
   return {
     reads,
-    /** The read that saw this limit (the first one, if the page made several). */
+    /**
+     * The newest read, by the order the page started them: the last one, once every read started so
+     * far has been answered (and the page has had a moment to start any it was about to).
+     */
+    newest: async () => {
+      await expect.poll(() => reads.length > 0 && reads.every((read) => read.answered)).toBe(true);
+      await new Promise((done) => setTimeout(done, 250));
+      await expect.poll(() => reads.every((read) => read.answered)).toBe(true);
+      return reads[reads.length - 1]!;
+    },
+    /** The first read that saw this limit. */
     readSeeing: async (limit: number) => {
       await expect.poll(() => reads.some((read) => read.sawLimit === limit)).toBe(true);
       return reads.find((read) => read.sawLimit === limit)!;
@@ -587,7 +600,8 @@ export function registerWebCollaborationStart(fixture: WebFixture): void {
       await page.getByTestId("refresh-budgets").click();
       await hold.readSeeing(8);
       await setRoomMessages(9);
-      const newest = await hold.readSeeing(9);
+      const newest = await hold.newest();
+      expect(newest.sawLimit).toBe(9);
       const older = hold.reads.filter((read) => read !== newest);
       newest.release();
       await expect.poll(shownLimit).toContain("of 9 per minute");
@@ -604,7 +618,8 @@ export function registerWebCollaborationStart(fixture: WebFixture): void {
       await page.getByTestId("refresh-budgets").click();
       await hold.readSeeing(9);
       await setRoomMessages(10);
-      const newest = await hold.readSeeing(10);
+      const newest = await hold.newest();
+      expect(newest.sawLimit).toBe(10);
       const older = hold.reads.filter((read) => read !== newest);
       for (const read of older) read.release();
       await Promise.all(older.map((read) => read.delivered));

@@ -369,6 +369,11 @@ function registerWebDemoFlow(fixture: WebFixture): void {
           command: "printf 'agent-terminal-output-marker\\n'",
         });
         await page.getByTestId("tab-terminal").click();
+        // Each wait gets at most AGENT_OUTPUT_WAIT_MS and always ends 2 s before the step's own timer,
+        // so a timeout is reported by the wait that timed out, with the viewer's state.
+        const stepStarted = Date.now();
+        const waitBudget = () =>
+          Math.min(AGENT_OUTPUT_WAIT_MS, STEP_TIMEOUT_MS - 2_000 - (Date.now() - stepStarted));
         // The viewer's own state, so a timeout says whether it was connecting, reconnecting, in
         // error or finished, and what the error was.
         const viewerState = async () => ({
@@ -385,7 +390,7 @@ function registerWebDemoFlow(fixture: WebFixture): void {
             ...(await viewerState()),
           }),
           (observed) => observed.options === 1,
-          AGENT_OUTPUT_WAIT_MS,
+          waitBudget(),
         );
         // The viewer selects the first execution by itself as soon as it appears, and may already have
         // its output. Selecting it again fires a change event (a real browser fires none for the same
@@ -402,7 +407,7 @@ function registerWebDemoFlow(fixture: WebFixture): void {
             ...(await viewerState()),
           }),
           (observed) => observed.output?.includes("agent-terminal-output-marker") ?? false,
-          AGENT_OUTPUT_WAIT_MS,
+          waitBudget(),
         );
         const agentOutput = page.getByTestId("agent-output-panel");
         expect(await agentOutput.locator("input, textarea, button").count()).toBe(0);
