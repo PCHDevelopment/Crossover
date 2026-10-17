@@ -8,7 +8,7 @@ import {
   connect as tlsConnect,
   type Server as TlsServer,
 } from "node:tls";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createEgressProxyServer, type EgressLog, type EgressProxyOptions } from "./server.js";
 import { proxyAuthorization } from "./test-fixtures/auth.js";
 import { createProxyTestFixture, type ProxyTestFixture } from "./test-fixtures/database.js";
@@ -42,6 +42,13 @@ beforeAll(async () => {
   proxy = started.server;
   proxyPort = started.port;
 }, 60_000);
+
+// A test that fails or times out must not leave the participant PAUSED for the next one (T1558).
+afterEach(async () => {
+  await fixture.db.pool.query("UPDATE participants SET status = 'ACTIVE' WHERE id = $1", [
+    fixture.participantId,
+  ]);
+});
 
 beforeEach(() => {
   logs.length = 0;
@@ -215,24 +222,22 @@ describe("egress proxy transport", () => {
     await withProxy({ idleTimeoutMs: 2_000, maxTunnelLifetimeMs: 100 }, async (port) => {
       const tunnel = await requestConnectAt(port, "registry.npmjs.org:443");
       expect(tunnel.status).toBe(200);
+      // The proxy's lifetime timer (100 ms here) is already running: listen for the close before
+      // awaiting anything else, or a slow runner closes the socket before the listener exists and
+      // `once` never resolves (T1558).
+      const closed = once(tunnel.socket, "close");
       await fixture.db.pool.query("UPDATE participants SET status = 'PAUSED' WHERE id = $1", [
         fixture.participantId,
       ]);
-      try {
-        await once(tunnel.socket, "close");
-        expect(logs.at(-1)).toMatchObject({
-          sandbox_id: fixture.sandboxId,
-          allowed: true,
-          reason: "tunnel_lifetime_exceeded",
-        });
-        const reconnect = await requestConnectAt(port, "registry.npmjs.org:443");
-        expect(reconnect.status).toBe(403);
-        reconnect.socket.destroy();
-      } finally {
-        await fixture.db.pool.query("UPDATE participants SET status = 'ACTIVE' WHERE id = $1", [
-          fixture.participantId,
-        ]);
-      }
+      await closed;
+      expect(logs.at(-1)).toMatchObject({
+        sandbox_id: fixture.sandboxId,
+        allowed: true,
+        reason: "tunnel_lifetime_exceeded",
+      });
+      const reconnect = await requestConnectAt(port, "registry.npmjs.org:443");
+      expect(reconnect.status).toBe(403);
+      reconnect.socket.destroy();
     });
   });
 
