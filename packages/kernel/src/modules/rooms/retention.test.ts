@@ -5,7 +5,8 @@ import type { Principal } from "../../principal.js";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { registerRoomLifecycleCommands } from "./lifecycle.js";
 import { registerRoomRetentionCommands } from "./retention.js";
-import { ROOM_SCOPED_TABLES, RoomRetentionSweeper } from "./retention-sweeper.js";
+import { deriveRoomScopedDeleteOrder } from "./room-purge-order.js";
+import { RoomRetentionSweeper } from "./retention-sweeper.js";
 import { newId } from "@crossover/protocol";
 
 let db: TestDatabase;
@@ -230,7 +231,117 @@ describe("RoomRetentionSweeper", () => {
         ORDER BY columns.table_name`,
     );
 
-    expect(rows.map((row) => row.table_name)).toEqual(ROOM_SCOPED_TABLES);
+    const client = await pool.connect();
+    let runtimeOrder: string[];
+    try {
+      runtimeOrder = await deriveRoomScopedDeleteOrder(client);
+    } finally {
+      client.release();
+    }
+
+    expect([...runtimeOrder].sort()).toEqual(rows.map((row) => row.table_name));
+  });
+
+  it("deletes a new room table before its FK parent without adding it to the purger", async () => {
+    const tableName = "retention_purge_fk_chain";
+    await pool.query(`
+      CREATE TABLE public.${tableName} (
+        id text PRIMARY KEY,
+        room_id text NOT NULL REFERENCES rooms (id),
+        task_id text NOT NULL,
+        FOREIGN KEY (task_id, room_id) REFERENCES tasks (id, room_id)
+      )
+    `);
+    try {
+      const { dispatcher, roomId, ownerId } = await archivedRoom();
+      const taskId = newId("task");
+      await pool.query(
+        "INSERT INTO tasks (id, room_id, title, created_by) VALUES ($1, $2, 'FK chain', $3)",
+        [taskId, roomId, ownerId],
+      );
+      await pool.query(
+        `INSERT INTO public.${tableName} (id, room_id, task_id) VALUES ($1, $2, $3)`,
+        [newId("evt"), roomId, taskId],
+      );
+
+      const now = new Date();
+      await pool.query(
+        `UPDATE rooms SET retention_days = 30, archived_at = $2::timestamptz - interval '31 days'
+          WHERE id = $1`,
+        [roomId, now],
+      );
+      const onError = vi.fn();
+      const sweeper = new RoomRetentionSweeper({
+        pool,
+        dispatcher,
+        now: () => now,
+        purgeWorkspace: async () => {},
+        onError,
+      });
+
+      expect(await sweeper.tick()).toBe(1);
+      expect(onError).not.toHaveBeenCalled();
+      expect(
+        (await pool.query(`SELECT id FROM public.${tableName} WHERE room_id = $1`, [roomId])).rows,
+      ).toEqual([]);
+      expect((await pool.query("SELECT id FROM rooms WHERE id = $1", [roomId])).rows).toEqual([]);
+    } finally {
+      await pool.query(`DROP TABLE IF EXISTS public.${tableName}`);
+    }
+  });
+
+  it("fails loudly when a room table has an unhandled nullable self-FK cycle", async () => {
+    const tableName = "retention_purge_self_cycle";
+    await pool.query(`
+      CREATE TABLE public.${tableName} (
+        id text PRIMARY KEY,
+        room_id text NOT NULL REFERENCES rooms (id),
+        parent_id text,
+        FOREIGN KEY (parent_id) REFERENCES public.${tableName} (id)
+      )
+    `);
+    try {
+      const { dispatcher, roomId } = await archivedRoom();
+      await pool.query(
+        `INSERT INTO public.${tableName} (id, room_id) VALUES ('cycle-a', $1), ('cycle-b', $1)`,
+        [roomId],
+      );
+      await pool.query(
+        `UPDATE public.${tableName}
+            SET parent_id = CASE id WHEN 'cycle-a' THEN 'cycle-b' ELSE 'cycle-a' END
+          WHERE room_id = $1`,
+        [roomId],
+      );
+
+      const now = new Date();
+      await pool.query(
+        `UPDATE rooms SET retention_days = 30, archived_at = $2::timestamptz - interval '31 days'
+          WHERE id = $1`,
+        [roomId, now],
+      );
+      const onError = vi.fn();
+      const sweeper = new RoomRetentionSweeper({
+        pool,
+        dispatcher,
+        now: () => now,
+        purgeWorkspace: async () => {},
+        onError,
+      });
+
+      expect(await sweeper.tick()).toBe(0);
+      expect(onError).toHaveBeenCalledOnce();
+      expect(onError.mock.calls[0]?.[0]).toMatchObject({
+        message: expect.stringContaining(tableName),
+      });
+      expect((await pool.query("SELECT id FROM rooms WHERE id = $1", [roomId])).rows).toHaveLength(
+        1,
+      );
+      expect(
+        (await pool.query(`SELECT id FROM public.${tableName} WHERE room_id = $1`, [roomId])).rows,
+      ).toHaveLength(2);
+    } finally {
+      await pool.query(`DROP TABLE IF EXISTS public.${tableName}`);
+    }
   });
 
   it("sends one owner inbox notice at the seven-day boundary", async () => {
