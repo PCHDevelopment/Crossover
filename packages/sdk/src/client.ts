@@ -375,4 +375,3 @@ export class RoomClient {
     this.onClose(this);
   }
 }
-export const t1554TypeError: number = "not a number"; // THROWAWAY (T1554)
