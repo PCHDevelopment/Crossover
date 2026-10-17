@@ -1039,6 +1039,31 @@ describe("GitHub App installation", () => {
     expect(replay.headers.location).toBe("/?github_install=failed");
     expect(authorizeInstallation).toHaveBeenCalledOnce();
     expect(replay.body).not.toContain(code);
+
+    const expiredStart = await s.app.inject({
+      method: "GET",
+      url: `/v1/rooms/${s.room}/integrations/github/install`,
+      headers: { cookie: ownerCookie, origin: "http://localhost" },
+    });
+    const expiredState = new URL(expiredStart.headers.location!).searchParams.get("state")!;
+    const expiredCookieHeader = expiredStart.headers["set-cookie"];
+    const expiredCookie = (
+      Array.isArray(expiredCookieHeader) ? expiredCookieHeader : [expiredCookieHeader]
+    )[0]!.split(";", 1)[0]!;
+    states.delete(expiredState);
+    const expiredCallbackUrl = new URL("http://localhost/v1/auth/github-app/callback");
+    expiredCallbackUrl.searchParams.set("state", expiredState);
+    expiredCallbackUrl.searchParams.set("code", code);
+    expiredCallbackUrl.searchParams.set("installation_id", "41");
+    const expiredCallback = await s.app.inject({
+      method: "GET",
+      url: expiredCallbackUrl.pathname + expiredCallbackUrl.search,
+      headers: { cookie: `${ownerCookie}; ${expiredCookie}` },
+    });
+    expect(expiredCallback.statusCode).toBe(303);
+    expect(expiredCallback.headers.location).toBe("/?github_install=failed");
+    expect(expiredCallback.body).not.toContain(code);
+    expect(authorizeInstallation).toHaveBeenCalledOnce();
   });
 });
 
