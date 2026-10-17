@@ -372,6 +372,54 @@ describe("room integration commands", () => {
     expect(refused[0]).toMatchObject({ status: "rejected", reason: { code: "VALIDATION" } });
   });
 
+  it("keeps a pending GitHub connection available when secret sealing fails", async () => {
+    const pending = pendingConnectionStore();
+    let failSeal = true;
+    const retryableSecretStore: SecretStore = {
+      async seal(roomId, provider, plaintext, wrappedDataKey) {
+        if (failSeal) throw new Error("temporary KMS failure");
+        return testSecretStore.seal(roomId, provider, plaintext, wrappedDataKey);
+      },
+      open: testSecretStore.open,
+    };
+    const f = await setup(retryableSecretStore, { githubPendingConnections: pending.store });
+    const record: GitHubPendingConnection = {
+      room_id: f.roomId,
+      owner_participant_id: f.owner.participant_id,
+      installation_id: "123456",
+      repositories: [{ name: "Example/Service", id: "8910" }],
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+    };
+    pending.set(record);
+    const params = {
+      provider: "github",
+      pending_id: "p".repeat(43),
+      repositories: ["Example/Service"],
+    };
+
+    const firstAttempt = await dispatch(f, f.owner, "integrations.connect", params).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(firstAttempt).toMatchObject({ code: "PROVIDER_UNAVAILABLE" });
+    expect(pending.store.consume).not.toHaveBeenCalled();
+    expect(
+      await pending.store.peek("p".repeat(43), {
+        room_id: f.roomId,
+        owner_participant_id: f.owner.participant_id,
+      }),
+    ).toEqual(record);
+
+    failSeal = false;
+    const retry = await dispatch(f, f.owner, "integrations.connect", params);
+    expect(retry.response).toMatchObject({
+      provider: "github",
+      status: "CONNECTED",
+      config: { installation_id: "123456", repositories: ["example/service"] },
+    });
+    expect(pending.store.consume).toHaveBeenCalledOnce();
+  });
+
   it("does not consume a GitHub pending record for a repository outside the verified list", async () => {
     const pending = pendingConnectionStore();
     const g = await setup(testSecretStore, { githubPendingConnections: pending.store });
