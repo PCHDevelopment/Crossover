@@ -1864,8 +1864,11 @@ From 2026-10-16, new task specs live on their GitHub issue. Each line below name
 - **T1543** · Purge: derive the delete order from the schema (plan first) — S2 · #325
 - **T1544** · MCP owner/lead tools: checkpoints, roles, pause/resume (no grant tools: only humans hold that power, D8) — Q1 (moved from S2; Peter approved 2026-10-16) · #326
 - **T1545** · §30 step 17: connect a GitHub App installation so export opens a PR — S2; in the MVP (Peter, 2026-10-16); plan first · #327
-- **T1546** · health-runner tests: raise the 30 s Docker case timeout to the measured budget — Q1 · #329
+- **T1546** · health-runner tests: raise the 30 s Docker case timeout to the measured budget — Q1 · #329 · done (#339)
 - **T1532** · Remote sandbox-host driver: O1 scopes it into a milestone; not scheduled · #328
 - **T1547** · Rename the Go CLI module path to `github.com/PCHDevelopment/Crossover` — Q1 · #333
 - **T1548** · Measured budget for the docker-execution-driver soft-mode sandbox test — Q1 · #334
 - **T1549** · Upstream test fixtures clone with `--no-local` and no background gc (nightly flake, Review 18) — Q1 · #336
+- **T1550** · Split `docker-execution-driver.ts` by concern (plan first; post-MVP) — unassigned · #340
+- **T1551** · Policy: count capability length in code points in TypeScript, as Rego does (post-MVP) — unassigned · #341
+- **T1552** · dev-login: no `session_token` in the body for browser requests (post-MVP) — unassigned · #342
