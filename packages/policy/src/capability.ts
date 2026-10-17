@@ -1,5 +1,5 @@
 import { CrossoverError } from "@crossover/protocol";
-import { pathGlobMatch, plainGlobMatch } from "./glob.js";
+import { codePointLength, pathGlobMatch, plainGlobMatch } from "./glob.js";
 import { loadedPolicy } from "./engine.js";
 import type { Tier } from "./tiers.js";
 
@@ -34,7 +34,7 @@ function malformed(capability: unknown, reason: string): CrossoverError {
  */
 export function parseCapability(capability: string): ParsedCapability {
   if (typeof capability !== "string" || capability === "") throw malformed(capability, "empty");
-  if (capability.length > MAX_CAPABILITY_LENGTH) throw malformed(capability, "too long");
+  if (codePointLength(capability) > MAX_CAPABILITY_LENGTH) throw malformed(capability, "too long");
 
   const colon = capability.indexOf(":");
   const base = colon === -1 ? capability : capability.slice(0, colon);
@@ -120,7 +120,7 @@ export function tierOf(capability: string): Tier {
  * file name, unlike in a capability scope.)
  */
 export function isSafeRequestPath(path: string): boolean {
-  if (typeof path !== "string" || path === "" || path.length > MAX_CAPABILITY_LENGTH * 8)
+  if (typeof path !== "string" || path === "" || codePointLength(path) > MAX_CAPABILITY_LENGTH * 8)
     return false;
   // eslint-disable-next-line no-control-regex
   if (/[\u0000-\u001f\u007f\\]/.test(path) || path.startsWith("/")) return false;
