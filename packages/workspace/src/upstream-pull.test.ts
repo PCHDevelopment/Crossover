@@ -39,6 +39,9 @@ const run = (cwd: string, args: string[]) => git(args, { cwd, timeoutMs: 30_000,
 async function upstreamRepo() {
   const dir = await tmp("crossover-upstream-");
   await run(dir, ["init", "-q", "-b", "main"]);
+  // local clones copy objects/ directly; a background gc could drop one mid-copy (T1549, defence in depth)
+  await run(dir, ["config", "gc.auto", "0"]);
+  await run(dir, ["config", "maintenance.auto", "false"]);
   await mkdir(join(dir, "src"), { recursive: true });
   await writeFile(join(dir, "README.md"), "# Upstream\n");
   await writeFile(join(dir, "src/a.ts"), "export const a = 1;\nexport const keep = 0;\n");
@@ -68,7 +71,8 @@ class FixtureFetcher implements UpstreamFetcher {
     this.fetches += 1;
     await this.during?.();
     const dir = await tmp("crossover-fetched-");
-    await run(dir, ["clone", "-q", "--bare", this.source, "repo"]);
+    // local clones copy objects/ directly; a background gc could drop one mid-copy (T1549, defence in depth)
+    await run(dir, ["clone", "-q", "--bare", "--no-local", this.source, "repo"]);
     const repo = join(dir, "repo");
     const sha = (
       await git(["rev-parse", "HEAD"], { gitDir: repo, timeoutMs: 10_000 })

@@ -546,6 +546,58 @@ describe("platform users (T216)", () => {
     expect(rows).toEqual([{ provider: "dev" }]);
   });
 
+  // Dev login only exists with `devLogin` on, which turns cookie auth on too (server.ts), so the
+  // "cookie auth off" rows of the sign-in matrix can't be reached through this route.
+  it("a same-origin browser dev login gets the cookie and no session_token in the body", async () => {
+    const s = await setup(undefined, true);
+    const res = await post(
+      s,
+      "/v1/auth/dev-login",
+      { subject: subject(), display_name: "Peter" },
+      { origin: "http://localhost" },
+    );
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["set-cookie"]).toMatch(/^crossover_session=us_/);
+    const body = res.json();
+    expect(body).not.toHaveProperty("session_token");
+    expect(Object.keys(body).sort()).toEqual(["expires_at", "user"]);
+    // The cookie it set is a working session.
+    const cookie = (res.headers["set-cookie"] as string).split(";", 1)[0]!;
+    expect(
+      (await s.app.inject({ method: "GET", url: "/v1/rooms", headers: { cookie } })).statusCode,
+    ).toBe(200);
+  });
+
+  it("a dev login with no Origin gets the cookie and the session_token in the body", async () => {
+    const s = await setup(undefined, true);
+    const res = await login(s, subject());
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["set-cookie"]).toMatch(/^crossover_session=us_/);
+    expect(res.json().session_token).toMatch(/^us_/);
+    // The body token is a working bearer token.
+    const token = res.json().session_token as string;
+    expect(
+      (
+        await s.app.inject({
+          method: "GET",
+          url: "/v1/rooms",
+          headers: { authorization: `Bearer ${token}` },
+        })
+      ).statusCode,
+    ).toBe(200);
+  });
+
+  it("a cross-origin dev login is refused, as before", async () => {
+    const s = await setup(undefined, true);
+    const res = await post(
+      s,
+      "/v1/auth/dev-login",
+      { subject: subject(), display_name: "Peter" },
+      { origin: "https://attacker.example" },
+    );
+    errorShape(res.json(), "FORBIDDEN", 403, res);
+  });
+
   it("uses the browser session cookie for development login and logout", async () => {
     const s = await setup(undefined, true);
     expect((await s.app.inject({ method: "GET", url: "/v1/auth/session" })).json()).toEqual({

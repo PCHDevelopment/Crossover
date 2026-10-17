@@ -6,7 +6,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/peterheo/Crossover/clients/go/internal/cli"
+	"github.com/PCHDevelopment/Crossover/clients/go/internal/cli"
 )
 
 func main() {

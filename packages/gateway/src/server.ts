@@ -691,8 +691,10 @@ export function buildGateway(options: GatewayOptions): FastifyInstance {
           details: { issues: parsed.error.issues },
         });
       }
-      if (cookieAuthEnabled && request.headers.origin)
-        requireSameOrigin(request, options.oauth?.publicBaseUrl);
+      // A browser sends `Origin` and keeps its session in the cookie. Clients that send none (the
+      // SDKs, scripts) authenticate with the token in the body.
+      const browserSignIn = cookieAuthEnabled && Boolean(request.headers.origin);
+      if (browserSignIn) requireSameOrigin(request, options.oauth?.publicBaseUrl);
       const user = await findOrCreateUser(pool, {
         provider: "dev",
         subject: parsed.data.subject,
@@ -708,7 +710,7 @@ export function buildGateway(options: GatewayOptions): FastifyInstance {
       }
       return {
         user: { id: user.id, display_name: user.display_name },
-        session_token: session.session_token,
+        ...(browserSignIn ? {} : { session_token: session.session_token }),
         expires_at: session.expires_at.toISOString(),
       };
     });
