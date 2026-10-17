@@ -1,4 +1,4 @@
-module github.com/peterheo/Crossover/clients/go
+module github.com/PCHDevelopment/Crossover/clients/go
 
 go 1.22.0
 
