@@ -109,20 +109,26 @@ export class RedisGitHubInstallStore
   }
 
   async ready(timeoutMs = 5_000): Promise<void> {
-    if (this.redis.status !== "ready") {
-      await new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(() => {
-          this.redis.off("ready", onReady);
-          reject(new Error(`GitHub install Redis not ready after ${timeoutMs} ms`));
-        }, timeoutMs);
-        const onReady = () => {
-          clearTimeout(timer);
-          resolve();
-        };
-        this.redis.once("ready", onReady);
-      });
-    }
-    await this.redis.ping();
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.redis.off("ready", onReady);
+        reject(new Error(`GitHub install Redis not ready after ${timeoutMs} ms`));
+      }, timeoutMs);
+      const onReady = () => {
+        void this.redis.ping().then(
+          () => {
+            clearTimeout(timer);
+            resolve();
+          },
+          (error: unknown) => {
+            clearTimeout(timer);
+            reject(error);
+          },
+        );
+      };
+      if (this.redis.status === "ready") onReady();
+      else this.redis.once("ready", onReady);
+    });
   }
 
   async saveState(state: string, value: GitHubInstallState): Promise<void> {

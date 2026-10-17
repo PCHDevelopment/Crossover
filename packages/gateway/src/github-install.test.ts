@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { Redis } from "ioredis";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   GITHUB_INSTALL_STATE_TTL_MS,
   GITHUB_PENDING_CONNECTION_TTL_MS,
@@ -15,6 +16,17 @@ afterEach(async () => {
 });
 
 describe("RedisGitHubInstallStore", () => {
+  it("applies the readiness timeout to the Redis ping", async () => {
+    const redis = Object.assign(new EventEmitter(), {
+      status: "ready",
+      ping: vi.fn(() => new Promise<string>(() => {})),
+    });
+    const store = new RedisGitHubInstallStore(redis as unknown as Redis);
+
+    await expect(store.ready(5)).rejects.toThrow("GitHub install Redis not ready after 5 ms");
+    expect(redis.ping).toHaveBeenCalledOnce();
+  });
+
   it("keeps state and pending records under separate prefixes with ten-minute TTLs", async () => {
     const store = new RedisGitHubInstallStore(redisUrl);
     stores.push(store);
@@ -58,6 +70,20 @@ describe("RedisGitHubInstallStore", () => {
       ]);
       expect(
         await store.peek(pendingId, { room_id: pending.room_id, owner_participant_id: "other" }),
+      ).toBeUndefined();
+      expect(await probe.exists(pendingKey)).toBe(1);
+      expect(
+        await store.consume(pendingId, {
+          room_id: pending.room_id,
+          owner_participant_id: "other",
+        }),
+      ).toBeUndefined();
+      expect(await probe.exists(pendingKey)).toBe(1);
+      expect(
+        await store.consume(pendingId, {
+          room_id: "room_other",
+          owner_participant_id: pending.owner_participant_id,
+        }),
       ).toBeUndefined();
       expect(await probe.exists(pendingKey)).toBe(1);
       const pendingResults = await Promise.all([
