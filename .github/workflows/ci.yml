@@ -61,6 +61,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      - name: THROWAWAY (T1553) fail on purpose to prove the aggregate check goes red
+        run: exit 1
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26.5"
