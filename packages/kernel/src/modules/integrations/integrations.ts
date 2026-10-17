@@ -4,6 +4,7 @@ import { CrossoverError } from "@crossover/protocol";
 import { z } from "zod";
 import type { Dispatcher, PrepareContext } from "../../dispatcher.js";
 import type { EncryptedSecret, SecretStore } from "./secret-store.js";
+import type { GitHubPendingConnection, GitHubPendingConnectionStore } from "./github-pending.js";
 import { ensureRoomDataKey } from "./room-key.js";
 
 export type {

@@ -962,6 +962,45 @@ describe("GitHub App installation", () => {
     expect(JSON.stringify(pending.get(pendingId))).not.toContain(code);
     expect(states.has(state)).toBe(false);
 
+    const pendingRepositories = await s.app.inject({
+      method: "GET",
+      url: `/v1/rooms/${s.room}/integrations/github/pending?pending_id=${pendingId}`,
+      headers: { cookie: ownerCookie, origin: "http://localhost" },
+    });
+    expect(pendingRepositories.statusCode).toBe(200);
+    expect(pendingRepositories.json()).toEqual({
+      repositories: [{ name: "Example/Service" }],
+    });
+    expect(pendingRepositories.headers["cache-control"]).toBe("no-store");
+    expect(pendingRepositories.headers["referrer-policy"]).toBe("no-referrer");
+    expect(pendingRepositories.body).not.toContain(code);
+    expect(pendingRepositories.body).not.toContain("installation_id");
+
+    const strangerRead = await s.app.inject({
+      method: "GET",
+      url: `/v1/rooms/${s.room}/integrations/github/pending?pending_id=${pendingId}`,
+      headers: { cookie: strangerCookie, origin: "http://localhost" },
+    });
+    expect(strangerRead.statusCode).toBe(403);
+    expect(strangerRead.body).not.toContain("Example/Service");
+
+    const secondRoom = await s.dispatcher.dispatchRoomless(
+      { user_id: ownerRows.rows[0]!.user_id, display_name: "Peter" },
+      envelope("room.create", {
+        slug: `github-other-${Date.now().toString(36)}-${++n}`,
+        name: "Other room",
+        objective: "Check pending room binding",
+      }),
+    );
+    const otherRoomId = (secondRoom.response as { room: { id: string } }).room.id;
+    const crossRoomRead = await s.app.inject({
+      method: "GET",
+      url: `/v1/rooms/${otherRoomId}/integrations/github/pending?pending_id=${pendingId}`,
+      headers: { cookie: ownerCookie, origin: "http://localhost" },
+    });
+    expect(crossRoomRead.statusCode).toBe(404);
+    expect(crossRoomRead.body).not.toContain("Example/Service");
+
     const replay = await s.app.inject({
       method: "GET",
       url: callbackUrl.pathname + callbackUrl.search,

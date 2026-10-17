@@ -402,6 +402,42 @@ export function buildGateway(options: GatewayOptions): FastifyInstance {
     );
 
     app.get<{
+      Params: { roomId: string };
+      Querystring: { pending_id?: string };
+    }>("/v1/rooms/:roomId/integrations/github/pending", async (request, reply) => {
+      const auth = userToken(request, cookieAuthEnabled, sessionCookieName);
+      if (auth.cookie) requireSameOriginNavigation(request, options.oauth?.publicBaseUrl);
+      const principal = await authenticateUser(pool, auth.token);
+      const ownerParticipantId = await githubOwnerForUser(
+        pool,
+        request.params.roomId,
+        principal.user_id,
+      );
+      if (!ownerParticipantId)
+        throw new CrossoverError("FORBIDDEN", "Only the room owner can manage integrations", {
+          details: { reason: "owner_only" },
+        });
+      const pendingId = request.query.pending_id;
+      if (typeof pendingId !== "string" || !OAUTH_STATE.test(pendingId)) {
+        throw new CrossoverError("VALIDATION", "Invalid GitHub pending connection");
+      }
+      let pending: Awaited<ReturnType<typeof install.pendingConnections.peek>>;
+      try {
+        pending = await install.pendingConnections.peek(pendingId, {
+          room_id: request.params.roomId,
+          owner_participant_id: ownerParticipantId,
+        });
+      } catch {
+        throw new CrossoverError("PROVIDER_UNAVAILABLE", "GitHub integration is unavailable");
+      }
+      if (!pending) throw new CrossoverError("NOT_FOUND", "GitHub pending connection not found");
+      return reply
+        .header("Cache-Control", "no-store")
+        .header("Referrer-Policy", "no-referrer")
+        .send({ repositories: pending.repositories.map(({ name }) => ({ name })) });
+    });
+
+    app.get<{
       Querystring: { state?: string; code?: string; installation_id?: string; error?: string };
     }>(installCallbackPath, async (request, reply) => {
       const { state, code, installation_id: installationId, error } = request.query;
