@@ -2,47 +2,10 @@ import { withTransaction, type Pool, type PoolClient } from "@crossover/db";
 import { CrossoverError } from "@crossover/protocol";
 import type { Dispatcher, EmittedEvent } from "../../dispatcher.js";
 import { deliverInbox } from "../inbox/inbox.js";
+import { deriveRoomScopedDeleteOrder, quoteRoomPurgeIdentifier } from "./room-purge-order.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const RETENTION_NOTICE_MS = 7 * DAY_MS;
-
-/**
- * Room-scoped tables covered by deleteRoomRows or by cascading deletion of their room/participant.
- * retention.test.ts keeps this list aligned with every public base table that has a room_id column.
- */
-export const ROOM_SCOPED_TABLES = [
-  "approvals",
-  "auth_tokens",
-  "capability_grants",
-  "changesets",
-  "checkpoints",
-  "conflicts",
-  "decision_positions",
-  "decisions",
-  "events",
-  "file_revisions",
-  "health_install_runs",
-  "health_runs",
-  "inbox_items",
-  "integration_room_keys",
-  "integrations",
-  "invites",
-  "memory_entries",
-  "memory_revisions",
-  "messages",
-  "participants",
-  "sandbox_compute_agent_daily",
-  "sandbox_compute_reservations",
-  "sandbox_compute_room_daily",
-  "sandboxes",
-  "task_reviews",
-  "tasks",
-  "tool_invocations",
-  "upstreams",
-  "wake_windows",
-  "workspace_revisions",
-  "workspaces",
-] as const;
 
 export interface RoomRetentionSweeperOptions {
   pool: Pool;
@@ -314,36 +277,11 @@ async function assertCurrentLease(
 
 async function deleteRoomRows(client: PoolClient, roomId: string): Promise<void> {
   const participantIds = "SELECT id FROM participants WHERE room_id = $1";
-  await client.query("DELETE FROM auth_tokens WHERE room_id = $1", [roomId]);
-  await client.query(`DELETE FROM idempotency_keys WHERE participant_id IN (${participantIds})`, [
-    roomId,
-  ]);
-  await client.query("DELETE FROM tool_invocations WHERE room_id = $1", [roomId]);
-  await client.query("DELETE FROM invites WHERE room_id = $1", [roomId]);
-  await client.query("DELETE FROM capability_grants WHERE room_id = $1", [roomId]);
-  await client.query("DELETE FROM inbox_items WHERE room_id = $1", [roomId]);
-  await client.query("DELETE FROM wake_windows WHERE room_id = $1", [roomId]);
-  await client.query("DELETE FROM approvals WHERE room_id = $1", [roomId]);
-  await client.query("DELETE FROM task_reviews WHERE room_id = $1", [roomId]);
-  await client.query("DELETE FROM tasks WHERE room_id = $1", [roomId]);
-  await client.query("UPDATE messages SET reply_to = NULL WHERE room_id = $1", [roomId]);
-  await client.query("DELETE FROM messages WHERE room_id = $1", [roomId]);
-  await client.query("DELETE FROM decision_positions WHERE room_id = $1", [roomId]);
-  await client.query("UPDATE decisions SET supersedes = NULL WHERE room_id = $1", [roomId]);
-  await client.query("DELETE FROM decisions WHERE room_id = $1", [roomId]);
-  await client.query("DELETE FROM events WHERE room_id = $1", [roomId]);
-  await client.query("DELETE FROM memory_revisions WHERE room_id = $1", [roomId]);
-  await client.query("DELETE FROM memory_entries WHERE room_id = $1", [roomId]);
-  await client.query("DELETE FROM checkpoints WHERE room_id = $1", [roomId]);
-  await client.query("DELETE FROM health_runs WHERE room_id = $1", [roomId]);
-  await client.query("DELETE FROM health_install_runs WHERE room_id = $1", [roomId]);
-  await client.query("DELETE FROM upstreams WHERE room_id = $1", [roomId]);
-  await client.query("DELETE FROM integrations WHERE room_id = $1", [roomId]);
-  await client.query("DELETE FROM integration_room_keys WHERE room_id = $1", [roomId]);
-  await client.query("DELETE FROM sandboxes WHERE room_id = $1", [roomId]);
 
-  // The workspace schema has cycles between conflicts, ChangeSets and revisions. Null their
-  // optional links first, then remove the graph from its leaves inward.
+  // The existing message, decision, and workspace graphs contain nullable FK cycles. Clear the
+  // same six links first so the catalog-derived order can detect every other cycle explicitly.
+  await client.query("UPDATE messages SET reply_to = NULL WHERE room_id = $1", [roomId]);
+  await client.query("UPDATE decisions SET supersedes = NULL WHERE room_id = $1", [roomId]);
   await client.query("UPDATE changesets SET conflict_id = NULL WHERE room_id = $1", [roomId]);
   await client.query("UPDATE conflicts SET resolution_changeset_id = NULL WHERE room_id = $1", [
     roomId,
@@ -352,11 +290,18 @@ async function deleteRoomRows(client: PoolClient, roomId: string): Promise<void>
     roomId,
   ]);
   await client.query("UPDATE changesets SET applied_revision = NULL WHERE room_id = $1", [roomId]);
-  await client.query("DELETE FROM conflicts WHERE room_id = $1", [roomId]);
-  await client.query("DELETE FROM file_revisions WHERE room_id = $1", [roomId]);
-  await client.query("DELETE FROM changesets WHERE room_id = $1", [roomId]);
-  await client.query("DELETE FROM workspace_revisions WHERE room_id = $1", [roomId]);
-  await client.query("DELETE FROM workspaces WHERE room_id = $1", [roomId]);
 
-  await client.query(`DELETE FROM participants WHERE room_id = $1`, [roomId]);
+  const tableOrder = await deriveRoomScopedDeleteOrder(client);
+  for (const table of tableOrder) {
+    if (table === "participants") {
+      // idempotency_keys has no room_id column; participant ownership is its existing scope.
+      await client.query(
+        `DELETE FROM idempotency_keys WHERE participant_id IN (${participantIds})`,
+        [roomId],
+      );
+    }
+    await client.query(`DELETE FROM public.${quoteRoomPurgeIdentifier(table)} WHERE room_id = $1`, [
+      roomId,
+    ]);
+  }
 }

@@ -67,7 +67,7 @@ export const integrationsConnectParams = z
   });
 
 export const integrationsDisconnectParams = z.strictObject({ provider: providerSchema });
-export const integrationsVerifyParams = z.strictObject({ provider: z.literal("aws") });
+export const integrationsVerifyParams = z.strictObject({ provider: z.enum(["aws", "github"]) });
 export const integrationsListParams = z.strictObject({});
 
 export type IntegrationConnectionStatus = "PENDING" | "CONNECTED" | "EXPIRED";
@@ -78,11 +78,16 @@ export interface AwsRoleVerifier {
   }>;
 }
 
+export interface GitHubInstallationVerifier {
+  (input: { installation_id: string }): Promise<{ connected: boolean }>;
+}
 export interface IntegrationCommandsOptions {
   /** Encrypts all provider secrets before the command opens its PostgreSQL transaction. */
   secretStore?: SecretStore;
   /** Implemented by the broker layer; failed role assumptions stay pending. */
   verifyAwsRole?: AwsRoleVerifier;
+  /** Checks that a configured GitHub App installation still exists and is active. */
+  verifyGitHubInstallation?: GitHubInstallationVerifier;
   /** Verified GitHub installation selections created by the server-side install callback. */
   githubPendingConnections?: GitHubPendingConnectionStore;
 }
@@ -241,60 +246,112 @@ export function registerIntegrationCommands(
     action: "integrations.manage",
     mutating: true,
     params: integrationsVerifyParams,
-    prepare: async (ctx) => {
+    prepare: async (ctx, params) => {
       await requireOwner(ctx.pool, ctx.room_id, ctx.principal.participant_id);
-      if (!options.secretStore || !options.verifyAwsRole)
+      if (!options.secretStore)
+        throw new CrossoverError("PROVIDER_UNAVAILABLE", "Integration verification is unavailable");
+      if (params.provider === "aws") {
+        if (!options.verifyAwsRole)
+          throw new CrossoverError(
+            "PROVIDER_UNAVAILABLE",
+            "Integration verification is unavailable",
+          );
+        const row = await readConnectedIntegrationSecretConfig(
+          ctx.pool,
+          options.secretStore,
+          ctx.room_id,
+          "aws",
+          "PENDING",
+        );
+        const roleArn = row.configuration.role_arn;
+        const externalId = row.configuration.external_id;
+        if (!roleArn || !externalId)
+          throw new CrossoverError("PROVIDER_UNAVAILABLE", "Integration credential is unavailable");
+        let connected: boolean;
+        try {
+          connected = (
+            await options.verifyAwsRole({
+              room_id: ctx.room_id,
+              role_arn: roleArn,
+              external_id: externalId,
+            })
+          ).connected;
+        } catch {
+          connected = false;
+        }
+        return { provider: "aws" as const, connected, encrypted_secret: row.encrypted_secret };
+      }
+      if (!options.verifyGitHubInstallation)
         throw new CrossoverError("PROVIDER_UNAVAILABLE", "Integration verification is unavailable");
       const row = await readConnectedIntegrationSecretConfig(
         ctx.pool,
         options.secretStore,
         ctx.room_id,
-        "aws",
-        "PENDING",
+        "github",
       );
-      const roleArn = row.configuration.role_arn;
-      const externalId = row.configuration.external_id;
-      if (!roleArn || !externalId)
+      const installationId = row.configuration.installation_id;
+      if (!installationId || !/^[1-9]\d{0,15}$/.test(installationId))
         throw new CrossoverError("PROVIDER_UNAVAILABLE", "Integration credential is unavailable");
       let connected: boolean;
       try {
-        connected = (
-          await options.verifyAwsRole({
-            room_id: ctx.room_id,
-            role_arn: roleArn,
-            external_id: externalId,
-          })
-        ).connected;
-      } catch {
-        connected = false;
+        connected = (await options.verifyGitHubInstallation({ installation_id: installationId }))
+          .connected;
+      } catch (cause) {
+        throw new CrossoverError("PROVIDER_UNAVAILABLE", "GitHub verification is unavailable", {
+          retryable: true,
+          cause,
+        });
       }
-      return { connected, encrypted_secret: row.encrypted_secret };
+      return { provider: "github" as const, connected, encrypted_secret: row.encrypted_secret };
     },
     execute: async (ctx) => {
       await requireOwner(ctx.client, ctx.room_id, ctx.principal.participant_id);
       const prepared = ctx.prepared as
-        { connected: boolean; encrypted_secret: EncryptedSecret } | undefined;
+        | {
+            provider: "aws" | "github";
+            connected: boolean;
+            encrypted_secret: EncryptedSecret;
+          }
+        | undefined;
       if (!prepared)
         throw new CrossoverError("PROVIDER_UNAVAILABLE", "Integration verification failed");
-      const status: IntegrationConnectionStatus = prepared.connected ? "CONNECTED" : "PENDING";
-      const statusReason = prepared.connected ? null : "assume_role_failed";
+      const status: IntegrationConnectionStatus = prepared.connected
+        ? "CONNECTED"
+        : prepared.provider === "github"
+          ? "EXPIRED"
+          : "PENDING";
+      const statusReason = prepared.connected
+        ? null
+        : prepared.provider === "github"
+          ? "installation_unavailable"
+          : "assume_role_failed";
       const { rowCount } = await ctx.client.query(
         `UPDATE integrations SET status = $3, status_reason = $4,
            connected_at = CASE WHEN $3 = 'CONNECTED' THEN clock_timestamp() ELSE NULL END,
            updated_at = clock_timestamp()
-         WHERE room_id = $1 AND provider = 'aws' AND status = 'PENDING'
+         WHERE room_id = $1 AND provider = $5 AND status = $6
            AND encrypted_secret = $2::jsonb`,
-        [ctx.room_id, JSON.stringify(prepared.encrypted_secret), status, statusReason],
+        [
+          ctx.room_id,
+          JSON.stringify(prepared.encrypted_secret),
+          status,
+          statusReason,
+          prepared.provider,
+          prepared.provider === "github" ? "CONNECTED" : "PENDING",
+        ],
       );
       if (!(rowCount ?? 0))
-        throw new CrossoverError("CONFLICT_VERSION", "The AWS integration changed; retry verify", {
-          retryable: true,
-          details: { reason: "integration_changed" },
-        });
+        throw new CrossoverError(
+          "CONFLICT_VERSION",
+          `The ${prepared.provider === "aws" ? "AWS" : "GitHub"} integration changed; retry verify`,
+          { retryable: true, details: { reason: "integration_changed" } },
+        );
       return {
-        response: { provider: "aws", status, status_reason: statusReason },
+        response: { provider: prepared.provider, status, status_reason: statusReason },
         ...(prepared.connected
-          ? { events: [{ type: "integration.connected", payload: { provider: "aws" } }] }
+          ? {
+              events: [{ type: "integration.connected", payload: { provider: prepared.provider } }],
+            }
           : {}),
       };
     },
