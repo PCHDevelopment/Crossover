@@ -72,6 +72,79 @@ async function holdBudgetReads(page: Page, agentId: string) {
   };
 }
 
+/**
+ * Hold the response of every command the page sends that `match` accepts: the server handles it at
+ * once, and the page receives the response when `release()` is called. `answered` resolves when the
+ * server has answered, `delivered` when the page has been handed the response. Requests that don't
+ * match fall through to other route handlers.
+ */
+async function holdCommands(
+  page: Page,
+  match: (method: string, params: Record<string, unknown>) => boolean,
+) {
+  type Held = {
+    method: string;
+    answered: boolean;
+    release: () => void;
+    delivered: Promise<void>;
+  };
+  const held: Held[] = [];
+  let holding = true;
+  const handler = async (route: Route) => {
+    const request = route.request();
+    let envelope: { method?: string; params?: Record<string, unknown> } = {};
+    try {
+      envelope = JSON.parse(request.postData() ?? "{}");
+    } catch {
+      // not a command
+    }
+    if (
+      !holding ||
+      request.method() !== "POST" ||
+      !envelope.method ||
+      !match(envelope.method, envelope.params ?? {})
+    )
+      return route.fallback();
+    let release!: () => void;
+    let delivered!: () => void;
+    const entry: Held = {
+      method: envelope.method,
+      answered: false,
+      release: () => release(),
+      delivered: new Promise<void>((resolve) => (delivered = resolve)),
+    };
+    const released = new Promise<void>((resolve) => (release = resolve));
+    held.push(entry);
+    const response = await route.fetch();
+    entry.answered = true;
+    await released;
+    await route.fulfill({ response });
+    delivered();
+  };
+  await page.route("**/v1/rooms/*/commands", handler);
+  return {
+    held,
+    /** The held commands with this method, once at least one has been answered by the server. */
+    answered: async (method: string) => {
+      await expect.poll(() => held.some((h) => h.method === method && h.answered)).toBe(true);
+      // Give the page a moment to start any further matching reads it was about to make.
+      await new Promise((done) => setTimeout(done, 250));
+      return held.filter((h) => h.method === method);
+    },
+    /** Release everything still held, deliver it, and stop holding. */
+    finish: async () => {
+      holding = false;
+      for (const h of held) h.release();
+      await Promise.all(held.map((h) => h.delivered));
+      await page.unroute("**/v1/rooms/*/commands", handler);
+    },
+  };
+}
+
+/** Let the page apply what it has just been handed. */
+const settle = (page: Page) =>
+  page.evaluate(() => new Promise<void>((done) => setTimeout(done, 250)));
+
 export function registerWebCollaborationStart(fixture: WebFixture): void {
   it("T1507: the room header reports workspace status read refusals", async () => {
     const page: Page = await fixture.browser!.newPage();
@@ -1295,6 +1368,36 @@ export function registerWebDecisionsAndInbox(fixture: WebFixture): void {
       .toContain("Refresh the browser session carefully.");
     await expect.poll(() => page.getByTestId("memory-history").textContent()).toContain("r2");
 
+    // T1559: a memory.* event makes the page re-read the entry that was selected a moment ago. That
+    // read can answer after the read of the entry that was just written, and must not replace it.
+    // The put's response is held until the event's read of the old entry has been answered, which
+    // forces that order; the old read is then delivered last.
+    const raceNote = "Written while the old entry's read was in flight.";
+    await mirror.click();
+    await expect
+      .poll(() => page.getByTestId("memory-detail").textContent())
+      .toContain("Session tokens or JWT");
+    const memoryHold = await holdCommands(
+      page,
+      (method, params) =>
+        method === "memory.put" ||
+        (method === "memory.get" && params["key"] === `decisions/${decisionId}`),
+    );
+    await page.getByTestId("memory-write-key").fill("notes/race-check");
+    await page.getByTestId("memory-write-value").fill(raceNote);
+    await page.getByTestId("memory-write-type").selectOption("text/markdown");
+    await page.getByTestId("memory-source-refs").fill(`decision:${decisionId}`);
+    await page.getByTestId("memory-write").click();
+    const [put] = await memoryHold.answered("memory.put");
+    const oldReads = await memoryHold.answered("memory.get");
+    put!.release();
+    await expect.poll(() => page.getByTestId("memory-detail").textContent()).toContain(raceNote);
+    for (const read of oldReads) read.release();
+    await Promise.all(oldReads.map((read) => read.delivered));
+    await settle(page);
+    expect(await page.getByTestId("memory-detail").textContent()).toContain(raceNote);
+    await memoryHold.finish();
+
     await page.getByTestId("collab-decisions").click();
     await page
       .getByTestId("decision-veto-rationale")
@@ -1319,6 +1422,35 @@ export function registerWebDecisionsAndInbox(fixture: WebFixture): void {
     await expect
       .poll(() => page.getByTestId("decision-detail").textContent())
       .toContain("WITHDRAWN");
+
+    // T1559: the same for the decision pane. A decision.* event makes the page re-read the decision
+    // that was selected before; its answer must not replace the one just proposed.
+    const withdrawnId = (
+      await owner.api.decisions.list<{ decisions: { id: string; title: string }[] }>({ limit: 100 })
+    ).response.decisions.find((decision) => decision.title === "A proposal to withdraw")!.id;
+    const decisionHold = await holdCommands(
+      page,
+      (method, params) =>
+        method === "decisions.propose" ||
+        (method === "decisions.get" && params["decision_id"] === withdrawnId),
+    );
+    await page.getByTestId("decision-title").fill("Another proposal");
+    await page
+      .getByTestId("decision-context")
+      .fill("Proposed while the old decision's read is in flight.");
+    await page.getByTestId("decision-options").fill("Yes\nNo");
+    await page.getByTestId("decision-propose").click();
+    const [proposed] = await decisionHold.answered("decisions.propose");
+    const oldDecisionReads = await decisionHold.answered("decisions.get");
+    proposed!.release();
+    await expect
+      .poll(() => page.getByTestId("decision-detail").textContent())
+      .toContain("Another proposal");
+    for (const read of oldDecisionReads) read.release();
+    await Promise.all(oldDecisionReads.map((read) => read.delivered));
+    await settle(page);
+    expect(await page.getByTestId("decision-detail").textContent()).toContain("Another proposal");
+    await decisionHold.finish();
 
     expect(problems).toEqual([]);
     await page.close();
