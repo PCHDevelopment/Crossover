@@ -1144,6 +1144,7 @@ describe("DockerExecutionDriver", () => {
     30_000,
   );
 
+  // Measured (T1548): idle 10137 ms, 3x load 11770 ms; budget 7x.
   it.skipIf(skipDockerIntegration)(
     "creates, hibernates, resumes and removes a soft-mode Docker sandbox",
     async () => {
@@ -1182,7 +1183,7 @@ describe("DockerExecutionDriver", () => {
         await driver.destroy({ sandbox_id: sandboxId, resources });
       }
     },
-    15_000,
+    85_000,
   );
 
   it.skipIf(skipDockerIntegration)(
