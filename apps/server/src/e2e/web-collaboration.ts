@@ -5,6 +5,60 @@ import { refuseNextCommand } from "./web-refusal.js";
 import type { Page, Route } from "playwright-core";
 import { expect, it } from "vitest";
 
+/**
+ * Hold the response of every budget status read the page makes, until it is released: the server
+ * answers at once, and the page is handed the answer on `release()`. Each read records the message
+ * limit it saw for `agentId`, so a test can tell the read that saw a change from the ones that did not.
+ */
+async function holdBudgetReads(page: Page, agentId: string) {
+  type Read = {
+    sawLimit: number | undefined;
+    release: () => void;
+    delivered: Promise<void>;
+  };
+  const reads: Read[] = [];
+  let holding = true;
+  await page.route("**/v1/rooms/*/commands", async (route: Route) => {
+    const request = route.request();
+    const isRead =
+      request.method() === "POST" && /"method"\s*:\s*"budgets\.get"/.test(request.postData() ?? "");
+    if (!holding || !isRead) return route.continue();
+    let release!: () => void;
+    let delivered!: () => void;
+    const read: Read = {
+      sawLimit: undefined,
+      release: () => release(),
+      delivered: new Promise<void>((resolve) => (delivered = resolve)),
+    };
+    const released = new Promise<void>((resolve) => (release = resolve));
+    reads.push(read);
+    const response = await route.fetch();
+    const status = (await response.json()) as {
+      response?: { agents?: { participant_id: string; effective?: { messages?: number } }[] };
+    };
+    read.sawLimit = status.response?.agents?.find((agent) => agent.participant_id === agentId)
+      ?.effective?.messages;
+    await released;
+    await route.fulfill({ response });
+    delivered();
+  });
+  return {
+    reads,
+    /** The read that saw this limit (the first one, if the page made several). */
+    readSeeing: async (limit: number) => {
+      await expect.poll(() => reads.some((read) => read.sawLimit === limit)).toBe(true);
+      return reads.find((read) => read.sawLimit === limit)!;
+    },
+    /** Release every read still held, deliver them, and stop holding. */
+    finish: async () => {
+      holding = false;
+      for (const read of reads) read.release();
+      await Promise.all(reads.map((read) => read.delivered));
+      await page.unroute("**/v1/rooms/*/commands");
+    },
+  };
+}
+
 export function registerWebCollaborationStart(fixture: WebFixture): void {
   it("T1507: the room header reports workspace status read refusals", async () => {
     const page: Page = await fixture.browser!.newPage();
@@ -391,6 +445,9 @@ export function registerWebCollaborationStart(fixture: WebFixture): void {
     await guestPage.goto(fixture.baseUrl);
     await guestPage.getByTestId("login-name").fill("RoomGuest");
     await guestPage.getByTestId("login-submit").click();
+    // Signed in (the form for the next step exists): navigating earlier can cancel the login request
+    // before its session cookie is stored (T1556).
+    await guestPage.getByTestId("room-name").waitFor();
     await guestPage.goto(`${fixture.baseUrl}/rooms/${roomId}`);
     await guestPage.getByTestId("room-title").waitFor();
     await expect.poll(() => guestPage.getByTestId("tab-owner-controls").count()).toBe(0);
@@ -513,6 +570,54 @@ export function registerWebCollaborationStart(fixture: WebFixture): void {
     await expect
       .poll(() => page.getByTestId(`budget-usage-${agentA.id}-messages`).textContent())
       .toContain("Messages: 1 used of 2 per minute");
+
+    // T1556: reads of the budget status can finish out of order. A read that was answered before a
+    // change but reaches the page after a newer one must not overwrite it, and the refresh button
+    // must stay disabled until the newest read is in. A room-level change makes the page read again
+    // (room.budgets_changed); ObserverAgent has no override, so its limit follows the room's. The
+    // page can make other reads of its own at any time, so the newest read is the one that saw the
+    // change.
+    const shownLimit = () => page.getByTestId(`budget-usage-${observer.id}-messages`).textContent();
+    const refreshEnabled = () => page.getByTestId("refresh-budgets").isEnabled();
+    const setRoomMessages = (messages: number) => owner.api.budgets.set({ budgets: { messages } });
+    const settle = () => page.evaluate(() => new Promise<void>((done) => setTimeout(done, 250)));
+    // Older reads answered last: their stale answers arrive after the newest one is shown.
+    {
+      const hold = await holdBudgetReads(page, observer.id);
+      await page.getByTestId("refresh-budgets").click();
+      await hold.readSeeing(8);
+      await setRoomMessages(9);
+      const newest = await hold.readSeeing(9);
+      const older = hold.reads.filter((read) => read !== newest);
+      newest.release();
+      await expect.poll(shownLimit).toContain("of 9 per minute");
+      for (const read of older) read.release();
+      await Promise.all(older.map((read) => read.delivered));
+      await settle();
+      expect(await shownLimit()).toContain("of 9 per minute");
+      await hold.finish();
+      await expect.poll(refreshEnabled).toBe(true);
+    }
+    // Older reads answered first: they must not end "loading" while the newest read is in flight.
+    {
+      const hold = await holdBudgetReads(page, observer.id);
+      await page.getByTestId("refresh-budgets").click();
+      await hold.readSeeing(9);
+      await setRoomMessages(10);
+      const newest = await hold.readSeeing(10);
+      const older = hold.reads.filter((read) => read !== newest);
+      for (const read of older) read.release();
+      await Promise.all(older.map((read) => read.delivered));
+      await settle();
+      expect(await shownLimit()).toContain("of 9 per minute"); // a superseded answer is not shown
+      expect(await refreshEnabled()).toBe(false); // the newest read is still in flight
+      newest.release();
+      await expect.poll(shownLimit).toContain("of 10 per minute");
+      await hold.finish();
+      await expect.poll(refreshEnabled).toBe(true);
+    }
+    await setRoomMessages(8);
+    await expect.poll(shownLimit).toContain("of 8 per minute");
     await expect
       .poll(() => page.getByTestId(`compute-usage-${agentA.id}`).textContent())
       .toContain("Sandbox CPU: 0 used, 0 reserved of 2 vCPU-hours/day");

@@ -267,16 +267,28 @@ export function OwnerControlsView(props: {
     setApprovals(result.response.approvals);
   }, [room]);
 
+  // Reads can finish out of order: one started by an event can answer after the user's refresh
+  // (T1556). Only the answer to the newest read is shown, and only the newest read ends "loading",
+  // or the refresh button would re-enable while a read is still in flight.
+  const budgetReadId = useRef(0);
   const refreshBudgetStatus = useCallback(async (): Promise<BudgetStatus> => {
-    const result = await room.api.budgets.get<BudgetStatus>({});
-    setBudgetStatus(result.response);
-    return result.response;
+    const readId = ++budgetReadId.current;
+    try {
+      const result = await room.api.budgets.get<BudgetStatus>({});
+      if (readId === budgetReadId.current) setBudgetStatus(result.response);
+      return result.response;
+    } finally {
+      if (readId === budgetReadId.current) setBudgetLoading(false);
+    }
   }, [room]);
 
   const loadBudgetControls = useCallback(async () => {
     setBudgetLoading(true);
+    const read = refreshBudgetStatus();
+    const readId = budgetReadId.current;
     try {
-      const status = await refreshBudgetStatus();
+      const status = await read;
+      if (readId !== budgetReadId.current) return; // a newer read has superseded this one
       setRoomBudgetForm((current) =>
         preserveEditedBudgetFields(
           budgetForm(status.room_budgets),
@@ -317,7 +329,7 @@ export function OwnerControlsView(props: {
         ),
       );
     } finally {
-      setBudgetLoading(false);
+      if (readId === budgetReadId.current) setBudgetLoading(false);
     }
   }, [refreshBudgetStatus]);
 
