@@ -442,7 +442,7 @@ describe("room integration commands", () => {
     expect(pending.store.consume).not.toHaveBeenCalled();
   });
 
-  it("verifies a connected GitHub installation and expires it when the App cannot access it", async () => {
+  it("keeps a GitHub integration connected on transient verification failures", async () => {
     let connected = true;
     const verifyGitHubInstallation = vi.fn(async () => ({ connected }));
     const pending = pendingConnectionStore();
@@ -471,6 +471,19 @@ describe("room integration commands", () => {
     });
     expect(verifyGitHubInstallation).toHaveBeenCalledWith({ installation_id: "123456" });
     expect(JSON.stringify(verified)).not.toContain("123456");
+
+    verifyGitHubInstallation.mockRejectedValueOnce(new Error("GitHub is unavailable"));
+    await expect(
+      dispatch(f, f.owner, "integrations.verify", { provider: "github" }),
+    ).rejects.toMatchObject({
+      code: "PROVIDER_UNAVAILABLE",
+      retryable: true,
+    });
+    const stillConnected = await pool.query<{ status: string }>(
+      "SELECT status FROM integrations WHERE room_id = $1 AND provider = 'github'",
+      [f.roomId],
+    );
+    expect(stillConnected.rows[0]?.status).toBe("CONNECTED");
 
     connected = false;
     const unavailable = await dispatch(f, f.owner, "integrations.verify", { provider: "github" });

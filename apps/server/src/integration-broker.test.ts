@@ -138,6 +138,8 @@ describe("IntegrationCredentialBroker", () => {
         return Response.json({ id: 41, suspended_at: null });
       if (url.endsWith("/app/installations/42"))
         return Response.json({ id: 42, suspended_at: "2026-10-01T00:00:00Z" });
+      if (url.endsWith("/app/installations/43")) return new Response(null, { status: 404 });
+      if (url.endsWith("/app/installations/44")) return new Response(null, { status: 503 });
       throw new Error("Unexpected GitHub request");
     };
     const service = broker({ secret: {}, fetcher });
@@ -148,9 +150,17 @@ describe("IntegrationCredentialBroker", () => {
     await expect(service.verifyGitHubInstallation({ installation_id: "42" })).resolves.toEqual({
       connected: false,
     });
+    await expect(service.verifyGitHubInstallation({ installation_id: "43" })).resolves.toEqual({
+      connected: false,
+    });
+    await expect(service.verifyGitHubInstallation({ installation_id: "44" })).rejects.toThrow(
+      "GitHub request failed",
+    );
     expect(requests.map(({ url }) => url)).toEqual([
       "https://api.github.com/app/installations/41",
       "https://api.github.com/app/installations/42",
+      "https://api.github.com/app/installations/43",
+      "https://api.github.com/app/installations/44",
     ]);
     expect(requests.every(({ init }) => init?.headers !== undefined)).toBe(true);
     expect(requests.every(({ url }) => !url.includes("access_tokens"))).toBe(true);
