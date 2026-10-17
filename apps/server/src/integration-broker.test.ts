@@ -446,6 +446,19 @@ describe("IntegrationCredentialBroker", () => {
           pendingAvailable = false;
           return pendingValue;
         },
+        async restore(id, binding, value) {
+          if (
+            pendingAvailable ||
+            !matchesPending(id, binding) ||
+            value.room_id !== roomId ||
+            value.owner_participant_id !== ownerId ||
+            Date.parse(value.expires_at) <= Date.now()
+          ) {
+            return false;
+          }
+          pendingAvailable = true;
+          return true;
+        },
       },
     });
     registerToolCommands(dispatcher, { registry, runner });

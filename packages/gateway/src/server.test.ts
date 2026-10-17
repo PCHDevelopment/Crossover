@@ -917,6 +917,9 @@ describe("GitHub App installation", () => {
       async consume() {
         return undefined;
       },
+      async restore() {
+        return false;
+      },
     };
 
     await expect(
@@ -959,6 +962,22 @@ describe("GitHub App installation", () => {
         const value = await this.peek(pendingId, binding);
         if (value) pending.delete(pendingId);
         return value;
+      },
+      async restore(
+        pendingId: string,
+        binding: { room_id: string; owner_participant_id: string },
+        value: GitHubPendingConnection,
+      ) {
+        if (
+          pending.has(pendingId) ||
+          value.room_id !== binding.room_id ||
+          value.owner_participant_id !== binding.owner_participant_id ||
+          Date.parse(value.expires_at) <= Date.now()
+        ) {
+          return false;
+        }
+        pending.set(pendingId, value);
+        return true;
       },
     };
     const code = "github-one-time-code-secret";

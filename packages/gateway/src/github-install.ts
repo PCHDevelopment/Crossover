@@ -204,6 +204,40 @@ export class RedisGitHubInstallStore
     return pending;
   }
 
+  async restore(
+    pendingId: string,
+    binding: { room_id: string; owner_participant_id: string },
+    value: GitHubPendingConnection,
+  ): Promise<boolean> {
+    if (!/^[A-Za-z0-9_-]{43}$/.test(pendingId)) return false;
+    let raw: string | undefined;
+    try {
+      raw = JSON.stringify(value);
+    } catch {
+      return false;
+    }
+    const pending = raw === undefined ? undefined : parsePending(raw);
+    const expiresAt = pending ? Date.parse(pending.expires_at) : NaN;
+    if (
+      !pending ||
+      pending.room_id !== binding.room_id ||
+      pending.owner_participant_id !== binding.owner_participant_id ||
+      !Number.isFinite(expiresAt) ||
+      expiresAt <= Date.now()
+    ) {
+      return false;
+    }
+    const ttlMs = Math.ceil(expiresAt - Date.now());
+    const result = await this.redis.set(
+      pendingKey(pendingId),
+      JSON.stringify(pending),
+      "PX",
+      ttlMs,
+      "NX",
+    );
+    return result === "OK";
+  }
+
   async close(): Promise<void> {
     if (this.ownsClient) await this.redis.quit().catch(() => this.redis.disconnect());
   }

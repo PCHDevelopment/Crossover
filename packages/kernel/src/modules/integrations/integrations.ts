@@ -166,6 +166,13 @@ interface PreparedConnection {
   encrypted_secret: EncryptedSecret;
   connected_at: string | null;
   external_id?: string;
+  pendingConnectionRecovery?: {
+    pendingId: string;
+    binding: { room_id: string; owner_participant_id: string };
+    connection: GitHubPendingConnection;
+    store: GitHubPendingConnectionStore;
+    committed: boolean;
+  };
 }
 
 interface IntegrationRow {
@@ -190,6 +197,11 @@ export function registerIntegrationCommands(
     notApprovable: true,
     params: integrationsConnectParams,
     prepare: async (ctx, params) => prepareConnection(ctx, params, options),
+    disposePrepared: async (value) => {
+      const recovery = (value as PreparedConnection).pendingConnectionRecovery;
+      if (!recovery || recovery.committed) return;
+      await recovery.store.restore(recovery.pendingId, recovery.binding, recovery.connection);
+    },
     execute: async (ctx, params) => {
       await requireOwner(ctx.client, ctx.room_id, ctx.principal.participant_id);
       const prepared = ctx.prepared as PreparedConnection | undefined;
@@ -221,6 +233,11 @@ export function registerIntegrationCommands(
           ctx.principal.participant_id,
         ],
       );
+      if (prepared.pendingConnectionRecovery) {
+        ctx.afterCommit(() => {
+          prepared.pendingConnectionRecovery!.committed = true;
+        });
+      }
       return {
         response: {
           provider: prepared.provider,
@@ -522,6 +539,13 @@ async function prepareConnection(
       public_config: publicConfig,
       encrypted_secret: encrypted,
       connected_at: new Date().toISOString(),
+      pendingConnectionRecovery: {
+        pendingId: params.pending_id!,
+        binding,
+        connection: consumed,
+        store: pendingStore,
+        committed: false,
+      },
     };
   }
   if (!options.secretStore) {

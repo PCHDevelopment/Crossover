@@ -103,6 +103,52 @@ describe("RedisGitHubInstallStore", () => {
     }
   });
 
+  it("restores a consumed pending record only while unexpired and never overwrites a live record", async () => {
+    const store = new RedisGitHubInstallStore(redisUrl);
+    stores.push(store);
+    const probe = new Redis(redisUrl);
+    probe.on("error", () => {});
+    try {
+      await Promise.all([store.ready(), probe.ping()]);
+      const pendingId = randomBytes(32).toString("base64url");
+      const binding = { room_id: "room_restore", owner_participant_id: "part_restore" };
+      const pending = {
+        ...binding,
+        installation_id: "41",
+        repositories: [{ name: "Example/Repo", id: "9823" }],
+        expires_at: new Date(Date.now() + 30_000).toISOString(),
+      };
+      await store.save(pendingId, pending);
+      const consumed = await store.consume(pendingId, binding);
+      expect(consumed).toEqual(pending);
+      expect(await store.restore(pendingId, binding, consumed!)).toBe(true);
+      expect(await store.peek(pendingId, binding)).toEqual(pending);
+
+      const key = `github:install:pending:${createHash("sha256").update(pendingId).digest("hex")}`;
+      const ttl = await probe.pttl(key);
+      expect(ttl).toBeGreaterThan(0);
+      expect(ttl).toBeLessThanOrEqual(Date.parse(pending.expires_at) - Date.now() + 50);
+
+      expect(await store.consume(pendingId, binding)).toEqual(pending);
+      const replacement = { ...pending, installation_id: "42" };
+      await store.save(pendingId, replacement);
+      expect(await store.restore(pendingId, binding, pending)).toBe(false);
+      expect(await store.peek(pendingId, binding)).toEqual(replacement);
+
+      expect(
+        await store.restore(pendingId, { ...binding, owner_participant_id: "other" }, pending),
+      ).toBe(false);
+      expect(
+        await store.restore(pendingId, binding, {
+          ...pending,
+          expires_at: new Date(Date.now() - 1_000).toISOString(),
+        }),
+      ).toBe(false);
+    } finally {
+      probe.disconnect();
+    }
+  });
+
   it("returns expired pending records as unavailable", async () => {
     const store = new RedisGitHubInstallStore(redisUrl);
     stores.push(store);
