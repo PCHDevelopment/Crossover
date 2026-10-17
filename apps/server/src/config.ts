@@ -13,6 +13,10 @@ const flag = z
   .optional()
   .transform((v) => v === "true" || v === "1");
 
+/** Compose's optional pass-through values are empty strings when unset. */
+const optionalEnv = <T extends z.ZodType>(schema: T) =>
+  z.preprocess((value) => (value === "" ? undefined : value), schema.optional());
+
 /** An IP address, or an address with a CIDR prefix length. */
 function isProxyAddress(entry: string): boolean {
   const [address, length, ...rest] = entry.split("/");
@@ -87,24 +91,19 @@ const envSchema = z.object({
   SANDBOX_EGRESS_PROXY_PORT: z.coerce.number().int().min(1).max(65_535).optional(),
   SANDBOX_EGRESS_PROXY_SECRET: z.string().min(32).optional(),
   /** 32-byte hex key for development integration-secret encryption. */
-  INTEGRATION_SECRET_KEY: z
-    .string()
-    .regex(/^[a-fA-F0-9]{64}$/)
-    .optional(),
+  INTEGRATION_SECRET_KEY: optionalEnv(z.string().regex(/^[a-fA-F0-9]{64}$/)),
   /** AWS KMS key id or ARN used for production integration-secret envelope encryption. */
-  INTEGRATION_KMS_KEY_ID: z.string().trim().min(1).optional(),
-  GITHUB_APP_ID: z
-    .string()
-    .regex(/^[1-9]\d{0,19}$/)
-    .optional(),
-  GITHUB_APP_SLUG: z
-    .string()
-    .trim()
-    .regex(/^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$/)
-    .optional(),
-  GITHUB_CLIENT_ID: z.string().trim().min(1).max(200).optional(),
-  GITHUB_CLIENT_SECRET: z.string().min(1).max(4096).optional(),
-  GITHUB_APP_PRIVATE_KEY: z.string().min(100).max(16_384).optional(),
+  INTEGRATION_KMS_KEY_ID: optionalEnv(z.string().trim().min(1)),
+  GITHUB_APP_ID: optionalEnv(z.string().regex(/^[1-9]\d{0,19}$/)),
+  GITHUB_APP_SLUG: optionalEnv(
+    z
+      .string()
+      .trim()
+      .regex(/^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$/),
+  ),
+  GITHUB_CLIENT_ID: optionalEnv(z.string().trim().min(1).max(200)),
+  GITHUB_CLIENT_SECRET: optionalEnv(z.string().min(1).max(4096)),
+  GITHUB_APP_PRIVATE_KEY: optionalEnv(z.string().min(100).max(16_384)),
   /** Operator-provisioned immutable GitHub plugin worker image. */
   GITHUB_PLUGIN_IMAGE: z
     .string()
@@ -317,6 +316,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   if (githubAppValues.some(Boolean) && githubAppValues.some((value) => !value)) {
     throw new Error(
       "Invalid server configuration:\n  GITHUB_APP_ID, GITHUB_APP_SLUG, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET and GITHUB_APP_PRIVATE_KEY must be configured together",
+    );
+  }
+  if (githubAppValues.some(Boolean) && !e.INTEGRATION_SECRET_KEY && !e.INTEGRATION_KMS_KEY_ID) {
+    invalidConfig(
+      "GitHub App integration requires an integration secret store: set INTEGRATION_SECRET_KEY for local development or INTEGRATION_KMS_KEY_ID for production",
     );
   }
   return {

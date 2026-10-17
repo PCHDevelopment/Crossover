@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { CrossoverError, type UserRoomInfo } from "@crossover/sdk";
 import { client } from "./session.js";
 import { RoomView } from "./RoomView.js";
+import { consumeGitHubInstallNotice } from "./github-install-notice.js";
 
 /** `/` the room list, `/rooms/<id>` one room. */
 const roomIdOf = (path: string): string | undefined => /^\/rooms\/([^/]+)\/?$/.exec(path)?.[1];
@@ -10,7 +11,19 @@ export function App() {
   const [authenticated, setAuthenticated] = useState<boolean>();
   const [providers, setProviders] = useState<string[]>([]);
   const [bootstrapError, setBootstrapError] = useState<string>();
+  const [githubInstallNotice, setGitHubInstallNotice] = useState<string>();
   const [path, setPath] = useState(window.location.pathname);
+
+  useEffect(() => {
+    const result = consumeGitHubInstallNotice(window.location.search);
+    if (!result.notice) return;
+    setGitHubInstallNotice(result.notice);
+    window.history.replaceState(
+      window.history.state,
+      "",
+      `${window.location.pathname}${result.search}${window.location.hash}`,
+    );
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -62,7 +75,14 @@ export function App() {
 
   if (authenticated === undefined) return <main className="card">Loading…</main>;
   if (!authenticated)
-    return <Login providers={providers} error={bootstrapError} onSession={signIn} />;
+    return (
+      <Login
+        providers={providers}
+        error={bootstrapError}
+        githubInstallNotice={githubInstallNotice}
+        onSession={signIn}
+      />
+    );
   const roomId = roomIdOf(path);
   return (
     <div className="app">
@@ -83,7 +103,14 @@ export function App() {
       {roomId ? (
         <RoomView key={roomId} roomId={roomId} onBack={() => go("/")} onSignedOut={signedOut} />
       ) : (
-        <Rooms onOpen={(id) => go(`/rooms/${id}`)} onSignedOut={signedOut} />
+        <>
+          {githubInstallNotice && (
+            <p role="alert" className="error" data-testid="github-install-notice">
+              {githubInstallNotice}
+            </p>
+          )}
+          <Rooms onOpen={(id) => go(`/rooms/${id}`)} onSignedOut={signedOut} />
+        </>
       )}
     </div>
   );
@@ -97,10 +124,12 @@ export const isUnauthenticated = (error: unknown): boolean =>
 function Login({
   providers,
   error: bootstrapError,
+  githubInstallNotice,
   onSession,
 }: {
   providers: string[];
   error?: string | undefined;
+  githubInstallNotice?: string | undefined;
   onSession: () => void;
 }) {
   const [name, setName] = useState("");
@@ -110,6 +139,11 @@ function Login({
     <main className="card narrow">
       <h1>Crossover</h1>
       <p>Sign in to your rooms.</p>
+      {githubInstallNotice && (
+        <p role="alert" className="error" data-testid="github-install-notice">
+          {githubInstallNotice}
+        </p>
+      )}
       {providers.map((provider) => (
         <p key={provider}>
           <a

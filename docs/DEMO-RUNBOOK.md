@@ -15,8 +15,8 @@ format is at the end.
   capability grant to export a checkpoint as a pull request.
 - **No network in sandboxes or health checks:** without the egress proxy, `npm install` can't run.
   Use a repository with no dependencies (below).
-- **No MCP tools for some actions:** roles, pause, capability grants and checkpoints have no MCP
-  tools. Do those in the web UI as the owner.
+- **Capability grants are UI-only:** roles, pause and checkpoints have MCP tools; grant
+  capabilities in the web UI as the owner.
 
 ## GitHub App setup for step 17
 
@@ -35,7 +35,10 @@ returns the owner to the room's repository picker ([callback URL docs](https://d
 **Owner controls → Integrations → Connect GitHub**. Do not configure that per-room URL as the App's
 Setup URL.
 
-Set the following values in the server's local `.env` before starting or restarting the stack:
+Set the following values in the local `.env` before starting or restarting the stack. Compose passes
+these values into the server container; use literal `\n` sequences for PEM newlines so the key
+stays on one `.env` line. The development stack requires `INTEGRATION_SECRET_KEY`; production uses
+`INTEGRATION_KMS_KEY_ID` instead.
 
 ```dotenv
 GITHUB_APP_ID=<numeric App ID>
@@ -85,10 +88,10 @@ docker pull node:22-bookworm-slim          # sandbox and health image; the first
 sudo install -d -o 1000 -g 1000 -m 0750 "$PWD/.data/workspaces"
 ```
 
-Compose does not pass `.env` into the server container; it only uses `.env` for substitution. Extra
-server settings go in `docker-compose.override.yml`, which Compose loads automatically. Step 14
-needs the AWS tool registered. Its image never runs, because policy denies the call first. Find the
-pinned reference:
+Compose uses `.env` for substitution and passes the GitHub App and integration-secret settings
+listed above into the server container. Other extra server settings go in
+`docker-compose.override.yml`, which Compose loads automatically. Step 14 needs the AWS tool
+registered. Its image never runs, because policy denies the call first. Find the pinned reference:
 
 ```sh
 docker inspect --format '{{index .RepoDigests 0}}' node:22-bookworm-slim   # node@sha256:...
