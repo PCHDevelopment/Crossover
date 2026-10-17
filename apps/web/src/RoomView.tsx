@@ -407,8 +407,13 @@ export function RoomView(props: { roomId: string; onBack: () => void; onSignedOu
       }
       await reload();
     } catch (err) {
-      setNotice(message(err));
-      await reload();
+      const failureNotice = message(err);
+      try {
+        await reload();
+      } finally {
+        setTaskBusy(undefined);
+        setNotice(failureNotice);
+      }
     } finally {
       setTaskBusy(undefined);
     }

@@ -1,4 +1,11 @@
-import { useEffect, useState, type FormEvent } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type Dispatch,
+  type FormEvent,
+  type SetStateAction,
+} from "react";
 import type { RoomClient, SdkEvent } from "@crossover/sdk";
 import type { Participant } from "./model.js";
 
@@ -30,6 +37,23 @@ interface InviteResponse {
 
 type InviteRole = "DEVELOPER" | "REVIEWER" | "OBSERVER";
 type EventListener = (listener: (event: SdkEvent) => void) => () => void;
+
+function useServerSyncedValue(
+  serverValue: string,
+  wasEdited: { current: boolean },
+): [string, Dispatch<SetStateAction<string>>] {
+  const [value, setValue] = useState(serverValue);
+  const previousServerValue = useRef(serverValue);
+
+  useEffect(() => {
+    const previous = previousServerValue.current;
+    if (previous === serverValue) return;
+    previousServerValue.current = serverValue;
+    if (!wasEdited.current) setValue(serverValue);
+  }, [serverValue]);
+
+  return [value, setValue];
+}
 
 export function RoomSetupView(props: {
   room: RoomClient;
@@ -78,16 +102,21 @@ export function RoomSetupView(props: {
   const [leadBusy, setLeadBusy] = useState(false);
   const [leadNotice, setLeadNotice] = useState<string>();
   const [leadError, setLeadError] = useState<string>();
-  const [healthCommand, setHealthCommand] = useState(configuredHealthCommand);
-  const [healthImage, setHealthImage] = useState(configuredHealthImage);
+  const healthCommandEdited = useRef(false);
+  const healthImageEdited = useRef(false);
+  const healthCommandEditVersion = useRef(0);
+  const healthImageEditVersion = useRef(0);
+  const [healthCommand, setHealthCommand] = useServerSyncedValue(
+    configuredHealthCommand,
+    healthCommandEdited,
+  );
+  const [healthImage, setHealthImage] = useServerSyncedValue(
+    configuredHealthImage,
+    healthImageEdited,
+  );
   const [healthBusy, setHealthBusy] = useState(false);
   const [healthStatus, setHealthStatus] = useState<string>();
   const [healthError, setHealthError] = useState<string>();
-
-  useEffect(() => {
-    setHealthCommand(configuredHealthCommand);
-    setHealthImage(configuredHealthImage);
-  }, [configuredHealthCommand, configuredHealthImage]);
 
   useEffect(
     () =>
@@ -208,9 +237,12 @@ export function RoomSetupView(props: {
     setHealthBusy(true);
     setHealthError(undefined);
     setHealthStatus(undefined);
+    const commandBeforeSave = healthCommand;
     try {
       await room.api.room.set_health({ health_command: command });
-      setHealthCommand(command);
+      setHealthCommand((current) =>
+        current === commandBeforeSave || current === command ? command : current,
+      );
       setHealthStatus("Health command configured.");
     } catch (error) {
       setHealthError(error instanceof Error ? error.message : "Health command could not be saved");
@@ -226,11 +258,16 @@ export function RoomSetupView(props: {
     setHealthBusy(true);
     setHealthError(undefined);
     setHealthStatus(undefined);
+    const commandEditVersion = healthCommandEditVersion.current;
+    const imageEditVersion = healthImageEditVersion.current;
     try {
       await room.api.room.set_health({
         health_command: healthCommand.trim() || null,
         health_image: healthImage.trim() || null,
       });
+      if (healthCommandEditVersion.current === commandEditVersion)
+        healthCommandEdited.current = false;
+      if (healthImageEditVersion.current === imageEditVersion) healthImageEdited.current = false;
       setHealthStatus("Health settings saved.");
     } catch (error) {
       setHealthError(error instanceof Error ? error.message : "Health settings could not be saved");
@@ -244,9 +281,14 @@ export function RoomSetupView(props: {
     setHealthBusy(true);
     setHealthError(undefined);
     setHealthStatus(undefined);
+    const commandBeforeClear = healthCommand;
+    const commandEditVersion = healthCommandEditVersion.current;
     try {
       await room.api.room.set_health({ health_command: null });
-      setHealthCommand("");
+      if (healthCommandEditVersion.current === commandEditVersion) {
+        healthCommandEdited.current = false;
+        setHealthCommand((current) => (current === commandBeforeClear ? "" : current));
+      }
       setHealthStatus("Health command cleared.");
     } catch (error) {
       setHealthError(
@@ -425,7 +467,11 @@ const joined = await client.join("${roomId}", { token, manifest });`;
               <input
                 data-testid="health-command"
                 value={healthCommand}
-                onChange={(event) => setHealthCommand(event.target.value)}
+                onChange={(event) => {
+                  healthCommandEdited.current = true;
+                  healthCommandEditVersion.current += 1;
+                  setHealthCommand(event.target.value);
+                }}
                 maxLength={4096}
                 placeholder="No health command configured"
               />
@@ -435,7 +481,11 @@ const joined = await client.join("${roomId}", { token, manifest });`;
               <input
                 data-testid="health-image"
                 value={healthImage}
-                onChange={(event) => setHealthImage(event.target.value)}
+                onChange={(event) => {
+                  healthImageEdited.current = true;
+                  healthImageEditVersion.current += 1;
+                  setHealthImage(event.target.value);
+                }}
                 maxLength={255}
                 placeholder="Server default"
               />
