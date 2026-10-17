@@ -3,7 +3,6 @@ import type { Pool, PoolClient } from "@crossover/db";
 import { CrossoverError } from "@crossover/protocol";
 import { z } from "zod";
 import type { Dispatcher, PrepareContext } from "../../dispatcher.js";
-import type { GitHubPendingConnection, GitHubPendingConnectionStore } from "./github-pending.js";
 import type { EncryptedSecret, SecretStore } from "./secret-store.js";
 import { ensureRoomDataKey } from "./room-key.js";
 
