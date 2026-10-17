@@ -393,14 +393,7 @@ function registerWebDemoFlow(fixture: WebFixture): void {
           (observed) => observed.options === 1,
           waitBudget(),
         );
-        // The viewer selects the first execution by itself as soon as it appears, and may already have
-        // its output. Selecting it again fires a change event (a real browser fires none for the same
-        // option) that makes the viewer drop that output and never ask for it again (T1556).
-        if (
-          (await page.getByTestId("agent-output-execution").inputValue()) !==
-          execution.response.exec_id
-        )
-          await page.getByTestId("agent-output-execution").selectOption(execution.response.exec_id);
+        await page.getByTestId("agent-output-execution").selectOption(execution.response.exec_id);
         await waitForStep(
           "T1505: agent output appears in the viewer",
           async () => ({

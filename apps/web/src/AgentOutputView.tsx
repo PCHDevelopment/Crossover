@@ -145,6 +145,9 @@ export default function AgentOutputView(props: {
             data-testid="agent-output-execution"
             value={selectedExecId}
             onChange={(event) => {
+              // Selecting the execution that is already shown changes nothing: the subscription
+              // effect would not run again, and the output cleared here would never come back.
+              if (event.target.value === selectedExecId) return;
               setOutput(undefined);
               setSelectedExecId(event.target.value);
             }}
