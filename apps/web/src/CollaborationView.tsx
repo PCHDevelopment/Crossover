@@ -361,6 +361,8 @@ export default function CollaborationView(props: {
     setNotice(undefined);
     try {
       const entry = await loadMemoryDetail(key);
+      // A later click selected another key; this answer must not overwrite its form.
+      if (memoryKeyRef.current !== key) return;
       setMemoryWriteKey(entry.key);
       setMemoryWriteValue(entry.redacted ? "" : entry.value);
       setMemoryWriteType(entry.content_type as "text/markdown" | "application/json");
@@ -368,6 +370,7 @@ export default function CollaborationView(props: {
         entry.source_refs.map((source) => `${source.kind}:${source.id}`).join("\n"),
       );
     } catch (error) {
+      if (memoryKeyRef.current !== key) return;
       setNotice(message(error));
     }
   };

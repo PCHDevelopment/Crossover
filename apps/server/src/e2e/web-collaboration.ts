@@ -1398,6 +1398,26 @@ export function registerWebDecisionsAndInbox(fixture: WebFixture): void {
     expect(await page.getByTestId("memory-detail").textContent()).toContain(raceNote);
     await memoryHold.finish();
 
+    // T1559: a click on a key whose read answers after a later click must not fill the write form
+    // with the earlier key: the next write would target an entry that is not selected.
+    const formHold = await holdCommands(
+      page,
+      (method, params) => method === "memory.get" && params["key"] === "notes/browser-auth",
+    );
+    await page.getByTestId("memory-key").filter({ hasText: "notes/browser-auth" }).click();
+    const [earlierRead] = await formHold.answered("memory.get");
+    await page.getByTestId("memory-key").filter({ hasText: "notes/race-check" }).click();
+    await expect.poll(() => page.getByTestId("memory-detail").textContent()).toContain(raceNote);
+    await expect
+      .poll(() => page.getByTestId("memory-write-key").inputValue())
+      .toBe("notes/race-check");
+    earlierRead!.release();
+    await earlierRead!.delivered;
+    await settle(page);
+    expect(await page.getByTestId("memory-write-key").inputValue()).toBe("notes/race-check");
+    expect(await page.getByTestId("memory-detail").textContent()).toContain(raceNote);
+    await formHold.finish();
+
     await page.getByTestId("collab-decisions").click();
     await page
       .getByTestId("decision-veto-rationale")
