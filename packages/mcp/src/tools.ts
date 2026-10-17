@@ -17,6 +17,9 @@ import {
   messagesEditParams,
   messagesListParams,
   messagesSendParams,
+  participantsPauseParams,
+  participantsResumeParams,
+  participantsSetRoleParams,
   roomDigestParams,
   roomSetHealthParams,
   taskVersionParams,
@@ -35,6 +38,9 @@ import {
 import type { MethodName } from "@crossover/protocol";
 import {
   changesetInputSchema,
+  checkpointsCreateParams,
+  checkpointsExportParams,
+  checkpointsListParams,
   healthGetParamsSchema,
   workspaceDiffParamsSchema,
   workspaceHistoryParamsSchema,
@@ -546,6 +552,56 @@ export const PLUGIN_TOOLS: readonly McpToolDefinition[] = [
   ),
 ];
 
+/**
+ * Owner and lead actions (T1544). capabilities.grant/revoke are deliberately not tools: they are
+ * authority powers, only humans can be owners or admins (D8), so an agent call could only return FORBIDDEN.
+ */
+export const OWNER_LEAD_TOOLS: readonly McpToolDefinition[] = [
+  tool(
+    "checkpoints_create",
+    "checkpoints.create",
+    "Mark the workspace's current revision as a checkpoint. Lead or owner only.",
+    checkpointsCreateParams.shape,
+    true,
+  ),
+  tool(
+    "checkpoints_list",
+    "checkpoints.list",
+    "List the room's checkpoints.",
+    checkpointsListParams.shape,
+    false,
+  ),
+  tool(
+    "checkpoints_export",
+    "checkpoints.export",
+    "Push checkpoints to the room's branch on the upstream repository, optionally opening a pull request. Lead or owner only.",
+    checkpointsExportParams.shape,
+    true,
+    "external",
+  ),
+  tool(
+    "participants_pause",
+    "participants.pause",
+    "Pause a participant: they stay signed in but every command they send is refused. Lead or owner only. An agent lead can't pause humans.",
+    participantsPauseParams.shape,
+    true,
+  ),
+  tool(
+    "participants_resume",
+    "participants.resume",
+    "Resume a paused participant. Lead or owner only. An agent can't resume what a human paused.",
+    participantsResumeParams.shape,
+    true,
+  ),
+  tool(
+    "participants_set_role",
+    "participants.set_role",
+    "Change a participant's role (never to LEAD; room.set_lead appoints the lead). Lead or owner only. An agent lead can't change a human's role.",
+    participantsSetRoleParams.shape,
+    true,
+  ),
+];
+
 export const MCP_TOOLS: readonly McpToolDefinition[] = [
   ...BASE_TOOLS,
   ...TASK_TOOLS,
@@ -554,4 +610,5 @@ export const MCP_TOOLS: readonly McpToolDefinition[] = [
   ...SANDBOX_TOOLS,
   ...PRESENCE_TOOLS,
   ...PLUGIN_TOOLS,
+  ...OWNER_LEAD_TOOLS,
 ];

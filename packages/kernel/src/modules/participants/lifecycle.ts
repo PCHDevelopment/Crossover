@@ -5,7 +5,11 @@ import type { Dispatcher } from "../../dispatcher.js";
 import { revokeParticipantTokens } from "../auth/tokens.js";
 import { restartAgentLeases } from "../tasks/task.js";
 
-const params = z.strictObject({ participant_id: z.string().min(1).max(100) });
+export const participantsPauseParams = z.strictObject({
+  participant_id: z.string().min(1).max(100),
+});
+export const participantsResumeParams = participantsPauseParams;
+const params = participantsPauseParams;
 
 interface Row {
   id: string;
@@ -109,7 +113,7 @@ export function registerParticipantLifecycleCommands(
   dispatcher.registerCommand({
     method: "participants.pause",
     mutating: true,
-    params,
+    params: participantsPauseParams,
     execute: async (ctx, p) => {
       const { actor, target } = await load(ctx, p.participant_id);
       if (target.id === actor.id) throw validation("You can't pause yourself");
@@ -145,7 +149,7 @@ export function registerParticipantLifecycleCommands(
   dispatcher.registerCommand({
     method: "participants.resume",
     mutating: true,
-    params,
+    params: participantsResumeParams,
     execute: async (ctx, p) => {
       const { actor, target } = await load(ctx, p.participant_id);
       if (target.status === "REMOVED")

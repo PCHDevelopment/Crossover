@@ -12,6 +12,8 @@ import {
   registerMemoryAccessCommands,
   registerMemoryCommands,
   registerMessageCommands,
+  registerParticipantLifecycleCommands,
+  registerParticipantRoleCommand,
   registerPresenceIntentCommands,
   registerRoomDigestCommand,
   registerRoomHealthSettingsCommand,
@@ -43,6 +45,7 @@ import {
   type Dispatcher as KernelDispatcher,
   registerInviteCommands,
   registerJoinCommand,
+  registerLeadCommands,
   registerRoomCommands,
   type RoomInviteSecret,
   type TokenPair,
@@ -64,6 +67,7 @@ import {
   BASE_TOOLS,
   COLLABORATION_TOOLS,
   MCP_TOOLS,
+  OWNER_LEAD_TOOLS,
   PLUGIN_TOOLS,
   PRESENCE_TOOLS,
   TASK_TOOLS,
@@ -101,6 +105,7 @@ let n = 0;
 const apps: FastifyInstance[] = [];
 const clients: Client[] = [];
 const workspaceDirs: string[] = [];
+const pushes: string[] = [];
 
 beforeAll(async () => {
   db = await createTestDatabase();
@@ -137,7 +142,16 @@ async function setup(
   registerInviteCommands(dispatcher);
   registerJoinCommand(dispatcher);
   registerCapabilityCommands(dispatcher);
-  registerWorkspaceCommands(dispatcher);
+  // checkpoints.export pushes through a recorder, not the network (T1544).
+  registerWorkspaceCommands(dispatcher, {
+    upstream: {
+      pusher: { push: async (request) => void pushes.push(request.branch) },
+      resolve: async () => ["93.184.216.34"],
+    },
+  });
+  registerParticipantRoleCommand(dispatcher);
+  registerLeadCommands(dispatcher);
+  registerParticipantLifecycleCommands(dispatcher);
   registerTaskCommands(dispatcher);
   registerTaskReadCommands(dispatcher);
   registerTaskLifecycleCommands(dispatcher);
@@ -1159,5 +1173,163 @@ describe("MCP reconnect and participant.manifest_changed (T1303)", () => {
     );
     expect(everything).toContain("client_version");
     expect(everything).not.toContain("hooks.example.com");
+  });
+});
+
+describe("MCP owner and lead tools (T1544)", () => {
+  const MUTATING = OWNER_LEAD_TOOLS.filter((t) => t.mutating).map((t) => t.name);
+  const call = async (client: Client, name: string, args: Record<string, unknown> = {}) => {
+    const res = await client.callTool({ name, arguments: args });
+    const text = (res.content as { text: string }[])[0]!.text;
+    return { isError: Boolean(res.isError), body: structured(res), text };
+  };
+  const events = async (room: string, type: string) =>
+    (await pool.query("SELECT payload FROM events WHERE room_id = $1 AND type = $2", [room, type]))
+      .rows;
+  const dispatchOwner = (s: Awaited<ReturnType<typeof setup>>, method: string, params: object) =>
+    s.dispatcher.dispatch(s.ownerPrincipal, {
+      id: newId("cmd"),
+      method,
+      params,
+      idempotency_key: `k-${++n}`,
+    } as never);
+
+  /** A room whose agent is the LEAD, with another agent and a (non-owner) human to act on. */
+  async function leadRoom() {
+    const s = await setup();
+    await dispatchOwner(s, "room.set_lead", { participant_id: s.agentId });
+    const invite = await dispatchOwner(s, "room.invite", { role: "DEVELOPER" });
+    const joined = await s.dispatcher.dispatchAnonymous(
+      "room.join",
+      { token: (invite.one_time as RoomInviteSecret).token, manifest: { ...manifest, name: "C2" } },
+      s.room,
+    );
+    const otherId = (joined.response as { participant_id: string }).participant_id;
+    const humanId = newId("part");
+    await pool.query(
+      `INSERT INTO participants (id, room_id, kind, display_name, authority, role, status)
+       VALUES ($1, $2, 'HUMAN', 'Sam', 'MEMBER', 'DEVELOPER', 'ACTIVE')`,
+      [humanId, s.room],
+    );
+    const lead = await connect(s.url, s.agent.access_token);
+    const owner = await connect(s.url, s.owner.access_token);
+    // Two applied revisions, and an upstream at the first, so the second can be exported.
+    for (const base of [0, 1]) {
+      await call(owner, "apply_changeset", {
+        source: "API",
+        message: `Seed ${base}`,
+        base_workspace_revision: base,
+        operations: [{ type: "create", path: `f${base}.md`, content: `${base}` }],
+      });
+    }
+    const first = await pool.query(
+      "SELECT commit_sha FROM workspace_revisions WHERE room_id = $1 AND revision = 1",
+      [s.room],
+    );
+    await pool.query(
+      `INSERT INTO upstreams (room_id, workspace_id, url, branch, last_synced_sha, last_synced_room_revision, imported_by)
+       SELECT $1, id, 'https://github.com/acme/widgets', 'main', $2, 1, $3 FROM workspaces WHERE room_id = $1`,
+      [s.room, first.rows[0].commit_sha, s.ownerId],
+    );
+    return { ...s, lead, otherId, humanId };
+  }
+
+  it("maps the six commands, with the commands' own trust labels, appended last", () => {
+    expect(
+      OWNER_LEAD_TOOLS.map((t) => [t.name, t.method, t.mutating, t.trust ?? "participant"]),
+    ).toEqual([
+      ["checkpoints_create", "checkpoints.create", true, "participant"],
+      ["checkpoints_list", "checkpoints.list", false, "participant"],
+      ["checkpoints_export", "checkpoints.export", true, "external"],
+      ["participants_pause", "participants.pause", true, "participant"],
+      ["participants_resume", "participants.resume", true, "participant"],
+      ["participants_set_role", "participants.set_role", true, "participant"],
+    ]);
+    expect(MCP_TOOLS.slice(-OWNER_LEAD_TOOLS.length)).toEqual(OWNER_LEAD_TOOLS);
+    for (const t of OWNER_LEAD_TOOLS) expect(METHODS).toHaveProperty([t.method]);
+  });
+
+  it("an agent lead runs every tool; each mutating one emits its event; export is real", async () => {
+    const s = await leadRoom();
+    const created = await call(s.lead, "checkpoints_create", { message: "Milestone" });
+    expect(created.isError).toBe(false);
+    expect(created.text).toContain('trust="participant"');
+    expect(await events(s.room, "checkpoint.created")).toHaveLength(1);
+
+    const listed = await call(s.lead, "checkpoints_list");
+    expect(listed.isError).toBe(false);
+    expect(listed.text).toContain('trust="participant"');
+    expect(JSON.stringify(listed.body)).toContain(created.body.id);
+
+    const exported = await call(s.lead, "checkpoints_export", {});
+    expect(exported.isError).toBe(false);
+    expect(exported.text).toContain('trust="external"');
+    expect(await events(s.room, "checkpoint.exported")).toHaveLength(1);
+    const { rows } = await pool.query("SELECT slug FROM rooms WHERE id = $1", [s.room]);
+    expect(pushes).toContain(`room/${rows[0].slug}`);
+
+    const paused = await call(s.lead, "participants_pause", { participant_id: s.otherId });
+    expect(paused.body).toMatchObject({ status: "PAUSED", changed: true });
+    expect(await events(s.room, "participant.paused")).toHaveLength(1);
+    const resumed = await call(s.lead, "participants_resume", { participant_id: s.otherId });
+    expect(resumed.body).toMatchObject({ status: "ACTIVE", changed: true });
+    expect(await events(s.room, "participant.resumed")).toHaveLength(1);
+    const role = await call(s.lead, "participants_set_role", {
+      participant_id: s.otherId,
+      role: "REVIEWER",
+    });
+    expect(role.isError).toBe(false);
+    expect(await events(s.room, "participant.role_changed")).toHaveLength(1);
+  });
+
+  it("an agent developer is FORBIDDEN from every mutating tool", async () => {
+    const s = await setup();
+    const dev = await connect(s.url, s.agent.access_token);
+    const args: Record<string, Record<string, unknown>> = {
+      checkpoints_create: { message: "x" },
+      checkpoints_export: {},
+      participants_pause: { participant_id: s.ownerId },
+      participants_resume: { participant_id: s.ownerId },
+      participants_set_role: { participant_id: s.ownerId, role: "OBSERVER" },
+    };
+    expect(Object.keys(args).sort()).toEqual([...MUTATING].sort());
+    for (const name of MUTATING) {
+      const r = await call(dev, name, args[name]!);
+      expect(r.isError, name).toBe(true);
+      expect(r.body, name).toMatchObject({ error: { code: "FORBIDDEN" } });
+    }
+  });
+
+  it("an agent lead pausing a human is FORBIDDEN with reason lead_human, through MCP", async () => {
+    const s = await leadRoom();
+    const r = await call(s.lead, "participants_pause", { participant_id: s.humanId });
+    expect(r.isError).toBe(true);
+    expect(r.body).toMatchObject({
+      error: { code: "FORBIDDEN", details: { reason: "lead_human" } },
+    });
+    expect(await events(s.room, "participant.paused")).toHaveLength(0);
+  });
+
+  it("a replay with the same idempotency_key returns the same result and no second event", async () => {
+    const s = await leadRoom();
+    const runs: [string, Record<string, unknown>, string][] = [
+      ["checkpoints_create", { message: "Once" }, "checkpoint.created"],
+      ["checkpoints_export", {}, "checkpoint.exported"],
+      ["participants_pause", { participant_id: s.otherId }, "participant.paused"],
+      ["participants_resume", { participant_id: s.otherId }, "participant.resumed"],
+      [
+        "participants_set_role",
+        { participant_id: s.otherId, role: "OBSERVER" },
+        "participant.role_changed",
+      ],
+    ];
+    for (const [name, args, type] of runs) {
+      const withKey = { ...args, idempotency_key: `replay-${name}` };
+      const a = await call(s.lead, name, withKey);
+      const b = await call(s.lead, name, withKey);
+      expect(a.isError, name).toBe(false);
+      expect(b.body, name).toEqual(a.body);
+      expect(await events(s.room, type), name).toHaveLength(1);
+    }
   });
 });
