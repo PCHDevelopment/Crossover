@@ -17,11 +17,66 @@ concurrency:
 # (T1553): `static` and `go` need no services, `test` is everything but the Chromium-backed web E2E,
 # which runs in `web-e2e` on its own runner, so no Docker test is changing bridge networks under it.
 jobs:
+  # Is there anything but documentation in this pull request? Pushes to main, the nightly run and
+  # manual runs always run everything. `static` runs either way, so Prettier still checks the docs.
+  # (The filter is two plain lists, not one list with negations: the action ORs the patterns of a list,
+  # so `**` with `!docs/**` would match every file.)
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      code: ${{ steps.result.outputs.code }}
+    steps:
+      - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3.0.2
+        if: github.event_name == 'pull_request'
+        id: filter
+        with:
+          list-files: json
+          filters: |
+            docs:
+              - 'docs/**'
+              - '**/*.md'
+              - '.github/ISSUE_TEMPLATE/**'
+            all:
+              - '**'
+      - id: result
+        env:
+          EVENT: ${{ github.event_name }}
+          ALL: ${{ steps.filter.outputs.all_files }}
+          DOCS: ${{ steps.filter.outputs.docs_files }}
+        run: |
+          set -euo pipefail
+          code=true
+          if [ "$EVENT" = pull_request ]; then
+            # Code changed if more files changed than the docs filter matched.
+            code=$(jq -n --argjson all "${ALL:-[]}" --argjson docs "${DOCS:-[]}" '($all | length) > ($docs | length)')
+            echo "changed files: $(jq -n --argjson all "${ALL:-[]}" '$all | length'), of which docs: $(jq -n --argjson docs "${DOCS:-[]}" '$docs | length')"
+          fi
+          echo "code=$code" | tee -a "$GITHUB_OUTPUT"
+
   static:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      # `tsc -b` still runs and checks everything; the restored outputs and .tsbuildinfo files only let it
+      # skip the projects whose sources did not change. Restored before `pnpm install`, so the hash below
+      # does not scan node_modules. Only `static` saves it; the other jobs restore it.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            apps/*/dist
+            apps/*/tsconfig.tsbuildinfo
+            packages/*/dist
+            packages/*/tsconfig.tsbuildinfo
+            plugins/*/dist
+            plugins/*/tsconfig.tsbuildinfo
+          key: ts-build-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', '**/tsconfig*.json', '**/*.ts', '**/*.tsx') }}
+          restore-keys: |
+            ts-build-${{ runner.os }}-
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -57,6 +112,8 @@ jobs:
           OPA_BIN="$dir/opa" pnpm --filter @crossover/policy gen:wasm -- --check
 
   go:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -93,8 +150,15 @@ jobs:
           if-no-files-found: error
 
   test:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # The main vitest run in two shards that run side by side; `check` needs the whole matrix.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ["1/2", "2/2"]
     services:
       postgres:
         image: postgres:16
@@ -120,12 +184,38 @@ jobs:
       REDIS_URL: redis://localhost:6380
     steps:
       - uses: actions/checkout@v4
+      # `tsc -b` still runs and checks everything; the restored outputs and .tsbuildinfo files only let it
+      # skip the projects whose sources did not change. Restored before `pnpm install`, so the hash below
+      # does not scan node_modules. Only `static` saves it; the other jobs restore it.
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            apps/*/dist
+            apps/*/tsconfig.tsbuildinfo
+            packages/*/dist
+            packages/*/tsconfig.tsbuildinfo
+            plugins/*/dist
+            plugins/*/tsconfig.tsbuildinfo
+          key: ts-build-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', '**/tsconfig*.json', '**/*.ts', '**/*.tsx') }}
+          restore-keys: |
+            ts-build-${{ runner.os }}-
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
           node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # Vitest orders the files it runs longest-first from the timings of the last run. CI never kept
+      # them, so every run started its long files late. Each shard has its own file set and its own
+      # timings; a run falls back to the newest ones from its own branch, then from main. This only
+      # reorders files: which tests run does not depend on it.
+      - uses: actions/cache@v4
+        with:
+          path: node_modules/.vite/vitest
+          key: vitest-results-${{ github.ref_name }}-${{ strategy.job-index }}-${{ github.run_id }}
+          restore-keys: |
+            vitest-results-${{ github.ref_name }}-${{ strategy.job-index }}-
+            vitest-results-main-${{ strategy.job-index }}-
       - run: pnpm typecheck
       # workspace.search runs ripgrep. A pinned, checksum-verified binary needs no sudo, so it works
       # on any runner.
@@ -206,12 +296,14 @@ jobs:
           printf '%s\n' "$output" | node --input-type=module -e 'let input="";for await(const chunk of process.stdin)input+=chunk;const value=JSON.parse(input);if(value.error?.code!=="unavailable"||input.includes("fixture-token"))process.exit(1);'
       - run: docker run --rm --network none --entrypoint git crossover-git-fetcher:test --version
       - name: Test, including deployed server topology
-        run: pnpm exec vitest run --exclude apps/server/src/e2e/web.test.ts
+        run: pnpm exec vitest run --exclude apps/server/src/e2e/web.test.ts --shard=${{ matrix.shard }}
         env:
           CROSSOVER_SERVER_IMAGE: crossover-server:test
 
   # The Chromium-backed web E2E (the only Playwright user), on its own runner.
   web-e2e:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     services:
@@ -239,6 +331,21 @@ jobs:
       REDIS_URL: redis://localhost:6380
     steps:
       - uses: actions/checkout@v4
+      # `tsc -b` still runs and checks everything; the restored outputs and .tsbuildinfo files only let it
+      # skip the projects whose sources did not change. Restored before `pnpm install`, so the hash below
+      # does not scan node_modules. Only `static` saves it; the other jobs restore it.
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            apps/*/dist
+            apps/*/tsconfig.tsbuildinfo
+            packages/*/dist
+            packages/*/tsconfig.tsbuildinfo
+            plugins/*/dist
+            plugins/*/tsconfig.tsbuildinfo
+          key: ts-build-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', '**/tsconfig*.json', '**/*.ts', '**/*.tsx') }}
+          restore-keys: |
+            ts-build-${{ runner.os }}-
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -281,16 +388,29 @@ jobs:
 
   check:
     if: always()
-    needs: [static, go, test, web-e2e]
+    needs: [changes, static, go, test, web-e2e]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Require every job to have succeeded
+      - name: Require every job to have succeeded, or the code jobs to have been skipped for a docs-only change
         env:
           NEEDS: ${{ toJSON(needs) }}
         run: |
+          set -euo pipefail
           echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
-          echo "$NEEDS" | jq -e 'all(.[]; .result == "success")' > /dev/null
+          code=$(echo "$NEEDS" | jq -r '.changes.outputs.code // "unknown"')
+          echo "code changed: $code"
+          # `changes` and `static` always run and must succeed.
+          echo "$NEEDS" | jq -e '.changes.result == "success" and .static.result == "success"' > /dev/null
+          if [ "$code" = true ]; then
+            # Everything must have succeeded: a skipped, cancelled or failed job is not a pass.
+            echo "$NEEDS" | jq -e 'all(.[]; .result == "success")' > /dev/null
+          elif [ "$code" = false ]; then
+            # Only the filter may have skipped them: a docs-only change. Anything else is not a pass.
+            echo "$NEEDS" | jq -e '.go.result == "skipped" and .test.result == "skipped" and .["web-e2e"].result == "skipped"' > /dev/null
+          else
+            echo "The changes job did not report"; exit 1
+          fi
 
   workspace-benchmark:
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
