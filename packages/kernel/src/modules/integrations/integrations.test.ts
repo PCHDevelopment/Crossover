@@ -442,6 +442,63 @@ describe("room integration commands", () => {
     expect(pending.store.consume).not.toHaveBeenCalled();
   });
 
+  it("keeps a GitHub integration connected on transient verification failures", async () => {
+    let connected = true;
+    const verifyGitHubInstallation = vi.fn(async () => ({ connected }));
+    const pending = pendingConnectionStore();
+    const f = await setup(testSecretStore, {
+      githubPendingConnections: pending.store,
+      verifyGitHubInstallation,
+    });
+    pending.set({
+      room_id: f.roomId,
+      owner_participant_id: f.owner.participant_id,
+      installation_id: "123456",
+      repositories: [{ name: "Example/Service", id: "8910" }],
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+    });
+    await dispatch(f, f.owner, "integrations.connect", {
+      provider: "github",
+      pending_id: "p".repeat(43),
+      repositories: ["Example/Service"],
+    });
+
+    const verified = await dispatch(f, f.owner, "integrations.verify", { provider: "github" });
+    expect(verified.response).toEqual({
+      provider: "github",
+      status: "CONNECTED",
+      status_reason: null,
+    });
+    expect(verifyGitHubInstallation).toHaveBeenCalledWith({ installation_id: "123456" });
+    expect(JSON.stringify(verified)).not.toContain("123456");
+
+    verifyGitHubInstallation.mockRejectedValueOnce(new Error("GitHub is unavailable"));
+    await expect(
+      dispatch(f, f.owner, "integrations.verify", { provider: "github" }),
+    ).rejects.toMatchObject({
+      code: "PROVIDER_UNAVAILABLE",
+      retryable: true,
+    });
+    const stillConnected = await pool.query<{ status: string }>(
+      "SELECT status FROM integrations WHERE room_id = $1 AND provider = 'github'",
+      [f.roomId],
+    );
+    expect(stillConnected.rows[0]?.status).toBe("CONNECTED");
+
+    connected = false;
+    const unavailable = await dispatch(f, f.owner, "integrations.verify", { provider: "github" });
+    expect(unavailable.response).toEqual({
+      provider: "github",
+      status: "EXPIRED",
+      status_reason: "installation_unavailable",
+    });
+    const integration = await pool.query<{ status: string }>(
+      "SELECT status FROM integrations WHERE room_id = $1 AND provider = 'github'",
+      [f.roomId],
+    );
+    expect(integration.rows[0]?.status).toBe("EXPIRED");
+  });
+
   it("retries a pending AWS role verification without returning its external ID", async () => {
     let connected = false;
     const verifier = vi.fn(async () => ({ connected }));

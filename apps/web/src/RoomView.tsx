@@ -48,6 +48,12 @@ const TerminalView = lazy(() => import("./TerminalView.js"));
 
 const FEED_LIMIT = 200;
 const BACKLOG = 50;
+const GITHUB_PENDING_ID = /^[A-Za-z0-9_-]{43}$/;
+
+function githubPendingIdFromHash(): string | undefined {
+  const pendingId = new URLSearchParams(window.location.hash.slice(1)).get("github_pending");
+  return pendingId && GITHUB_PENDING_ID.test(pendingId) ? pendingId : undefined;
+}
 
 type Tab =
   | "overview"
@@ -132,6 +138,7 @@ export function RoomView(props: { roomId: string; onBack: () => void; onSignedOu
     Record<string, Record<number, TaskEvidenceDraft>>
   >({});
   const [taskBusy, setTaskBusy] = useState<string>();
+  const [githubPendingId, setGitHubPendingId] = useState(githubPendingIdFromHash);
   const roomRef = useRef<RoomClient>(undefined);
   const listeners = useRef(new Set<(event: SdkEvent) => void>());
   const onEvent = useCallback((listener: (event: SdkEvent) => void) => {
@@ -164,6 +171,19 @@ export function RoomView(props: { roomId: string; onBack: () => void; onSignedOu
       roomRef.current = undefined;
     };
   }, [roomId, onSignedOut]);
+
+  useEffect(() => {
+    if (githubPendingId && open?.me.authority === "OWNER") setTab("owner-controls");
+  }, [githubPendingId, open]);
+
+  const onGitHubPendingHandled = useCallback(() => {
+    setGitHubPendingId(undefined);
+    window.history.replaceState(
+      window.history.state,
+      "",
+      `${window.location.pathname}${window.location.search}`,
+    );
+  }, []);
 
   const reload = useCallback(async () => {
     const room = roomRef.current;
@@ -837,6 +857,8 @@ export function RoomView(props: { roomId: string; onBack: () => void; onSignedOu
             archivedAt={room.archived_at}
             retentionDays={room.retention_days}
             settings={room.settings}
+            githubPendingId={githubPendingId}
+            onGitHubPendingHandled={onGitHubPendingHandled}
             onEvent={onEvent}
             onRefresh={reload}
           />
