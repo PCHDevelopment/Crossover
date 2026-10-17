@@ -221,6 +221,21 @@ describe("internal Git listener configuration", () => {
 });
 
 describe("GitHub integration configuration", () => {
+  it("treats blank Compose pass-through values as unset when the App is disabled", () => {
+    expect(
+      loadConfig({
+        ...env,
+        GITHUB_APP_ID: "",
+        GITHUB_APP_SLUG: "",
+        GITHUB_CLIENT_ID: "",
+        GITHUB_CLIENT_SECRET: "",
+        GITHUB_APP_PRIVATE_KEY: "",
+        INTEGRATION_SECRET_KEY: "",
+        INTEGRATION_KMS_KEY_ID: "",
+      }).githubApp,
+    ).toBeUndefined();
+  });
+
   it("requires operator credentials as a complete set and normalizes PEM newlines", () => {
     expect(() => loadConfig({ ...env, GITHUB_APP_ID: "123" })).toThrow(
       /must be configured together/,
@@ -232,6 +247,7 @@ describe("GitHub integration configuration", () => {
       GITHUB_CLIENT_ID: "client-id",
       GITHUB_CLIENT_SECRET: "client-secret",
       GITHUB_APP_PRIVATE_KEY: `-----BEGIN PRIVATE KEY-----\\n${"x".repeat(100)}\\n-----END PRIVATE KEY-----`,
+      INTEGRATION_SECRET_KEY: "ab".repeat(32),
     });
     expect(configured.githubApp).toMatchObject({
       appId: "123",
@@ -252,6 +268,25 @@ describe("GitHub integration configuration", () => {
     expect(() => loadConfig({ ...env, GITHUB_APP_SLUG: "Invalid Slug" })).toThrow(
       /GITHUB_APP_SLUG/,
     );
+  });
+
+  it("requires an integration secret store when the GitHub App is configured", () => {
+    const app = {
+      GITHUB_APP_ID: "123",
+      GITHUB_APP_SLUG: "crossover-github",
+      GITHUB_CLIENT_ID: "client-id",
+      GITHUB_CLIENT_SECRET: "client-secret",
+      GITHUB_APP_PRIVATE_KEY: `-----BEGIN PRIVATE KEY-----\\n${"x".repeat(100)}\\n-----END PRIVATE KEY-----`,
+    };
+    expect(() => loadConfig({ ...env, ...app })).toThrow(
+      /GitHub App integration requires an integration secret store.*INTEGRATION_SECRET_KEY.*INTEGRATION_KMS_KEY_ID/,
+    );
+    expect(
+      loadConfig({ ...env, ...app, INTEGRATION_SECRET_KEY: "ab".repeat(32) }).githubApp,
+    ).toBeDefined();
+    expect(
+      loadConfig({ ...env, ...app, INTEGRATION_KMS_KEY_ID: "alias/crossover-test" }).githubApp,
+    ).toBeDefined();
   });
 
   it("accepts only a digest-pinned GitHub plugin worker image", () => {
