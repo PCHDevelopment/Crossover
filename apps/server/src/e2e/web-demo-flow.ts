@@ -365,13 +365,14 @@ function registerWebDemoFlow(fixture: WebFixture): void {
       });
 
       await demoStep("T1505: Peter views AgentA output without controls", async () => {
+        // The step's own timer is already running; the waits below are budgeted against it.
+        const stepStarted = Date.now();
         const execution = await agentA.room.api.sandbox.exec<{ exec_id: string }>({
           command: "printf 'agent-terminal-output-marker\\n'",
         });
         await page.getByTestId("tab-terminal").click();
         // Each wait gets at most AGENT_OUTPUT_WAIT_MS and always ends 2 s before the step's own timer,
         // so a timeout is reported by the wait that timed out, with the viewer's state.
-        const stepStarted = Date.now();
         const waitBudget = () =>
           Math.min(AGENT_OUTPUT_WAIT_MS, STEP_TIMEOUT_MS - 2_000 - (Date.now() - stepStarted));
         // The viewer's own state, so a timeout says whether it was connecting, reconnecting, in
