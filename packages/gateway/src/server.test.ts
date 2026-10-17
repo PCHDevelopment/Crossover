@@ -22,7 +22,7 @@ import { z } from "zod";
 import { HTTP_STATUS, toHttpError } from "./errors.js";
 import type { OAuthProvider, OAuthState, OAuthStateStore } from "./oauth.js";
 import type { GitHubInstallState, GitHubInstallStateStore } from "./github-install.js";
-import type { GitHubPendingConnection } from "@crossover/kernel";
+import type { GitHubPendingConnection, GitHubPendingConnectionStore } from "@crossover/kernel";
 import { buildGateway, clientKey } from "./server.js";
 
 let db: TestDatabase;
@@ -850,6 +850,35 @@ describe("browser OAuth sessions", () => {
 });
 
 describe("GitHub App installation", () => {
+  it("requires browser sign-in when the GitHub App install flow is configured", async () => {
+    const stateStore: GitHubInstallStateStore = {
+      async saveState() {},
+      async consumeState() {
+        return undefined;
+      },
+    };
+    const pendingConnections: GitHubPendingConnectionStore = {
+      async save() {},
+      async peek() {
+        return undefined;
+      },
+      async consume() {
+        return undefined;
+      },
+    };
+
+    await expect(
+      setup(undefined, false, {
+        githubAppInstall: {
+          slug: "crossover-github",
+          stateStore,
+          pendingConnections,
+          authorizeInstallation: async () => [],
+        },
+      }),
+    ).rejects.toThrow(/browser sign-in \(OAuth or dev-login\)/);
+  });
+
   it("requires a room owner, exchanges callback data server-side, and stores only a bound pending record", async () => {
     const states = new Map<string, GitHubInstallState>();
     const pending = new Map<string, GitHubPendingConnection>();
@@ -882,7 +911,7 @@ describe("GitHub App installation", () => {
     };
     const code = "github-one-time-code-secret";
     const authorizeInstallation = vi.fn(async () => [{ name: "Example/Service", id: "9823" }]);
-    const s = await setup(undefined, false, {
+    const s = await setup(undefined, true, {
       secureCookies: true,
       githubAppInstall: {
         slug: "crossover-github",

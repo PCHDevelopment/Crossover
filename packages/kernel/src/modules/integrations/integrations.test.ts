@@ -266,6 +266,57 @@ describe("room integration commands", () => {
     expect(replay).toMatchObject({ code: "VALIDATION" });
   });
 
+  it("keeps a pending GitHub connection bound to its room for the same user", async () => {
+    const pending = pendingConnectionStore();
+    const roomA = await setup(testSecretStore, { githubPendingConnections: pending.store });
+    const roomB = await setup(testSecretStore, { githubPendingConnections: pending.store });
+    const sharedUserId = newId("user");
+    await pool.query(
+      `INSERT INTO users (id, display_name, provider, provider_subject)
+       VALUES ($1, 'Shared owner', 'test', $2)`,
+      [sharedUserId, `integration-user-${++serial}`],
+    );
+    await pool.query("UPDATE participants SET user_id = $1 WHERE id = ANY($2::text[])", [
+      sharedUserId,
+      [roomA.owner.participant_id, roomB.owner.participant_id],
+    ]);
+    const record: GitHubPendingConnection = {
+      room_id: roomA.roomId,
+      owner_participant_id: roomA.owner.participant_id,
+      installation_id: "123456",
+      repositories: [{ name: "Example/Service", id: "8910" }],
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+    };
+    pending.set(record);
+
+    const crossRoomError = await dispatch(roomB, roomB.owner, "integrations.connect", {
+      provider: "github",
+      pending_id: "p".repeat(43),
+      repositories: ["Example/Service"],
+    }).then(
+      () => null,
+      (error: unknown) => error,
+    );
+
+    expect(crossRoomError).toMatchObject({ code: "VALIDATION" });
+    expect(
+      await pending.store.peek("p".repeat(43), {
+        room_id: roomA.roomId,
+        owner_participant_id: roomA.owner.participant_id,
+      }),
+    ).toEqual(record);
+    const connected = await dispatch(roomA, roomA.owner, "integrations.connect", {
+      provider: "github",
+      pending_id: "p".repeat(43),
+      repositories: ["Example/Service"],
+    });
+    expect(connected.response).toMatchObject({
+      provider: "github",
+      status: "CONNECTED",
+      config: { installation_id: "123456", repositories: ["example/service"] },
+    });
+  });
+
   it("does not consume a GitHub pending record for a repository outside the verified list", async () => {
     const pending = pendingConnectionStore();
     const g = await setup(testSecretStore, { githubPendingConnections: pending.store });

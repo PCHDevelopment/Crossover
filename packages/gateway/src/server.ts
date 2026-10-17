@@ -22,7 +22,11 @@ import { staticSite } from "./static.js";
 import { attachWebSocket, type WebSocketOptions } from "./ws.js";
 import type { RoomExportLimiter, RoomExportSource } from "./room-export.js";
 import { registerRoomExportRoute } from "./room-export-route.js";
-import { GITHUB_INSTALL_STATE_TTL_MS, type GitHubInstallStateStore } from "./github-install.js";
+import {
+  GITHUB_INSTALL_STATE_TTL_MS,
+  GITHUB_PENDING_CONNECTION_TTL_MS,
+  type GitHubInstallStateStore,
+} from "./github-install.js";
 import type { GitHubPendingConnectionStore, GitHubPendingRepository } from "@crossover/kernel";
 
 /** Counts hits per key in fixed windows (Redis in production). */
@@ -203,15 +207,15 @@ function expectObject(body: unknown): Record<string, unknown> {
  * Responses carrying secrets (`one_time`, the join tokens) are `Cache-Control: no-store`.
  */
 export function buildGateway(options: GatewayOptions): FastifyInstance {
+  if (options.githubAppInstall && !options.oauth && options.devLogin !== true) {
+    throw new Error("The GitHub App install flow needs browser sign-in (OAuth or dev-login)");
+  }
   const { dispatcher, pool } = options;
   const secureCookies = options.secureCookies ?? false;
   const sessionCookieName = secureCookies ? SECURE_SESSION_COOKIE : SESSION_COOKIE;
   const stateCookiePrefix = secureCookies ? SECURE_STATE_COOKIE_PREFIX : STATE_COOKIE_PREFIX;
   // Development sign-in uses the same browser cookie even without configured OAuth providers.
-  const cookieAuthEnabled =
-    options.oauth !== undefined ||
-    options.devLogin === true ||
-    options.githubAppInstall !== undefined;
+  const cookieAuthEnabled = options.oauth !== undefined || options.devLogin === true;
   const app = Fastify({
     logger: false,
     bodyLimit: options.bodyLimit ?? 1024 * 1024,
@@ -496,7 +500,7 @@ export function buildGateway(options: GatewayOptions): FastifyInstance {
           owner_participant_id: ownerParticipantId,
           installation_id: installationId,
           repositories,
-          expires_at: new Date(Date.now() + GITHUB_INSTALL_STATE_TTL_MS).toISOString(),
+          expires_at: new Date(Date.now() + GITHUB_PENDING_CONNECTION_TTL_MS).toISOString(),
         });
         const destination = `/rooms/${encodeURIComponent(transaction.room_id)}#github_pending=${pendingId}`;
         return reply
