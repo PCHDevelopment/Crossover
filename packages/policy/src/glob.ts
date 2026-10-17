@@ -13,19 +13,38 @@
  * is case-sensitive and always against the whole string.
  */
 
-/** Whole-string match of a single wildcard pattern (`*`, `?`) against `text`. */
+/** Length in code points, as Rego's `count()` sees a string (`.length` counts UTF-16 units). */
+export function codePointLength(text: string): number {
+  let count = 0;
+  for (let i = 0; i < text.length; i++) {
+    count++;
+    const high = text.charCodeAt(i);
+    if (high >= 0xd800 && high <= 0xdbff && i + 1 < text.length) {
+      const low = text.charCodeAt(i + 1);
+      if (low >= 0xdc00 && low <= 0xdfff) i++;
+    }
+  }
+  return count;
+}
+
+/**
+ * Whole-string match of a single wildcard pattern (`*`, `?`) against `text`. `?` matches one
+ * code point, as it does in Rego (an emoji is one character, though two UTF-16 units).
+ */
 export function wildcardMatch(pattern: string, text: string): boolean {
+  const pat = Array.from(pattern);
+  const str = Array.from(text);
   // Iterative two-pointer matching with one backtrack point: O(pattern × text), no recursion.
   let p = 0;
   let t = 0;
   let starP = -1;
   let starT = 0;
-  while (t < text.length) {
+  while (t < str.length) {
     // A `*` in the pattern is always a wildcard, even where the text has a `*` there too.
-    if (p < pattern.length && pattern[p] === "*") {
+    if (p < pat.length && pat[p] === "*") {
       starP = p++;
       starT = t;
-    } else if (p < pattern.length && (pattern[p] === "?" || pattern[p] === text[t])) {
+    } else if (p < pat.length && (pat[p] === "?" || pat[p] === str[t])) {
       p++;
       t++;
     } else if (starP !== -1) {
@@ -35,8 +54,8 @@ export function wildcardMatch(pattern: string, text: string): boolean {
       return false;
     }
   }
-  while (p < pattern.length && pattern[p] === "*") p++;
-  return p === pattern.length;
+  while (p < pat.length && pat[p] === "*") p++;
+  return p === pat.length;
 }
 
 /** IAM-style: `*` and `?` match any characters, separators included. */

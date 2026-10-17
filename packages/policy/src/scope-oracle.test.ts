@@ -1,6 +1,11 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
-import { capabilityMatches, capabilityMatchesPath, isSafeRequestPath } from "./capability.js";
+import {
+  MAX_CAPABILITY_LENGTH,
+  capabilityMatches,
+  capabilityMatchesPath,
+  isSafeRequestPath,
+} from "./capability.js";
 import { createPolicyEngine, type AuthzFacts, type PolicyEngine } from "./engine.js";
 
 /**
@@ -9,10 +14,8 @@ import { createPolicyEngine, type AuthzFacts, type PolicyEngine } from "./engine
  * created. The two must never drift apart, so this runs in CI for good: every grant against every
  * request of a fixed corpus, and a seeded random one.
  *
- * The only known difference is for astral characters (emoji): Rego counts code points and the
- * TypeScript UTF-16 units, so `?` and the length limits (512 / 4096) differ for them. Grants in the
- * database were validated by the TypeScript, and the corpus below leaves astral characters out
- * except in the one test that pins the difference.
+ * Astral characters (emoji) are in the corpus too: Rego counts code points, so the TypeScript counts
+ * them the same way for the length limits (512 / 4096) and for `?` (T1551). The last test pins that.
  */
 const WASM = new URL("../policy/policy.wasm", import.meta.url);
 
@@ -28,6 +31,9 @@ const ORACLE_TIMEOUT_MS = 30_000;
 const SCOPES = [
   "",
   "*",
+  "?",
+  "a?",
+  "a\u{1F600}",
   "**",
   "src/**",
   "src/*",
@@ -93,6 +99,9 @@ const REQUESTS = [
 const PATHS = [
   "",
   "a",
+  "\u{1F600}",
+  "a\u{1F600}",
+  "a\u{1F600}b",
   "a/b",
   "src/a.ts",
   "src/x/y.ts",
@@ -292,12 +301,40 @@ describe("scope matching in the compiled policy equals the TypeScript", () => {
     ORACLE_TIMEOUT_MS,
   );
 
-  it("differs only for astral characters, where Rego counts code points and the TypeScript UTF-16 units", async () => {
+  it("agrees on astral characters: `?` is one code point and the length limits count code points", async () => {
     const engine = await createPolicyEngine(await readFile(WASM));
-    // `?` is one code point in Rego and one UTF-16 unit in the TypeScript: an emoji is two units.
-    const granted = "github.create_pull_request:a?";
-    const requested = "github.create_pull_request:a\u{1F600}";
-    expect(capabilityMatches(granted, requested)).toBe(false);
-    expect(covered(engine, facts(requested, null, granted))).toBe("covered");
+    const emoji = "\u{1F600}";
+    const both = (granted: string, action: string, path: string | null = null) => {
+      const expected = expectedCover(granted, action, path);
+      expect(
+        covered(engine, facts(action, path, granted)),
+        `${granted} / ${action} / ${path}`,
+      ).toBe(expected);
+      return expected;
+    };
+
+    // `?` matches one code point, not one UTF-16 unit, in plain globs and in path globs.
+    const plain = "github.create_pull_request";
+    expect(both(`${plain}:a?`, `${plain}:a${emoji}`)).toBe("covered");
+    expect(both(`${plain}:a??`, `${plain}:a${emoji}${emoji}`)).toBe("covered");
+    expect(both(`${plain}:a?`, `${plain}:a${emoji}${emoji}`)).toBe("no");
+    expect(both("workspace.write:a?", "workspace.write", `a${emoji}`)).toBe("covered");
+    expect(both("workspace.write:a?/b", "workspace.write", `a${emoji}/b`)).toBe("covered");
+    expect(both("workspace.write:a?", "workspace.write", `a${emoji}${emoji}`)).toBe("no");
+
+    // The 512 capability limit counts code points: 512 are valid, 513 are not.
+    const prefix = `${plain}:`;
+    const atLimit = prefix + emoji.repeat(MAX_CAPABILITY_LENGTH - prefix.length);
+    expect(atLimit.length).toBeGreaterThan(MAX_CAPABILITY_LENGTH); // over in UTF-16 units
+    expect(both(atLimit, atLimit)).toBe("covered");
+    expect(both(plain, atLimit)).toBe("covered");
+    const overLimit = atLimit + emoji;
+    expect(both(overLimit, overLimit)).toBe("no");
+    expect(both(plain, overLimit)).toBe("no");
+
+    // The request path limit (8 x 512 = 4096) counts code points too.
+    const pathAtLimit = emoji.repeat(MAX_CAPABILITY_LENGTH * 8);
+    expect(both("workspace.write", "workspace.write", pathAtLimit)).toBe("covered");
+    expect(both("workspace.write", "workspace.write", pathAtLimit + emoji)).toBe("invalid_path");
   });
 });
