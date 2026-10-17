@@ -1764,9 +1764,30 @@ From T1418, after T1509 3c. Every deployment today is single-host, because `Dock
 
 6. README: in the deployment section, add one paragraph copying the §4.1 single-host limits.
 
-### T1532 · Remote sandbox-host driver (§4.1) — unassigned
+### T1532 · Remote sandbox-host driver (§4.1) — S2 milestone; implementation unscheduled
 
-From T1418. An `ExecutionDriver` that runs sandboxes on separate sandbox hosts over an authenticated channel (mutual TLS or signed requests), with host registration, health checks and capacity, and the same lifecycle, output streaming and compute accounting as `DockerExecutionDriver`. It is required before any multi-tenant or untrusted deployment. It is not needed for the MVP demo. Scope and split it into a milestone when it is scheduled.
+From T1418. This post-MVP milestone runs sandboxes on separate hosts over an authenticated channel. It is required before any multi-tenant or untrusted deployment, but not for the MVP demo. O1 approved this five-task plan; Peter must schedule implementation before any code starts. O1 opens one issue per task after this milestone is documented.
+
+**Current-code boundary.** `ExecutionDriver` is defined in `packages/workspace/src/execution/core.ts`; `ExecutionService` keeps policy, room ownership and SQL lifecycle transitions, and `apps/server/src/compose.ts` injects the driver. The remote driver must preserve every operation implemented by `DockerExecutionDriver`: create, materialize, status, readFile, snapshot inventory/read/update, exec, cpuUsage, start, stop, restart and destroy. `sandbox.exec` is registered by `packages/workspace/src/sandbox-exec.ts`; its streamed output uses the existing `LogStore` and `SandboxOutputHub`. `sandbox.status` and `changes.submit` also depend on the execution service. Keep the §14.7 isolation guarantees: gVisor, default-deny egress, blocked metadata, no platform credentials in sandboxes and one sandbox per participant.
+
+**Authenticated channel.** Use HTTPS with per-host HMAC-signed requests in both directions. Sign the host ID, method, canonical path, body digest, timestamp and nonce; reject invalid signatures, stale timestamps, replayed nonces, and unknown or revoked hosts. At enrollment, record each host's TLS public-key pin and pin it on every server-to-host connection. The HMAC authenticates requests and the pinned TLS connection authenticates the enrolled host and protects the integrity of streamed output. Rotate the HMAC key and TLS pin together; neither is available to sandbox processes.
+
+**Tasks, in dependency order.** Estimates are non-test changed lines per PR; each implementation PR stays below the 400-line split threshold.
+
+1. **Host enrollment, signed control API, registry, health and capacity** — suggested owner: S2; 250–350 lines; no dependency. Done when enrollment records a host ID, HMAC key reference and TLS public-key pin; server-to-host requests use the pinned TLS identity and HMAC; host-to-server registration and heartbeats are HMAC-signed with timestamp and nonce checks; and stale, unhealthy, revoked or draining hosts cannot receive placements. Tests cover invalid signatures, replay, expiry, revocation, health transitions and capacity reporting.
+2. **Placement and complete `RemoteExecutionDriver`** — suggested owner: S2; 300–400 lines; depends on task 1. Persist the selected host and remote resource references with the sandbox record and place sandboxes only on healthy hosts with capacity. Done when the driver supports every `DockerExecutionDriver` operation listed above, including exec streaming and `cpuUsage`, and existing lifecycle, workspace, snapshot, exec and output tests pass against a fake remote host. Preserve sandbox-ID idempotency and keep network calls outside SQL transactions.
+3. **Host agent and local execution adapter** — suggested owner: S2; 300–400 lines; depends on tasks 1–2. Done when the host agent accepts only authenticated and authorized operations and runs the same resource limits, gVisor isolation, egress controls and workspace operations as the local driver, without exposing the Docker socket or host credentials to sandbox processes. Whether this task must wait for T1550 (#340), and which extracted modules are reusable, is a Peter decision below.
+4. **Host-loss semantics and compute-accounting parity** — suggested owner: S2; 250–350 lines; depends on tasks 2–3. Done when CPU usage from a remote host reaches the existing participant and room counters (§22.3 and §25.3), output ordering and resume work across a reconnect, and host loss returns a retryable failure with explicit incomplete-execution metadata. Never report success or automatically replay an arbitrary shell command. Restore a sandbox only from its latest durable volume snapshot.
+5. **Recovery tests and operator runbook** — suggested owner: S2 with O1 review; 200–300 lines; depends on tasks 1–4. Done when fault-injection tests cover host loss during create, materialize, exec, status and destroy; verify there is no cross-room access, unsafe retry or false success; and the runbook documents enrollment, HMAC-key and TLS-pin rotation/revocation, host draining, capacity alarms and recovery.
+
+**Peter-only decisions before implementation:**
+
+- Which initial hosting and network model is in scope: platform-operated EC2 in a private VPC, customer-operated hosts, or both; which region and host-to-control-plane connectivity model?
+- Who provisions, patches and operates hosts, and what trusted enrollment path supplies and rotates each host's HMAC key and TLS pin?
+- What tenancy boundary should placement enforce (shared host across rooms, dedicated host per room/customer, or another policy), and what maximum host and concurrent-sandbox capacity applies?
+- Which durable volume/snapshot service and recovery point objective should be promised? §26 currently says snapshots every 15 minutes; is that acceptable for unsubmitted workspace edits?
+- Should the first milestone enforce only existing participant and room compute budgets, or add operator/customer-host quotas?
+- Must task 3 wait for T1550 (#340), or can it proceed with the existing local driver while reusing extracted modules where they fit?
 
 ### T1533 · Stop wasted CI runs — S2 (moved from S1) · done
 
