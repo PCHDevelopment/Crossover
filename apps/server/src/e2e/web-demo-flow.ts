@@ -8,6 +8,9 @@ import { manifest, type WebFixture } from "./web-fixture.js";
 
 const STEP_TIMEOUT_MS = 45_000;
 const DOCKER_STEP_TIMEOUT_MS = 150_000;
+// The two waits inside the agent-output step get less than the step's own 45 s, so their message,
+// with the viewer's state, is the one that surfaces when one of them times out (T1556).
+const AGENT_OUTPUT_WAIT_MS = 25_000;
 const HEALTH_STEP_TIMEOUT_MS = 150_000;
 
 interface DemoParticipant {
@@ -183,6 +186,9 @@ function registerWebDemoFlow(fixture: WebFixture): void {
     const sdkFetch = trackSdkFetches();
     const demoStep = <T>(label: string, action: () => Promise<T>, timeoutMs = STEP_TIMEOUT_MS) =>
       runDemoStep(label, action, timeoutMs, sdkFetch.run);
+    // A step that waits on Docker sandbox work gets the Docker budget.
+    const dockerStep = <T>(label: string, action: () => Promise<T>) =>
+      demoStep(label, action, DOCKER_STEP_TIMEOUT_MS);
     page.setDefaultTimeout(STEP_TIMEOUT_MS);
     page.setDefaultNavigationTimeout(STEP_TIMEOUT_MS);
     const problems: string[] = [];
@@ -359,24 +365,43 @@ function registerWebDemoFlow(fixture: WebFixture): void {
       });
 
       await demoStep("T1505: Peter views AgentA output without controls", async () => {
+        // The step's own timer is already running; the waits below are budgeted against it.
+        const stepStarted = Date.now();
         const execution = await agentA.room.api.sandbox.exec<{ exec_id: string }>({
           command: "printf 'agent-terminal-output-marker\\n'",
         });
         await page.getByTestId("tab-terminal").click();
+        // Each wait gets at most AGENT_OUTPUT_WAIT_MS and always ends 2 s before the step's own timer,
+        // so a timeout is reported by the wait that timed out, with the viewer's state.
+        const waitBudget = () =>
+          Math.min(AGENT_OUTPUT_WAIT_MS, STEP_TIMEOUT_MS - 2_000 - (Date.now() - stepStarted));
+        // The viewer's own state, so a timeout says whether it was connecting, reconnecting, in
+        // error or finished, and what the error was.
+        const viewerState = async () => ({
+          status: (await page.getByTestId("agent-output-status").allTextContents())[0]?.trim(),
+          alerts: await page.getByRole("alert").allTextContents(),
+        });
         await waitForStep(
           "T1505: agent execution appears in the read-only viewer",
-          () =>
-            page
+          async () => ({
+            options: await page
               .getByTestId("agent-output-execution")
               .locator(`option[value="${execution.response.exec_id}"]`)
               .count(),
-          (count) => count === 1,
+            ...(await viewerState()),
+          }),
+          (observed) => observed.options === 1,
+          waitBudget(),
         );
         await page.getByTestId("agent-output-execution").selectOption(execution.response.exec_id);
         await waitForStep(
           "T1505: agent output appears in the viewer",
-          () => page.getByTestId("agent-output-output").textContent(),
-          (text) => text?.includes("agent-terminal-output-marker") ?? false,
+          async () => ({
+            output: await page.getByTestId("agent-output-output").textContent(),
+            ...(await viewerState()),
+          }),
+          (observed) => observed.output?.includes("agent-terminal-output-marker") ?? false,
+          waitBudget(),
         );
         const agentOutput = page.getByTestId("agent-output-panel");
         expect(await agentOutput.locator("input, textarea, button").count()).toBe(0);
@@ -603,7 +628,11 @@ function registerWebDemoFlow(fixture: WebFixture): void {
       });
 
       // 10. A syncs the disjoint Peter edit, then submits its sandbox change cleanly.
-      await demoStep("step 10: Agent A syncs and submits a cleanly merged change", async () => {
+      // Measured (T1556): the whole step took 5.7-29.6 s idle (n=20) and 15.6-34.4 s with the CPUs
+      // oversubscribed three times over (n=12), mostly `sandbox.sync` and `changes.submit`; with the
+      // 45 s default it timed out in 2 of 15 idle runs. It gets the Docker budget like the other
+      // sandbox steps.
+      await dockerStep("step 10: Agent A syncs and submits a cleanly merged change", async () => {
         const current = await workspaceFile(owner, "src/auth.js");
         const syncResult = await agentA.room.api.sandbox.sync<{
           synced_to: number;
