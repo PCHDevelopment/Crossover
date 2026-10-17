@@ -1,3 +1,85 @@
+import type * as GatewayModule from "@crossover/gateway";
+import type * as KernelModule from "@crossover/kernel";
+
+const redisClientSources = vi.hoisted(() => ({
+  command: [] as unknown[],
+  subscriber: [] as unknown[],
+}));
+
+vi.mock("@crossover/gateway", async (importOriginal) => {
+  const actual = await importOriginal<typeof GatewayModule>();
+  return {
+    ...actual,
+    RedisOAuthStateStore: class extends actual.RedisOAuthStateStore {
+      constructor(...args: ConstructorParameters<typeof actual.RedisOAuthStateStore>) {
+        redisClientSources.command.push(args[0]);
+        super(...args);
+      }
+    },
+    RedisGitHubInstallStore: class extends actual.RedisGitHubInstallStore {
+      constructor(...args: ConstructorParameters<typeof actual.RedisGitHubInstallStore>) {
+        redisClientSources.command.push(args[0]);
+        super(...args);
+      }
+    },
+    RedisRoomExportLimiter: class extends actual.RedisRoomExportLimiter {
+      constructor(...args: ConstructorParameters<typeof actual.RedisRoomExportLimiter>) {
+        redisClientSources.command.push(args[0]);
+        super(...args);
+      }
+    },
+  };
+});
+
+vi.mock("@crossover/kernel", async (importOriginal) => {
+  const actual = await importOriginal<typeof KernelModule>();
+  return {
+    ...actual,
+    RedisBudgetLimiter: class extends actual.RedisBudgetLimiter {
+      constructor(...args: ConstructorParameters<typeof actual.RedisBudgetLimiter>) {
+        redisClientSources.command.push(args[0]);
+        super(...args);
+      }
+    },
+    RedisEventPublisher: class extends actual.RedisEventPublisher {
+      constructor(...args: ConstructorParameters<typeof actual.RedisEventPublisher>) {
+        redisClientSources.command.push(args[0]);
+        super(...args);
+      }
+    },
+    RedisEditIntentStore: class extends actual.RedisEditIntentStore {
+      constructor(...args: ConstructorParameters<typeof actual.RedisEditIntentStore>) {
+        redisClientSources.command.push(args[0]);
+        super(...args);
+      }
+    },
+    RedisPresenceStore: class extends actual.RedisPresenceStore {
+      constructor(...args: ConstructorParameters<typeof actual.RedisPresenceStore>) {
+        redisClientSources.command.push(args[0]);
+        super(...args);
+      }
+    },
+    RedisEventSubscriber: class extends actual.RedisEventSubscriber {
+      constructor(...args: ConstructorParameters<typeof actual.RedisEventSubscriber>) {
+        redisClientSources.subscriber.push(args[0]);
+        super(...args);
+      }
+    },
+    RedisEditIntentSubscriber: class extends actual.RedisEditIntentSubscriber {
+      constructor(...args: ConstructorParameters<typeof actual.RedisEditIntentSubscriber>) {
+        redisClientSources.subscriber.push(args[0]);
+        super(...args);
+      }
+    },
+    RedisPresenceSubscriber: class extends actual.RedisPresenceSubscriber {
+      constructor(...args: ConstructorParameters<typeof actual.RedisPresenceSubscriber>) {
+        redisClientSources.subscriber.push(args[0]);
+        super(...args);
+      }
+    },
+  };
+});
+
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -2246,6 +2328,8 @@ describe("composeServer", () => {
   });
 
   it("shares one Redis command client and one subscriber across composed stores", async () => {
+    redisClientSources.command.length = 0;
+    redisClientSources.subscriber.length = 0;
     const cfg = config({
       oauth: {
         publicBaseUrl: "https://crossover.example.com",
@@ -2271,6 +2355,11 @@ describe("composeServer", () => {
         await new Promise<void>((resolve) => probe.once("ready", resolve));
       await probe.ping();
       server = await composeServer(cfg, { pool: db.pool });
+      expect(redisClientSources.command).toHaveLength(7);
+      expect(new Set(redisClientSources.command).size).toBe(1);
+      expect(redisClientSources.subscriber).toHaveLength(3);
+      expect(new Set(redisClientSources.subscriber).size).toBe(1);
+      expect(redisClientSources.command[0]).not.toBe(redisClientSources.subscriber[0]);
       let after = 0;
       for (let attempt = 0; attempt < 20 && after !== 2; attempt++) {
         await new Promise((resolve) => setTimeout(resolve, 25));
