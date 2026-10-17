@@ -55,3 +55,4 @@ main().catch((error: unknown) => {
   console.error("[egress-proxy] startup failed", error instanceof Error ? error.message : error);
   process.exit(1);
 });
+// cache probe (T1555): touches one source file; reverted next
