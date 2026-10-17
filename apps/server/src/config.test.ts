@@ -228,16 +228,30 @@ describe("GitHub integration configuration", () => {
     const configured = loadConfig({
       ...env,
       GITHUB_APP_ID: "123",
+      GITHUB_APP_SLUG: "crossover-github",
       GITHUB_CLIENT_ID: "client-id",
       GITHUB_CLIENT_SECRET: "client-secret",
       GITHUB_APP_PRIVATE_KEY: `-----BEGIN PRIVATE KEY-----\\n${"x".repeat(100)}\\n-----END PRIVATE KEY-----`,
     });
     expect(configured.githubApp).toMatchObject({
       appId: "123",
+      slug: "crossover-github",
       clientId: "client-id",
       clientSecret: "client-secret",
       privateKey: expect.stringContaining("\n"),
     });
+    expect(() =>
+      loadConfig({
+        ...env,
+        GITHUB_APP_ID: "123",
+        GITHUB_CLIENT_ID: "client-id",
+        GITHUB_CLIENT_SECRET: "client-secret",
+        GITHUB_APP_PRIVATE_KEY: `-----BEGIN PRIVATE KEY-----\\n${"x".repeat(100)}\\n-----END PRIVATE KEY-----`,
+      }),
+    ).toThrow(/GITHUB_APP_ID, GITHUB_APP_SLUG/);
+    expect(() => loadConfig({ ...env, GITHUB_APP_SLUG: "Invalid Slug" })).toThrow(
+      /GITHUB_APP_SLUG/,
+    );
   });
 
   it("accepts only a digest-pinned GitHub plugin worker image", () => {

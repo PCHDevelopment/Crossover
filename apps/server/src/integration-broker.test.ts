@@ -29,6 +29,7 @@ const invocation: ToolInvocation = {
 
 const app = {
   appId: "12345",
+  slug: "crossover-github",
   clientId: "client-fixture",
   clientSecret: "client-secret-fixture",
   privateKey: String(
@@ -144,16 +145,37 @@ describe("IntegrationCredentialBroker", () => {
       throw new Error(`Unexpected request ${url}`);
     };
     const service = broker({ secret: {}, fetcher });
-    const connected = await service.verifyGitHubConnection({
+    const connected = await service.authorizeGitHubInstallation({
       installation_id: 41,
       code: "one-time-code",
-      repositories: ["example/repo"],
     });
 
-    expect(connected).toEqual({ repository_ids: ["9823"] });
+    expect(connected).toEqual([{ name: "Example/Repo", id: "9823" }]);
     expect(requests[0]?.init?.body).toContain("one-time-code");
     expect(requests.at(-1)?.init?.body).toContain("github-user-token");
     expect(requests.some(({ init }) => JSON.stringify(init).includes("one-time-code"))).toBe(true);
+  });
+
+  it("revokes the GitHub user token when the selected installation is not user-authorized", async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const fetcher: typeof fetch = async (input, init) => {
+      const url = String(input);
+      requests.push({ url, ...(init ? { init } : {}) });
+      if (url === "https://github.com/login/oauth/access_token")
+        return Response.json({ access_token: "temporary-user-token" });
+      if (url.endsWith("/user/installations?per_page=100&page=1"))
+        return Response.json({ installations: [{ id: 99 }] });
+      if (url.endsWith("/applications/client-fixture/token"))
+        return new Response(null, { status: 204 });
+      throw new Error("Unexpected GitHub request");
+    };
+    const service = broker({ secret: {}, fetcher });
+
+    await expect(
+      service.authorizeGitHubInstallation({ installation_id: 41, code: "one-time-code" }),
+    ).rejects.toThrow("Installation is not controlled by the authorizing user");
+    expect(requests.some(({ url }) => url.includes("/repositories?"))).toBe(false);
+    expect(requests.at(-1)?.init?.body).toContain("temporary-user-token");
   });
 
   it("mints a GitHub token for only the scoped repository and revokes it once", async () => {
@@ -290,7 +312,6 @@ describe("IntegrationCredentialBroker", () => {
     const secretStore = new EnvelopeSecretStore(
       new ConfigKeyRoomDataKeyProvider(Buffer.alloc(32, 7)),
     );
-    const code = "one-time-oauth-code-secret";
     const userToken = "github-user-access-token-secret";
     const githubToken = "github-installation-token-secret";
     const oauthToken = "oauth-slack-access-token-secret";
@@ -363,9 +384,32 @@ describe("IntegrationCredentialBroker", () => {
       authorize,
       nodeId: "broker-" + newId("cmd"),
     });
+    const pendingId = "p".repeat(43);
+    const pendingValue = {
+      room_id: roomId,
+      owner_participant_id: ownerId,
+      installation_id: "41",
+      repositories: [{ name: "acme/widgets", id: "9823" }],
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+    };
+    let pendingAvailable = true;
+    const matchesPending = (
+      id: string,
+      binding: { room_id: string; owner_participant_id: string },
+    ) => id === pendingId && binding.room_id === roomId && binding.owner_participant_id === ownerId;
     registerIntegrationCommands(dispatcher, {
       secretStore,
-      verifyGitHubConnection: service.verifyGitHubConnection,
+      githubPendingConnections: {
+        async save() {},
+        async peek(id, binding) {
+          return pendingAvailable && matchesPending(id, binding) ? pendingValue : undefined;
+        },
+        async consume(id, binding) {
+          if (!pendingAvailable || !matchesPending(id, binding)) return undefined;
+          pendingAvailable = false;
+          return pendingValue;
+        },
+      },
     });
     registerToolCommands(dispatcher, { registry, runner });
     await db.pool.query(
@@ -382,8 +426,7 @@ describe("IntegrationCredentialBroker", () => {
       owner,
       envelope("integrations.connect", {
         provider: "github",
-        installation_id: 41,
-        code,
+        pending_id: pendingId,
         repositories: ["acme/widgets"],
       }),
     );
@@ -447,10 +490,9 @@ describe("IntegrationCredentialBroker", () => {
     expect(JSON.stringify(toolResponse)).not.toContain(oauthToken);
     expect(failedToolResponse).toMatchObject({ message: "github.create_pull_request failed" });
     expect(JSON.stringify(failedToolResponse)).not.toContain(githubToken);
-    for (const secret of [code, userToken, githubToken, oauthToken])
+    for (const secret of [userToken, githubToken, oauthToken])
       expect(persisted).not.toContain(secret);
-    for (const secret of [code, userToken, githubToken, oauthToken])
-      expect(logs).not.toContain(secret);
+    for (const secret of [userToken, githubToken, oauthToken]) expect(logs).not.toContain(secret);
     expect(revokeCount).toBe(2);
     expect(events.filter((event) => event.type === "tool.invoked")).toHaveLength(2);
     expect(events.filter((event) => event.type === "integration.connected")).toHaveLength(2);

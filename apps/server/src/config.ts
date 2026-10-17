@@ -97,6 +97,11 @@ const envSchema = z.object({
     .string()
     .regex(/^[1-9]\d{0,19}$/)
     .optional(),
+  GITHUB_APP_SLUG: z
+    .string()
+    .trim()
+    .regex(/^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$/)
+    .optional(),
   GITHUB_CLIENT_ID: z.string().trim().min(1).max(200).optional(),
   GITHUB_CLIENT_SECRET: z.string().min(1).max(4096).optional(),
   GITHUB_APP_PRIVATE_KEY: z.string().min(100).max(16_384).optional(),
@@ -174,7 +179,13 @@ export interface ServerConfig {
   integrationSecretKey?: Uint8Array;
   /** KMS key id or ARN for production room-scoped integration secret encryption. */
   integrationKmsKeyId?: string;
-  githubApp?: { appId: string; clientId: string; clientSecret: string; privateKey: string };
+  githubApp?: {
+    appId: string;
+    slug: string;
+    clientId: string;
+    clientSecret: string;
+    privateKey: string;
+  };
   /** Digest-pinned isolated GitHub worker image; GitHub tools are unavailable when unset. */
   githubPluginImage?: string;
   /** Digest-pinned isolated browser worker image; browser tools are unavailable when unset. */
@@ -298,13 +309,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   }
   const githubAppValues = [
     e.GITHUB_APP_ID,
+    e.GITHUB_APP_SLUG,
     e.GITHUB_CLIENT_ID,
     e.GITHUB_CLIENT_SECRET,
     e.GITHUB_APP_PRIVATE_KEY,
   ];
   if (githubAppValues.some(Boolean) && githubAppValues.some((value) => !value)) {
     throw new Error(
-      "Invalid server configuration:\n  GITHUB_APP_ID, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET and GITHUB_APP_PRIVATE_KEY must be configured together",
+      "Invalid server configuration:\n  GITHUB_APP_ID, GITHUB_APP_SLUG, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET and GITHUB_APP_PRIVATE_KEY must be configured together",
     );
   }
   return {
@@ -363,10 +375,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
       ? { integrationSecretKey: Buffer.from(e.INTEGRATION_SECRET_KEY, "hex") }
       : {}),
     ...(e.INTEGRATION_KMS_KEY_ID ? { integrationKmsKeyId: e.INTEGRATION_KMS_KEY_ID } : {}),
-    ...(e.GITHUB_APP_ID && e.GITHUB_CLIENT_ID && e.GITHUB_CLIENT_SECRET && e.GITHUB_APP_PRIVATE_KEY
+    ...(e.GITHUB_APP_ID &&
+    e.GITHUB_APP_SLUG &&
+    e.GITHUB_CLIENT_ID &&
+    e.GITHUB_CLIENT_SECRET &&
+    e.GITHUB_APP_PRIVATE_KEY
       ? {
           githubApp: {
             appId: e.GITHUB_APP_ID,
+            slug: e.GITHUB_APP_SLUG,
             clientId: e.GITHUB_CLIENT_ID,
             clientSecret: e.GITHUB_CLIENT_SECRET,
             privateKey: e.GITHUB_APP_PRIVATE_KEY.replace(/\\n/g, "\n"),

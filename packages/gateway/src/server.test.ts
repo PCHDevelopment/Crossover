@@ -5,6 +5,7 @@ import type { Pool } from "@crossover/db";
 import { createTestDatabase, type TestDatabase } from "@crossover/db/testing";
 import {
   Dispatcher,
+  createUserSession,
   issueTokens,
   registerInviteCommands,
   registerRoomEventsCommand,
@@ -20,6 +21,8 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { HTTP_STATUS, toHttpError } from "./errors.js";
 import type { OAuthProvider, OAuthState, OAuthStateStore } from "./oauth.js";
+import type { GitHubInstallState, GitHubInstallStateStore } from "./github-install.js";
+import type { GitHubPendingConnection } from "@crossover/kernel";
 import { buildGateway, clientKey } from "./server.js";
 
 let db: TestDatabase;
@@ -843,6 +846,131 @@ describe("browser OAuth sessions", () => {
     expect(sessionCookie).toMatch(
       /^crossover_session=[^;]+; Path=\/; Max-Age=\d+; HttpOnly; SameSite=Lax$/,
     );
+  });
+});
+
+describe("GitHub App installation", () => {
+  it("requires a room owner, exchanges callback data server-side, and stores only a bound pending record", async () => {
+    const states = new Map<string, GitHubInstallState>();
+    const pending = new Map<string, GitHubPendingConnection>();
+    const stateStore: GitHubInstallStateStore = {
+      async saveState(state, value) {
+        states.set(state, value);
+      },
+      async consumeState(state) {
+        const value = states.get(state);
+        states.delete(state);
+        return value;
+      },
+    };
+    const pendingConnections = {
+      async save(pendingId: string, value: GitHubPendingConnection) {
+        pending.set(pendingId, value);
+      },
+      async peek(pendingId: string, binding: { room_id: string; owner_participant_id: string }) {
+        const value = pending.get(pendingId);
+        return value?.room_id === binding.room_id &&
+          value.owner_participant_id === binding.owner_participant_id
+          ? value
+          : undefined;
+      },
+      async consume(pendingId: string, binding: { room_id: string; owner_participant_id: string }) {
+        const value = await this.peek(pendingId, binding);
+        if (value) pending.delete(pendingId);
+        return value;
+      },
+    };
+    const code = "github-one-time-code-secret";
+    const authorizeInstallation = vi.fn(async () => [{ name: "Example/Service", id: "9823" }]);
+    const s = await setup(undefined, false, {
+      secureCookies: true,
+      githubAppInstall: {
+        slug: "crossover-github",
+        stateStore,
+        pendingConnections,
+        authorizeInstallation,
+      },
+    });
+    const ownerRows = await pool.query<{ user_id: string; id: string }>(
+      "SELECT id, user_id FROM participants WHERE room_id = $1 AND authority = 'OWNER' AND kind = 'HUMAN'",
+      [s.room],
+    );
+    const ownerSession = await createUserSession(pool, ownerRows.rows[0]!.user_id);
+    const strangerSession = await createUserSession(pool, "user_1");
+    const ownerCookie = `__Host-crossover_session=${ownerSession.session_token}`;
+    const strangerCookie = `__Host-crossover_session=${strangerSession.session_token}`;
+    const denied = await s.app.inject({
+      method: "GET",
+      url: `/v1/rooms/${s.room}/integrations/github/install`,
+      headers: { cookie: strangerCookie, origin: "http://localhost" },
+    });
+    expect(denied.statusCode).toBe(403);
+    expect(states.size).toBe(0);
+
+    const start = await s.app.inject({
+      method: "GET",
+      url: `/v1/rooms/${s.room}/integrations/github/install`,
+      headers: { cookie: ownerCookie, origin: "http://localhost" },
+    });
+    const destination = new URL(start.headers.location!);
+    const state = destination.searchParams.get("state")!;
+    const stateCookieHeader = start.headers["set-cookie"];
+    const stateCookie = (
+      Array.isArray(stateCookieHeader) ? stateCookieHeader[0] : stateCookieHeader
+    )!.split(";", 1)[0]!;
+    expect(start.statusCode).toBe(302);
+    expect(destination.origin).toBe("https://github.com");
+    expect(destination.pathname).toBe("/apps/crossover-github/installations/new");
+    expect(state).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(states.get(state)).toEqual({
+      room_id: s.room,
+      owner_participant_id: ownerRows.rows[0]!.id,
+    });
+    expect(start.headers["cache-control"]).toBe("no-store");
+    expect(start.headers["referrer-policy"]).toBe("no-referrer");
+
+    const callbackUrl = new URL("http://localhost/v1/auth/github-app/callback");
+    callbackUrl.searchParams.set("state", state);
+    callbackUrl.searchParams.set("code", code);
+    callbackUrl.searchParams.set("installation_id", "41");
+    const callback = await s.app.inject({
+      method: "GET",
+      url: callbackUrl.pathname + callbackUrl.search,
+      headers: { cookie: `${ownerCookie}; ${stateCookie}` },
+    });
+    expect(callback.statusCode).toBe(303);
+    const location = callback.headers.location!;
+    expect(location).toMatch(new RegExp(`^/rooms/${s.room}#github_pending=[A-Za-z0-9_-]{43}$`));
+    expect(location).not.toContain(code);
+    expect(callback.body).not.toContain(code);
+    expect(JSON.stringify(callback.headers)).not.toContain(code);
+    expect(authorizeInstallation).toHaveBeenCalledWith({ installation_id: 41, code });
+    const pendingId = location.split("github_pending=")[1]!;
+    expect(pending.get(pendingId)).toMatchObject({
+      room_id: s.room,
+      owner_participant_id: ownerRows.rows[0]!.id,
+      installation_id: "41",
+      repositories: [{ name: "Example/Service", id: "9823" }],
+    });
+    expect(Object.keys(pending.get(pendingId)!).sort()).toEqual([
+      "expires_at",
+      "installation_id",
+      "owner_participant_id",
+      "repositories",
+      "room_id",
+    ]);
+    expect(JSON.stringify(pending.get(pendingId))).not.toContain(code);
+    expect(states.has(state)).toBe(false);
+
+    const replay = await s.app.inject({
+      method: "GET",
+      url: callbackUrl.pathname + callbackUrl.search,
+      headers: { cookie: `${ownerCookie}; ${stateCookie}` },
+    });
+    expect(replay.statusCode).toBe(303);
+    expect(replay.headers.location).toBe("/?github_install=failed");
+    expect(authorizeInstallation).toHaveBeenCalledOnce();
+    expect(replay.body).not.toContain(code);
   });
 });
 

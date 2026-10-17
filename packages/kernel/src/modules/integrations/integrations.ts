@@ -24,8 +24,10 @@ export const integrationsConnectParams = z
     role_arn: z.string().regex(ROLE_ARN_PATTERN).optional(),
     access_token: z.string().min(1).max(8192).optional(),
     expires_at: z.iso.datetime({ offset: true }).optional(),
-    installation_id: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
-    code: z.string().min(1).max(8192).optional(),
+    pending_id: z
+      .string()
+      .regex(/^[A-Za-z0-9_-]{43}$/)
+      .optional(),
     repositories: z
       .array(z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/))
       .min(1)
@@ -38,8 +40,7 @@ export const integrationsConnectParams = z
         "role_arn",
         "access_token",
         "expires_at",
-        "installation_id",
-        "code",
+        "pending_id",
         "repositories",
       ] as const) {
         if (!allowed.includes(field) && params[field] !== undefined) {
@@ -48,8 +49,8 @@ export const integrationsConnectParams = z
       }
     };
     if (params.provider === "github") {
-      only(["installation_id", "code", "repositories"]);
-      for (const field of ["installation_id", "code", "repositories"] as const) {
+      only(["pending_id", "repositories"]);
+      for (const field of ["pending_id", "repositories"] as const) {
         if (params[field] === undefined)
           ctx.addIssue({ code: "custom", path: [field], message: "Required" });
       }
@@ -76,18 +77,13 @@ export interface AwsRoleVerifier {
   }>;
 }
 
-export interface GitHubConnectionVerifier {
-  (input: { installation_id: number; code: string; repositories: readonly string[] }): Promise<{
-    repository_ids: readonly string[];
-  }>;
-}
-
 export interface IntegrationCommandsOptions {
   /** Encrypts all provider secrets before the command opens its PostgreSQL transaction. */
   secretStore?: SecretStore;
   /** Implemented by the broker layer; failed role assumptions stay pending. */
   verifyAwsRole?: AwsRoleVerifier;
-  verifyGitHubConnection?: GitHubConnectionVerifier;
+  /** Verified GitHub installation selections created by the server-side install callback. */
+  githubPendingConnections?: GitHubPendingConnectionStore;
 }
 
 export async function readConnectedIntegrationSecretConfig(
@@ -372,32 +368,79 @@ async function prepareConnection(
   if (params.provider === "github") {
     if (!options.secretStore)
       throw new CrossoverError("PROVIDER_UNAVAILABLE", "Integration secret storage is unavailable");
-    if (!options.verifyGitHubConnection)
+    const pendingStore = options.githubPendingConnections;
+    if (!pendingStore)
       throw new CrossoverError("PROVIDER_UNAVAILABLE", "GitHub integration is unavailable");
-    let verified: Awaited<ReturnType<GitHubConnectionVerifier>>;
+    const binding = { room_id: ctx.room_id, owner_participant_id: ctx.principal.participant_id };
+    let pending: GitHubPendingConnection | undefined;
     try {
-      verified = await options.verifyGitHubConnection({
-        installation_id: params.installation_id!,
-        code: params.code!,
-        repositories: params.repositories!.map((repo) => repo.toLowerCase()),
-      });
+      pending = await pendingStore.peek(params.pending_id!, binding);
     } catch {
-      throw new CrossoverError("VALIDATION", "GitHub installation could not be verified");
+      throw new CrossoverError("PROVIDER_UNAVAILABLE", "GitHub integration is unavailable");
     }
+    const invalidPending = () =>
+      new CrossoverError("VALIDATION", "GitHub installation could not be verified");
+    const expiry = pending ? Date.parse(pending.expires_at) : NaN;
     if (
-      verified.repository_ids.length !== params.repositories!.length ||
-      new Set(verified.repository_ids).size !== verified.repository_ids.length ||
-      verified.repository_ids.some((id) => !/^[1-9]\d{0,19}$/.test(id))
+      !pending ||
+      pending.room_id !== ctx.room_id ||
+      pending.owner_participant_id !== ctx.principal.participant_id ||
+      !Number.isFinite(expiry) ||
+      expiry <= Date.now() ||
+      !/^[1-9]\d{0,15}$/.test(pending.installation_id) ||
+      !pending.repositories.length
     ) {
-      throw new CrossoverError("VALIDATION", "GitHub installation could not be verified");
+      throw invalidPending();
+    }
+    const available = new Map<string, string>();
+    for (const repository of pending.repositories) {
+      const name = repository.name.toLowerCase();
+      if (
+        !/^[a-z0-9_.-]+\/[a-z0-9_.-]+$/.test(name) ||
+        !/^[1-9]\d{0,19}$/.test(repository.id) ||
+        available.has(name)
+      ) {
+        throw invalidPending();
+      }
+      available.set(name, repository.id);
+    }
+    const repositories = params.repositories!.map((repo) => repo.toLowerCase());
+    if (new Set(repositories).size !== repositories.length) throw invalidPending();
+    const repositoryIds = repositories.map((name) => available.get(name));
+    if (repositoryIds.some((id) => id === undefined)) throw invalidPending();
+    let consumed: GitHubPendingConnection | undefined;
+    try {
+      consumed = await pendingStore.consume(params.pending_id!, binding);
+    } catch {
+      throw new CrossoverError("PROVIDER_UNAVAILABLE", "GitHub integration is unavailable");
+    }
+    const consumedExpiry = consumed ? Date.parse(consumed.expires_at) : NaN;
+    if (
+      !consumed ||
+      consumed.room_id !== ctx.room_id ||
+      consumed.owner_participant_id !== ctx.principal.participant_id ||
+      !Number.isFinite(consumedExpiry) ||
+      consumedExpiry <= Date.now()
+    ) {
+      throw invalidPending();
+    }
+    const consumedRepositories = new Map(
+      consumed.repositories.map((repository) => [repository.name.toLowerCase(), repository.id]),
+    );
+    const consumedRepositoryIds = repositories.map((name) => consumedRepositories.get(name));
+    if (
+      consumedRepositoryIds.some((id) => id === undefined) ||
+      consumed.installation_id !== pending.installation_id ||
+      consumedRepositoryIds.some((id, index) => id !== repositoryIds[index])
+    ) {
+      throw invalidPending();
     }
     const wrappedKeyResult = await ctx.pool.query<IntegrationKeyRow>(
       "SELECT key_strategy, wrapped_data_key FROM integration_room_keys WHERE room_id = $1",
       [ctx.room_id],
     );
     const { rows: existing } = wrappedKeyResult;
-    const repositories = params.repositories!.map((repository) => repository.toLowerCase());
-    const installationId = String(params.installation_id);
+    const installationId = consumed.installation_id;
     const publicConfig = { installation_id: installationId, repositories };
     let encrypted: EncryptedSecret;
     try {
@@ -407,7 +450,7 @@ async function prepareConnection(
         JSON.stringify({
           installation_id: installationId,
           repositories_json: JSON.stringify(repositories),
-          repository_ids_json: JSON.stringify(verified.repository_ids),
+          repository_ids_json: JSON.stringify(consumedRepositoryIds),
         }),
         existing[0]?.wrapped_data_key,
       );
