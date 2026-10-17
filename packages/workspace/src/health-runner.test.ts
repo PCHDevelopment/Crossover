@@ -294,7 +294,7 @@ afterEach(async () => {
  * Real containers under a loaded full suite need more than vitest's 5 s default (T1517). S2
  * measured the abort case at 2.9 s in isolation; it timed out at 5 s in #248's CI run.
  */
-const DOCKER_CASE_TIMEOUT_MS = 30_000;
+const DOCKER_CASE_TIMEOUT_MS = 40_000;
 
 describe("DockerHealthRunner", () => {
   it("creates Docker health checkouts under the configured host-visible root", async () => {
@@ -1136,6 +1136,7 @@ describe("DockerHealthRunner", () => {
     expect(networkRemoval).toBeGreaterThan(containerRemoval);
   });
 
+  // Measured (T1529): idle 5028 ms, 3x load 5167 ms; budget 7x.
   it.skipIf(skipDockerIntegration)(
     "runs with a writable checkout as its unprivileged UID",
     async () => {
@@ -1152,6 +1153,7 @@ describe("DockerHealthRunner", () => {
     DOCKER_CASE_TIMEOUT_MS,
   );
 
+  // Measured (T1529): idle 5012 ms, 3x load 5085 ms; budget 7x.
   it.skipIf(skipDockerIntegration)(
     "blocks network access from the container",
     async () => {
@@ -1167,6 +1169,7 @@ describe("DockerHealthRunner", () => {
     DOCKER_CASE_TIMEOUT_MS,
   );
 
+  // Measured (T1529): idle 3582 ms, 3x load 5037 ms; budget 7x.
   it.skipIf(skipDockerIntegration)(
     "keeps successful status with output over 1 MiB",
     async () => {
@@ -1182,6 +1185,7 @@ describe("DockerHealthRunner", () => {
     DOCKER_CASE_TIMEOUT_MS,
   );
 
+  // Measured (T1529): idle 2453 ms, 3x load 5059 ms; budget 7x.
   it.skipIf(skipDockerIntegration)(
     "kills and removes a container on timeout",
     async () => {
