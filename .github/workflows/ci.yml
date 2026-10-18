@@ -23,10 +23,10 @@ permissions:
 # Token and actions (T1571): the default `GITHUB_TOKEN` is read-only (`contents: read`, above). A job
 # widens it only for a scope it uses, in its own `permissions:` block: `changes` reads the pull
 # request's files, and `test` and `web-e2e` read the run's jobs (`actions: read`) while they wait for
-# the images. No job has write access. Actions owned by `actions/` stay on their major tags, as
-# GitHub recommends for its own actions; every other action is pinned to a commit with its version
-# in a comment, so a moved tag can't change what runs. (`actions/cache` and the artifact actions use
-# the runtime token, not these scopes.)
+# the images, and `check` has none at all. No job has write access. Actions owned by `actions/`
+# stay on their major tags, as GitHub recommends for its own actions; every other action is pinned
+# to a commit with its version in a comment, so a moved tag can't change what runs. (`actions/cache`
+# and the artifact actions use the runtime token, not these scopes.)
 jobs:
   # Is there anything but documentation in this pull request? Pushes to main, the nightly run and
   # manual runs always run everything. `static` runs either way, so Prettier still checks the docs.
@@ -529,6 +529,8 @@ jobs:
     needs: [changes, static, go, images, test, web-e2e]
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # It only reads `needs` with jq: no checkout, no API call, so no token scope.
+    permissions: {}
     steps:
       - name: Require every job to have succeeded, or the code jobs to have been skipped for a docs-only change
         env:
