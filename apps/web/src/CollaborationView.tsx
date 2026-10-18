@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import type { RoomClient, SdkEvent } from "@crossover/sdk";
 
 type Provenance = { author_id: string; author_kind: "HUMAN" | "AGENT" | "SYSTEM"; trust: string };
@@ -63,6 +63,9 @@ type Section = "inbox" | "decisions" | "memory";
 const message = (error: unknown): string =>
   error instanceof Error ? error.message : "Something went wrong";
 
+/** A read that failed after a newer read had replaced it: nothing shown depends on it. */
+class SupersededReadError extends Error {}
+
 export default function CollaborationView(props: {
   room: RoomClient;
   selfId: string;
@@ -122,10 +125,23 @@ export default function CollaborationView(props: {
     });
     setInbox(page.response.items);
   }, [room]);
+  // Detail reads can finish out of order (T1559): an event-driven reload of the decision that was
+  // selected a moment ago can answer after the read of the one that was just proposed or clicked.
+  // Loading a decision selects it, a newer read supersedes an older one, and only the newest
+  // read's answer is shown.
+  const decisionIdRef = useRef<string | undefined>(undefined);
+  const decisionReadId = useRef(0);
   const loadDecision = useCallback(
     async (id: string) => {
-      const detail = await room.api.decisions.get<Decision>({ decision_id: id });
-      setSelectedDecision(detail.response);
+      const readId = ++decisionReadId.current;
+      decisionIdRef.current = id;
+      try {
+        const detail = await room.api.decisions.get<Decision>({ decision_id: id });
+        if (readId === decisionReadId.current) setSelectedDecision(detail.response);
+      } catch (error) {
+        if (readId !== decisionReadId.current) throw new SupersededReadError(message(error));
+        throw error;
+      }
     },
     [room],
   );
@@ -139,15 +155,33 @@ export default function CollaborationView(props: {
     },
     [room],
   );
+  // The same for the memory pane: loading a key selects it, and only the newest read is shown.
+  const memoryKeyRef = useRef<string | undefined>(undefined);
+  // The revision the write form was filled from (or last saved at): the compare-and-set base.
+  // `memoryEntry` can already be newer when the answer that filled the form arrived late.
+  const memoryDraftRef = useRef<{ key: string; revision: number } | undefined>(undefined);
+  const memoryReadId = useRef(0);
   const loadMemoryDetail = useCallback(
     async (key: string) => {
-      const [entry, history] = await Promise.all([
-        room.api.memory.get<MemoryEntry>({ key }),
-        room.api.memory.history<{ revisions: MemoryRevision[] }>({ key, limit: 100 }),
-      ]);
-      setMemoryEntry(entry.response);
-      setMemoryHistory(history.response.revisions);
-      return entry.response;
+      const readId = ++memoryReadId.current;
+      memoryKeyRef.current = key;
+      try {
+        const [entry, history] = await Promise.all([
+          room.api.memory.get<MemoryEntry>({ key }),
+          room.api.memory.history<{ revisions: MemoryRevision[] }>({ key, limit: 100 }),
+        ]);
+        if (readId === memoryReadId.current) {
+          setMemoryEntry(entry.response);
+          setMemoryHistory(history.response.revisions);
+        }
+        return entry.response;
+      } catch (error) {
+        // Only the newest read may empty the pane: an older read that fails says nothing about it.
+        if (readId !== memoryReadId.current) throw new SupersededReadError(message(error));
+        setMemoryEntry(undefined);
+        setMemoryHistory([]);
+        throw error;
+      }
     },
     [room],
   );
@@ -166,19 +200,18 @@ export default function CollaborationView(props: {
       }
       if (event.type.startsWith("decision.")) {
         void loadDecisions().catch((error: unknown) => setNotice(message(error)));
-        if (selectedDecision?.id) {
-          void loadDecision(selectedDecision.id).catch((error: unknown) =>
-            setNotice(message(error)),
-          );
+        if (decisionIdRef.current) {
+          void loadDecision(decisionIdRef.current).catch((error: unknown) => {
+            if (!(error instanceof SupersededReadError)) setNotice(message(error));
+          });
         }
       }
       if (event.type.startsWith("memory.")) {
         void loadMemory(memoryPrefix).catch((error: unknown) => setNotice(message(error)));
-        if (memoryKey) {
-          void loadMemoryDetail(memoryKey).catch((error: unknown) => {
-            setMemoryEntry(undefined);
-            setMemoryHistory([]);
-            setNotice(message(error));
+        const key = memoryKeyRef.current;
+        if (key) {
+          void loadMemoryDetail(key).catch((error: unknown) => {
+            if (!(error instanceof SupersededReadError)) setNotice(message(error));
           });
         }
       }
@@ -193,10 +226,8 @@ export default function CollaborationView(props: {
     loadDecisions,
     loadMemory,
     loadMemoryDetail,
-    memoryKey,
     memoryPrefix,
     onEvent,
-    selectedDecision?.id,
   ]);
 
   const propose = async (event: FormEvent<HTMLFormElement>) => {
@@ -284,14 +315,17 @@ export default function CollaborationView(props: {
             id: reference.slice(separator + 1).trim(),
           };
         });
-      const expected_revision = memoryEntry?.key === key ? memoryEntry.revision : 0;
-      await room.api.memory.put({
+      const draft = memoryDraftRef.current;
+      const expected_revision = draft?.key === key ? draft.revision : 0;
+      const written = await room.api.memory.put<{ revision: number }>({
         key,
         value: memoryWriteValue,
         content_type: memoryWriteType,
         expected_revision,
         source_refs,
       });
+      // The base is this write's own revision; the refresh below may already show a newer one.
+      memoryDraftRef.current = { key, revision: written.response.revision };
       setMemoryKey(key);
       await Promise.all([loadMemory(memoryPrefix), loadMemoryDetail(key)]);
     } catch (error) {
@@ -344,6 +378,9 @@ export default function CollaborationView(props: {
     setNotice(undefined);
     try {
       const entry = await loadMemoryDetail(key);
+      // A later click selected another key; this answer must not overwrite its form.
+      if (memoryKeyRef.current !== key) return;
+      memoryDraftRef.current = { key: entry.key, revision: entry.revision };
       setMemoryWriteKey(entry.key);
       setMemoryWriteValue(entry.redacted ? "" : entry.value);
       setMemoryWriteType(entry.content_type as "text/markdown" | "application/json");
@@ -351,6 +388,7 @@ export default function CollaborationView(props: {
         entry.source_refs.map((source) => `${source.kind}:${source.id}`).join("\n"),
       );
     } catch (error) {
+      if (memoryKeyRef.current !== key) return;
       setNotice(message(error));
     }
   };
