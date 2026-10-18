@@ -12,20 +12,44 @@ export function registerWebEditorTests(fixture: WebFixture): void {
       if (m.type() === "error") problems.push(`console: ${m.text()} @ ${m.location().url}`);
     });
     // What the browser sees after someone else's change (T1559): if the clean buffer doesn't follow
-    // it, the failure says whether the event reached the browser and what the page's reads answered.
+    // it, the failure says whether the event reached the browser, whether the connection dropped
+    // (the SDK then reconnects and delivers later), and which reads the page sent and what answered.
     const seen: string[] = [];
     let remoteChangeAt = 0;
-    const since = () => `+${Date.now() - remoteChangeAt}ms`;
-    page.on("websocket", (socket) =>
+    const since = () =>
+      remoteChangeAt ? `+${Date.now() - remoteChangeAt}ms` : "before the change";
+    page.on("websocket", (socket) => {
       socket.on("framereceived", (frame) => {
+        if (!remoteChangeAt) return;
         const text = typeof frame.payload === "string" ? frame.payload : frame.payload.toString();
-        if (remoteChangeAt && text.includes("workspace.changeset.applied"))
-          seen.push(`event frame ${since()}`);
-      }),
-    );
+        try {
+          const parsed = JSON.parse(text) as {
+            type?: string;
+            event?: { type?: string; sequence?: number };
+          };
+          if (parsed.type === "event")
+            seen.push(`event ${parsed.event?.type}#${parsed.event?.sequence} ${since()}`);
+          else if (parsed.type === "resync_required") seen.push(`resync_required ${since()}`);
+        } catch {
+          // not JSON
+        }
+      });
+      socket.on("close", () => seen.push(`websocket closed ${since()}`));
+      socket.on("socketerror", (error) => seen.push(`websocket error ${error} ${since()}`));
+    });
+    const isRead = (request: { method(): string; postData(): string | null; url(): string }) =>
+      request.method() === "POST" &&
+      request.url().endsWith("/commands") &&
+      (request.postData() ?? "").includes('"workspace.read"');
+    page.on("request", (request) => {
+      if (remoteChangeAt && isRead(request)) seen.push(`workspace.read sent ${since()}`);
+    });
+    page.on("requestfailed", (request) => {
+      if (remoteChangeAt && isRead(request))
+        seen.push(`workspace.read failed (${request.failure()?.errorText}) ${since()}`);
+    });
     page.on("response", async (response) => {
-      if (!remoteChangeAt || !response.url().endsWith("/commands")) return;
-      if (!(response.request().postData() ?? "").includes('"workspace.read"')) return;
+      if (!remoteChangeAt || !isRead(response.request())) return;
       const body = await response.text().catch(() => "");
       seen.push(`workspace.read ${response.status()} ${since()} ${body.slice(0, 60)}`);
     });
