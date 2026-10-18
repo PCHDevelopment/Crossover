@@ -98,6 +98,54 @@ async function makeRepo(): Promise<{ repository: string; revision: string }> {
   return { repository, revision };
 }
 
+/**
+ * A room repo the way `git.import` leaves it (T1572/T1576): a bare repo holding a --depth=1 upstream
+ * clone fetched with --update-shallow (so it has a `shallow` file), and a canonical commit made with
+ * `commit-tree <upstream tree> -p <room head>` on top of its own, complete history.
+ */
+async function makeShallowRoomRepo(): Promise<{ repository: string; revision: string }> {
+  const root = await mkdtemp(join(tmpdir(), "crossover-health-shallow-"));
+  directories.push(root);
+  const options = { timeoutMs: 10_000 };
+  const identity = ["-c", "user.name=Test", "-c", "user.email=test@example.invalid"];
+  const upstream = join(root, "upstream");
+  await git(["init", "--quiet", "--initial-branch=main", upstream], options);
+  for (const n of [1, 2, 3]) {
+    await writeFile(join(upstream, `file${n}.txt`), `contents ${n}\n`);
+    await git(["add", "."], { ...options, cwd: upstream });
+    await git([...identity, "commit", "--quiet", "-m", `c${n}`], { ...options, cwd: upstream });
+  }
+  const clone = join(root, "clone");
+  await git(["clone", "--quiet", "--depth=1", `file://${upstream}`, clone], options);
+  const repository = join(root, "room.git");
+  await git(["init", "--quiet", "--bare", "--initial-branch=main", repository], options);
+  const gitDir = { ...options, gitDir: repository };
+  await git(
+    [
+      "fetch",
+      "--quiet",
+      "--no-tags",
+      "--update-shallow",
+      clone,
+      "+refs/heads/main:refs/upstream/head",
+    ],
+    gitDir,
+  );
+  const tree = (await git(["rev-parse", "refs/upstream/head^{tree}"], gitDir)).stdout.trim();
+  const empty = (
+    await git(["hash-object", "-t", "tree", "-w", "--stdin"], { ...gitDir, input: "" })
+  ).stdout.trim();
+  const roomHead = (
+    await git([...identity, "commit-tree", empty, "-m", "room"], gitDir)
+  ).stdout.trim();
+  const revision = (
+    await git([...identity, "commit-tree", tree, "-p", roomHead, "-m", "import"], gitDir)
+  ).stdout.trim();
+  await git(["update-ref", "refs/room/canonical", revision], gitDir);
+  await readFile(join(repository, "shallow"), "utf8"); // throws unless the repo really is shallow
+  return { repository, revision };
+}
+
 function fakeInstallDocker(
   installExitCode = 0,
   installOutput?: string | ((args: readonly string[]) => string),
@@ -1151,6 +1199,19 @@ describe("DockerHealthRunner", () => {
       expect(result.log).toContain("docker-health-ok");
     },
     DOCKER_CASE_TIMEOUT_MS,
+  );
+
+  it.skipIf(skipDockerIntegration)(
+    "checks out and runs health in a shallow room repo as an imported room has (T1576)",
+    async () => {
+      const { repository, revision } = await makeShallowRoomRepo();
+      const runner = new DockerHealthRunner({ allowedImages: [DEFAULT_HEALTH_IMAGE] });
+      const green = await runner.run({ repository, revision, command: "test -f file3.txt" });
+      expect(green.status).toBe("GREEN");
+      const red = await runner.run({ repository, revision, command: "test -f missing.txt" });
+      expect(red.status).toBe("RED");
+    },
+    DOCKER_CASE_TIMEOUT_MS * 2,
   );
 
   // Measured (T1529): idle 5012 ms, 3x load 5085 ms; budget 7x.
