@@ -627,6 +627,19 @@ jobs:
         run: pnpm exec tsc -b scripts/compose-rehearsal
       - name: Rehearse the runbook
         run: pnpm exec vitest run --config vitest.rehearsal.config.ts
+      # Git's own complaint is not in the server log (by design), so on a failure look at what the
+      # server's user sees on the workspace volume. Nothing here prints a secret.
+      - name: Diagnose a failed rehearsal
+        if: failure()
+        run: |
+          docker exec crossover-server sh -c '
+            id; git --version; echo "WORKSPACE_ROOT=$WORKSPACE_ROOT"
+            ls -lan "$WORKSPACE_ROOT" | head -8
+            for d in "$WORKSPACE_ROOT"/*; do
+              echo "== $d"; ls -lan "$d" | head -6
+              git --git-dir="$d" rev-parse --git-dir 2>&1 | head -3
+              git -C "$d" rev-parse --git-dir 2>&1 | head -3
+            done' 2>&1 | head -60 || true
       # Only after the rehearsal's own check that no generated secret or issued token is in the logs.
       - uses: actions/upload-artifact@v4
         if: always() && hashFiles('rehearsal-out/leak-check.ok') != ''
