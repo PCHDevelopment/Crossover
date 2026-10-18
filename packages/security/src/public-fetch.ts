@@ -1,3 +1,4 @@
+import { validateHeaderName, validateHeaderValue } from "node:http";
 import { request } from "node:https";
 import { isIP } from "node:net";
 import { matchesHostPattern, normalizeEgressHost } from "./egress-allowlist.js";
@@ -143,8 +144,17 @@ function send(
 ): Promise<{ status: number; json: unknown }> {
   const maxBytes = options.maxResponseBytes ?? 1_048_576;
   const headers: Record<string, string> = {};
-  for (const [name, value] of Object.entries(req.headers ?? {}))
-    if (!OWN_HEADERS.has(name.toLowerCase())) headers[name] = value;
+  for (const [name, value] of Object.entries(req.headers ?? {})) {
+    if (OWN_HEADERS.has(name.toLowerCase())) continue;
+    try {
+      validateHeaderName(name);
+      validateHeaderValue(name, value);
+    } catch {
+      // No reason of its own: a header Node refuses is a bad request description, like a bad URL.
+      return Promise.reject(new PublicFetchError("invalid_url", "A request header is not valid"));
+    }
+    headers[name] = value;
+  }
   headers["accept"] = "application/json";
   headers["host"] = url.host;
   if (body !== undefined) {

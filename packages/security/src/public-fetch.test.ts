@@ -253,6 +253,18 @@ describe("fetchPublicJson", () => {
     expect(Date.now() - started).toBeLessThan(400 + 1_000);
   });
 
+  it("a header Node refuses is a PublicFetchError, not a stray TypeError", async () => {
+    const { seam } = await serve((_req, res) => json(res, {}));
+    for (const headers of [{ "bad name": "x" }, { "x-a": "line\r\nbreak" }]) {
+      const error = await fetchPublicJson(
+        { ...get("https://agent.example/"), headers },
+        seam,
+      ).catch((e: unknown) => e);
+      expect(error, JSON.stringify(headers)).toBeInstanceOf(PublicFetchError);
+      expect((error as PublicFetchError).reason).toBe("invalid_url");
+    }
+  });
+
   it("caller cannot override host or content-length headers", async () => {
     const seen: Record<string, string | undefined>[] = [];
     const { seam } = await serve((req, res) => {
