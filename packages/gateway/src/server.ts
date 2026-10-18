@@ -1,5 +1,4 @@
 import type { Pool } from "@crossover/db";
-import { createHash, randomBytes } from "node:crypto";
 import {
   authenticate,
   authenticateUser,
@@ -10,23 +9,31 @@ import {
   revokeUserSession,
   refresh,
   type Dispatcher,
-  type ProviderIdentity,
 } from "@crossover/kernel";
 import { CrossoverError, newId } from "@crossover/protocol";
 import { z } from "zod";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import { bearerToken } from "./bearer.js";
+import {
+  SESSION_COOKIE,
+  SECURE_SESSION_COOKIE,
+  STATE_COOKIE_PREFIX,
+  SECURE_STATE_COOKIE_PREFIX,
+  cookieValue,
+  userToken,
+  setCookie,
+  clearCookie,
+  requireSameOrigin,
+} from "./cookies.js";
+import { registerOAuthRoutes } from "./oauth-routes.js";
+import { registerGitHubInstallRoutes } from "./github-install-routes.js";
 import { toHttpError } from "./errors.js";
-import { OAUTH_STATE_TTL_MS, type OAuthProvider, type OAuthStateStore } from "./oauth.js";
+import type { OAuthProvider, OAuthStateStore } from "./oauth.js";
 import { staticSite } from "./static.js";
 import { attachWebSocket, type WebSocketOptions } from "./ws.js";
 import type { RoomExportLimiter, RoomExportSource } from "./room-export.js";
 import { registerRoomExportRoute } from "./room-export-route.js";
-import {
-  GITHUB_INSTALL_STATE_TTL_MS,
-  GITHUB_PENDING_CONNECTION_TTL_MS,
-  type GitHubInstallStateStore,
-} from "./github-install.js";
+import type { GitHubInstallStateStore } from "./github-install.js";
 import type { GitHubPendingConnectionStore, GitHubPendingRepository } from "@crossover/kernel";
 
 /** Counts hits per key in fixed windows (Redis in production). */
@@ -106,75 +113,6 @@ const devLoginBody = z.strictObject({
   display_name: z.string().trim().min(1).max(100),
 });
 
-const SESSION_COOKIE = "crossover_session";
-const SECURE_SESSION_COOKIE = "__Host-crossover_session";
-const STATE_COOKIE_PREFIX = "crossover_oauth_state_";
-const SECURE_STATE_COOKIE_PREFIX = "__Host-crossover_oauth_state_";
-const OAUTH_STATE = /^[A-Za-z0-9_-]{43}$/;
-
-function cookieValue(request: FastifyRequest, name: string): string | undefined {
-  for (const part of (request.headers.cookie ?? "").split(";")) {
-    const index = part.indexOf("=");
-    if (index >= 0 && part.slice(0, index).trim() === name) return part.slice(index + 1).trim();
-  }
-  return undefined;
-}
-
-function userToken(
-  request: FastifyRequest,
-  allowCookie: boolean,
-  sessionCookieName: string,
-): { token: string; cookie: boolean } {
-  if (request.headers.authorization !== undefined)
-    return { token: bearerToken(request), cookie: false };
-  const token = allowCookie ? cookieValue(request, sessionCookieName) : undefined;
-  return token ? { token, cookie: true } : { token: bearerToken(request), cookie: false };
-}
-
-function setCookie(name: string, token: string, expiresAt: Date, secure: boolean): string {
-  const maxAge = Math.max(0, Math.floor((expiresAt.getTime() - Date.now()) / 1000));
-  return `${name}=${token}; Path=/; Max-Age=${maxAge}; HttpOnly; SameSite=Lax${secure ? "; Secure" : ""}`;
-}
-
-function clearCookie(name: string, secure: boolean): string {
-  return `${name}=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; SameSite=Lax${secure ? "; Secure" : ""}`;
-}
-
-function requireSameOrigin(request: FastifyRequest, expectedOrigin?: string): void {
-  const origin = request.headers.origin;
-  const expected = expectedOrigin ?? `${request.protocol}://${request.hostname}`;
-  const actual =
-    typeof origin === "string" && URL.canParse(origin) ? new URL(origin).origin : undefined;
-  if (actual !== new URL(expected).origin)
-    throw new CrossoverError("FORBIDDEN", "Invalid request origin");
-}
-
-function requireSameOriginNavigation(request: FastifyRequest, expectedOrigin?: string): void {
-  if (request.headers.origin !== undefined) {
-    requireSameOrigin(request, expectedOrigin);
-    return;
-  }
-  if (request.headers["sec-fetch-site"] !== "same-origin")
-    throw new CrossoverError("FORBIDDEN", "Invalid request origin");
-}
-
-async function githubOwnerForUser(
-  pool: Pool,
-  roomId: string,
-  userId: string,
-  expectedParticipantId?: string,
-): Promise<string | undefined> {
-  const { rows } = await pool.query<{ participant_id: string }>(
-    `SELECT p.id AS participant_id
-     FROM participants p
-     WHERE p.room_id = $1 AND p.user_id = $2 AND p.kind = 'HUMAN'
-       AND p.authority = 'OWNER' AND p.status = 'ACTIVE'
-       AND ($3::text IS NULL OR p.id = $3)`,
-    [roomId, userId, expectedParticipantId ?? null],
-  );
-  return rows[0]?.participant_id;
-}
-
 function expectObject(body: unknown): Record<string, unknown> {
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
     throw new CrossoverError("VALIDATION", "Request body must be a JSON object");
@@ -237,12 +175,10 @@ export function buildGateway(options: GatewayOptions): FastifyInstance {
     if (auth.cookie && mutation) requireSameOrigin(request, options.oauth?.publicBaseUrl);
     return { principal: await authenticateUser(pool, auth.token), ...auth };
   }
-
   app.get("/v1/auth/providers", async (_request, reply) => {
     void reply.header("Cache-Control", "no-store");
     return { providers: Object.keys(options.oauth?.providers ?? {}) };
   });
-
   app.get("/v1/auth/session", async (request, reply) => {
     void reply.header("Cache-Control", "no-store");
     const token = cookieAuthEnabled ? cookieValue(request, sessionCookieName) : undefined;
@@ -256,288 +192,26 @@ export function buildGateway(options: GatewayOptions): FastifyInstance {
       throw error;
     }
   });
-
   if (options.oauth) {
-    const { publicBaseUrl, providers, stateStore } = options.oauth;
-    const providerFor = (name: string) => Object.hasOwn(providers, name) && providers[name];
-    for (const [name, provider] of Object.entries(providers)) {
-      if (!/^[a-z][a-z0-9_-]{0,31}$/.test(name) || provider.name !== name)
-        throw new Error("OAuth providers must use their registered name");
-    }
-    app.get<{ Params: { provider: string } }>(
-      "/v1/auth/oauth/:provider",
-      async (request, reply) => {
-        const selected = providerFor(request.params.provider);
-        if (!selected) throw new CrossoverError("NOT_FOUND", "OAuth provider not found");
-        const limit = options.oauthStartLimit;
-        if (limit) {
-          const decision = await limit.limiter
-            .hit(`oauth-start:${clientKey(request.ip)}`, limit.perMinute ?? 30, 60_000)
-            .catch(() => ({ allowed: true as const }));
-          if (!decision.allowed) {
-            throw new CrossoverError("RATE_LIMITED", "Too many OAuth sign-in attempts", {
-              details: { retry_after: Math.max(1, Math.ceil(decision.retry_after_ms / 1000)) },
-            });
-          }
-        }
-        const state = randomBytes(32).toString("base64url");
-        const verifier = randomBytes(32).toString("base64url");
-        const nonce = randomBytes(32).toString("base64url");
-        const challenge = createHash("sha256").update(verifier).digest("base64url");
-        await stateStore.save(state, { provider: selected.name, verifier, nonce });
-        const cookie = `${stateCookiePrefix}${state}=1; Path=/; Max-Age=${OAUTH_STATE_TTL_MS / 1000}; HttpOnly; SameSite=Lax${secureCookies ? "; Secure" : ""}`;
-        const redirectUri = `${publicBaseUrl}/v1/auth/oauth/${selected.name}/callback`;
-        return reply
-          .header("Cache-Control", "no-store")
-          .header("Referrer-Policy", "no-referrer")
-          .header("Set-Cookie", cookie)
-          .redirect(selected.authorizationUrl({ state, challenge, redirectUri, nonce }));
-      },
-    );
-    app.get<{
-      Params: { provider: string };
-      Querystring: { state?: string; code?: string; error?: string };
-    }>("/v1/auth/oauth/:provider/callback", async (request, reply) => {
-      const selected = providerFor(request.params.provider);
-      const { state, code, error } = request.query;
-      const failed = (clearState?: string) => {
-        const destination = new URL("/", publicBaseUrl);
-        destination.searchParams.set("auth", "failed");
-        const response = reply
-          .status(303)
-          .header("Cache-Control", "no-store")
-          .header("Referrer-Policy", "no-referrer");
-        if (clearState) response.header("Set-Cookie", clearState);
-        return response.header("Location", destination.toString()).send();
-      };
-      if (!selected || typeof state !== "string" || !OAUTH_STATE.test(state)) return failed();
-      const stateCookie = `${stateCookiePrefix}${state}`;
-      if (cookieValue(request, stateCookie) !== "1") return failed();
-      const transaction = await stateStore.consume(state);
-      const clearState = clearCookie(stateCookie, secureCookies);
-      if (
-        !transaction ||
-        transaction.provider !== selected.name ||
-        error ||
-        typeof code !== "string" ||
-        !code ||
-        code.length > 2048
-      ) {
-        return failed(clearState);
-      }
-      let identity: ProviderIdentity;
-      try {
-        identity = await selected.identity({
-          redirectUri: `${publicBaseUrl}/v1/auth/oauth/${selected.name}/callback`,
-          code,
-          verifier: transaction.verifier,
-          ...(transaction.nonce === undefined ? {} : { nonce: transaction.nonce }),
-        });
-      } catch {
-        return failed(clearState);
-      }
-      if (
-        identity.provider !== selected.name ||
-        !identity.subject ||
-        identity.subject.length > 255 ||
-        typeof identity.display_name !== "string" ||
-        !identity.display_name.trim()
-      ) {
-        return failed(clearState);
-      }
-      const user = await findOrCreateUser(pool, identity);
-      const session = await createUserSession(pool, user.id);
-      const destination = new URL("/", publicBaseUrl);
-      return reply
-        .status(303)
-        .header("Cache-Control", "no-store")
-        .header("Referrer-Policy", "no-referrer")
-        .header("Set-Cookie", [
-          setCookie(sessionCookieName, session.session_token, session.expires_at, secureCookies),
-          clearState,
-        ])
-        .header("Location", destination.toString())
-        .send();
+    registerOAuthRoutes(app, {
+      pool,
+      oauth: options.oauth,
+      oauthStartLimit: options.oauthStartLimit,
+      secureCookies,
+      sessionCookieName,
+      stateCookiePrefix,
+      clientKey,
     });
   }
-
   if (options.githubAppInstall) {
-    const install = options.githubAppInstall;
-    const installStateCookiePrefix = secureCookies
-      ? "__Host-crossover_github_install_state_"
-      : "crossover_github_install_state_";
-    const installCallbackPath = "/v1/auth/github-app/callback";
-    const failedLocation = (reason: "access_denied" | "unavailable" | "invalid") =>
-      `/?github_install=failed&github_install_reason=${reason}`;
-    const clearInstallStateCookie = (state: string) =>
-      clearCookie(`${installStateCookiePrefix}${state}`, secureCookies);
-
-    app.get<{ Params: { roomId: string } }>(
-      "/v1/rooms/:roomId/integrations/github/install",
-      async (request, reply) => {
-        const auth = userToken(request, cookieAuthEnabled, sessionCookieName);
-        if (auth.cookie) requireSameOriginNavigation(request, options.oauth?.publicBaseUrl);
-        const principal = await authenticateUser(pool, auth.token);
-        const ownerParticipantId = await githubOwnerForUser(
-          pool,
-          request.params.roomId,
-          principal.user_id,
-        );
-        if (!ownerParticipantId)
-          throw new CrossoverError("FORBIDDEN", "Only the room owner can manage integrations", {
-            details: { reason: "owner_only" },
-          });
-
-        const state = randomBytes(32).toString("base64url");
-        await install.stateStore.saveState(state, {
-          room_id: request.params.roomId,
-          owner_participant_id: ownerParticipantId,
-        });
-        const destination = new URL(
-          `https://github.com/apps/${encodeURIComponent(install.slug)}/installations/new`,
-        );
-        destination.searchParams.set("state", state);
-        const cookie = `${installStateCookiePrefix}${state}=1; Path=/; Max-Age=${GITHUB_INSTALL_STATE_TTL_MS / 1000}; HttpOnly; SameSite=Lax${secureCookies ? "; Secure" : ""}`;
-        return reply
-          .header("Cache-Control", "no-store")
-          .header("Referrer-Policy", "no-referrer")
-          .header("Set-Cookie", cookie)
-          .redirect(destination.toString());
-      },
-    );
-
-    app.get<{
-      Params: { roomId: string };
-      Querystring: { pending_id?: string };
-    }>("/v1/rooms/:roomId/integrations/github/pending", async (request, reply) => {
-      const auth = userToken(request, cookieAuthEnabled, sessionCookieName);
-      if (auth.cookie) requireSameOriginNavigation(request, options.oauth?.publicBaseUrl);
-      const principal = await authenticateUser(pool, auth.token);
-      const ownerParticipantId = await githubOwnerForUser(
-        pool,
-        request.params.roomId,
-        principal.user_id,
-      );
-      if (!ownerParticipantId)
-        throw new CrossoverError("FORBIDDEN", "Only the room owner can manage integrations", {
-          details: { reason: "owner_only" },
-        });
-      const pendingId = request.query.pending_id;
-      if (typeof pendingId !== "string" || !OAUTH_STATE.test(pendingId)) {
-        throw new CrossoverError("VALIDATION", "Invalid GitHub pending connection");
-      }
-      let pending: Awaited<ReturnType<typeof install.pendingConnections.peek>>;
-      try {
-        pending = await install.pendingConnections.peek(pendingId, {
-          room_id: request.params.roomId,
-          owner_participant_id: ownerParticipantId,
-        });
-      } catch {
-        throw new CrossoverError("PROVIDER_UNAVAILABLE", "GitHub integration is unavailable");
-      }
-      if (!pending) throw new CrossoverError("NOT_FOUND", "GitHub pending connection not found");
-      return reply
-        .header("Cache-Control", "no-store")
-        .header("Referrer-Policy", "no-referrer")
-        .send({ repositories: pending.repositories.map(({ name }) => ({ name })) });
-    });
-
-    app.get<{
-      Querystring: { state?: string; code?: string; installation_id?: string; error?: string };
-    }>(installCallbackPath, async (request, reply) => {
-      const { state, code, installation_id: installationId, error } = request.query;
-      const failed = (reason: "access_denied" | "unavailable" | "invalid", clearState?: string) => {
-        const response = reply
-          .status(303)
-          .header("Cache-Control", "no-store")
-          .header("Referrer-Policy", "no-referrer");
-        if (clearState) response.header("Set-Cookie", clearState);
-        return response.header("Location", failedLocation(reason)).send();
-      };
-      if (
-        typeof state !== "string" ||
-        !OAUTH_STATE.test(state) ||
-        cookieValue(request, `${installStateCookiePrefix}${state}`) !== "1"
-      ) {
-        return failed("invalid");
-      }
-      let transaction: { room_id: string; owner_participant_id: string } | undefined;
-      try {
-        transaction = await install.stateStore.consumeState(state);
-      } catch {
-        return failed("unavailable", clearInstallStateCookie(state));
-      }
-      const clearState = clearInstallStateCookie(state);
-      if (!transaction) return failed("invalid", clearState);
-      if (error !== undefined)
-        return failed(error === "access_denied" ? "access_denied" : "unavailable", clearState);
-      if (
-        typeof code !== "string" ||
-        !code ||
-        code.length > 2048 ||
-        typeof installationId !== "string" ||
-        !/^[1-9]\d{0,15}$/.test(installationId) ||
-        !Number.isSafeInteger(Number(installationId))
-      ) {
-        return failed("invalid", clearState);
-      }
-
-      let principal: Awaited<ReturnType<typeof authenticateUser>>;
-      try {
-        ({ principal } = await humanUser(request));
-      } catch (authError) {
-        return failed(
-          authError instanceof CrossoverError && authError.code === "UNAUTHENTICATED"
-            ? "invalid"
-            : "unavailable",
-          clearState,
-        );
-      }
-
-      let ownerParticipantId: string | undefined;
-      try {
-        ownerParticipantId = await githubOwnerForUser(
-          pool,
-          transaction.room_id,
-          principal.user_id,
-          transaction.owner_participant_id,
-        );
-      } catch {
-        return failed("unavailable", clearState);
-      }
-      if (!ownerParticipantId) return failed("invalid", clearState);
-
-      let repositories: readonly GitHubPendingRepository[];
-      try {
-        repositories = await install.authorizeInstallation({
-          installation_id: Number(installationId),
-          code,
-        });
-      } catch {
-        return failed("unavailable", clearState);
-      }
-      if (!repositories.length) return failed("invalid", clearState);
-
-      try {
-        const pendingId = randomBytes(32).toString("base64url");
-        await install.pendingConnections.save(pendingId, {
-          room_id: transaction.room_id,
-          owner_participant_id: ownerParticipantId,
-          installation_id: installationId,
-          repositories,
-          expires_at: new Date(Date.now() + GITHUB_PENDING_CONNECTION_TTL_MS).toISOString(),
-        });
-        const destination = `/rooms/${encodeURIComponent(transaction.room_id)}#github_pending=${pendingId}`;
-        return reply
-          .status(303)
-          .header("Cache-Control", "no-store")
-          .header("Referrer-Policy", "no-referrer")
-          .header("Set-Cookie", clearState)
-          .header("Location", destination)
-          .send();
-      } catch {
-        return failed("unavailable", clearState);
-      }
+    registerGitHubInstallRoutes(app, {
+      pool,
+      githubAppInstall: options.githubAppInstall,
+      secureCookies,
+      sessionCookieName,
+      cookieAuthEnabled,
+      publicBaseUrl: options.oauth?.publicBaseUrl,
+      humanUser,
     });
   }
   const web = options.staticRoot ? staticSite(options.staticRoot) : undefined;
@@ -561,12 +235,10 @@ export function buildGateway(options: GatewayOptions): FastifyInstance {
     }
     return reply.status(404).send(new CrossoverError("NOT_FOUND", "No such route").toErrorBody());
   });
-
   app.get("/health", async (_request, reply) => {
     await pool.query("SELECT 1");
     return reply.status(200).send({ status: "ok" });
   });
-
   app.post<{ Params: { roomId: string } }>("/v1/rooms/:roomId/commands", async (request, reply) => {
     const principal = await authenticate(pool, bearerToken(request));
     // A token is for one room. Anything else looks the same as a room that doesn't exist.
@@ -649,7 +321,6 @@ export function buildGateway(options: GatewayOptions): FastifyInstance {
     void reply.status(201).header("Cache-Control", "no-store");
     return { ...(result.response as object), tokens: result.one_time };
   });
-
   app.get("/v1/rooms", async (request, reply) => {
     const { principal } = await humanUser(request);
     void reply.header("Cache-Control", "no-store");
@@ -662,7 +333,6 @@ export function buildGateway(options: GatewayOptions): FastifyInstance {
     void reply.header("Cache-Control", "no-store");
     return session;
   });
-
   app.post("/v1/auth/refresh", async (request, reply) => {
     const limit = options.refreshLimit;
     if (limit) {
