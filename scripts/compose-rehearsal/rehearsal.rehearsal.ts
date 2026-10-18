@@ -675,7 +675,17 @@ it("rehearses docs/DEMO-RUNBOOK.md steps 1-16 against the real docker compose st
         });
         if (!seen.content.includes("createAccessToken"))
           throw new Error("Agent A does not see the renamed helper");
-        return "renamed in auth.js, routes.js and auth.test.js; Agent A reads it";
+        // workspace.search runs ripgrep inside the server image (T1635).
+        const found = (
+          await owner.api.workspace.search<{ matches: { path: string }[] }>({
+            query: "createAccessToken",
+          })
+        ).response.matches;
+        if (!found.some((match) => match.path === "auth.js"))
+          throw new Error(
+            `workspace.search found no match in auth.js (matched: ${found.map((match) => match.path).join(", ") || "nothing"})`,
+          );
+        return `renamed in auth.js, routes.js and auth.test.js; Agent A reads it; search: ${found.length} match(es)`;
       },
     );
 
