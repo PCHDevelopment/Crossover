@@ -254,6 +254,8 @@ export class ExecutionCore {
 
   readonly advanceWorkers = new Map<string, Promise<void>>();
 
+  closed = false;
+
   sandboxEventSink:
     ((roomId: string, events: readonly SandboxAdvanceEvent[]) => Promise<void>) | undefined;
 
