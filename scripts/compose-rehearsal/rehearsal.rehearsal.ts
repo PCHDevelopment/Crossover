@@ -534,6 +534,33 @@ it("rehearses docs/DEMO-RUNBOOK.md steps 1-16 against the real docker compose st
     };
     const initialAuth = await read("auth.js");
 
+    // Run a command in an agent's sandbox over MCP and read its output stream as the owner does.
+    const execIn = async (who: string, command: string) => {
+      const started = await agent(who).call<{ exec_id: string }>("sandbox_exec", {
+        command,
+        timeout_s: 60,
+      });
+      let text = "";
+      let exitCode: number | null | undefined;
+      const stream = owner.subscribeSandboxOutput(started.exec_id, {
+        onUpdate: (update) => {
+          if (update.kind === "data") text += new TextDecoder().decode(update.data);
+          if (update.kind === "finished") exitCode = update.exit_code;
+        },
+      });
+      try {
+        await waitFor(
+          `${who}'s \`${command}\` to end`,
+          async () => exitCode,
+          (code) => code !== undefined,
+          60_000,
+        );
+      } finally {
+        stream.close();
+      }
+      return { exitCode, text };
+    };
+
     // 8. A and B work in real sandboxes: a container per agent, output streamed, exit code recorded.
     await step(
       {
@@ -544,6 +571,8 @@ it("rehearses docs/DEMO-RUNBOOK.md steps 1-16 against the real docker compose st
         budgetMs: DOCKER_MS,
       },
       async () => {
+        // The first sandbox_exec creates an agent's sandbox (a write before it has nothing to write to).
+        await Promise.all([execIn("AgentA", "node --version"), execIn("AgentB", "node --version")]);
         await agent("AgentA").call("sandbox_write_file", {
           path: "auth.js",
           content: mark(initialAuth.content, MARK, "or null when it is (A). */"),
@@ -558,33 +587,16 @@ it("rehearses docs/DEMO-RUNBOOK.md steps 1-16 against the real docker compose st
           content:
             'import assert from "node:assert/strict";\nimport test from "node:test";\nimport { refreshHandler } from "./refresh.js";\n\ntest("refreshing returns a token", () => {\n  assert.equal(refreshHandler("Ada").token, "token:ada");\n});\n',
         });
-        const started = await agent("AgentB").call<{ exec_id: string }>("sandbox_exec", {
-          command: "node --test",
-          timeout_s: 60,
-        });
-        // The owner reads another agent's output stream, as Peter does in the Terminal tab.
-        let text = "";
-        let exitCode: number | null | undefined;
-        const stream = owner.subscribeSandboxOutput(started.exec_id, {
-          onUpdate: (update) => {
-            if (update.kind === "data") text += new TextDecoder().decode(update.data);
-            if (update.kind === "finished") exitCode = update.exit_code;
-          },
-        });
-        try {
-          await waitFor(
-            "the sandbox command's end",
-            async () => exitCode,
-            (code) => code !== undefined,
-            60_000,
+        const tested = await execIn("AgentB", "node --test");
+        if (tested.exitCode !== 0)
+          throw new Error(
+            `node --test exited ${String(tested.exitCode)}: ${tested.text.slice(-300)}`,
           );
-        } finally {
-          stream.close();
-        }
-        if (exitCode !== 0)
-          throw new Error(`node --test exited ${String(exitCode)}: ${text.slice(-300)}`);
-        if (!text.includes("pass"))
-          throw new Error(`no test output was streamed: ${JSON.stringify(text.slice(-200))}`);
+        if (!tested.text.includes("pass"))
+          throw new Error(
+            `no test output was streamed: ${JSON.stringify(tested.text.slice(-200))}`,
+          );
+        const text = tested.text;
         const containers = (
           await run("docker", ["ps", "--filter", "label=crossover.sandbox=true", "-q"])
         ).stdout
