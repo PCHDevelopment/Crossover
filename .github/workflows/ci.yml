@@ -684,7 +684,14 @@ jobs:
             try "A bind mount, nested ref" "$WORKSPACE_ROOT/probe-a.git" refs/upstream/prepare/cmd_X
             try "B /tmp, nested ref" /tmp/matrix/b.git refs/upstream/prepare/cmd_X
             try "C bind mount, flat ref" "$WORKSPACE_ROOT/probe-c.git" refs/upstream/x
-            try "D /tmp, flat ref" /tmp/matrix/d.git refs/upstream/x' 2>&1 | head -40 || true
+            try "D /tmp, flat ref" /tmp/matrix/d.git refs/upstream/x
+            echo "-- more variants (fresh repo on /tmp, flat ref)"
+            git clone -q --bare --no-tags --template= --branch=main -- "$URL" /tmp/crossover-import-m/full.git 2>&1 | tail -2
+            git init -q --bare --template= /tmp/matrix/e.git; git --git-dir=/tmp/matrix/e.git fetch --no-tags --quiet /tmp/crossover-import-m/full.git +HEAD:refs/upstream/x; echo "== E non-shallow source: rc=$? refs=$(git --git-dir=/tmp/matrix/e.git for-each-ref | wc -l)"
+            git init -q --bare --template= /tmp/matrix/f.git; git --git-dir=/tmp/matrix/f.git fetch --no-tags --quiet --update-shallow /tmp/crossover-import-m/repo +HEAD:refs/upstream/x; echo "== F shallow source, --update-shallow: rc=$? refs=$(git --git-dir=/tmp/matrix/f.git for-each-ref | wc -l)"
+            git init -q --bare --template= /tmp/matrix/g.git; echo "== G shallow source, verbose:"; git --git-dir=/tmp/matrix/g.git fetch --no-tags /tmp/crossover-import-m/repo +HEAD:refs/upstream/x 2>&1 | head -8; echo "   refs=$(git --git-dir=/tmp/matrix/g.git for-each-ref | wc -l) shallow-file: $(ls /tmp/matrix/g.git/shallow 2>&1)"
+            git init -q --bare --template= /tmp/matrix/h.git; echo "== H traced:"; GIT_TRACE=1 git --git-dir=/tmp/matrix/h.git fetch --no-tags /tmp/crossover-import-m/repo +HEAD:refs/upstream/x 2>&1 | cut -c1-180 | head -24
+            echo "== source repo: $(git --git-dir=/tmp/crossover-import-m/repo rev-parse HEAD) shallow: $(cat /tmp/crossover-import-m/repo/shallow 2>&1 | head -2)"' 2>&1 | head -80 || true
           # The same Git calls the import makes (packages/workspace upstream.ts and upstream-import.ts),
           # with Git's own stderr, which the server does not log.
           docker exec -e URL="$DEMO_REPO_URL" crossover-server sh -c '
