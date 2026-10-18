@@ -94,8 +94,7 @@ export class IntegrationCredentialBroker {
         token,
         "installations",
       );
-      if (!installations.some(({ id }) => id === input.installation_id))
-        throw new Error("Installation is not controlled by the authorizing user");
+      if (!installations.some(({ id }) => id === input.installation_id)) return [];
       // This user-token endpoint returns only repositories the authorizing user can access.
       const available = await this.githubPages<{ id: number; full_name: string }>(
         `/user/installations/${input.installation_id}/repositories?per_page=100`,

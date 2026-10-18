@@ -367,7 +367,8 @@ export function buildGateway(options: GatewayOptions): FastifyInstance {
       ? "__Host-crossover_github_install_state_"
       : "crossover_github_install_state_";
     const installCallbackPath = "/v1/auth/github-app/callback";
-    const failedLocation = "/?github_install=failed";
+    const failedLocation = (reason: "access_denied" | "unavailable" | "invalid") =>
+      `/?github_install=failed&github_install_reason=${reason}`;
     const clearInstallStateCookie = (state: string) =>
       clearCookie(`${installStateCookiePrefix}${state}`, secureCookies);
 
@@ -445,31 +446,32 @@ export function buildGateway(options: GatewayOptions): FastifyInstance {
       Querystring: { state?: string; code?: string; installation_id?: string; error?: string };
     }>(installCallbackPath, async (request, reply) => {
       const { state, code, installation_id: installationId, error } = request.query;
-      const failed = (clearState?: string) => {
+      const failed = (reason: "access_denied" | "unavailable" | "invalid", clearState?: string) => {
         const response = reply
           .status(303)
           .header("Cache-Control", "no-store")
           .header("Referrer-Policy", "no-referrer");
         if (clearState) response.header("Set-Cookie", clearState);
-        return response.header("Location", failedLocation).send();
+        return response.header("Location", failedLocation(reason)).send();
       };
       if (
         typeof state !== "string" ||
         !OAUTH_STATE.test(state) ||
         cookieValue(request, `${installStateCookiePrefix}${state}`) !== "1"
       ) {
-        return failed();
+        return failed("invalid");
       }
       let transaction: { room_id: string; owner_participant_id: string } | undefined;
       try {
         transaction = await install.stateStore.consumeState(state);
       } catch {
-        return failed(clearInstallStateCookie(state));
+        return failed("unavailable", clearInstallStateCookie(state));
       }
       const clearState = clearInstallStateCookie(state);
+      if (!transaction) return failed("invalid", clearState);
+      if (error !== undefined)
+        return failed(error === "access_denied" ? "access_denied" : "unavailable", clearState);
       if (
-        !transaction ||
-        error !== undefined ||
         typeof code !== "string" ||
         !code ||
         code.length > 2048 ||
@@ -477,23 +479,46 @@ export function buildGateway(options: GatewayOptions): FastifyInstance {
         !/^[1-9]\d{0,15}$/.test(installationId) ||
         !Number.isSafeInteger(Number(installationId))
       ) {
-        return failed(clearState);
+        return failed("invalid", clearState);
       }
 
+      let principal: Awaited<ReturnType<typeof authenticateUser>>;
       try {
-        const { principal } = await humanUser(request);
-        const ownerParticipantId = await githubOwnerForUser(
+        ({ principal } = await humanUser(request));
+      } catch (authError) {
+        return failed(
+          authError instanceof CrossoverError && authError.code === "UNAUTHENTICATED"
+            ? "invalid"
+            : "unavailable",
+          clearState,
+        );
+      }
+
+      let ownerParticipantId: string | undefined;
+      try {
+        ownerParticipantId = await githubOwnerForUser(
           pool,
           transaction.room_id,
           principal.user_id,
           transaction.owner_participant_id,
         );
-        if (!ownerParticipantId) return failed(clearState);
-        const repositories = await install.authorizeInstallation({
+      } catch {
+        return failed("unavailable", clearState);
+      }
+      if (!ownerParticipantId) return failed("invalid", clearState);
+
+      let repositories: readonly GitHubPendingRepository[];
+      try {
+        repositories = await install.authorizeInstallation({
           installation_id: Number(installationId),
           code,
         });
-        if (!repositories.length) return failed(clearState);
+      } catch {
+        return failed("unavailable", clearState);
+      }
+      if (!repositories.length) return failed("invalid", clearState);
+
+      try {
         const pendingId = randomBytes(32).toString("base64url");
         await install.pendingConnections.save(pendingId, {
           room_id: transaction.room_id,
@@ -511,7 +536,7 @@ export function buildGateway(options: GatewayOptions): FastifyInstance {
           .header("Location", destination)
           .send();
       } catch {
-        return failed(clearState);
+        return failed("unavailable", clearState);
       }
     });
   }

@@ -19,6 +19,25 @@ describe("GitHub install callback notice", () => {
       notice: "GitHub installation was canceled. You can connect GitHub again from Owner controls.",
       search: "?tab=integrations",
     });
+    expect(
+      consumeGitHubInstallNotice("?github_install=failed&github_install_reason=access_denied"),
+    ).toMatchObject({
+      notice: "GitHub installation was canceled. You can connect GitHub again from Owner controls.",
+      search: "",
+    });
+    expect(
+      consumeGitHubInstallNotice("?github_install=failed&github_install_reason=unavailable"),
+    ).toMatchObject({
+      notice: "Crossover could not finish connecting GitHub. Please try again.",
+      search: "",
+    });
+    expect(
+      consumeGitHubInstallNotice("?github_install=failed&github_install_reason=invalid"),
+    ).toMatchObject({
+      notice:
+        "GitHub installation could not be completed. You can try connecting again from Owner controls.",
+      search: "",
+    });
   });
 
   it("does not display unrecognized reasons or alter unrelated URLs", () => {

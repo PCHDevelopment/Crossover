@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
-import { Redis } from "ioredis";
+import type { Redis } from "ioredis";
 import type { GitHubPendingConnection, GitHubPendingConnectionStore } from "@crossover/kernel";
+import { RedisBackedStore } from "./redis-store.js";
 
 export const GITHUB_INSTALL_STATE_TTL_MS = 10 * 60_000;
 export const GITHUB_PENDING_CONNECTION_TTL_MS = 10 * 60_000;
@@ -86,49 +87,15 @@ function parsePending(raw: string | null): GitHubPendingConnection | undefined {
 
 /** Redis state and pending records for GitHub App installation handshakes. */
 export class RedisGitHubInstallStore
+  extends RedisBackedStore
   implements GitHubInstallStateStore, GitHubPendingConnectionStore
 {
-  private readonly redis: Redis;
-  private readonly ownsClient: boolean;
-
   constructor(source: string | Redis) {
-    if (typeof source === "string") {
-      this.redis = new Redis(source, {
-        enableOfflineQueue: false,
-        maxRetriesPerRequest: 1,
-        connectTimeout: 1_000,
-        commandTimeout: 500,
-        retryStrategy: (times: number) => Math.min(times * 200, 2_000),
-      } as never);
-      this.redis.on("error", () => {});
-      this.ownsClient = true;
-    } else {
-      this.redis = source;
-      this.ownsClient = false;
-    }
+    super(source);
   }
 
   async ready(timeoutMs = 5_000): Promise<void> {
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.redis.off("ready", onReady);
-        reject(new Error(`GitHub install Redis not ready after ${timeoutMs} ms`));
-      }, timeoutMs);
-      const onReady = () => {
-        void this.redis.ping().then(
-          () => {
-            clearTimeout(timer);
-            resolve();
-          },
-          (error: unknown) => {
-            clearTimeout(timer);
-            reject(error);
-          },
-        );
-      };
-      if (this.redis.status === "ready") onReady();
-      else this.redis.once("ready", onReady);
-    });
+    await this.waitForRedis(timeoutMs, `GitHub install Redis not ready after ${timeoutMs} ms`);
   }
 
   async saveState(state: string, value: GitHubInstallState): Promise<void> {
@@ -239,6 +206,6 @@ export class RedisGitHubInstallStore
   }
 
   async close(): Promise<void> {
-    if (this.ownsClient) await this.redis.quit().catch(() => this.redis.disconnect());
+    await this.closeRedis();
   }
 }

@@ -103,20 +103,29 @@ export interface EventSubscriber {
  */
 export class RedisRoomFanout<T> {
   private readonly redis: Redis;
+  private readonly ownsClient: boolean;
   private readonly handlers = new Map<string, Set<(message: T) => void>>();
+  private readonly messageListener: (channel: string, raw: string) => void;
+  private closed = false;
 
   constructor(
-    url: string,
+    source: string | Redis,
     private readonly channelOf: (roomId: string) => string,
     parse: (raw: string) => T | undefined,
     options: RedisOptions = {},
   ) {
-    this.redis = new Redis(url, {
-      retryStrategy: (n: number) => Math.min(n * 200, 2_000),
-      ...options,
-    } as never);
-    this.redis.on("error", () => {});
-    this.redis.on("message", (channel: string, raw: string) => {
+    if (typeof source === "string") {
+      this.redis = new Redis(source, {
+        retryStrategy: (n: number) => Math.min(n * 200, 2_000),
+        ...options,
+      } as never);
+      this.redis.on("error", () => {});
+      this.ownsClient = true;
+    } else {
+      this.redis = source;
+      this.ownsClient = false;
+    }
+    this.messageListener = (channel: string, raw: string) => {
       const set = this.handlers.get(channel);
       if (!set) return;
       let message: T | undefined;
@@ -133,10 +142,12 @@ export class RedisRoomFanout<T> {
           // One listener's failure must not stop the others.
         }
       }
-    });
+    };
+    this.redis.on("message", this.messageListener);
   }
 
   async subscribe(roomId: string, handler: (message: T) => void) {
+    if (this.closed) throw new Error("Cannot subscribe after RedisRoomFanout is closed");
     const channel = this.channelOf(roomId);
     let set = this.handlers.get(channel);
     if (!set) {
@@ -144,6 +155,7 @@ export class RedisRoomFanout<T> {
       this.handlers.set(channel, set);
       await this.redis.subscribe(channel);
     }
+    if (this.closed) throw new Error("Cannot subscribe after RedisRoomFanout is closed");
     set.add(handler);
     return async () => {
       const current = this.handlers.get(channel);
@@ -157,13 +169,21 @@ export class RedisRoomFanout<T> {
   }
 
   async close(): Promise<void> {
-    this.redis.disconnect();
+    if (this.closed) return;
+    this.closed = true;
+    this.redis.off("message", this.messageListener);
+    const channels = [...this.handlers.keys()];
+    this.handlers.clear();
+    await Promise.all(
+      channels.map((channel) => this.redis.unsubscribe(channel).catch(() => undefined)),
+    );
+    if (this.ownsClient) this.redis.disconnect();
   }
 }
 
 /** Room events from Redis, one subscriber connection per node. */
 export class RedisEventSubscriber extends RedisRoomFanout<RoomEvent> implements EventSubscriber {
-  constructor(url: string, options: RedisOptions = {}) {
-    super(url, roomChannel, (raw) => JSON.parse(raw) as RoomEvent, options);
+  constructor(source: string | Redis, options: RedisOptions = {}) {
+    super(source, roomChannel, (raw) => JSON.parse(raw) as RoomEvent, options);
   }
 }

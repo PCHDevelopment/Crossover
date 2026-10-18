@@ -2,6 +2,56 @@
 
 Periodic big-picture reviews by O1: is the merged code building the product in ARCHITECTURE.md, in the right order? Newest first.
 
+## 2026-10-17 · Review 20 (20:20 UTC; 5 PRs merged since Review 19)
+
+**State.** Merged since Review 19: #370 (T1560), #372 (T1561), #374 (T1558), #376 (T1563), #375 (T1562). O1 reviewed each one before merging. CI on `main` was green through `b037fa6`; the run on `eed7842` (#375) was in progress at writing.
+
+- **Step 17 can now be done by hand.** Compose passes the GitHub App and integration-secret settings into the server (#372). An App configured without a secret store fails at startup. A failed install now tells the owner why: canceled, unavailable or invalid (#376). The runbook matches. Peter's hands-on run (#314) is unblocked.
+- **The pending GitHub connection survives a rolled-back write** (#370). This was CodeRabbit's finding on #351.
+- **One Redis command client and one subscriber per server** (#375), down from about 10 connections. The OAuth and GitHub-install stores share `RedisBackedStore`. Tests cover client identity, the scoped `CLIENT LIST` count and fanout routing on a shared subscriber.
+- **The egress-proxy test hang is fixed** (#374): the close listener now attaches first, and the participant is reset after every test.
+
+**On track?** Yes. No §30 step lacks code or a by-hand path. Peter's hands-on run (#314) is the remaining MVP gate.
+
+**Course corrections.**
+
+1. **S2:** #378 (T1565, `RedisRoomFanout.close()` on a borrowed client), then #377 (T1564, split `OwnerControlsView` after a plan).
+2. **Q1:** #365 (T1559, T1402 step-5 read race, treated as a product fix), #360 (T1557, e2e leaves containers), then #364/#353 timing runs once both are on `main`.
+3. **Merging on CodeRabbit:** keep requiring green CI on the exact head as well. On #375 CodeRabbit reported "low merge risk" while `web-e2e` was red. That red run did not reproduce (T1105a 10/10 on the branch and on `main`), but CodeRabbit never weighs CI.
+
+**Tech-debt register** (changes since Review 19):
+
+- Closed: the duplicated Redis store base (T1562) and the step-17 config path (T1561).
+- Added: T1565, fanout close semantics on a shared subscriber.
+- Unchanged: `OwnerControlsView.tsx` (T1564), `docker-execution-driver.ts` (T1550, post-MVP), T1509 (S1, inactive).
+
+## 2026-10-17 · Review 19 (16:30 UTC; 19 PRs merged since Review 18)
+
+**State.** Merged since Review 18 (`26c675c`): #332, #337, #338, #339, #343, #344, #345, #346, #347, #348, #349, #350, #351, #354, #355, #359, #361, docs PRs #335 and #363. That is 49 files, +3,458/−420. No migrations were added; the latest is still `0034`. CI on `main` was green at `7d198ab` (#359); the run on `4f5d58f` (#351) was in progress at writing.
+
+- **T1545 is done (#347, #348, #349, #351).** The GitHub App install → owner connect → verified repo picker → PR export flow is composed in the server and web app. It is covered over HTTP against a faked GitHub API (`git-import.test.ts`), with a secret-leak check over responses, events, persisted rows and logs.
+- **T1544 is done (#343).** MCP has owner/lead tools for checkpoints, roles and pause/resume. It has no grant tools (D8).
+- **T1540–T1543 and T1546–T1552 are done**, plus T1553 (parallel CI jobs, #355) and T1556 (web e2e flakes and the stuck agent-output viewer, #359). T1555 was closed as not planned: it saved about 1 s.
+- **T1532:** the remote sandbox-host milestone is in BACKLOG (#363). Implementation waits on Peter's questions on #328.
+- **Layering is clean.** protocol has no internal deps. kernel → db/ledger/policy/protocol/security. gateway → kernel, never the reverse. web → protocol/sdk only (#337 removed web's `@crossover/workspace` import). No tested-but-unwired modules or unreachable commands were found.
+
+**On track?** Yes for code: every §30 step has code, and steps 1–17 run in `web-demo-flow`. **No for hands-on:** step 17 can't be done by hand yet. The runbook puts the GitHub App variables in `.env`, but Compose doesn't pass `.env` into the server container. When the App is configured without an integration secret store, the install route is silently not registered. A failed install redirects to `?github_install=failed`, which the web app never reads. Peter's hands-on run (#314) is still the MVP gate.
+
+**Course corrections.**
+
+1. **S2: T1561 (#367) goes first**, ahead of T1560. Get the step-17 config into the server container, fail at startup on incomplete config, show install failures, and fix the stale runbook line about MCP tools. Then Peter can run #314 end to end.
+2. **S2: T1560 (#366), then T1562 (#368).** T1560 is the CodeRabbit finding on #351: a failed DB write after `consume()` loses the pending connection. T1562 shares one Redis client in compose (about 10 connections today) and dedupes the OAuth/GitHub-install store base.
+3. **Q1: order is #362 (T1558), #365 (T1559), then #364 (T1554) timing runs.** #365 has a second symptom on `0a37a62`: the pane showed another document's text. That is treated as a product race in loading the selected document, not a timeout.
+4. **Process: two leads.** While this session was idle (03–16 UTC), another lead posted "O1:" comments from the `peterheo` account and merged most of the PRs above. Peter decides which one continues. Until then, check-ins read the latest O1 comment on each item before acting.
+5. **CodeRabbit (Peter enabled it 2026-10-17).** Over 4 PRs it caught every real code issue O1 found, plus 3 real issues on #351, two of which were already fixed on `main`. Its false positives are "CI not shown" (it can't read check runs) and a docstring-coverage warning this repo doesn't use. It skips drafts. O1 now merges engineer PRs when CodeRabbit has no actionable findings on the head, CI is green, the merge is clean and O1's own review found nothing blocking.
+
+**Tech-debt register.**
+
+- **Browser e2e is the only source of red `main` runs this period:** #348 guest login, #354 T1505 viewer, #363 T1402 step 5. Each was a UI read before an async load landed. #359 fixed two; #365 is open.
+- **Fastest-growing files:** `OwnerControlsView.tsx` 1,129 → 1,406, `web-collaboration.ts` 1,302 → 1,586, `gateway/server.ts` 552 → 754. Split `OwnerControlsView` by section after the MVP.
+- **CI:** `pnpm typecheck` runs in three jobs. Fold into #364 if cheap.
+- **Unchanged:** `docker-execution-driver.ts` (1,742 lines, T1550 #340, post-MVP); T1509 OPA-WASM (S1, inactive).
+
 ## 2026-10-16 · Review 18 (12:25 UTC; 13 PRs merged since Review 17)
 
 **State.** #307–#310, #287 and #317–#322 merged, plus docs PRs #298 and #316. CI was green on each head and on main afterwards (`59151b9`).
