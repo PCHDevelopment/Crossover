@@ -628,7 +628,23 @@ jobs:
       # THROWAWAY DEBUG: log every Git call in the server container with its exit code and stderr.
       - name: Debug Git wrapper in the server container
         run: |
-          docker exec -u 0 crossover-server sh -c 'mv /usr/bin/git /usr/bin/git.real && printf "%s\n" "#!/bin/sh" "/usr/bin/git.real \"\$@\" 2>/tmp/git.err; rc=\$?" "echo \"rc=\$rc git \$*\" >> /tmp/git-calls.log" "[ \$rc -ne 0 ] && { echo \"--- stderr:\" >> /tmp/git-calls.log; cat /tmp/git.err >> /tmp/git-calls.log; }" "cat /tmp/git.err >&2" "exit \$rc" > /usr/bin/git && chmod +x /usr/bin/git && cat /usr/bin/git'
+          cat > /tmp/git-wrapper.sh <<'EOF'
+          #!/bin/sh
+          # Helpers such as git-upload-pack are symlinks to git: keep their name.
+          case "${0##*/}" in
+            git) ;;
+            git-*) exec /usr/bin/git.real "${0##*/git-}" "$@" ;;
+          esac
+          /usr/bin/git.real "$@" 2>/tmp/git.err; rc=$?
+          echo "rc=$rc git $*" >> /tmp/git-calls.log
+          if [ $rc -ne 0 ]; then
+            { echo "--- stderr:"; cat /tmp/git.err; echo "--- env: HOME=$HOME TMPDIR=$TMPDIR USER=$(id -u) $(env | grep '^GIT_' | grep -v TOKEN | tr '\n' ' ')"; } >> /tmp/git-calls.log
+          fi
+          cat /tmp/git.err >&2
+          exit $rc
+          EOF
+          docker cp /tmp/git-wrapper.sh crossover-server:/tmp/git-wrapper.sh
+          docker exec -u 0 crossover-server sh -c 'mv /usr/bin/git /usr/bin/git.real && cp /tmp/git-wrapper.sh /usr/bin/git && chmod 755 /usr/bin/git && ls -l /usr/bin/git-upload-pack /usr/bin/git /usr/bin/git.real'
       - name: Rehearse the runbook
         run: pnpm exec vitest run --config vitest.rehearsal.config.ts
       # Git's own complaint is not in the server log (by design), so on a failure look at what the
