@@ -521,8 +521,22 @@ it("rehearses docs/DEMO-RUNBOOK.md steps 1-16 against the real docker compose st
 
     const read = async (path: string) =>
       (await owner.api.workspace.read<FileView>({ path })).response;
-    const roomEvents = async () =>
-      (await owner.api.room.events.list<{ events: RoomEvent[] }>({ limit: 500 })).response.events;
+    // Every event of the room, oldest first: follows next_after until the last page.
+    const roomEvents = async () => {
+      const events: RoomEvent[] = [];
+      let after = 0;
+      for (;;) {
+        const page = (
+          await owner.api.room.events.list<{ events: RoomEvent[]; next_after: number | null }>({
+            after,
+            limit: 500,
+          })
+        ).response;
+        events.push(...page.events);
+        if (page.next_after === null) return events;
+        after = page.next_after;
+      }
+    };
     const healthOf = async (revision: number) =>
       (await roomEvents()).find(
         (event) => event.type === "workspace.health" && event.payload["revision"] === revision,
