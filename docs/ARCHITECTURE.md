@@ -1283,6 +1283,7 @@ workspace.health
 workspace.upstream_synced
 
 checkpoint.created / checkpoint.exported
+workspace.snapshot.created / workspace.snapshot.deleted
 
 sandbox.created / sandbox.behind / sandbox.hibernated / sandbox.synced
 sandbox.exec.started / sandbox.exec.finished
