@@ -241,6 +241,20 @@ describe("RoomExportService", () => {
       });
     });
 
+    it("a room that already has refs/heads/main bundles with HEAD at the canonical commit", async () => {
+      const { base, repo, canonical } = await realRoom(false);
+      // An older commit on refs/heads/main: the bundle must still point at the canonical head.
+      const older = (await git(["--git-dir", repo, "rev-parse", `${canonical}~1`])).stdout.trim();
+      await git(["--git-dir", repo, "update-ref", "refs/heads/main", older]);
+      const bundle = await exportedBundle(base, repo);
+      const clone = join(base, "clone-of-bundle");
+      await git(["clone", "-q", bundle, clone]);
+      expect((await git(["rev-parse", "HEAD"], clone)).stdout.trim()).toBe(canonical);
+      expect((await git(["--git-dir", repo, "rev-parse", "refs/heads/main"])).stdout.trim()).toBe(
+        older,
+      );
+    });
+
     it("exporting does not change the room repository", async () => {
       const { base, repo } = await realRoom(false);
       const state = async () =>

@@ -205,10 +205,16 @@ async function makeBundle(repoPath: string, output: string, signal: AbortSignal)
       .split("\n")
       .filter(Boolean)
       .map((line) => line.split(" ") as [string, string]);
-    const updates = [...refs, [canonical, "refs/heads/main"] as [string, string]]
+    // One update per ref: a room that already has refs/heads/main gets the canonical commit there.
+    const updates = [
+      ...refs.filter(([, ref]) => ref !== "refs/heads/main"),
+      [canonical, "refs/heads/main"] as [string, string],
+    ]
       .map(([sha, ref]) => `update ${ref} ${sha}\n`)
       .join("");
     const update = execFileAsync("git", ["--git-dir", temporary, "update-ref", "--stdin"], options);
+    // EPIPE is reported by the process promise when Git exits before reading its input.
+    update.child.stdin?.on("error", () => {});
     update.child.stdin?.end(updates);
     await update;
     await git(temporary, "symbolic-ref", "HEAD", "refs/heads/main");
