@@ -11,6 +11,24 @@ export function registerWebEditorTests(fixture: WebFixture): void {
     page.on("console", (m) => {
       if (m.type() === "error") problems.push(`console: ${m.text()} @ ${m.location().url}`);
     });
+    // What the browser sees after someone else's change (T1559): if the clean buffer doesn't follow
+    // it, the failure says whether the event reached the browser and what the page's reads answered.
+    const seen: string[] = [];
+    let remoteChangeAt = 0;
+    const since = () => `+${Date.now() - remoteChangeAt}ms`;
+    page.on("websocket", (socket) =>
+      socket.on("framereceived", (frame) => {
+        const text = typeof frame.payload === "string" ? frame.payload : frame.payload.toString();
+        if (remoteChangeAt && text.includes("workspace.changeset.applied"))
+          seen.push(`event frame ${since()}`);
+      }),
+    );
+    page.on("response", async (response) => {
+      if (!remoteChangeAt || !response.url().endsWith("/commands")) return;
+      if (!(response.request().postData() ?? "").includes('"workspace.read"')) return;
+      const body = await response.text().catch(() => "");
+      seen.push(`workspace.read ${response.status()} ${since()} ${body.slice(0, 60)}`);
+    });
     await page.goto(fixture.baseUrl);
     await page.getByTestId("login-name").fill("Peter");
     await page.getByTestId("login-submit").click();
@@ -93,14 +111,25 @@ export function registerWebEditorTests(fixture: WebFixture): void {
     const current = await api.workspace.read<{ workspace_revision: number; file_revision: number }>(
       { path: "src/notes.txt" },
     );
-    await api.workspace.apply_changeset({
+    remoteChangeAt = Date.now();
+    const shout = await api.workspace.apply_changeset<{ status: string }>({
       source: "API",
       message: "Shout",
       base_workspace_revision: current.response.workspace_revision,
       base_file_revisions: { "src/notes.txt": current.response.file_revision },
       operations: [{ type: "modify", path: "src/notes.txt", content: final.replace("one", "ONE") }],
     });
-    await expect.poll(async () => lines.textContent(), { timeout: 10_000 }).toContain("ONE");
+    expect(shout.response.status).toBe("APPLIED");
+    try {
+      await expect.poll(async () => lines.textContent(), { timeout: 10_000 }).toContain("ONE");
+    } catch (error) {
+      throw new Error(
+        `The clean buffer did not follow the remote change. Seen by the browser since it was ` +
+          `applied: ${seen.length ? seen.join("; ") : "nothing"}. Buffer: ` +
+          `${JSON.stringify(await lines.textContent())}`,
+        { cause: error },
+      );
+    }
     expect(await page.getByTestId("draft-indicator").count()).toBe(0);
     expect(await onServer()).toBe(final.replace("one", "ONE"));
 
