@@ -86,6 +86,8 @@ async function holdCommands(
     method: string;
     answered: boolean;
     release: () => void;
+    /** Hand the page a server error instead of the held response. */
+    fail: () => void;
     delivered: Promise<void>;
   };
   const held: Held[] = [];
@@ -105,20 +107,27 @@ async function holdCommands(
       !match(envelope.method, envelope.params ?? {})
     )
       return route.fallback();
-    let release!: () => void;
+    let release!: (fail: boolean) => void;
     let delivered!: () => void;
     const entry: Held = {
       method: envelope.method,
       answered: false,
-      release: () => release(),
+      release: () => release(false),
+      fail: () => release(true),
       delivered: new Promise<void>((resolve) => (delivered = resolve)),
     };
-    const released = new Promise<void>((resolve) => (release = resolve));
+    const released = new Promise<boolean>((resolve) => (release = resolve));
     held.push(entry);
     const response = await route.fetch();
     entry.answered = true;
-    await released;
-    await route.fulfill({ response });
+    const failed = await released;
+    if (failed)
+      await route.fulfill({
+        status: 500,
+        contentType: "application/json",
+        body: JSON.stringify({ error: { code: "INTERNAL", message: "The server failed" } }),
+      });
+    else await route.fulfill({ response });
     delivered();
   };
   await page.route("**/v1/rooms/*/commands", handler);
@@ -1256,7 +1265,11 @@ export function registerWebDecisionsAndInbox(fixture: WebFixture): void {
     const problems: string[] = [];
     page.on("pageerror", (error) => problems.push(`pageerror: ${error.message}`));
     page.on("console", (entry) => {
-      if (entry.type() === "error" && !entry.text().includes("status of 403"))
+      if (
+        entry.type() === "error" &&
+        !entry.text().includes("status of 403") &&
+        !entry.text().includes("status of 500")
+      )
         problems.push(`console: ${entry.text()}`);
     });
 
@@ -1417,6 +1430,35 @@ export function registerWebDecisionsAndInbox(fixture: WebFixture): void {
     expect(await page.getByTestId("memory-write-key").inputValue()).toBe("notes/race-check");
     expect(await page.getByTestId("memory-detail").textContent()).toContain(raceNote);
     await formHold.finish();
+
+    // T1559: two memory.* events for the selected key make two reads of it. The first is slow and
+    // fails after the second has answered; its failure must not empty the pane the second filled.
+    let heldFirstRead = false;
+    const failHold = await holdCommands(page, (method, params) => {
+      if (method !== "memory.get" || params["key"] !== "notes/race-check" || heldFirstRead)
+        return false;
+      return (heldFirstRead = true);
+    });
+    const current = await owner.api.memory.get<{ revision: number }>({ key: "notes/race-check" });
+    const firstNote = "First change from outside the page.";
+    const secondNote = "Second change from outside the page.";
+    const putOutside = (value: string, expected_revision: number) =>
+      owner.api.memory.put({
+        key: "notes/race-check",
+        value,
+        content_type: "text/markdown",
+        source_refs: [{ kind: "decision", id: decisionId }],
+        expected_revision,
+      });
+    await putOutside(firstNote, current.response.revision);
+    const [slowRead] = await failHold.answered("memory.get");
+    await putOutside(secondNote, current.response.revision + 1);
+    await expect.poll(() => page.getByTestId("memory-detail").textContent()).toContain(secondNote);
+    slowRead!.fail();
+    await slowRead!.delivered;
+    await settle(page);
+    expect(await page.getByTestId("memory-detail").textContent()).toContain(secondNote);
+    await failHold.finish();
 
     await page.getByTestId("collab-decisions").click();
     await page

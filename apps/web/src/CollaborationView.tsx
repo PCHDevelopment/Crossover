@@ -154,15 +154,24 @@ export default function CollaborationView(props: {
     async (key: string) => {
       const readId = ++memoryReadId.current;
       memoryKeyRef.current = key;
-      const [entry, history] = await Promise.all([
-        room.api.memory.get<MemoryEntry>({ key }),
-        room.api.memory.history<{ revisions: MemoryRevision[] }>({ key, limit: 100 }),
-      ]);
-      if (readId === memoryReadId.current) {
-        setMemoryEntry(entry.response);
-        setMemoryHistory(history.response.revisions);
+      try {
+        const [entry, history] = await Promise.all([
+          room.api.memory.get<MemoryEntry>({ key }),
+          room.api.memory.history<{ revisions: MemoryRevision[] }>({ key, limit: 100 }),
+        ]);
+        if (readId === memoryReadId.current) {
+          setMemoryEntry(entry.response);
+          setMemoryHistory(history.response.revisions);
+        }
+        return entry.response;
+      } catch (error) {
+        // Only the newest read may empty the pane: an older read that fails says nothing about it.
+        if (readId === memoryReadId.current) {
+          setMemoryEntry(undefined);
+          setMemoryHistory([]);
+        }
+        throw error;
       }
-      return entry.response;
     },
     [room],
   );
@@ -191,14 +200,7 @@ export default function CollaborationView(props: {
         void loadMemory(memoryPrefix).catch((error: unknown) => setNotice(message(error)));
         const key = memoryKeyRef.current;
         if (key) {
-          void loadMemoryDetail(key).catch((error: unknown) => {
-            // A failure of a read for a key that is no longer the selected one says nothing about it.
-            if (memoryKeyRef.current === key) {
-              setMemoryEntry(undefined);
-              setMemoryHistory([]);
-            }
-            setNotice(message(error));
-          });
+          void loadMemoryDetail(key).catch((error: unknown) => setNotice(message(error)));
         }
       }
     });
