@@ -29,8 +29,9 @@ const DEMO_REPO_URL =
 const FIXTURE = fileURLToPath(new URL("./demo-repo", import.meta.url));
 const ROOM_BIN = process.env["ROOM_BIN"] ?? "room";
 const UI_URL = "http://localhost:5173";
-// Initial ceilings (T1570 plan): the in-process demo flow's own. Tightened from measured runs.
-const STEP_MS = 45_000;
+// Measured (T1570): idle runner, 3 green runs, per step 12 to 1,526 ms (step 0b the slowest, it starts
+// Vite); budget = max x 7 rounded up to the next 5,000 ms, minimum 15,000 (the T1529 rule), so 15 s.
+const STEP_MS = 15_000;
 
 interface Participant {
   id: string;
@@ -135,7 +136,7 @@ it("rehearses docs/DEMO-RUNBOOK.md steps 1-7 against the real docker compose sta
         id: "0b",
         title: "the dev UI (Vite) proxies /v1 and /mcp to the server",
         expectation: `${UI_URL}/mcp and ${UI_URL}/v1/... answer as ${BASE_URL} does`,
-        budgetMs: 90_000,
+        budgetMs: STEP_MS,
       },
       async () => {
         const vite = spawn("pnpm", ["--filter", "@crossover/web", "dev"], {

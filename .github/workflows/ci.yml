@@ -567,7 +567,9 @@ jobs:
   compose-rehearsal:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Measured (T1570): the job takes 95 to 118 s on an idle runner (3 runs); 118 s x 7 rounded up
+    # is 15 minutes. Stack build and start: 48 to 67 s; /health is 200 two seconds later.
+    timeout-minutes: 15
     permissions:
       contents: read
     env:
