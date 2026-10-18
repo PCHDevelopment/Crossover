@@ -313,3 +313,22 @@ it("streams literal/regex/case/glob results, skips symlinks/binaries, bounds mat
     await rm(root, { recursive: true, force: true });
   }
 });
+
+it("does not recreate the search checkout of a room whose repository is gone (T1636)", async () => {
+  const root = await mkdtemp(join(tmpdir(), "crossover-search-tree-"));
+  try {
+    const repo = await initRoomRepo(root, "room_purged");
+    const head = (
+      await git(["rev-parse", "refs/room/canonical"], { gitDir: repo, timeoutMs: 10_000 })
+    ).stdout.trim();
+    await withSearchTree(repo, head, async () => {});
+    await rm(repo, { recursive: true, force: true });
+    await rm(`${repo}.search`, { recursive: true, force: true });
+    await expect(withSearchTree(repo, head, async () => {})).rejects.toThrow(
+      "room repository is gone",
+    );
+    await expect(stat(`${repo}.search`)).rejects.toMatchObject({ code: "ENOENT" });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

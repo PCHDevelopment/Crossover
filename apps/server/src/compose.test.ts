@@ -80,7 +80,7 @@ vi.mock("@crossover/kernel", async (importOriginal) => {
   };
 });
 
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -99,6 +99,7 @@ import {
 } from "@crossover/workspace";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { composeServer, type ComposeOverrides, type CrossoverServer } from "./compose.js";
+import { purgeRoomWorkspace } from "./purge-workspace.js";
 import { loadConfig, type ServerConfig } from "./config.js";
 
 /**
@@ -499,6 +500,35 @@ describe("composeServer", () => {
       dispatch.mockRestore();
       stderr.mockRestore();
     }
+  });
+
+  it("a purge removes the room repository and its search checkout, and refuses a path it didn't derive (T1636)", async () => {
+    const { server } = await start();
+    const { roomId, agent, cmd } = await walkthrough(server.app);
+    // A real search builds <room>.git.search/tree: the room's whole file tree.
+    const found = await ok(
+      await cmd(envelope("workspace.search", { query: "Alpha" }), agent.tokens.access_token),
+    );
+    expect(found.response.matches.length).toBeGreaterThan(0);
+    const repo = join(root, `${roomId}.git`);
+    expect((await stat(join(`${repo}.search`, "tree"))).isDirectory()).toBe(true);
+    const destroyed: string[] = [];
+    const purge = (repoPath: string | null) =>
+      purgeRoomWorkspace({
+        workspaceRoot: root,
+        roomId,
+        repoPath,
+        destroyRoom: async (id) => void destroyed.push(id),
+      });
+
+    await expect(purge(join(root, "elsewhere.git"))).rejects.toThrow("Refusing to remove");
+    expect((await stat(repo)).isDirectory()).toBe(true);
+    expect((await stat(`${repo}.search`)).isDirectory()).toBe(true);
+
+    await purge(repo);
+    expect(destroyed).toEqual([roomId, roomId]);
+    await expect(stat(repo)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(stat(`${repo}.search`)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("stops agent sandboxes on freeze and cleans up on participant removal and archive", async () => {

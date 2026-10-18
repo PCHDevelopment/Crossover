@@ -29,6 +29,11 @@ async function queued<T>(repo: string, work: () => Promise<T>): Promise<T> {
 async function cacheState(repo: string) {
   const cache = `${repo}.search`;
   const tree = join(cache, "tree");
+  // A purged room's repository is gone: don't recreate its files from a search that raced the purge (T1636).
+  await stat(repo).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") throw new Error("room repository is gone");
+    throw error;
+  });
   await mkdir(cache, { recursive: true });
   let cached = "";
   try {

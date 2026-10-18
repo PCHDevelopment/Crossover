@@ -14,6 +14,7 @@ import {
 } from "@crossover/gateway";
 import { MCP_TOOLS, registerMcp } from "@crossover/mcp";
 import { buildInternalGitServer } from "./internal-git.js";
+import { purgeRoomWorkspace } from "./purge-workspace.js";
 import { githubOAuthProvider } from "./github-oauth.js";
 import { googleOAuthProvider } from "./google-oauth.js";
 import { IntegrationCredentialBroker } from "./integration-broker.js";
@@ -80,8 +81,7 @@ import {
 import { CrossoverError } from "@crossover/protocol";
 import { normalizeRoomEgressAllowlist, postWebhook } from "@crossover/security";
 import { authorize, tierOf } from "@crossover/policy";
-import { join, resolve } from "node:path";
-import { rm } from "node:fs/promises";
+import { join } from "node:path";
 import { DockerToolRunner } from "./plugin-runner.js";
 import { AwsKmsDataKeyOperations, KmsRoomDataKeyProvider } from "./kms-secret-keys.js";
 import { ConfigKeyRoomDataKeyProvider, EnvelopeSecretStore } from "./secret-store.js";
@@ -520,14 +520,13 @@ export async function composeServer(
       pool,
       dispatcher,
       now,
-      purgeWorkspace: async (roomId, repoPath) => {
-        await executionService!.destroyRoom(roomId);
-        const expectedRepoPath = resolve(config.workspaceRoot, `${roomId}.git`);
-        if (repoPath && resolve(repoPath) !== expectedRepoPath) {
-          throw new Error(`Refusing to remove unexpected workspace path for ${roomId}`);
-        }
-        await rm(expectedRepoPath, { recursive: true, force: true });
-      },
+      purgeWorkspace: (roomId, repoPath) =>
+        purgeRoomWorkspace({
+          workspaceRoot: config.workspaceRoot,
+          roomId,
+          repoPath,
+          destroyRoom: (id) => executionService!.destroyRoom(id),
+        }),
     });
     roomRetentionSweeper.start();
     // Runs without a key too: then it sends nothing and only keeps the outbox from growing.
