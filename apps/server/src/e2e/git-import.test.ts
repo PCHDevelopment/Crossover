@@ -52,7 +52,20 @@ const fetcher: UpstreamFetcher = {
   async fetch(request) {
     fetches += 1;
     const dir = await mkdtemp(join(tmpdir(), "crossover-e2e-fetched-"));
-    await run(dir, ["clone", "-q", "--bare", upstreamDir, "repo"]);
+    // A --depth=1 clone, as HttpsGitFetcher hands over (T1572): the room repo becomes shallow, and
+    // the import, pull, checkpoint and export tests below run on that. --depth needs file:// here.
+    await run(dir, [
+      "clone",
+      "-q",
+      "--depth=1",
+      "--bare",
+      "--single-branch",
+      "--no-tags",
+      "--template=",
+      "--branch=main",
+      `file://${upstreamDir}`,
+      "repo",
+    ]);
     const repo = join(dir, "repo");
     const sha = (
       await git(["rev-parse", "HEAD"], { gitDir: repo, timeoutMs: 10_000 })
@@ -127,7 +140,9 @@ beforeAll(async () => {
   await run(upstreamDir, ["commit", "-q", "-m", "Initial"]);
   upstreamSha = (await run(upstreamDir, ["rev-parse", "HEAD"])).stdout.trim();
   remoteDir = await mkdtemp(join(tmpdir(), "crossover-e2e-remote-"));
-  await run(remoteDir, ["init", "-q", "--bare", "-b", "main", "remote.git"]);
+  // The hosting service holds the upstream's history: an export pushes a commit whose parent is the
+  // upstream tip, which a shallow room repo can only send to a remote that already has it (T1572).
+  await run(remoteDir, ["clone", "-q", "--bare", upstreamDir, "remote.git"]);
   remoteDir = join(remoteDir, "remote.git");
   const config: ServerConfig = {
     databaseUrl: "unused: test pool is injected",
@@ -151,6 +166,11 @@ beforeAll(async () => {
       pusher: {
         async push(request) {
           pushed.push(request.branch);
+          // The hosting service always has the upstream as it is now (the pull tests move it on).
+          await git(["fetch", "-q", upstreamDir, "+main:refs/heads/main"], {
+            gitDir: remoteDir,
+            timeoutMs: 30_000,
+          });
           await git(
             ["push", "--porcelain", remoteDir, `${request.commit}:refs/heads/${request.branch}`],
             { gitDir: request.repo, timeoutMs: 30_000 },
