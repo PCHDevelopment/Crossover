@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { createTestDatabase, type TestDatabase } from "@crossover/db/testing";
 import type { OAuthProvider } from "@crossover/gateway";
-import { git, type UpstreamFetcher } from "@crossover/workspace";
+import { DockerExecutionDriver, git, type UpstreamFetcher } from "@crossover/workspace";
 import { chromium, type Browser } from "playwright-core";
 import { afterAll, beforeAll } from "vitest";
 import { composeServer, type CrossoverServer } from "../compose.js";
@@ -190,6 +190,34 @@ function chromiumPath(): string | undefined {
       `${process.env["PLAYWRIGHT_BROWSERS_PATH"]}/chromium`,
   ];
   return candidates.find((path): path is string => !!path && existsSync(path));
+}
+
+/**
+ * Destroy every sandbox recorded in this run's database; the driver tolerates removed resources.
+ * A short-lived helper container the server started on the workspace volume may still be exiting,
+ * which makes the volume removal fail with "in use"; that case is retried briefly.
+ */
+async function destroyRunSandboxes(db: TestDatabase): Promise<void> {
+  const { rows } = await db.pool.query<{ id: string }>("SELECT id FROM sandboxes");
+  const driver = new DockerExecutionDriver();
+  const failures: string[] = [];
+  for (const { id } of rows) {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await driver.destroy({ sandbox_id: id });
+        break;
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        if (attempt < 10 && reason.includes("in use")) {
+          await new Promise((resolve) => setTimeout(resolve, 500));
+          continue;
+        }
+        failures.push(`${id}: ${reason}`);
+        break;
+      }
+    }
+  }
+  if (failures.length) throw new Error(`Sandbox cleanup failed:\n${failures.join("\n")}`);
 }
 
 /** Register an isolated real-server/browser fixture for one web E2E test file. */
@@ -409,6 +437,10 @@ export function registerWebFixture(): WebFixture {
         }),
       );
     await attempt(() => server?.close());
+    // This run's database holds exactly the sandboxes this run created. Remove them through the
+    // driver's own destroy (container, workspace volume, network), as production does, so nothing
+    // is matched by label and a concurrent run's sandboxes are never touched.
+    if (db) await attempt(() => destroyRunSandboxes(db));
     await attempt(() => db?.drop());
     if (dir) await attempt(() => rm(dir, { recursive: true, force: true }));
     if (errors.length) throw new AggregateError(errors, "Web e2e fixture cleanup failed");
