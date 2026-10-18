@@ -657,7 +657,9 @@ jobs:
               echo "== $d"; git --git-dir="$d" for-each-ref 2>&1 | head -5
               rm -rf /tmp/t1575-clone
               git clone --shared --no-checkout -- "$d" /tmp/t1575-clone 2>&1 | head -5
-              git -C /tmp/t1575-clone checkout --detach --force refs/room/canonical 2>&1 | head -5
+              sha=$(git --git-dir="$d" rev-parse refs/room/canonical)
+              git -C /tmp/t1575-clone checkout --quiet --detach --force "$sha^{commit}" 2>&1 | head -5
+              echo "checkout exit: $?"; git -C /tmp/t1575-clone log --oneline -3 2>&1 | head -4
               ls "$d/shallow" 2>&1 | head -2
             done' 2>&1 | head -40 || true
       # Only after the rehearsal's own check that no generated secret or issued token is in the logs.
