@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { chmod, chown, lchown, mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
+import { chmod, chown, lchown, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { Pool } from "@crossover/db";
@@ -747,9 +747,17 @@ export class DockerHealthRunner implements HealthRunner {
     try {
       await chmod(checkout, 0o755);
       const repository = resolve(repositoryPath);
-      await git(["clone", "--quiet", "--shared", "--no-checkout", "--", repository, checkout], {
-        timeoutMs: 30_000,
-      });
+      // clone --shared is skipped for a shallow source (imported rooms since T1572); alternates give the same sharing (T1576)
+      await git(["init", "--quiet", "--", checkout], { timeoutMs: 30_000 });
+      const objects = (
+        await git(["rev-parse", "--path-format=absolute", "--git-path", "objects"], {
+          cwd: repository,
+          timeoutMs: 30_000,
+        })
+      ).stdout.trim();
+      const info = join(checkout, ".git", "objects", "info");
+      await mkdir(info, { recursive: true });
+      await writeFile(join(info, "alternates"), `${objects}\n`);
       if (signal?.aborted) throw new Error("Health check aborted");
       await git(["checkout", "--quiet", "--detach", "--force", `${revision}^{commit}`], {
         cwd: checkout,
