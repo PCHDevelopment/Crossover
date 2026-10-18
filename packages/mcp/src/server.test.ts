@@ -132,6 +132,7 @@ const manifest = {
 async function setup(
   tools?: Parameters<typeof registerMcp>[1]["tools"],
   pluginTools: readonly ToolDefinition[] = [],
+  mcpOptions: Pick<Parameters<typeof registerMcp>[1], "onInternalError"> = {},
 ) {
   const dispatcher = new Dispatcher({ pool, authorize, nodeId: `node-${++n}` });
   registerRoomCommands(dispatcher);
@@ -182,7 +183,7 @@ async function setup(
     },
   });
   const app = Fastify();
-  registerMcp(app, { dispatcher, pool, ...(tools ? { tools } : {}) });
+  registerMcp(app, { dispatcher, pool, ...mcpOptions, ...(tools ? { tools } : {}) });
   apps.push(app);
   const url = await app.listen({ port: 0, host: "127.0.0.1" });
 
@@ -589,6 +590,47 @@ describe("MCP server (T707)", () => {
     expect(structured(res)).toMatchObject({
       error: { code: "NOT_FOUND" },
     });
+  });
+
+  it("logs a tool call that fails with INTERNAL once, without its arguments (T1575)", async () => {
+    const logged: { error: unknown; context: unknown }[] = [];
+    const s = await setup(undefined, [], {
+      onInternalError: (error, context) => void logged.push({ error, context }),
+    });
+    s.dispatcher.dispatch = async () => {
+      throw new Error("driver exploded");
+    };
+    const client = await connect(s.url, s.agent.access_token);
+    const res = await client.callTool({
+      name: "capabilities_list",
+      arguments: { participant_id: "marker-argument-T1575" },
+    });
+    expect(res.isError).toBe(true);
+    expect(structured(res)).toEqual({
+      error: { code: "INTERNAL", message: "Internal error", retryable: false },
+    });
+    expect(logged).toHaveLength(1);
+    expect((logged[0]!.error as Error).message).toBe("driver exploded");
+    expect(logged[0]!.context).toEqual({
+      tool: "capabilities_list",
+      method: "capabilities.list",
+      room_id: s.room,
+      participant_id: s.agentId,
+      command_id: expect.stringMatching(/^cmd_/),
+    });
+    expect(JSON.stringify(logged[0]!.context)).not.toContain("marker-argument-T1575");
+  });
+
+  it("logs nothing for an expected error (T1575)", async () => {
+    const logged: unknown[] = [];
+    const s = await setup(undefined, [], { onInternalError: (error) => void logged.push(error) });
+    const client = await connect(s.url, s.agent.access_token);
+    const res = await client.callTool({
+      name: "capabilities_list",
+      arguments: { participant_id: "part_nope" },
+    });
+    expect(structured(res)).toMatchObject({ error: { code: "NOT_FOUND" } });
+    expect(logged).toEqual([]);
   });
 
   it("a mutating tool is authorized like any command: a developer can't invite", async () => {
