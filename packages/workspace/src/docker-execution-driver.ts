@@ -30,6 +30,7 @@ import { SANDBOX_SNAPSHOT_HELPER } from "./sandbox-snapshot-helper.js";
 import { dockerSocketPath, readDockerCpuUsageUsec } from "./docker/engine-api.js";
 import type { DockerModuleContext } from "./docker/context.js";
 import * as dockerNetworks from "./docker/networks.js";
+import * as dockerVolumes from "./docker/volumes.js";
 import { gitFetcherName, safeSandboxId, sandboxNetworkName } from "./docker/networks.js";
 import {
   invokeDocker,
@@ -1044,32 +1045,11 @@ export class DockerExecutionDriver implements ExecutionDriver {
   }
 
   private async ensureSoftVolume(name: string): Promise<void> {
-    const existing = await this.inspectVolume(name);
-    if (existing) return;
-    try {
-      await this.mustSucceed(["volume", "create", name], "ERROR: workspace volume creation failed");
-    } catch (error) {
-      if (!(await this.inspectVolume(name))) throw error;
-    }
+    return dockerVolumes.ensureSoftVolume(this.context, name);
   }
 
   private async ensureHardVolume(name: string): Promise<void> {
-    const existing = await this.inspectVolume(name);
-    if (existing) {
-      this.assertHardVolume(existing, name);
-      return;
-    }
-    const args = ["volume", "create", "--driver", this.volumeDriver!];
-    for (const [key, value] of Object.entries(this.volumeOptions))
-      args.push("--opt", `${key}=${value}`);
-    args.push(name);
-    try {
-      await this.mustSucceed(args, "ERROR: hard-enforced workspace volume creation failed");
-    } catch (error) {
-      const created = await this.inspectVolume(name);
-      if (!created) throw error;
-      this.assertHardVolume(created, name);
-    }
+    return dockerVolumes.ensureHardVolume(this.context, name);
   }
 
   private async ensureContainer(
@@ -1152,21 +1132,7 @@ export class DockerExecutionDriver implements ExecutionDriver {
 
   /** Give the sandbox's unprivileged UID write access to the workspace volume root. */
   private async initializeWorkspaceVolume(name: string): Promise<void> {
-    const args = [
-      "run",
-      "--rm",
-      "--network=none",
-      "--user=0:0",
-      "--mount",
-      `type=volume,source=${name},target=/workspace,volume-nocopy`,
-      ...(this.runtime ? ["--runtime", this.runtime] : []),
-      "--entrypoint",
-      "/bin/chown",
-      this.image,
-      "1000:1000",
-      "/workspace",
-    ];
-    await this.mustSucceed(args, "ERROR: workspace volume ownership setup failed");
+    return dockerVolumes.initializeWorkspaceVolume(this.context, name);
   }
 
   /** Reject resources created before the default-deny and unprivileged defaults were enforced. */
@@ -1243,49 +1209,14 @@ export class DockerExecutionDriver implements ExecutionDriver {
   private async inspectVolume(
     name: string,
   ): Promise<{ driver: string; options: Record<string, string> } | null> {
-    const inspected = await this.invoke([
-      "volume",
-      "inspect",
-      "--format",
-      "{{.Driver}}|{{json .Options}}",
-      name,
-    ]);
-    if (inspected.code !== 0) {
-      if (inspected.stderr.toLowerCase().includes("no such volume")) return null;
-      throw new Error(`ERROR: Docker volume inspect failed: ${inspected.stderr.trim()}`);
-    }
-    const separator = inspected.stdout.indexOf("|");
-    if (separator < 0) throw new Error("ERROR: Docker returned invalid volume inspection data");
-    try {
-      const options: unknown = JSON.parse(inspected.stdout.slice(separator + 1).trim()) as unknown;
-      if (options === null) {
-        return {
-          driver: inspected.stdout.slice(0, separator).trim(),
-          options: {},
-        };
-      }
-      if (typeof options !== "object" || Array.isArray(options))
-        throw new Error("volume options must be an object");
-      return {
-        driver: inspected.stdout.slice(0, separator).trim(),
-        options: options as Record<string, string>,
-      };
-    } catch {
-      throw new Error("ERROR: Docker returned invalid volume inspection data");
-    }
+    return dockerVolumes.inspectVolume(this.context, name);
   }
 
   private assertHardVolume(
     actual: { driver: string; options: Record<string, string> },
     name: string,
   ): void {
-    const matches =
-      actual.driver === this.volumeDriver &&
-      Object.entries(this.volumeOptions).every(([key, value]) => actual.options[key] === value);
-    if (!matches)
-      throw new Error(
-        `ERROR: existing Docker volume ${name} does not match SANDBOX_VOLUME_DRIVER and SANDBOX_VOLUME_OPTS`,
-      );
+    return dockerVolumes.assertHardVolume(this.context, actual, name);
   }
 
   private assertResources(sandboxId: string, resources: SandboxResources): void {
