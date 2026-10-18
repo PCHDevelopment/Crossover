@@ -572,7 +572,18 @@ it("rehearses docs/DEMO-RUNBOOK.md steps 1-16 against the real docker compose st
       },
       async () => {
         // The first sandbox_exec creates an agent's sandbox (a write before it has nothing to write to).
-        await Promise.all([execIn("AgentA", "node --version"), execIn("AgentB", "node --version")]);
+        // TEMPORARY DIAGNOSTIC: MCP tool errors are not logged by the server; the same command over REST is.
+        try {
+          await Promise.all([
+            execIn("AgentA", "node --version"),
+            execIn("AgentB", "node --version"),
+          ]);
+        } catch (error) {
+          await owner.api.sandbox
+            .exec({ command: "node --version", timeout_s: 30 })
+            .catch(() => undefined);
+          throw error;
+        }
         await agent("AgentA").call("sandbox_write_file", {
           path: "auth.js",
           content: mark(initialAuth.content, MARK, "or null when it is (A). */"),
