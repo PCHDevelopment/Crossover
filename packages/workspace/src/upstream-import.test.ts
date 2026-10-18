@@ -199,6 +199,46 @@ describe("git.import (§24.1, T801)", () => {
     // the room repo now holds the upstream tip as a shallow boundary: the history stops there
     const shallow = await readFile(join(r.repo, "shallow"), "utf8");
     expect(shallow.trim().split("\n")).toEqual([tip]);
+
+    // What a shallow room repo must still do. The room's own history is separate from the upstream's
+    // (the import commit's parent is the room's revision 0), so history and blame stop at the import.
+    const call = (method: string, params: Record<string, unknown>) =>
+      r.d.dispatch(r.principal, {
+        id: newId("cmd"),
+        method,
+        params,
+        idempotency_key: newId("cmd"),
+      });
+    const blame = (await call("workspace.blame", { path: "README.md" })).response;
+    expect(blame).toEqual({
+      workspace_revision: 1,
+      line_count: 1,
+      ranges: [{ start: 1, end: 2, workspace_revision: 1, actor_id: "system:upstream" }],
+    });
+    const fileHistory = (await call("workspace.history", { path: "README.md" })).response as {
+      entries: { workspace_revision: number }[];
+    };
+    expect(fileHistory.entries.map((entry) => entry.workspace_revision)).toEqual([1]);
+    const history = (await call("workspace.history", {})).response as {
+      entries: { workspace_revision: number }[];
+      next_before: number | null;
+    };
+    expect(history.entries.map((entry) => entry.workspace_revision)).toEqual([1, 0]);
+    expect(history.next_before).toBeNull();
+    // The sandbox git fetcher fetches refs/room/canonical from the room repo: serving it works.
+    const served = await tmp("crossover-room-served-");
+    await run(served, ["init", "-q", "--bare", "out"]);
+    await git(["fetch", "-q", `file://${r.repo}`, "+refs/room/canonical:refs/room/canonical"], {
+      gitDir: join(served, "out"),
+      timeoutMs: 30_000,
+    });
+    const cloned = (
+      await git(["rev-parse", "refs/room/canonical^{tree}"], {
+        gitDir: join(served, "out"),
+        timeoutMs: 10_000,
+      })
+    ).stdout.trim();
+    expect(cloned).toBe(await tree(head));
   });
 
   it("revision 1's tree equals the upstream branch tip's tree, and the upstream is recorded", async () => {
