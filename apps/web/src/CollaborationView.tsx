@@ -317,16 +317,17 @@ export default function CollaborationView(props: {
         });
       const draft = memoryDraftRef.current;
       const expected_revision = draft?.key === key ? draft.revision : 0;
-      await room.api.memory.put({
+      const written = await room.api.memory.put<{ revision: number }>({
         key,
         value: memoryWriteValue,
         content_type: memoryWriteType,
         expected_revision,
         source_refs,
       });
+      // The base is this write's own revision; the refresh below may already show a newer one.
+      memoryDraftRef.current = { key, revision: written.response.revision };
       setMemoryKey(key);
-      const [, saved] = await Promise.all([loadMemory(memoryPrefix), loadMemoryDetail(key)]);
-      memoryDraftRef.current = { key, revision: saved.revision };
+      await Promise.all([loadMemory(memoryPrefix), loadMemoryDetail(key)]);
     } catch (error) {
       setNotice(message(error));
     } finally {

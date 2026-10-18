@@ -1489,6 +1489,37 @@ export function registerWebDecisionsAndInbox(fixture: WebFixture): void {
     expect(after.response.value).toBe(newestNote);
     await draftHold.finish();
 
+    // T1559: a participant writes the key between this page's write and its refresh of the pane.
+    // The form still holds this page's own write, so the next save must compare against that
+    // write's revision, not the newer one the refresh shows, and be refused.
+    await page.getByTestId("memory-key").filter({ hasText: "notes/race-check" }).click();
+    await expect.poll(() => page.getByTestId("memory-write-value").inputValue()).toBe(newestNote);
+    let heldOwnWrite = false;
+    const ownWriteHold = await holdCommands(page, (method) => {
+      if (method !== "memory.put" || heldOwnWrite) return false;
+      return (heldOwnWrite = true);
+    });
+    const ownNote = "This page's own write.";
+    const participantNote = "A participant's write between the page's write and its refresh.";
+    await page.getByTestId("memory-write-value").fill(ownNote);
+    await page.getByTestId("memory-write").click();
+    const [ownWrite] = await ownWriteHold.answered("memory.put");
+    const written = await owner.api.memory.get<{ revision: number }>({ key: "notes/race-check" });
+    await putOutside(participantNote, written.response.revision);
+    await expect
+      .poll(() => page.getByTestId("memory-detail").textContent())
+      .toContain(participantNote);
+    ownWrite!.release();
+    await ownWrite!.delivered;
+    await settle(page);
+    await page.getByTestId("memory-write").click();
+    await expect
+      .poll(async () => (await page.getByTestId("collaboration-notice").count()) > 0)
+      .toBe(true);
+    const final = await owner.api.memory.get<{ value: string }>({ key: "notes/race-check" });
+    expect(final.response.value).toBe(participantNote);
+    await ownWriteHold.finish();
+
     await page.getByTestId("collab-decisions").click();
     await page
       .getByTestId("decision-veto-rationale")
