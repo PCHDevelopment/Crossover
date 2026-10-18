@@ -319,6 +319,16 @@ importers:
         specifier: 1.63.0
         version: 1.63.0
 
+  scripts/compose-rehearsal:
+    dependencies:
+      '@crossover/sdk':
+        specifier: workspace:*
+        version: link:../../packages/sdk
+    devDependencies:
+      '@modelcontextprotocol/sdk':
+        specifier: ^1.32.1
+        version: 1.32.1(zod@4.6.5)
+
 packages:
 
   '@aws-sdk/client-cloudwatch-logs@3.1149.0':

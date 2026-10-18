@@ -56,16 +56,24 @@ user token before presenting the picker.
 
 ## 0. Prepare a demo repository (once)
 
-Create a **public** GitHub repository, for example `<you>/crossover-demo`, containing:
+Create a **public** GitHub repository, for example `<you>/crossover-demo`, containing the files of
+`scripts/compose-rehearsal/demo-repo/` in this repository (the nightly rehearsal imports a copy of
+it and checks it equals that directory). In outline:
 
 - `package.json`:
   ```json
   {
     "name": "crossover-demo",
     "private": true,
-    "scripts": { "typecheck": "node --check index.js auth.js routes.js", "test": "node --test" }
+    "type": "module",
+    "scripts": {
+      "typecheck": "node --check index.js && node --check auth.js && node --check routes.js",
+      "test": "node --test"
+    }
   }
   ```
+  (`node --check` takes one file; `node --check index.js auth.js routes.js` checks only `index.js`,
+  so a syntax error in `auth.js` or `routes.js` would not turn the health check red.)
 - `auth.js`: about 100 lines of plain JavaScript with a few exported functions. Step 7 needs lines
   40–62 to exist.
 - `routes.js`: a small module that calls a function from `auth.js`.
@@ -118,6 +126,10 @@ Build the agent CLI:
 ```sh
 cd clients/go && CGO_ENABLED=0 go build -buildvcs=false -o room ./cmd/room && sudo install room /usr/local/bin/
 ```
+
+The same steps run nightly, without a browser, against the real Compose stack: the `compose-rehearsal`
+job in `.github/workflows/ci.yml` (`scripts/compose-rehearsal/`). It follows this section literally and
+then drives steps 1-7 (steps 8-16 follow); step 17 needs a real GitHub App and is not rehearsed.
 
 ## 2. Connect four agents (steps 1–3)
 

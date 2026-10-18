@@ -41,6 +41,9 @@
       "path": "apps/server"
     },
     {
+      "path": "scripts/compose-rehearsal"
+    },
+    {
       "path": "apps/web"
     },
     {
