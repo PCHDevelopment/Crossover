@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { withTransaction } from "@crossover/db";
@@ -70,13 +70,31 @@ class FixtureFetcher implements UpstreamFetcher {
   during: (() => Promise<void>) | undefined;
   requests: { url: string; branch: string; credential: GitCredential | null }[] = [];
   cleaned = 0;
-  constructor(private readonly source: string) {}
+  /** `shallow`: hand over a --depth=1 clone, as HttpsGitFetcher does (T1572). */
+  constructor(
+    private readonly source: string,
+    private readonly shallow = false,
+  ) {}
   async fetch(request: { url: string; branch: string; credential: GitCredential | null }) {
     this.requests.push(request);
     await this.during?.();
     const dir = await tmp("crossover-fetched-");
     // local clones copy objects/ directly; a background gc could drop one mid-copy (T1549, defence in depth)
-    await run(dir, ["clone", "-q", "--bare", "--no-local", this.source, "repo"]);
+    // --depth is ignored for a plain path, so a shallow clone goes through file://
+    if (this.shallow)
+      await run(dir, [
+        "clone",
+        "-q",
+        "--depth=1",
+        "--bare",
+        "--single-branch",
+        "--no-tags",
+        "--template=",
+        "--branch=main",
+        `file://${this.source}`,
+        "repo",
+      ]);
+    else await run(dir, ["clone", "-q", "--bare", "--no-local", this.source, "repo"]);
     const repo = join(dir, "repo");
     const sha = (
       await git(["rev-parse", "HEAD"], { gitDir: repo, timeoutMs: 10_000 })
@@ -152,6 +170,37 @@ const rejects = async (p: Promise<unknown>, reason?: string) => {
 };
 
 describe("git.import (§24.1, T801)", () => {
+  // T1572: HttpsGitFetcher clones with --depth=1. Fetching from a shallow clone without
+  // --update-shallow makes git reject the ref, and --quiet hides it, so the fetch exits 0 with no ref.
+  // This fails without the flag on any git, and the server image's own git is checked in CI (T1570).
+  it("imports from a --depth=1 clone of a repository with history (T1572)", async () => {
+    const up = await upstreamRepo();
+    for (const n of [2, 3]) {
+      await writeFile(join(up.dir, "src/index.ts"), `export const x = ${n};\n`);
+      await run(up.dir, ["commit", "-q", "-am", `Change ${n}`]);
+    }
+    const tip = (await run(up.dir, ["rev-parse", "HEAD"])).stdout.trim();
+    const fetcher = new FixtureFetcher(up.dir, true);
+    const r = await room({ fetcher });
+    const out = await r.importIt();
+    expect(out.response).toMatchObject({
+      applied_revision: 1,
+      file_count: 6,
+      upstream: { last_synced_sha: tip, last_synced_room_revision: 1 },
+    });
+    const head = (
+      await git(["rev-parse", "refs/room/canonical"], { gitDir: r.repo, timeoutMs: 10_000 })
+    ).stdout.trim();
+    const tree = async (rev: string) =>
+      (
+        await git(["rev-parse", `${rev}^{tree}`], { gitDir: r.repo, timeoutMs: 10_000 })
+      ).stdout.trim();
+    expect(await tree(head)).toBe(await tree(tip));
+    // the room repo now holds the upstream tip as a shallow boundary: the history stops there
+    const shallow = await readFile(join(r.repo, "shallow"), "utf8");
+    expect(shallow.trim().split("\n")).toEqual([tip]);
+  });
+
   it("revision 1's tree equals the upstream branch tip's tree, and the upstream is recorded", async () => {
     const up = await upstreamRepo();
     const fetcher = new FixtureFetcher(up.dir);
