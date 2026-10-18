@@ -522,6 +522,21 @@ it("rehearses docs/DEMO-RUNBOOK.md steps 1-16 against the real docker compose st
       (await roomEvents()).find(
         (event) => event.type === "workspace.health" && event.payload["revision"] === revision,
       );
+    // Why a health run ended as it did (the run's log tail), for a failure message.
+    const healthDetail = async (event: RoomEvent | undefined) => {
+      const runId = event?.payload["log_ref"];
+      if (typeof runId !== "string") return "no readable health log";
+      const run = (
+        await owner.api.workspace.health.get<{
+          status: string;
+          summary?: string;
+          log_tail?: string;
+        }>({
+          run_id: runId,
+        })
+      ).response;
+      return (run.log_tail ?? run.summary ?? "no readable health log").slice(-600);
+    };
     const versionOf = async (task: TaskView) =>
       (await owner.api.tasks.list<{ tasks: TaskView[] }>({})).response.tasks.find(
         (item) => item.id === task.id,
@@ -572,18 +587,8 @@ it("rehearses docs/DEMO-RUNBOOK.md steps 1-16 against the real docker compose st
       },
       async () => {
         // The first sandbox_exec creates an agent's sandbox (a write before it has nothing to write to).
-        // TEMPORARY DIAGNOSTIC: MCP tool errors are not logged by the server; the same command over REST is.
-        try {
-          await Promise.all([
-            execIn("AgentA", "node --version"),
-            execIn("AgentB", "node --version"),
-          ]);
-        } catch (error) {
-          await owner.api.sandbox
-            .exec({ command: "node --version", timeout_s: 30 })
-            .catch(() => undefined);
-          throw error;
-        }
+        await execIn("AgentA", "node --version");
+        await execIn("AgentB", "node --version");
         await agent("AgentA").call("sandbox_write_file", {
           path: "auth.js",
           content: mark(initialAuth.content, MARK, "or null when it is (A). */"),
@@ -808,7 +813,9 @@ it("rehearses docs/DEMO-RUNBOOK.md steps 1-16 against the real docker compose st
           HEALTH_MS,
         );
         if (red?.payload["status"] !== "RED")
-          throw new Error(`health was ${String(red?.payload["status"])}, expected RED`);
+          throw new Error(
+            `health was ${String(red?.payload["status"])}, expected RED: ${await healthDetail(red)}`,
+          );
         const inbox = await waitFor(
           "B's HEALTH_RED inbox item",
           async () => (await b.call<{ items: { kind: string }[] }>("inbox_list", {})).items,
@@ -833,7 +840,9 @@ it("rehearses docs/DEMO-RUNBOOK.md steps 1-16 against the real docker compose st
           HEALTH_MS,
         );
         if (green?.payload["status"] !== "GREEN")
-          throw new Error(`health was ${String(green?.payload["status"])}, expected GREEN`);
+          throw new Error(
+            `health was ${String(green?.payload["status"])}, expected GREEN: ${await healthDetail(green)}`,
+          );
         return `RED at ${broken.applied_revision} (${inbox.length} inbox item(s)), GREEN at ${fixed.applied_revision}`;
       },
     );
