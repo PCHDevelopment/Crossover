@@ -28,8 +28,12 @@ import {
 } from "./sandbox-status.js";
 import { SANDBOX_SNAPSHOT_HELPER } from "./sandbox-snapshot-helper.js";
 import { dockerSocketPath, readDockerCpuUsageUsec } from "./docker/engine-api.js";
+import type { DockerModuleContext } from "./docker/context.js";
+import * as dockerNetworks from "./docker/networks.js";
+import { gitFetcherName, safeSandboxId, sandboxNetworkName } from "./docker/networks.js";
 import {
   invokeDocker,
+  mustSucceed,
   type DockerExecutionDriverOptions,
   type DockerInvoker,
 } from "./docker/invoke.js";
@@ -64,6 +68,7 @@ export class DockerExecutionDriver implements ExecutionDriver {
   private readonly gitFetcherImage: string;
   private readonly invoke: DockerInvoker;
   private readonly dockerStatsSocketPath: string | undefined;
+  private readonly context: DockerModuleContext;
 
   constructor(options: DockerExecutionDriverOptions = {}) {
     this.dockerBinary = options.dockerBinary ?? "docker";
@@ -149,6 +154,23 @@ export class DockerExecutionDriver implements ExecutionDriver {
     this.invoke =
       options.invoke ??
       ((args, invokeOptions) => invokeDocker(this.dockerBinary, args, invokeOptions));
+    this.context = {
+      invoke: this.invoke,
+      dockerBinary: this.dockerBinary,
+      dockerStatsSocketPath: this.dockerStatsSocketPath,
+      image: this.image,
+      runtime: this.runtime,
+      volumeDriver: this.volumeDriver,
+      volumeOptions: this.volumeOptions,
+      egressProxyContainer: this.egressProxyContainer,
+      egressProxyPort: this.egressProxyPort,
+      egressProxySecret: this.egressProxySecret,
+      gitInternalContainer: this.gitInternalContainer,
+      gitInternalNetwork: this.gitInternalNetwork,
+      gitInternalPort: this.gitInternalPort,
+      gitInternalTokenSecret: this.gitInternalTokenSecret,
+      gitFetcherImage: this.gitFetcherImage,
+    };
   }
 
   async create(input: {
@@ -1169,143 +1191,16 @@ export class DockerExecutionDriver implements ExecutionDriver {
       );
   }
 
-  /** Isolate each sandbox and expose only the operator's allowlist proxy on its internal network. */
   private async ensureProxyNetwork(sandboxId: string): Promise<void> {
-    const name = sandboxNetworkName(sandboxId);
-    let inspected = await this.inspectProxyNetwork(name);
-    if (!inspected) {
-      try {
-        await this.mustSucceed(
-          ["network", "create", "--internal", "--label", "crossover.sandbox=true", name],
-          "ERROR: isolated sandbox network creation failed",
-        );
-      } catch (error) {
-        if (!(await this.inspectProxyNetwork(name))) throw error;
-      }
-      inspected = await this.inspectProxyNetwork(name);
-    }
-    if (!inspected?.internal)
-      throw new Error(`ERROR: Docker sandbox network ${name} is not internal`);
-    if (inspected.proxyConnected) return;
-
-    try {
-      await this.mustSucceed(
-        ["network", "connect", name, this.egressProxyContainer!],
-        "ERROR: egress proxy connection failed",
-      );
-    } catch (error) {
-      if (!(await this.inspectProxyNetwork(name))?.proxyConnected) throw error;
-    }
+    return dockerNetworks.ensureProxyNetwork(this.context, sandboxId);
   }
 
-  /** Attach only the trusted Git server and one-shot fetchers to the private network. */
   private async ensureGitNetwork(): Promise<void> {
-    let inspected = await this.inspectGitNetwork();
-    if (!inspected) {
-      try {
-        await this.mustSucceed(
-          [
-            "network",
-            "create",
-            "--internal",
-            "--label",
-            "crossover.git=true",
-            this.gitInternalNetwork,
-          ],
-          "ERROR: internal Git network creation failed",
-        );
-      } catch (error) {
-        if (!(await this.inspectGitNetwork())) throw error;
-      }
-      inspected = await this.inspectGitNetwork();
-    }
-    if (!inspected?.internal)
-      throw new Error(`ERROR: Docker network ${this.gitInternalNetwork} is not internal`);
-    if (inspected.serverConnected) return;
-    try {
-      await this.mustSucceed(
-        ["network", "connect", this.gitInternalNetwork, this.gitInternalContainer!],
-        "ERROR: internal Git server network connection failed",
-      );
-    } catch (error) {
-      if (!(await this.inspectGitNetwork())?.serverConnected) throw error;
-    }
-  }
-
-  private async inspectGitNetwork(): Promise<{
-    internal: boolean;
-    serverConnected: boolean;
-  } | null> {
-    const inspected = await this.invoke([
-      "network",
-      "inspect",
-      "--format",
-      "{{.Internal}}|{{json .Containers}}",
-      this.gitInternalNetwork,
-    ]);
-    if (inspected.code !== 0) {
-      const message = inspected.stderr.toLowerCase();
-      if (message.includes("no such network") || message.includes("not found")) return null;
-      throw new Error(`ERROR: internal Git network inspect failed: ${inspected.stderr.trim()}`);
-    }
-    const separator = inspected.stdout.indexOf("|");
-    if (separator < 0) throw new Error("ERROR: Docker returned invalid Git network data");
-    let containers: unknown;
-    try {
-      containers = JSON.parse(inspected.stdout.slice(separator + 1).trim()) as unknown;
-    } catch {
-      throw new Error("ERROR: Docker returned invalid Git network data");
-    }
-    if (containers === null) containers = {};
-    if (!containers || typeof containers !== "object" || Array.isArray(containers))
-      throw new Error("ERROR: Docker returned invalid Git network data");
-    const serverConnected = Object.values(containers as Record<string, { Name?: unknown }>).some(
-      (container) => container?.Name === this.gitInternalContainer,
-    );
-    return { internal: inspected.stdout.slice(0, separator).trim() === "true", serverConnected };
+    return dockerNetworks.ensureGitNetwork(this.context);
   }
 
   private async removeFetcher(name: string): Promise<void> {
-    const removed = await this.invoke(["container", "rm", "--force", name]);
-    if (removed.code === 0) return;
-    const message = removed.stderr.toLowerCase();
-    if (message.includes("no such container") || message.includes("no such object")) return;
-    throw new Error(`ERROR: Git fetcher cleanup failed: ${removed.stderr.trim()}`);
-  }
-
-  private async inspectProxyNetwork(
-    name: string,
-  ): Promise<{ internal: boolean; proxyConnected: boolean } | null> {
-    const inspected = await this.invoke([
-      "network",
-      "inspect",
-      "--format",
-      "{{.Internal}}|{{json .Containers}}",
-      name,
-    ]);
-    if (inspected.code !== 0) {
-      const message = inspected.stderr.toLowerCase();
-      if (message.includes("no such network") || message.includes("not found")) return null;
-      throw new Error(`ERROR: Docker network inspect failed: ${inspected.stderr.trim()}`);
-    }
-    const separator = inspected.stdout.indexOf("|");
-    if (separator < 0) throw new Error("ERROR: Docker returned invalid network inspection data");
-    let containers: unknown;
-    try {
-      containers = JSON.parse(inspected.stdout.slice(separator + 1).trim()) as unknown;
-    } catch {
-      throw new Error("ERROR: Docker returned invalid network inspection data");
-    }
-    if (containers === null) containers = {};
-    if (!containers || typeof containers !== "object" || Array.isArray(containers))
-      throw new Error("ERROR: Docker returned invalid network inspection data");
-    const attached = Object.values(containers as Record<string, { Name?: unknown }>).some(
-      (container) => container?.Name === this.egressProxyContainer,
-    );
-    return {
-      internal: inspected.stdout.slice(0, separator).trim() === "true",
-      proxyConnected: attached,
-    };
+    return dockerNetworks.removeFetcher(this.context, name);
   }
 
   private async inspectContainer(name: string): Promise<{ running: boolean } | null> {
@@ -1404,9 +1299,7 @@ export class DockerExecutionDriver implements ExecutionDriver {
   }
 
   private async mustSucceed(args: readonly string[], message: string): Promise<string> {
-    const result = await this.invoke(args);
-    if (result.code !== 0) throw new Error(`${message}: ${result.stderr.trim()}`);
-    return result.stdout.trim();
+    return mustSucceed(this.invoke, args, message);
   }
 }
 
@@ -1455,16 +1348,4 @@ function sandboxResources(sandboxId: string): SandboxResources {
   const safeId = safeSandboxId(sandboxId);
   const name = `crossover-sbx-${safeId}`;
   return { volume_ref: name, container_ref: name };
-}
-
-function sandboxNetworkName(sandboxId: string): string {
-  return `crossover-net-${safeSandboxId(sandboxId)}`;
-}
-
-function gitFetcherName(sandboxId: string): string {
-  return `crossover-git-fetch-${safeSandboxId(sandboxId)}`;
-}
-
-function safeSandboxId(sandboxId: string): string {
-  return sandboxId.toLowerCase().replaceAll(/[^a-z0-9_.-]/g, "-");
 }

@@ -20,6 +20,16 @@ export type DockerInvoker = (
   options?: DockerInvocationOptions,
 ) => Promise<DockerInvocationResult>;
 
+export async function mustSucceed(
+  invoke: DockerInvoker,
+  args: readonly string[],
+  message: string,
+): Promise<string> {
+  const result = await invoke(args);
+  if (result.code !== 0) throw new Error(`${message}: ${result.stderr.trim()}`);
+  return result.stdout.trim();
+}
+
 export interface DockerExecutionDriverOptions {
   dockerBinary?: string;
   /** Docker Engine Unix socket used for host-side resource stats. */
