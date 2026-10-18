@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { withTransaction } from "@crossover/db";
@@ -66,13 +66,31 @@ class FixtureFetcher implements UpstreamFetcher {
   fetches = 0;
   /** Runs while a fetch is "on the network": a slow upstream, or something happening meanwhile. */
   during: (() => Promise<void>) | undefined;
-  constructor(private readonly source: string) {}
+  /** `shallow`: hand over a --depth=1 clone, as HttpsGitFetcher does (T1572). */
+  constructor(
+    private readonly source: string,
+    private readonly shallow = false,
+  ) {}
   async fetch() {
     this.fetches += 1;
     await this.during?.();
     const dir = await tmp("crossover-fetched-");
     // local clones copy objects/ directly; a background gc could drop one mid-copy (T1549, defence in depth)
-    await run(dir, ["clone", "-q", "--bare", "--no-local", this.source, "repo"]);
+    // --depth is ignored for a plain path, so a shallow clone goes through file://
+    if (this.shallow)
+      await run(dir, [
+        "clone",
+        "-q",
+        "--depth=1",
+        "--bare",
+        "--single-branch",
+        "--no-tags",
+        "--template=",
+        "--branch=main",
+        `file://${this.source}`,
+        "repo",
+      ]);
+    else await run(dir, ["clone", "-q", "--bare", "--no-local", this.source, "repo"]);
     const repo = join(dir, "repo");
     const sha = (
       await git(["rev-parse", "HEAD"], { gitDir: repo, timeoutMs: 10_000 })
@@ -91,7 +109,10 @@ class FixtureFetcher implements UpstreamFetcher {
 
 const URL_OK = "https://github.com/acme/widgets";
 
-async function setup(extra: { pullLimits?: { files?: number; bytes?: number } } = {}) {
+async function setup(
+  extra: { pullLimits?: { files?: number; bytes?: number } } = {},
+  shallow = false,
+) {
   const up = await upstreamRepo();
   const roomId = newId("room");
   const lead = newId("part");
@@ -111,7 +132,7 @@ async function setup(extra: { pullLimits?: { files?: number; bytes?: number } } 
   const repo = (
     await db.pool.query("SELECT repo_path FROM workspaces WHERE room_id = $1", [roomId])
   ).rows[0].repo_path as string;
-  const fetcher = new FixtureFetcher(up.dir);
+  const fetcher = new FixtureFetcher(up.dir, shallow);
   const d = new Dispatcher({ pool: db.pool, authorize: allowAll, nodeId: roomId });
   const scheduledAdvances: Array<{ room_id: string; revision: number }> = [];
   registerWorkspaceCommands(d, {
@@ -244,6 +265,39 @@ describe("git.pull_upstream (§24.2, T803)", () => {
     expect(await s.events("workspace.upstream_synced")).toHaveLength(2); // the import, then this
   }, 20_000);
 
+  // T1572: HttpsGitFetcher hands over --depth=1 clones. Without --update-shallow git rejects the
+  // ref and --quiet hides it, so the fetch exits 0 with no ref (the room repo then becomes shallow).
+  it("pulls twice from --depth=1 clones, each tip a shallow boundary of the room repo (T1572)", async () => {
+    const s = await setup({}, true); // the import was from a shallow clone too
+    for (const round of [1, 2]) {
+      const sha = await s.up.commit(async (dir) => {
+        await writeFile(
+          join(dir, "src/a.ts"),
+          `export const a = ${round + 1};\nexport const keep = 0;\n`,
+        );
+        await writeFile(join(dir, "src/b.ts"), `export const b = ${round + 1};\n`);
+      });
+      await s.up.commit(async (dir) => {
+        await writeFile(join(dir, "src/c.ts"), `export const c = ${round};\n`);
+      }, "More");
+      const tip = (await s.up.commit(async () => {}, "Tip")).trim();
+      const out = await s.pull();
+      expect(out.response).toMatchObject({
+        status: "APPLIED",
+        upstream: { last_synced_sha: tip },
+      });
+      expect(sha).not.toBe(tip); // the clone really lacked the earlier commits
+      const room = (await s.head()).commit_sha;
+      expect(
+        (
+          await git(["rev-parse", `${room}^{tree}`], { gitDir: s.repo, timeoutMs: 10_000 })
+        ).stdout.trim(),
+      ).toBe(await s.up.tree());
+      const shallow = (await readFile(join(s.repo, "shallow"), "utf8")).trim().split("\n");
+      expect(shallow).toContain(tip);
+    }
+  }, 30_000);
+
   it("an upstream that hasn't moved is UP_TO_DATE: no revision, no event", async () => {
     const s = await setup();
     const out = await s.pull();
@@ -253,6 +307,21 @@ describe("git.pull_upstream (§24.2, T803)", () => {
   });
 
   // Measured (T1529): idle 1569 ms, 3x load 2197 ms; budget 7x.
+  it("a room edit and a non-overlapping upstream edit merge when both come from --depth=1 clones (T1572)", async () => {
+    const s = await setup({}, true);
+    await s.edit("src/b.ts", "export const b = 'room';\n"); // a ChangeSet on top of the shallow import
+    await s.up.commit(async (dir) => {
+      await writeFile(
+        join(dir, "src/a.ts"),
+        "export const a = 'upstream';\nexport const keep = 0;\n",
+      );
+    });
+    const out = await s.pull();
+    expect(out.response).toMatchObject({ status: "APPLIED", applied_revision: 3 });
+    expect(await s.read("src/a.ts")).toContain("'upstream'");
+    expect(await s.read("src/b.ts")).toContain("'room'");
+  }, 20_000);
+
   it("non-overlapping room and upstream edits merge; the room's edit is kept", async () => {
     const s = await setup();
     await s.edit("src/b.ts", "export const b = 'room';\n"); // revision 2, after the sync at 1

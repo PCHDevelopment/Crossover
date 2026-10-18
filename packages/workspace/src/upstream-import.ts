@@ -225,7 +225,11 @@ export async function fetchIntoRoomRepo(
   const prepared: PreparedFetch = { fetched, repo_path, ref, url, sha: fetched.sha };
   try {
     const options = { gitDir: repo_path, timeoutMs: 120_000 };
-    await git(["fetch", "--no-tags", "--quiet", fetched.repo, `+${fetched.ref}:${ref}`], options);
+    // the upstream clone is --depth=1; without this git rejects the ref and --quiet hides it (T1572)
+    await git(
+      ["fetch", "--no-tags", "--quiet", "--update-shallow", fetched.repo, `+${fetched.ref}:${ref}`],
+      options,
+    );
     const sha = (await git(["rev-parse", "--verify", `${ref}^{commit}`], options)).stdout.trim();
     if (sha !== fetched.sha) {
       throw refuse("fetch_mismatch", "The fetched commit isn't the branch tip");
