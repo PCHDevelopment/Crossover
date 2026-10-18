@@ -672,6 +672,19 @@ jobs:
               git -C "$d" rev-parse --git-dir 2>&1 | head -3
             done' 2>&1 | head -60 || true
           docker exec crossover-server sh -c 'echo "== git calls the server made"; tail -80 /tmp/git-calls.log' 2>&1 | cut -c1-300 || true
+          docker exec -e URL="$DEMO_REPO_URL" crossover-server sh -c '
+            export GIT_TERMINAL_PROMPT=0 GIT_CONFIG_NOSYSTEM=1
+            rm -rf /tmp/matrix && mkdir /tmp/matrix && cd /tmp/matrix
+            mkdir /tmp/crossover-import-m && git clone -q --depth=1 --bare --single-branch --no-tags --template= --branch=main -- "$URL" /tmp/crossover-import-m/repo 2>&1 | tail -2
+            try() { # name, where, ref
+              git init -q --bare --template= "$2" && git --git-dir="$2" fetch --no-tags --quiet /tmp/crossover-import-m/repo "+HEAD:$3"; rc=$?
+              echo "== $1: fetch rc=$rc, refs: $(git --git-dir="$2" for-each-ref | wc -l), FETCH_HEAD bytes: $(wc -c < "$2/FETCH_HEAD" 2>/dev/null)"
+              git --git-dir="$2" for-each-ref | head -3
+            }
+            try "A bind mount, nested ref" "$WORKSPACE_ROOT/probe-a.git" refs/upstream/prepare/cmd_X
+            try "B /tmp, nested ref" /tmp/matrix/b.git refs/upstream/prepare/cmd_X
+            try "C bind mount, flat ref" "$WORKSPACE_ROOT/probe-c.git" refs/upstream/x
+            try "D /tmp, flat ref" /tmp/matrix/d.git refs/upstream/x' 2>&1 | head -40 || true
           # The same Git calls the import makes (packages/workspace upstream.ts and upstream-import.ts),
           # with Git's own stderr, which the server does not log.
           docker exec -e URL="$DEMO_REPO_URL" crossover-server sh -c '
