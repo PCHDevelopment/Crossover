@@ -622,6 +622,9 @@ jobs:
             sleep 2
           done
           echo "GET /health 200 after $((SECONDS - healthy)) s"
+      # The rehearsal imports @crossover/sdk, which resolves to its build output.
+      - name: Build the SDK and typecheck the rehearsal
+        run: pnpm exec tsc -b scripts/compose-rehearsal
       - name: Rehearse the runbook
         run: pnpm exec vitest run --config vitest.rehearsal.config.ts
       # Only after the rehearsal's own check that no generated secret or issued token is in the logs.
