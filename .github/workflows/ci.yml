@@ -655,6 +655,10 @@ jobs:
             ls -lan "$WORKSPACE_ROOT" | head -8
             for d in "$WORKSPACE_ROOT"/*.git; do
               echo "== $d"; git --git-dir="$d" for-each-ref 2>&1 | head -5
+              rm -rf /tmp/t1575-clone
+              git clone --shared --no-checkout -- "$d" /tmp/t1575-clone 2>&1 | head -5
+              git -C /tmp/t1575-clone checkout --detach --force refs/room/canonical 2>&1 | head -5
+              ls "$d/shallow" 2>&1 | head -2
             done' 2>&1 | head -40 || true
       # Only after the rehearsal's own check that no generated secret or issued token is in the logs.
       - uses: actions/upload-artifact@v4
