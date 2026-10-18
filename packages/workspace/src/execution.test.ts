@@ -257,20 +257,47 @@ describe("ExecutionService", () => {
          VALUES ($1,$2,0,$3)`,
         [workspaceId, roomId, fixture.canonical],
       );
+      const baseFiles = await Promise.all(
+        [1, 2, 3].map(async (n) => {
+          const path = `file${n}.txt`;
+          const content = Buffer.from(
+            (
+              await git(["show", `${fixture.canonical}:${path}`], {
+                gitDir: fixture.repository,
+                timeoutMs: 10_000,
+              })
+            ).stdout,
+          );
+          const sha = createHash("sha1")
+            .update(`blob ${content.length}\0`)
+            .update(content)
+            .digest("hex");
+          return { path, mode: "100644", sha, size: content.length, content };
+        }),
+      );
       const content = Buffer.from("sandbox edit\n");
       const sha = createHash("sha1")
         .update(`blob ${content.length}\0`)
         .update(content)
         .digest("hex");
+      const snapshotFiles = [
+        ...baseFiles,
+        { path: "new.txt", mode: "100644", sha, size: content.length, content },
+      ];
       class SnapshotDriver extends MaterializingExecutionDriver {
         async readSnapshotFiles(): Promise<
           Array<{ path: string; mode: string; sha: string; size: number; content: Buffer }>
         > {
-          return [{ path: "new.txt", mode: "100644", sha, size: content.length, content }];
+          return snapshotFiles;
         }
       }
       const driver = new SnapshotDriver();
-      driver.snapshotEntries = [{ path: "new.txt", mode: "100644", sha, size: content.length }];
+      driver.snapshotEntries = snapshotFiles.map(({ path, mode, sha, size }) => ({
+        path,
+        mode,
+        sha,
+        size,
+      }));
       const execution = new ExecutionService(db.pool, driver);
       await execution.ensure(roomId, participantId);
       const dispatcher = new Dispatcher({ pool: db.pool, authorize: allowAll, nodeId: roomId });
@@ -301,6 +328,16 @@ describe("ExecutionService", () => {
         (await git(["show", `${head}:new.txt`], { gitDir: fixture.repository, timeoutMs: 10_000 }))
           .stdout,
       ).toBe("sandbox edit\n");
+      for (const n of [1, 2, 3]) {
+        expect(
+          (
+            await git(["show", `${head}:file${n}.txt`], {
+              gitDir: fixture.repository,
+              timeoutMs: 10_000,
+            })
+          ).stdout,
+        ).toBe(`contents ${n}\n`);
+      }
     } finally {
       await rm(root, { recursive: true, force: true });
     }
