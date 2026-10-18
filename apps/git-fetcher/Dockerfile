@@ -9,3 +9,6 @@ RUN chmod 0555 /usr/local/bin/fetch-workspace
 
 USER 1000:1000
 ENTRYPOINT ["/usr/local/bin/fetch-workspace"]
+
+# T1566 THROWAWAY: a broken Dockerfile (reverted next)
+RUN echo "broken on purpose" && false
