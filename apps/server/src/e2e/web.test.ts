@@ -1,10 +1,8 @@
 import { describe, it } from "vitest";
-import {
-  registerWebCollaborationStart,
-  registerWebDecisionsAndInbox,
-  registerWebOwnerRoleChanges,
-  registerWebTaskReview,
-} from "./web-collaboration.js";
+import { registerWebCollaborationStart } from "./web-collaboration-start.js";
+import { registerWebDecisionsAndInbox } from "./web-decisions-inbox.js";
+import { registerWebOwnerRoleChanges } from "./web-owner-roles.js";
+import { registerWebTaskReview } from "./web-task-review.js";
 import { registerWebEditorTests } from "./web-editor.js";
 import { registerWebFixture } from "./web-fixture.js";
 import { registerWebAuthTests } from "./web-auth.js";
