@@ -14,11 +14,13 @@ Periodic big-picture reviews by O1: is the merged code building the product in A
 **On track?** Yes. No §30 step lacks code or a by-hand path. Peter's hands-on run (#314) is the remaining MVP gate.
 
 **Course corrections.**
+
 1. **S2:** #378 (T1565, `RedisRoomFanout.close()` on a borrowed client), then #377 (T1564, split `OwnerControlsView` after a plan).
 2. **Q1:** #365 (T1559, T1402 step-5 read race, treated as a product fix), #360 (T1557, e2e leaves containers), then #364/#353 timing runs once both are on `main`.
 3. **Merging on CodeRabbit:** keep requiring green CI on the exact head as well. On #375 CodeRabbit reported "low merge risk" while `web-e2e` was red. That red run did not reproduce (T1105a 10/10 on the branch and on `main`), but CodeRabbit never weighs CI.
 
 **Tech-debt register** (changes since Review 19):
+
 - Closed: the duplicated Redis store base (T1562) and the step-17 config path (T1561).
 - Added: T1565, fanout close semantics on a shared subscriber.
 - Unchanged: `OwnerControlsView.tsx` (T1564), `docker-execution-driver.ts` (T1550, post-MVP), T1509 (S1, inactive).
@@ -36,6 +38,7 @@ Periodic big-picture reviews by O1: is the merged code building the product in A
 **On track?** Yes for code: every §30 step has code, and steps 1–17 run in `web-demo-flow`. **No for hands-on:** step 17 can't be done by hand yet. The runbook puts the GitHub App variables in `.env`, but Compose doesn't pass `.env` into the server container. When the App is configured without an integration secret store, the install route is silently not registered. A failed install redirects to `?github_install=failed`, which the web app never reads. Peter's hands-on run (#314) is still the MVP gate.
 
 **Course corrections.**
+
 1. **S2: T1561 (#367) goes first**, ahead of T1560. Get the step-17 config into the server container, fail at startup on incomplete config, show install failures, and fix the stale runbook line about MCP tools. Then Peter can run #314 end to end.
 2. **S2: T1560 (#366), then T1562 (#368).** T1560 is the CodeRabbit finding on #351: a failed DB write after `consume()` loses the pending connection. T1562 shares one Redis client in compose (about 10 connections today) and dedupes the OAuth/GitHub-install store base.
 3. **Q1: order is #362 (T1558), #365 (T1559), then #364 (T1554) timing runs.** #365 has a second symptom on `0a37a62`: the pane showed another document's text. That is treated as a product race in loading the selected document, not a timeout.
@@ -43,6 +46,7 @@ Periodic big-picture reviews by O1: is the merged code building the product in A
 5. **CodeRabbit (Peter enabled it 2026-10-17).** Over 4 PRs it caught every real code issue O1 found, plus 3 real issues on #351, two of which were already fixed on `main`. Its false positives are "CI not shown" (it can't read check runs) and a docstring-coverage warning this repo doesn't use. It skips drafts. O1 now merges engineer PRs when CodeRabbit has no actionable findings on the head, CI is green, the merge is clean and O1's own review found nothing blocking.
 
 **Tech-debt register.**
+
 - **Browser e2e is the only source of red `main` runs this period:** #348 guest login, #354 T1505 viewer, #363 T1402 step 5. Each was a UI read before an async load landed. #359 fixed two; #365 is open.
 - **Fastest-growing files:** `OwnerControlsView.tsx` 1,129 → 1,406, `web-collaboration.ts` 1,302 → 1,586, `gateway/server.ts` 552 → 754. Split `OwnerControlsView` by section after the MVP.
 - **CI:** `pnpm typecheck` runs in three jobs. Fold into #364 if cheap.
