@@ -299,10 +299,13 @@ jobs:
         run: |
           # One failed API call is not a failed job: try again on the next pass, and give up only
           # after several in a row. Poll gently; the token's requests are shared by the repository.
+          set -o pipefail
           deadline=$((SECONDS + 600))
           errors=0
           while :; do
-            if ! jobs="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" --jq '.jobs')"; then
+            # Every attempt's jobs: "Re-run failed jobs" does not re-run an `images` job that
+            # succeeded, so its result is in an earlier attempt. The newest attempt of each wins.
+            if ! jobs="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?filter=all&per_page=100" --jq '.jobs[]' | jq -s '.')"; then
               errors=$((errors + 1))
               [ "$errors" -lt 6 ] || { echo "ERROR: the jobs API failed $errors times in a row"; exit 1; }
               [ "$SECONDS" -lt "$deadline" ] || { echo "ERROR: the images were not ready in 10 minutes"; exit 1; }
@@ -312,7 +315,7 @@ jobs:
             errors=0
             pending=0
             for name in $IMAGES; do
-              result="$(echo "$jobs" | jq -r --arg n "images ($name)" '[.[] | select(.name == $n)][0].conclusion // "pending"')"
+              result="$(echo "$jobs" | jq -r --arg n "images ($name)" '[.[] | select(.name == $n)] | sort_by(.run_attempt) | last | .conclusion // "pending"')"
               case "$result" in
                 success) ;;
                 pending|null) pending=1 ;;
@@ -453,10 +456,13 @@ jobs:
         run: |
           # One failed API call is not a failed job: try again on the next pass, and give up only
           # after several in a row. Poll gently; the token's requests are shared by the repository.
+          set -o pipefail
           deadline=$((SECONDS + 600))
           errors=0
           while :; do
-            if ! jobs="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" --jq '.jobs')"; then
+            # Every attempt's jobs: "Re-run failed jobs" does not re-run an `images` job that
+            # succeeded, so its result is in an earlier attempt. The newest attempt of each wins.
+            if ! jobs="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?filter=all&per_page=100" --jq '.jobs[]' | jq -s '.')"; then
               errors=$((errors + 1))
               [ "$errors" -lt 6 ] || { echo "ERROR: the jobs API failed $errors times in a row"; exit 1; }
               [ "$SECONDS" -lt "$deadline" ] || { echo "ERROR: the images were not ready in 10 minutes"; exit 1; }
@@ -466,7 +472,7 @@ jobs:
             errors=0
             pending=0
             for name in $IMAGES; do
-              result="$(echo "$jobs" | jq -r --arg n "images ($name)" '[.[] | select(.name == $n)][0].conclusion // "pending"')"
+              result="$(echo "$jobs" | jq -r --arg n "images ($name)" '[.[] | select(.name == $n)] | sort_by(.run_attempt) | last | .conclusion // "pending"')"
               case "$result" in
                 success) ;;
                 pending|null) pending=1 ;;
