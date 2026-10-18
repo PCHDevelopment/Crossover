@@ -216,7 +216,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      actions: read
     timeout-minutes: 15
     # The main vitest run in two shards that run side by side; `check` needs the whole matrix.
     strategy:
