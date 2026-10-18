@@ -149,7 +149,9 @@ it("rehearses docs/DEMO-RUNBOOK.md steps 1-7 against the real docker compose sta
             "the Vite dev server",
             async () => (await fetch(`${UI_URL}/`)).status,
             (status) => status === 200,
-            60_000,
+            // Vite is up in about 1.4 s (3 runs): 7x is 10 s, which leaves the rest of the step's 15 s for
+            // the two proxy checks, and this wait reports what it last saw before the step's budget does.
+            10_000,
           );
           const providers = async (base: string) => {
             const response = await fetch(`${base}/v1/auth/providers`);
