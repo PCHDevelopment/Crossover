@@ -295,6 +295,15 @@ describe("workspace.apply_changeset", () => {
     expect(scheduled).toEqual([1, 2]);
   }, 30_000);
 
+  it("apply_changeset refuses source BRANCH from a client", async () => {
+    const f = await fixture();
+    const base = f.request([{ type: "create", path: "file", content: "x" }]);
+    await expect(
+      f.dispatch({ ...base, params: { ...base.params, source: "BRANCH" } }),
+    ).rejects.toMatchObject({ code: "VALIDATION", details: { reason: "reserved_source" } });
+    expect(await f.rowsFor("changesets")).toEqual([]);
+  });
+
   it("requires RESOLUTION and conflict_id together", async () => {
     const f = await fixture();
     const base = f.request([{ type: "create", path: "file", content: "x" }]);

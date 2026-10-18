@@ -123,7 +123,14 @@ export function registerWorkspaceCommands(
     perPathAuthorize: true,
     mutating: true,
     params: changesetParamsSchema,
-    execute: (ctx, params) => apply(ctx, params, deps),
+    execute: (ctx, params) => {
+      // BRANCH ChangeSets are made only by a branch merge (T1606), which calls apply() itself.
+      if (params.source === "BRANCH")
+        throw new CrossoverError("VALIDATION", "The BRANCH source is reserved", {
+          details: { reason: "reserved_source" },
+        });
+      return apply(ctx, params, deps);
+    },
   });
   dispatcher.registerCommand({
     method: "workspace.changeset.decide_hold",

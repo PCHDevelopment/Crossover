@@ -36,7 +36,7 @@ const operation = z
 
 /** Client-owned §10.1 fields; room, actor, key and ChangeSet id come from the dispatcher. */
 export const changesetInputSchema = z.strictObject({
-  source: z.enum(["EDITOR", "SANDBOX", "API", "UPSTREAM", "RESOLUTION"]),
+  source: z.enum(["EDITOR", "SANDBOX", "API", "UPSTREAM", "RESOLUTION", "BRANCH"]),
   message: text,
   base_workspace_revision: revision,
   base_file_revisions: z.record(path, revision).default({}),

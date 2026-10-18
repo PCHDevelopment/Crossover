@@ -222,6 +222,7 @@ ACTIVE ──freeze──▶ PAUSED ──resume──▶ ACTIVE
 
 - **Archive triggers:** owner action, or 30 days with no mutations (owner notified 7 days before).
 - **Retention** (decided 2026-10-13, T1519): it counts from the moment of archiving, and unarchiving stops the clock. A purge job deletes rooms whose retention has ended. The owner gets a notice 7 days before.
+- **Branch rooms:** a branch room (§9.7) has its own lifecycle: archiving or purging its parent never touches it, and the reverse.
 - **Export bundle:** `git bundle` of the full repository + `events.jsonl` + `memory.json` + `tasks.json` + `decisions.json`. The bundle's `HEAD` is `refs/heads/main` at the canonical head, so `git clone` of the bundle checks out the room's files; `refs/room/*` and `refs/upstream/*` are included unchanged.
 - This resolves the v0.1 tension: rooms are bounded projects (agents and sandboxes live and die with them), but their history persists.
 
@@ -510,6 +511,39 @@ workspace.blame       path, revision?
 
 All writes go through `workspace.apply_changeset` (§10). Create, modify, rename and delete are operations inside a ChangeSet, not separate endpoints.
 
+## 9.7 Snapshots and branch rooms
+
+A **snapshot** is a named, immutable mark of a workspace revision plus a frozen copy of the room's memory. A **branch room** is a new room that starts from a revision or a snapshot of another room, and whose accepted changes can later be merged back into the parent as ChangeSets. Snapshots and branches are for trying a different direction without disturbing the room; they are not undo.
+
+**Decisions**
+
+- **Snapshot contents.** The workspace part is only the revision number: the commit already exists, so nothing is copied and the marked revision cannot be pruned. The memory part is a copy of the room's **current** live, unredacted entries outside `agents/*`, whatever revision the snapshot names. Memory is not versioned by workspace revision (§18). Stored with each copied entry: key, revision, value, content type, author, `source_refs` and a `redacted` flag.
+- **No in-place restore.** A snapshot is never written back into its room. To go back to a snapshot, branch from it.
+- **Copy, not alternates.** A branch room's repository holds its own copy of the objects it needs; it does not borrow the parent's through `objects/info/alternates`, so purging or pruning the parent can never damage a branch. It is not shallow, even when the parent is.
+- **Participants.** Only the owner who creates the branch is a participant of it. The parent's agents and other humans are not carried over; the owner invites them as for any room.
+- **Settings.** The branch copies the parent's room settings (health command, image, protected paths, egress allowlist, budgets). It has no upstream of its own: `git.pull_upstream` in a branch is refused.
+- **Memory authorship.** When memory is copied into a branch, `decisions/*` entries are authored by `system`; every other entry is authored by the branch's owner.
+- **Lifecycle independence.** Archiving or purging a parent never touches its branches, and the reverse. `room_branches` is owned by the **branch** room and has no foreign key to the parent or the snapshot, so a parent can be purged first.
+- **Governing acts stay with humans.** Snapshot deletion is owner-only. Creating a branch and merging one move content between rooms, which D8 and §2.7 keep with humans: `room.branch` and `room.branches.merge` are owner/admin powers, never grantable, and an agent lead does not have them. `snapshots.create` is an ordinary lead/owner capability.
+- **Events and redaction.** `workspace.snapshot.*` events are platform state events and cannot be redacted, so a snapshot's name cannot be redacted. Redacting a `memory.updated` event also blanks every snapshot copy of that revision (§19.6).
+- **The `BRANCH` ChangeSet source** (§10.1) is reserved for a branch merge: `workspace.apply_changeset` refuses it from a client with `VALIDATION` and `details.reason: "reserved_source"`.
+
+**Tables** (migration `0035_snapshots_branches.sql`)
+
+```text
+workspace_snapshots        id, room_id, workspace_id, revision, name (unique per room, 1-100),
+                           description (<= 2000), created_by, memory_entries, memory_bytes, created_at
+workspace_snapshot_memory  snapshot_id, key (the pair is the primary key), room_id, revision, value
+                           (<= 64 KiB), content_type, author_id, source_refs, redacted
+room_branches              room_id (the branch; primary key), parent_room_id, parent_revision,
+                           parent_commit_sha, snapshot_id, last_merged_branch_revision,
+                           last_merged_parent_revision, created_by_user_id, created_at
+```
+
+`snapshot_id` and `parent_room_id` carry no foreign key on purpose (see lifecycle independence). Every table has a `room_id`, so a room purge removes the rows in its catalog-derived order (§19.7).
+
+**Limits:** 50 snapshots per room; 2,000 memory entries or 16 MiB of memory copied per snapshot or branch; 20 non-deleted branches per parent.
+
 ---
 
 # 10. ChangeSets and the Apply Pipeline
@@ -522,7 +556,7 @@ ChangeSet
   workspace_id
   actor_id
   idempotency_key
-  source                 EDITOR | SANDBOX | API | UPSTREAM | RESOLUTION
+  source                 EDITOR | SANDBOX | API | UPSTREAM | RESOLUTION | BRANCH
   task_id                optional
   conflict_id            set when resolving a conflict
   message                short description
@@ -968,6 +1002,14 @@ INTEGRATIONS
 GIT
   git.import / git.pull_upstream
   checkpoints.create / checkpoints.list / checkpoints.export
+
+SNAPSHOTS AND BRANCHES (§9.7)
+  workspace.snapshot.create                          lead or owner
+  workspace.snapshot.list / workspace.snapshot.get   every member
+  workspace.snapshot.delete                          room owner only
+  room.branch                                        owner or admin, humans only
+  room.branches.list                                 every member
+  room.branches.merge                                owner or admin, humans only
 ```
 
 `workspace.changeset.get` metadata is available to room participants authorized for `workspace.read`.
@@ -1209,6 +1251,7 @@ If the node crashes between steps 2 and 3, the new owner reconciles on startup b
 
 ```text
 room.created / room.paused / room.resumed / room.archived / room.unarchived / room.exported
+room.branched / room.branched_from / room.branch_merged
 room.retention_changed
 room.egress_allowlist_changed / room.protected_paths_changed / room.health_settings_changed
 room.budgets_changed

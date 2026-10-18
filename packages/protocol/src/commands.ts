@@ -130,6 +130,13 @@ export const METHODS = {
   "checkpoints.create": { mutating: true },
   "checkpoints.list": { mutating: false },
   "checkpoints.export": { mutating: true },
+  "workspace.snapshot.create": { mutating: true },
+  "workspace.snapshot.list": { mutating: false },
+  "workspace.snapshot.get": { mutating: false },
+  "workspace.snapshot.delete": { mutating: true },
+  "room.branch": { mutating: true },
+  "room.branches.list": { mutating: false },
+  "room.branches.merge": { mutating: true },
 } as const satisfies Record<string, { mutating: boolean }>;
 
 export type MethodName = keyof typeof METHODS;

@@ -1135,3 +1135,45 @@ describe("0020_approvals", () => {
     await expect(insert(c, { status: "MAYBE" })).rejects.toMatchObject({ code: "23514" });
   });
 });
+
+describe("0035_snapshots_branches", () => {
+  it("0035 allows source BRANCH and keeps the old sources", async () => {
+    await db.pool.query(
+      `INSERT INTO rooms (id, slug, name, objective, owner_id)
+       VALUES ('room_t1602_cs', 't1602-cs', 'n', 'o', 'part_1')`,
+    );
+    await db.pool.query(
+      "INSERT INTO workspaces (id, room_id, repo_path) VALUES ('ws_t1602', 'room_t1602_cs', '/repos/t1602.git')",
+    );
+    const changeset = (id: string, source: string) =>
+      db.pool.query(
+        `INSERT INTO changesets
+         (id, workspace_id, room_id, actor_id, idempotency_key, source, message,
+          base_workspace_revision, payload)
+         VALUES ($1, 'ws_t1602', 'room_t1602_cs', 'actor_1', $1, $2, 'Edit', 0, '{}')`,
+        [id, source],
+      );
+    for (const source of ["EDITOR", "SANDBOX", "API", "UPSTREAM", "RESOLUTION", "BRANCH"])
+      await changeset(`cs_t1602_${source}`, source);
+    await expect(changeset("cs_t1602_FOO", "FOO")).rejects.toMatchObject({ code: "23514" });
+  });
+
+  it("room_branches survives deleting its parent room row", async () => {
+    await db.pool.query(
+      `INSERT INTO rooms (id, slug, name, objective, owner_id)
+       VALUES ('room_t1602_parent', 't1602-parent', 'n', 'o', 'part_1'),
+              ('room_t1602_branch', 't1602-branch', 'n', 'o', 'part_1')`,
+    );
+    await db.pool.query(
+      `INSERT INTO room_branches
+         (room_id, parent_room_id, parent_revision, parent_commit_sha, last_merged_parent_revision,
+          created_by_user_id)
+       VALUES ('room_t1602_branch', 'room_t1602_parent', 3, 'abc123', 3, 'user_1')`,
+    );
+    await db.pool.query("DELETE FROM rooms WHERE id = 'room_t1602_parent'");
+    const { rows } = await db.pool.query(
+      "SELECT parent_room_id FROM room_branches WHERE room_id = 'room_t1602_branch'",
+    );
+    expect(rows).toEqual([{ parent_room_id: "room_t1602_parent" }]);
+  });
+});

@@ -83,6 +83,9 @@ const CATALOG = `
 
   git.import / git.pull_upstream
   checkpoints.create / checkpoints.list / checkpoints.export
+
+  workspace.snapshot.create / workspace.snapshot.list / workspace.snapshot.get / workspace.snapshot.delete
+  room.branch / room.branches.list / room.branches.merge
 `;
 // `room.create` (T202) isn't in the §16.1 list: there is no room yet to scope it to.
 const catalog = [...CATALOG.split(/[\s/]+/).filter(Boolean), "room.create"];
@@ -130,6 +133,9 @@ const READ_ONLY = [
   "tools.list",
   "integrations.list",
   "checkpoints.list",
+  "workspace.snapshot.list",
+  "workspace.snapshot.get",
+  "room.branches.list",
 ];
 
 const withoutKey = (extra: Record<string, unknown> = {}): Record<string, unknown> => {
@@ -148,7 +154,7 @@ const valid = (extra: Record<string, unknown> = {}) => ({
 
 describe("METHODS", () => {
   it("contains every §16.1 method plus room.create, and nothing else", () => {
-    expect(catalog).toHaveLength(105);
+    expect(catalog).toHaveLength(112);
     expect([...METHOD_NAMES].sort()).toEqual([...catalog].sort());
   });
 
@@ -159,7 +165,7 @@ describe("METHODS", () => {
   it("marks exactly the documented methods read-only", () => {
     const readOnly = METHOD_NAMES.filter((m) => !isMutatingMethod(m));
     expect([...readOnly].sort()).toEqual([...READ_ONLY].sort());
-    expect(Object.keys(METHODS).length - readOnly.length).toBe(64);
+    expect(Object.keys(METHODS).length - readOnly.length).toBe(68);
   });
 
   it("isMutatingMethod takes any string and is false for unknown methods", () => {

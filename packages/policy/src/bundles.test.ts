@@ -30,6 +30,7 @@ const READS: Capability[] = [
   "tools.read",
   "integrations.read",
   "checkpoints.read",
+  "snapshots.read",
 ];
 const DEVELOPER_WORK: Capability[] = [
   "sandbox.output",
@@ -90,6 +91,7 @@ const EXPECTED: Record<(typeof ROLES)[number], Capability[]> = {
     "decisions.decide",
     "checkpoints.create",
     "checkpoints.export",
+    "snapshots.create",
     "git.import",
     "git.pull_upstream",
     "health.set",
@@ -196,6 +198,8 @@ describe("authority powers (§6.2)", () => {
     "decisions.veto",
     "budgets.set",
     "egress.set",
+    "room.branch",
+    "branches.merge",
   ];
   const OWNER_AUTHORITY_CAPABILITIES = [
     "room.freeze",
@@ -208,8 +212,27 @@ describe("authority powers (§6.2)", () => {
     "events.redact",
     "integrations.manage",
     "protected_paths.set",
+    "snapshots.delete",
   ];
   const SHARED_LEAD_OWNER_POWERS = ["workspace.decide_hold", "health.set"];
+
+  it("room.branch and branches.merge are admin/owner powers, not grantable", () => {
+    for (const c of ["room.branch", "branches.merge"] as const) {
+      expect(isAuthorityPower(c), c).toBe(true);
+      expect(AUTHORITY_POWERS.ADMIN.has(c), `ADMIN ${c}`).toBe(true);
+      expect(AUTHORITY_POWERS.OWNER.has(c), `OWNER ${c}`).toBe(true);
+      for (const role of ROLES) expect(ROLE_BUNDLES[role].has(c), `${role} ${c}`).toBe(false);
+      expect(effectiveCapabilities("LEAD", "MEMBER").has(c), `agent lead ${c}`).toBe(false);
+    }
+    // Deleting a snapshot is owner-only; creating one is an ordinary lead/owner capability.
+    expect(isAuthorityPower("snapshots.delete")).toBe(true);
+    expect(AUTHORITY_POWERS.ADMIN.has("snapshots.delete")).toBe(false);
+    expect(isAuthorityPower("snapshots.create")).toBe(false);
+  });
+
+  it("snapshots.read is in every role's bundle", () => {
+    for (const role of ROLES) expect(ROLE_BUNDLES[role].has("snapshots.read"), role).toBe(true);
+  });
 
   it("members have none", () => {
     expect([...AUTHORITY_POWERS.MEMBER]).toEqual([]);
@@ -248,6 +271,7 @@ describe("authority powers (§6.2)", () => {
         "git.pull_upstream",
         "checkpoints.create",
         "checkpoints.export",
+        "snapshots.create",
       ] as const) {
         expect(effectiveCapabilities(role, "OWNER").has(c), `OWNER/${role} ${c}`).toBe(true);
         expect(effectiveCapabilities(role, "ADMIN").has(c), `ADMIN/${role} ${c}`).toBe(

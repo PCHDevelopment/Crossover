@@ -29,6 +29,7 @@ export const CAPABILITIES = {
   "tools.read": { mutating: false },
   "integrations.read": { mutating: false },
   "checkpoints.read": { mutating: false },
+  "snapshots.read": { mutating: false },
 
   // ---- presence: the one mutation every role has (ephemeral, self only)
   "presence.update": { mutating: true },
@@ -67,6 +68,10 @@ export const CAPABILITIES = {
   "decisions.decide": { mutating: true },
   "checkpoints.create": { mutating: true },
   "checkpoints.export": { mutating: true },
+  "snapshots.create": { mutating: true },
+  "snapshots.delete": { mutating: true },
+  "room.branch": { mutating: true },
+  "branches.merge": { mutating: true },
   "git.import": { mutating: true },
   "git.pull_upstream": { mutating: true },
   "workspace.decide_hold": { mutating: true },
@@ -127,6 +132,7 @@ const READS = [
   "tools.read",
   "integrations.read",
   "checkpoints.read",
+  "snapshots.read",
 ] as const satisfies readonly Capability[];
 
 const DEVELOPER = [
@@ -183,6 +189,7 @@ const LEAD = [
   "decisions.decide",
   "checkpoints.create",
   "checkpoints.export",
+  "snapshots.create",
   "git.import",
   "git.pull_upstream",
   "health.set",
@@ -227,6 +234,8 @@ const ADMIN_POWERS = [
   "decisions.veto",
   "budgets.set",
   "egress.set",
+  "room.branch",
+  "branches.merge",
 ] as const satisfies readonly Capability[];
 
 const OWNER_POWERS = [
@@ -243,6 +252,7 @@ const OWNER_POWERS = [
   "protected_paths.set",
   "health.set",
   "workspace.decide_hold",
+  "snapshots.delete",
 ] as const satisfies readonly Capability[];
 
 /**
@@ -278,6 +288,7 @@ export const OWNER_GIT_CAPABILITIES = [
   "git.pull_upstream",
   "checkpoints.create",
   "checkpoints.export",
+  "snapshots.create",
 ] as const satisfies readonly Capability[];
 
 /** Role bundle plus authority powers (and, for owners and admins, task management). */
