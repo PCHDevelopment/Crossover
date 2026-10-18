@@ -609,6 +609,7 @@ jobs:
       - name: Start the stack
         run: |
           set -euo pipefail
+          df -h / | tail -1
           start=$SECONDS
           docker compose --profile server up --build -d
           echo "built and started in $((SECONDS - start)) s"
@@ -622,86 +623,24 @@ jobs:
             sleep 2
           done
           echo "GET /health 200 after $((SECONDS - healthy)) s"
+          df -h / | tail -1
       # The rehearsal imports @crossover/sdk, which resolves to its build output.
       - name: Build the SDK and typecheck the rehearsal
         run: pnpm exec tsc -b scripts/compose-rehearsal
-      # THROWAWAY DEBUG: log every Git call in the server container with its exit code and stderr.
-      - name: Debug Git wrapper in the server container
-        run: |
-          cat > /tmp/git-wrapper.sh <<'EOF'
-          #!/bin/sh
-          # Helpers such as git-upload-pack are symlinks to git: keep their name.
-          case "${0##*/}" in
-            git) ;;
-            git-*) exec /usr/bin/git.real "${0##*/git-}" "$@" ;;
-          esac
-          /usr/bin/git.real "$@" 2>/tmp/git.err; rc=$?
-          echo "rc=$rc git $*" >> /tmp/git-calls.log
-          if [ $rc -ne 0 ]; then
-            { echo "--- stderr:"; cat /tmp/git.err; echo "--- env: HOME=$HOME TMPDIR=$TMPDIR USER=$(id -u) $(env | grep '^GIT_' | grep -v TOKEN | tr '\n' ' ')"; } >> /tmp/git-calls.log
-          fi
-          case "$*" in
-            *" fetch "*)
-              gd="${1#--git-dir=}"
-              {
-                echo "--- state right after that fetch (rc=$rc): refs, FETCH_HEAD, ref dirs"
-                /usr/bin/git.real --git-dir="$gd" for-each-ref 2>&1 | head -10
-                echo "FETCH_HEAD: $(cat "$gd/FETCH_HEAD" 2>&1 | head -3)"
-                ls -laR "$gd/refs" 2>&1 | head -24
-                echo "config: $(cat "$gd/config" 2>&1 | tr '\n' ' ')"
-              } >> /tmp/git-calls.log ;;
-          esac
-          cat /tmp/git.err >&2
-          exit $rc
-          EOF
-          docker cp /tmp/git-wrapper.sh crossover-server:/tmp/git-wrapper.sh
-          docker exec -u 0 crossover-server sh -c 'mv /usr/bin/git /usr/bin/git.real && cp /tmp/git-wrapper.sh /usr/bin/git && chmod 755 /usr/bin/git && ls -l /usr/bin/git-upload-pack /usr/bin/git /usr/bin/git.real'
       - name: Rehearse the runbook
         run: pnpm exec vitest run --config vitest.rehearsal.config.ts
-      # Git's own complaint is not in the server log (by design), so on a failure look at what the
-      # server's user sees on the workspace volume. Nothing here prints a secret.
+      # Git's own complaint is not in the server log (by design), so on a failure show what the
+      # server's user sees on the workspace volume and how much disk is left. Prints no secret.
       - name: Diagnose a failed rehearsal
         if: failure()
         run: |
+          df -h / | tail -2
           docker exec crossover-server sh -c '
             id; git --version; echo "WORKSPACE_ROOT=$WORKSPACE_ROOT"
             ls -lan "$WORKSPACE_ROOT" | head -8
-            for d in "$WORKSPACE_ROOT"/*; do
-              echo "== $d"; ls -lan "$d" | head -6
-              git --git-dir="$d" rev-parse --git-dir 2>&1 | head -3
-              git -C "$d" rev-parse --git-dir 2>&1 | head -3
-            done' 2>&1 | head -60 || true
-          docker exec crossover-server sh -c 'echo "== git calls the server made"; tail -80 /tmp/git-calls.log' 2>&1 | cut -c1-300 || true
-          docker exec -e URL="$DEMO_REPO_URL" crossover-server sh -c '
-            export GIT_TERMINAL_PROMPT=0 GIT_CONFIG_NOSYSTEM=1
-            rm -rf /tmp/matrix && mkdir /tmp/matrix && cd /tmp/matrix
-            mkdir /tmp/crossover-import-m && git clone -q --depth=1 --bare --single-branch --no-tags --template= --branch=main -- "$URL" /tmp/crossover-import-m/repo 2>&1 | tail -2
-            try() { # name, where, ref
-              git init -q --bare --template= "$2" && git --git-dir="$2" fetch --no-tags --quiet /tmp/crossover-import-m/repo "+HEAD:$3"; rc=$?
-              echo "== $1: fetch rc=$rc, refs: $(git --git-dir="$2" for-each-ref | wc -l), FETCH_HEAD bytes: $(wc -c < "$2/FETCH_HEAD" 2>/dev/null)"
-              git --git-dir="$2" for-each-ref | head -3
-            }
-            try "A bind mount, nested ref" "$WORKSPACE_ROOT/probe-a.git" refs/upstream/prepare/cmd_X
-            try "B /tmp, nested ref" /tmp/matrix/b.git refs/upstream/prepare/cmd_X
-            try "C bind mount, flat ref" "$WORKSPACE_ROOT/probe-c.git" refs/upstream/x
-            try "D /tmp, flat ref" /tmp/matrix/d.git refs/upstream/x
-            echo "-- more variants (fresh repo on /tmp, flat ref)"
-            git clone -q --bare --no-tags --template= --branch=main -- "$URL" /tmp/crossover-import-m/full.git 2>&1 | tail -2
-            git init -q --bare --template= /tmp/matrix/e.git; git --git-dir=/tmp/matrix/e.git fetch --no-tags --quiet /tmp/crossover-import-m/full.git +HEAD:refs/upstream/x; echo "== E non-shallow source: rc=$? refs=$(git --git-dir=/tmp/matrix/e.git for-each-ref | wc -l)"
-            git init -q --bare --template= /tmp/matrix/f.git; git --git-dir=/tmp/matrix/f.git fetch --no-tags --quiet --update-shallow /tmp/crossover-import-m/repo +HEAD:refs/upstream/x; echo "== F shallow source, --update-shallow: rc=$? refs=$(git --git-dir=/tmp/matrix/f.git for-each-ref | wc -l)"
-            git init -q --bare --template= /tmp/matrix/g.git; echo "== G shallow source, verbose:"; git --git-dir=/tmp/matrix/g.git fetch --no-tags /tmp/crossover-import-m/repo +HEAD:refs/upstream/x 2>&1 | head -8; echo "   refs=$(git --git-dir=/tmp/matrix/g.git for-each-ref | wc -l) shallow-file: $(ls /tmp/matrix/g.git/shallow 2>&1)"
-            git init -q --bare --template= /tmp/matrix/h.git; echo "== H traced:"; GIT_TRACE=1 git --git-dir=/tmp/matrix/h.git fetch --no-tags /tmp/crossover-import-m/repo +HEAD:refs/upstream/x 2>&1 | cut -c1-180 | head -24
-            echo "== source repo: $(git --git-dir=/tmp/crossover-import-m/repo rev-parse HEAD) shallow: $(cat /tmp/crossover-import-m/repo/shallow 2>&1 | head -2)"' 2>&1 | head -80 || true
-          # The same Git calls the import makes (packages/workspace upstream.ts and upstream-import.ts),
-          # with Git's own stderr, which the server does not log.
-          docker exec -e URL="$DEMO_REPO_URL" crossover-server sh -c '
-            export GIT_TERMINAL_PROMPT=0 GIT_CONFIG_NOSYSTEM=1
-            d="$(ls -d "$WORKSPACE_ROOT"/room_*.git | head -1)"
-            rm -rf /tmp/probe && mkdir /tmp/probe && cd /tmp/probe
-            echo "-- clone"; git clone --depth=1 --bare --single-branch --no-tags --template= --branch=main -- "$URL" repo 2>&1 | tail -3
-            echo "-- fetch into the room repository"
-            git --git-dir="$d" fetch --no-tags --quiet /tmp/probe/repo +HEAD:refs/upstream/probe 2>&1 | tail -5
-            echo "-- rev-parse"; git --git-dir="$d" rev-parse --verify "refs/upstream/probe^{commit}" 2>&1 | tail -3' 2>&1 | head -30 || true
+            for d in "$WORKSPACE_ROOT"/*.git; do
+              echo "== $d"; git --git-dir="$d" for-each-ref 2>&1 | head -5
+            done' 2>&1 | head -40 || true
       # Only after the rehearsal's own check that no generated secret or issued token is in the logs.
       - uses: actions/upload-artifact@v4
         if: always() && hashFiles('rehearsal-out/leak-check.ok') != ''
