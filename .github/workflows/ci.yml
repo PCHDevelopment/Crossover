@@ -149,8 +149,118 @@ jobs:
           path: clients/go/dist/room-*
           if-no-files-found: error
 
-  test:
+  # The Docker images the test jobs run against, built once (T1566). Both `test` shards and
+  # `web-e2e` used to build the same images each; they now load these, so the tags and the image IDs
+  # are the same ones. Each image is its own artifact so a job downloads only what it uses.
+  images:
     needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build egress-proxy image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/egress-proxy/Dockerfile
+          tags: crossover-egress-proxy:test
+          load: true
+          cache-from: type=gha,scope=egress-proxy
+          cache-to: type=gha,mode=max,scope=egress-proxy
+      - name: Build browser plugin image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: plugins/browser/Dockerfile
+          target: test
+          tags: crossover-browser-plugin:test
+          load: true
+          cache-from: type=gha,scope=browser-plugin
+          cache-to: type=gha,mode=max,scope=browser-plugin
+      - name: Build git-fetcher image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/git-fetcher/Dockerfile
+          tags: crossover-git-fetcher:test
+          load: true
+          cache-from: type=gha,scope=git-fetcher
+          cache-to: type=gha,mode=max,scope=git-fetcher
+      - name: Build GitHub plugin image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: plugins/github/Dockerfile
+          tags: crossover-github-plugin:test
+          load: true
+          cache-from: type=gha,scope=github-plugin
+          cache-to: type=gha,mode=max,scope=github-plugin
+      - name: Build production server image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/server/Dockerfile
+          tags: crossover-server:test
+          load: true
+          cache-from: type=gha,scope=server
+          cache-to: type=gha,mode=max,scope=server
+      - name: Save the images
+        run: |
+          out="$RUNNER_TEMP/save"
+          mkdir -p "$out"
+          for name in egress-proxy browser-plugin git-fetcher github-plugin server; do
+            id="$(docker image inspect "crossover-$name:test" --format '{{.Id}}')"
+            echo "built crossover-$name:test $id"
+            echo "crossover-$name:test $id" >> "$out/ids.txt"
+            docker save "crossover-$name:test" | zstd -T0 -3 -q -o "$out/$name.tar.zst"
+          done
+          ls -l "$out"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image-egress-proxy
+          path: ${{ runner.temp }}/save/egress-proxy.tar.zst
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image-browser-plugin
+          path: ${{ runner.temp }}/save/browser-plugin.tar.zst
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image-git-fetcher
+          path: ${{ runner.temp }}/save/git-fetcher.tar.zst
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image-github-plugin
+          path: ${{ runner.temp }}/save/github-plugin.tar.zst
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image-server
+          path: ${{ runner.temp }}/save/server.tar.zst
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image-ids
+          path: ${{ runner.temp }}/save/ids.txt
+          retention-days: 1
+          if-no-files-found: error
+
+  test:
+    needs: [changes, images]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -233,56 +343,29 @@ jobs:
           echo "$sum  $dir/rg.tar.gz" | sha256sum -c -
           tar -xzf "$dir/rg.tar.gz" -C "$dir" --strip-components=1
           echo "$dir" >> "$GITHUB_PATH"
-      - uses: docker/setup-buildx-action@v3
       - run: docker pull node:22-bookworm-slim
       - run: docker pull node:22-bookworm-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392
       - run: docker pull busybox:1.36.1-musl@sha256:3c6ae8008e2c2eedd141725c30b20d9c36b026eb796688f88205845ef17aa213
-      - name: Build egress-proxy image
-        uses: docker/build-push-action@v6
+      - uses: actions/download-artifact@v4
         with:
-          context: .
-          file: apps/egress-proxy/Dockerfile
-          tags: crossover-egress-proxy:test
-          load: true
-          cache-from: type=gha,scope=egress-proxy
-          cache-to: type=gha,mode=max,scope=egress-proxy
-      - name: Build browser plugin image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: plugins/browser/Dockerfile
-          target: test
-          tags: crossover-browser-plugin:test
-          load: true
-          cache-from: type=gha,scope=browser-plugin
-          cache-to: type=gha,mode=max,scope=browser-plugin
-      - name: Build git-fetcher image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: apps/git-fetcher/Dockerfile
-          tags: crossover-git-fetcher:test
-          load: true
-          cache-from: type=gha,scope=git-fetcher
-          cache-to: type=gha,mode=max,scope=git-fetcher
-      - name: Build GitHub plugin image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: plugins/github/Dockerfile
-          tags: crossover-github-plugin:test
-          load: true
-          cache-from: type=gha,scope=github-plugin
-          cache-to: type=gha,mode=max,scope=github-plugin
-      - name: Build production server image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: apps/server/Dockerfile
-          tags: crossover-server:test
-          load: true
-          cache-from: type=gha,scope=server
-          cache-to: type=gha,mode=max,scope=server
+          pattern: image-*
+          path: ${{ runner.temp }}/images
+          merge-multiple: true
+      - name: Load the test images
+        run: |
+          # Each image must have the ID the `images` job built: the tags are the ones the tests use,
+          # and the content must be too. A job that loaded only some images skips the others.
+          shopt -s nullglob
+          dir="$RUNNER_TEMP/images"
+          files=("$dir"/*.tar.zst)
+          [ ${#files[@]} -gt 0 ] || { echo "No saved images in $dir"; exit 1; }
+          for file in "${files[@]}"; do zstd -dc "$file" | docker load; done
+          while read -r tag expected; do
+            actual="$(docker image inspect "$tag" --format '{{.Id}}' 2>/dev/null || true)"
+            [ -n "$actual" ] || continue
+            echo "loaded $tag $actual"
+            [ "$actual" = "$expected" ] || { echo "ERROR: $tag is $actual here but $expected where it was built"; exit 1; }
+          done < "$dir/ids.txt"
       - name: Smoke test GitHub plugin stdin/stdout with network disabled
         shell: bash
         run: |
@@ -302,7 +385,7 @@ jobs:
 
   # The Chromium-backed web E2E (the only Playwright user), on its own runner.
   web-e2e:
-    needs: changes
+    needs: [changes, images]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -371,24 +454,34 @@ jobs:
             pnpm --filter @crossover/server exec playwright-core install chromium
           fi
       # web-fixture.ts runs health checks and a git fetcher in Docker.
-      - uses: docker/setup-buildx-action@v3
       - run: docker pull node:22-bookworm-slim
       - run: docker pull node:22-bookworm-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392
-      - name: Build git-fetcher image
-        uses: docker/build-push-action@v6
+      - uses: actions/download-artifact@v4
         with:
-          context: .
-          file: apps/git-fetcher/Dockerfile
-          tags: crossover-git-fetcher:test
-          load: true
-          cache-from: type=gha,scope=git-fetcher
-          cache-to: type=gha,mode=max,scope=git-fetcher
+          pattern: image-{git-fetcher,ids}
+          path: ${{ runner.temp }}/images
+          merge-multiple: true
+      - name: Load the git-fetcher image
+        run: |
+          # Each image must have the ID the `images` job built: the tags are the ones the tests use,
+          # and the content must be too. A job that loaded only some images skips the others.
+          shopt -s nullglob
+          dir="$RUNNER_TEMP/images"
+          files=("$dir"/*.tar.zst)
+          [ ${#files[@]} -gt 0 ] || { echo "No saved images in $dir"; exit 1; }
+          for file in "${files[@]}"; do zstd -dc "$file" | docker load; done
+          while read -r tag expected; do
+            actual="$(docker image inspect "$tag" --format '{{.Id}}' 2>/dev/null || true)"
+            [ -n "$actual" ] || continue
+            echo "loaded $tag $actual"
+            [ "$actual" = "$expected" ] || { echo "ERROR: $tag is $actual here but $expected where it was built"; exit 1; }
+          done < "$dir/ids.txt"
       - name: Test the web app in a browser
         run: pnpm exec vitest run apps/server/src/e2e/web.test.ts
 
   check:
     if: always()
-    needs: [changes, static, go, test, web-e2e]
+    needs: [changes, static, go, images, test, web-e2e]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -407,7 +500,7 @@ jobs:
             echo "$NEEDS" | jq -e 'all(.[]; .result == "success")' > /dev/null
           elif [ "$code" = false ]; then
             # Only the filter may have skipped them: a docs-only change. Anything else is not a pass.
-            echo "$NEEDS" | jq -e '.go.result == "skipped" and .test.result == "skipped" and .["web-e2e"].result == "skipped"' > /dev/null
+            echo "$NEEDS" | jq -e '.go.result == "skipped" and .images.result == "skipped" and .test.result == "skipped" and .["web-e2e"].result == "skipped"' > /dev/null
           else
             echo "The changes job did not report"; exit 1
           fi
