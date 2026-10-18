@@ -9,14 +9,20 @@ reference="${GIT_REFERENCE_REPOSITORY:-/reference.git}"
 checkout="$(mktemp -d /tmp/crossover-git-fetch.XXXXXX)"
 trap 'rm -rf "$checkout"' EXIT HUP INT TERM
 
+# git refuses a shallow --reference; imported rooms are shallow since T1572 (T1574)
+if [ -d "$reference" ] && [ ! -e "$reference/shallow" ]; then
+  set -- --reference="$reference" --dissociate
+else
+  set --
+fi
+
 git clone \
   --quiet \
   --no-tags \
   --depth=1 \
   --single-branch \
   --branch main \
-  --reference="$reference" \
-  --dissociate \
+  "$@" \
   "$GIT_REMOTE_URL" \
   "$checkout/repo"
 
