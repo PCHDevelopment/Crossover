@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { chmod, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
@@ -1053,8 +1053,10 @@ describe("DockerExecutionDriver", () => {
   })();
   const skipDockerIntegration = !dockerImageAvailable && !process.env["CI"];
 
-  // The real git-fetcher image and script (T1574): the room repo is the --reference, as in materialize.
-  // CI loads the image as crossover-git-fetcher:test; GIT_FETCHER_IMAGE overrides it locally.
+  // DockerExecutionDriver.materialize with the real git-fetcher image and script (T1574), the room repo
+  // as the --reference. Only the Git service is local: the fetcher clones file:///upstream.git instead of
+  // the internal HTTP service, and the network commands are stubbed. CI loads the image as
+  // crossover-git-fetcher:test; GIT_FETCHER_IMAGE overrides it locally.
   const fetcherImage = process.env["GIT_FETCHER_IMAGE"] ?? "crossover-git-fetcher:test";
   const git = (cwd: string, ...args: string[]) =>
     execFileSync("git", ["-c", "safe.directory=*", ...args], {
@@ -1062,8 +1064,31 @@ describe("DockerExecutionDriver", () => {
       encoding: "utf8",
       timeout: 30_000,
     }).trim();
-  async function fetchWithReference(room: "shallow" | "full") {
+  const realDocker: DockerInvoker = (args, options) =>
+    new Promise((resolve) => {
+      execFile(
+        "docker",
+        [...args],
+        {
+          env: { ...process.env, ...options?.env },
+          timeout: options?.timeoutMs,
+          maxBuffer: 64 * 1024 * 1024,
+          encoding: "utf8",
+        },
+        (error, stdout, stderr) =>
+          resolve({
+            code: error ? (typeof error.code === "number" ? error.code : 1) : 0,
+            stdout,
+            stderr,
+          }),
+      );
+    });
+  async function materializeFrom(room: "shallow" | "full") {
     const root = await mkdtemp(join(tmpdir(), "t1574-"));
+    const roomId = newId("room");
+    const sandboxId = newId("sandbox");
+    let driver: DockerExecutionDriver | undefined;
+    let resources: Awaited<ReturnType<DockerExecutionDriver["create"]>> | undefined;
     try {
       const up = join(root, "upstream.git");
       const work = join(root, "work");
@@ -1108,42 +1133,88 @@ describe("DockerExecutionDriver", () => {
       }
       const gitconfig = join(root, "gitconfig");
       await writeFile(gitconfig, "[safe]\n\tdirectory = *\n");
-      const workspace = join(root, "workspace");
-      execFileSync("mkdir", ["-m", "0777", workspace]);
-      execFileSync(
-        "docker",
-        [
-          "run",
-          "--rm",
-          "--network=none",
-          "--read-only",
-          "--user=1000:1000",
-          "--cap-drop=ALL",
-          "--tmpfs",
-          "/tmp:rw,nosuid,size=64m",
-          "--env",
-          `GIT_REMOTE_URL=file:///upstream.git`,
-          // The mounted repos belong to the host user, not uid 1000 (production mounts match).
-          "--env",
-          "GIT_CONFIG_GLOBAL=/gitconfig",
-          "--mount",
-          `type=bind,source=${gitconfig},target=/gitconfig,readonly`,
-          "--mount",
-          `type=bind,source=${workspace},target=/workspace`,
-          "--mount",
-          `type=bind,source=${reference},target=/reference.git,readonly`,
-          "--mount",
-          `type=bind,source=${up},target=/upstream.git,readonly`,
-          fetcherImage,
-        ],
-        { encoding: "utf8", timeout: 60_000, stdio: ["ignore", "pipe", "pipe"] },
-      );
+      const invoke: DockerInvoker = async (args, options) => {
+        if (args[0] === "network" && args[1] === "inspect")
+          return {
+            code: 0,
+            stdout: `true|${JSON.stringify({ endpoint: { Name: "crossover-server" } })}`,
+            stderr: "",
+          };
+        if (args[0] !== "run" || !args.includes("crossover.git.fetch=true"))
+          return realDocker(args, options);
+        // The materialize fetcher run: same arguments, but offline, with the local upstream.
+        const rewritten = args
+          .filter((arg) => !arg.startsWith("--network="))
+          .map((arg) =>
+            arg.startsWith("GIT_REMOTE_URL=") ? "GIT_REMOTE_URL=file:///upstream.git" : arg,
+          );
+        const image = rewritten.pop()!;
+        return realDocker(
+          [
+            ...rewritten,
+            "--network=none",
+            "--env",
+            "GIT_CONFIG_GLOBAL=/gitconfig",
+            "--mount",
+            `type=bind,source=${gitconfig},target=/gitconfig,readonly`,
+            "--mount",
+            `type=bind,source=${up},target=/upstream.git,readonly`,
+            image,
+          ],
+          options,
+        );
+      };
+      driver = new DockerExecutionDriver({
+        invoke,
+        gitInternalContainer: "crossover-server",
+        gitInternalNetwork: "crossover-git-t1574",
+        gitInternalPort: 8081,
+        gitInternalTokenSecret: "a sufficiently long internal Git signing secret",
+        gitFetcherImage: fetcherImage,
+      });
+      resources = await driver.create({
+        sandbox_id: sandboxId,
+        room_id: roomId,
+        participant_id: newId("part"),
+        limits: { disk_enforcement: "soft" },
+      });
+      await driver.materialize({
+        sandbox_id: sandboxId,
+        room_id: roomId,
+        participant_id: newId("part"),
+        resources,
+        workspace: { repo_path: reference, revision: 1 },
+      });
+      // Read the volume back with the same image (the sandbox image has no Git).
+      const inVolume = (...command: string[]) =>
+        execFileSync(
+          "docker",
+          [
+            "run",
+            "--rm",
+            "--user=1000:1000",
+            "--network=none",
+            "--entrypoint",
+            command[0]!,
+            "--env",
+            "GIT_CONFIG_GLOBAL=/gitconfig",
+            "--mount",
+            `type=bind,source=${gitconfig},target=/gitconfig,readonly`,
+            "--mount",
+            `type=volume,source=${resources!.volume_ref},target=/workspace,readonly`,
+            fetcherImage,
+            ...command.slice(1),
+          ],
+          { encoding: "utf8", timeout: 30_000 },
+        ).trim();
       return {
-        files: (await readFile(join(workspace, "file3.txt"), "utf8")).trim(),
-        head: git(workspace, "rev-parse", "HEAD"),
+        file: inVolume("cat", "/workspace/file3.txt"),
+        head: inVolume("git", "-C", "/workspace", "rev-parse", "HEAD"),
         canonical,
       };
     } finally {
+      if (driver && resources)
+        await driver.destroy({ sandbox_id: sandboxId, resources }).catch(() => undefined);
       await rm(root, { recursive: true, force: true });
     }
   }
@@ -1151,8 +1222,8 @@ describe("DockerExecutionDriver", () => {
   it.skipIf(skipDockerIntegration)(
     "fetches a workspace when the room repo is a shallow import (--reference is skipped)",
     async () => {
-      const result = await fetchWithReference("shallow");
-      expect(result.files).toBe("contents 3");
+      const result = await materializeFrom("shallow");
+      expect(result.file).toBe("contents 3");
       expect(result.head).toBe(result.canonical);
     },
     90_000,
@@ -1161,8 +1232,8 @@ describe("DockerExecutionDriver", () => {
   it.skipIf(skipDockerIntegration)(
     "still fetches with a non-shallow room repo as the --reference",
     async () => {
-      const result = await fetchWithReference("full");
-      expect(result.files).toBe("contents 3");
+      const result = await materializeFrom("full");
+      expect(result.file).toBe("contents 3");
       expect(result.head).toBe(result.canonical);
     },
     90_000,
