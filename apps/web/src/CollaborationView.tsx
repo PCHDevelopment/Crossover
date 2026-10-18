@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import type { RoomClient, SdkEvent } from "@crossover/sdk";
 
 type Provenance = { author_id: string; author_kind: "HUMAN" | "AGENT" | "SYSTEM"; trust: string };
@@ -122,10 +122,18 @@ export default function CollaborationView(props: {
     });
     setInbox(page.response.items);
   }, [room]);
+  // Detail reads can finish out of order (T1559): an event-driven reload of the decision that was
+  // selected a moment ago can answer after the read of the one that was just proposed or clicked.
+  // Loading a decision selects it, a newer read supersedes an older one, and only the newest
+  // read's answer is shown.
+  const decisionIdRef = useRef<string | undefined>(undefined);
+  const decisionReadId = useRef(0);
   const loadDecision = useCallback(
     async (id: string) => {
+      const readId = ++decisionReadId.current;
+      decisionIdRef.current = id;
       const detail = await room.api.decisions.get<Decision>({ decision_id: id });
-      setSelectedDecision(detail.response);
+      if (readId === decisionReadId.current) setSelectedDecision(detail.response);
     },
     [room],
   );
@@ -139,14 +147,21 @@ export default function CollaborationView(props: {
     },
     [room],
   );
+  // The same for the memory pane: loading a key selects it, and only the newest read is shown.
+  const memoryKeyRef = useRef<string | undefined>(undefined);
+  const memoryReadId = useRef(0);
   const loadMemoryDetail = useCallback(
     async (key: string) => {
+      const readId = ++memoryReadId.current;
+      memoryKeyRef.current = key;
       const [entry, history] = await Promise.all([
         room.api.memory.get<MemoryEntry>({ key }),
         room.api.memory.history<{ revisions: MemoryRevision[] }>({ key, limit: 100 }),
       ]);
-      setMemoryEntry(entry.response);
-      setMemoryHistory(history.response.revisions);
+      if (readId === memoryReadId.current) {
+        setMemoryEntry(entry.response);
+        setMemoryHistory(history.response.revisions);
+      }
       return entry.response;
     },
     [room],
@@ -166,18 +181,22 @@ export default function CollaborationView(props: {
       }
       if (event.type.startsWith("decision.")) {
         void loadDecisions().catch((error: unknown) => setNotice(message(error)));
-        if (selectedDecision?.id) {
-          void loadDecision(selectedDecision.id).catch((error: unknown) =>
+        if (decisionIdRef.current) {
+          void loadDecision(decisionIdRef.current).catch((error: unknown) =>
             setNotice(message(error)),
           );
         }
       }
       if (event.type.startsWith("memory.")) {
         void loadMemory(memoryPrefix).catch((error: unknown) => setNotice(message(error)));
-        if (memoryKey) {
-          void loadMemoryDetail(memoryKey).catch((error: unknown) => {
-            setMemoryEntry(undefined);
-            setMemoryHistory([]);
+        const key = memoryKeyRef.current;
+        if (key) {
+          void loadMemoryDetail(key).catch((error: unknown) => {
+            // A failure of a read for a key that is no longer the selected one says nothing about it.
+            if (memoryKeyRef.current === key) {
+              setMemoryEntry(undefined);
+              setMemoryHistory([]);
+            }
             setNotice(message(error));
           });
         }
@@ -193,10 +212,8 @@ export default function CollaborationView(props: {
     loadDecisions,
     loadMemory,
     loadMemoryDetail,
-    memoryKey,
     memoryPrefix,
     onEvent,
-    selectedDecision?.id,
   ]);
 
   const propose = async (event: FormEvent<HTMLFormElement>) => {
@@ -344,6 +361,8 @@ export default function CollaborationView(props: {
     setNotice(undefined);
     try {
       const entry = await loadMemoryDetail(key);
+      // A later click selected another key; this answer must not overwrite its form.
+      if (memoryKeyRef.current !== key) return;
       setMemoryWriteKey(entry.key);
       setMemoryWriteValue(entry.redacted ? "" : entry.value);
       setMemoryWriteType(entry.content_type as "text/markdown" | "application/json");
@@ -351,6 +370,7 @@ export default function CollaborationView(props: {
         entry.source_refs.map((source) => `${source.kind}:${source.id}`).join("\n"),
       );
     } catch (error) {
+      if (memoryKeyRef.current !== key) return;
       setNotice(message(error));
     }
   };
