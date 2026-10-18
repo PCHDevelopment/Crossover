@@ -8,3 +8,7 @@ coverage/
 .DS_Store
 __pycache__/
 *.pyc
+# Local runs of docs/DEMO-RUNBOOK.md and scripts/compose-rehearsal
+docker-compose.override.yml
+.data/
+rehearsal-out/

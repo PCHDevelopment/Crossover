@@ -1,0 +1,9 @@
+{
+  "name": "crossover-demo",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "node --check index.js && node --check auth.js && node --check routes.js",
+    "test": "node --test"
+  }
+}

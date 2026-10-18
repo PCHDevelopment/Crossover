@@ -5,6 +5,10 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      demo_repo_url:
+        description: "Public https repository for the compose rehearsal's demo repo (default: PCHDevelopment/crossover-demo)"
+        required: false
   schedule:
     - cron: "0 4 * * *"
 
@@ -556,6 +560,87 @@ jobs:
           else
             echo "The changes job did not report"; exit 1
           fi
+
+  # The nightly rehearsal of docs/DEMO-RUNBOOK.md against the real `docker compose` stack (T1570).
+  # It runs on the schedule and by hand only, never on pull requests or pushes, and `check` does not
+  # wait for it. A red run is reported on #314 by whoever sees it, with the failing step.
+  compose-rehearsal:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      DEMO_REPO_URL: ${{ inputs.demo_repo_url || 'https://github.com/PCHDevelopment/crossover-demo' }}
+      REHEARSAL_OUT: ${{ github.workspace }}/rehearsal-out
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.5"
+          cache-dependency-path: clients/go/go.sum
+      - run: pnpm install --frozen-lockfile
+      # Runbook section 1, as written. The secret is generated here, masked, and never printed.
+      - name: Prepare the stack
+        run: |
+          set -euo pipefail
+          cp .env.example .env
+          sed -i "s/^DOCKER_GID=.*/DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)/" .env
+          secret="$(openssl rand -hex 32)"
+          echo "::add-mask::$secret"
+          echo "GIT_INTERNAL_TOKEN_SECRET=$secret" >> "$GITHUB_ENV"
+          printf 'GIT_INTERNAL_TOKEN_SECRET=%s\n' "$secret" >> .env
+          docker network create --internal crossover-git
+          docker build -f apps/git-fetcher/Dockerfile -t crossover-git-fetcher:latest .
+          docker pull node:22-bookworm-slim
+          sudo install -d -o 1000 -g 1000 -m 0750 "$PWD/.data/workspaces"
+          digest="$(docker inspect --format '{{index .RepoDigests 0}}' node:22-bookworm-slim)"
+          printf 'services:\n  server:\n    environment:\n      AWS_PLUGIN_IMAGE: %s\n' "$digest" > docker-compose.override.yml
+      - name: Build the agent CLI
+        working-directory: clients/go
+        run: |
+          CGO_ENABLED=0 go build -buildvcs=false -o room ./cmd/room
+          sudo install room /usr/local/bin/
+      - name: Start the stack
+        run: |
+          set -euo pipefail
+          start=$SECONDS
+          docker compose --profile server up --build -d
+          echo "built and started in $((SECONDS - start)) s"
+          healthy=$SECONDS
+          until [ "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/health)" = 200 ]; do
+            if [ $((SECONDS - healthy)) -ge 180 ]; then
+              echo "ERROR: GET /health was not 200 within 180 s of starting the stack"
+              docker compose logs --no-color --tail 200 server
+              exit 1
+            fi
+            sleep 2
+          done
+          echo "GET /health 200 after $((SECONDS - healthy)) s"
+      - name: Rehearse the runbook
+        run: pnpm exec vitest run --config vitest.rehearsal.config.ts
+      # Only after the rehearsal's own check that no generated secret or issued token is in the logs.
+      - uses: actions/upload-artifact@v4
+        if: always() && hashFiles('rehearsal-out/leak-check.ok') != ''
+        with:
+          name: compose-rehearsal
+          path: rehearsal-out
+          retention-days: 7
+          if-no-files-found: error
+      - name: Clean up
+        if: always()
+        run: |
+          docker compose --profile server down -v --remove-orphans || true
+          docker ps -aq --filter label=crossover.sandbox=true | xargs -r docker rm -f || true
+          docker volume ls -q --filter name=crossover-sbx- | xargs -r docker volume rm || true
+          docker network ls -q --filter name=crossover-net- | xargs -r docker network rm || true
+          docker network rm crossover-git || true
+          sudo rm -rf .data .env docker-compose.override.yml
 
   workspace-benchmark:
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || (github.event_name == 'push' && github.ref == 'refs/heads/main')

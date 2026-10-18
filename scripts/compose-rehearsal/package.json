@@ -1,0 +1,13 @@
+{
+  "name": "@crossover/compose-rehearsal",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Nightly rehearsal of docs/DEMO-RUNBOOK.md against the real docker compose stack (T1570).",
+  "dependencies": {
+    "@crossover/sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1"
+  }
+}
