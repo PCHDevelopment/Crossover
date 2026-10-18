@@ -538,6 +538,14 @@ export async function composeServer(
     });
     wakeWebhooks.start();
 
+    // One line per unexpected failure, as JSON on stderr: the same shape for REST and MCP (T1575).
+    const logInternalError = (error: unknown, fields: Record<string, unknown>) => {
+      const stack =
+        error instanceof Error ? (error.stack ?? `${error.name}: ${error.message}`) : String(error);
+      // JSON keeps stack newlines escaped so each failure is a single stderr line.
+      console.error(JSON.stringify({ event: "gateway.internal_error", ...fields, stack }));
+    };
+
     const app = buildGateway({
       dispatcher,
       pool,
@@ -561,22 +569,13 @@ export async function composeServer(
             : undefined;
         const commandMethod =
           candidate && /^[a-zA-Z][a-zA-Z0-9_./-]{0,127}$/.test(candidate) ? candidate : undefined;
-        const stack =
-          error instanceof Error
-            ? (error.stack ?? `${error.name}: ${error.message}`)
-            : String(error);
 
-        // JSON keeps stack newlines escaped so each failure is a single stderr line. Only the
-        // route pattern and command method are included; never log request URLs, headers, or other body fields.
-        console.error(
-          JSON.stringify({
-            event: "gateway.internal_error",
-            method: request.method,
-            route: request.routeOptions.url ?? "<unmatched>",
-            ...(commandMethod ? { command_method: commandMethod } : {}),
-            stack,
-          }),
-        );
+        // Only the route pattern and command method are included; never log request URLs, headers, or other body fields.
+        logInternalError(error, {
+          method: request.method,
+          route: request.routeOptions.url ?? "<unmatched>",
+          ...(commandMethod ? { command_method: commandMethod } : {}),
+        });
       },
       devLogin: config.devLogin,
       secureCookies: config.secureCookies,
@@ -623,7 +622,21 @@ export async function composeServer(
       authorize: overrides.authorize ?? authorize,
       ...(config.gitInternalTokenSecret ? { tokenSecret: config.gitInternalTokenSecret } : {}),
     });
-    registerMcp(app, { dispatcher, pool }); // POST /mcp, the agents' tool surface
+    // POST /mcp, the agents' tool surface; an INTERNAL tool error is logged like the REST one, minus arguments
+    registerMcp(app, {
+      dispatcher,
+      pool,
+      onInternalError: (error, context) =>
+        logInternalError(error, {
+          method: "POST",
+          route: "/mcp",
+          command_method: context.method,
+          tool: context.tool,
+          room_id: context.room_id,
+          participant_id: context.participant_id,
+          command_id: context.command_id,
+        }),
+    });
 
     let closing: Promise<void> | undefined;
     const close = () =>

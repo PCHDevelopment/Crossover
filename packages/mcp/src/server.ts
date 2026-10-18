@@ -10,9 +10,20 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { MCP_TOOLS, type McpToolDefinition } from "./tools.js";
 
+/** What an operator may see about a tool call that failed with `INTERNAL`: never its arguments. */
+export interface McpInternalErrorContext {
+  tool: string;
+  method: string;
+  room_id: string;
+  participant_id: string;
+  command_id: string;
+}
+
 export interface McpOptions {
   dispatcher: Dispatcher;
   pool: Pool;
+  /** Called for a tool call that fails with `INTERNAL` (an unexpected error); the client still gets only `INTERNAL`. */
+  onInternalError?: (error: unknown, context: McpInternalErrorContext) => void;
   /** Tools to offer; default {@link MCP_TOOLS}. */
   tools?: readonly McpToolDefinition[];
   /** Route path; default `/mcp`. */
@@ -71,6 +82,7 @@ export function buildMcpServer(
   dispatcher: Dispatcher,
   principal: Principal,
   tools: readonly McpToolDefinition[],
+  onInternalError?: McpOptions["onInternalError"],
 ): McpServer {
   const server = new McpServer({ name: "crossover", version: "0.0.0" });
   for (const tool of tools) {
@@ -82,9 +94,10 @@ export function buildMcpServer(
       { description: tool.description, inputSchema: input },
       async (args: Record<string, unknown>) => {
         const { idempotency_key, ...rest } = args;
+        const commandId = newId("cmd");
         try {
           const result = await dispatcher.dispatch(principal, {
-            id: newId("cmd"),
+            id: commandId,
             method: tool.method,
             params: tool.toParams ? tool.toParams(rest) : rest,
             ...(tool.mutating
@@ -105,9 +118,24 @@ export function buildMcpServer(
           };
         } catch (error) {
           // The tool failed, not the protocol: report the §16.3 body so the agent can react.
+          const mapped = toHttpError(error);
+          // Like the REST gateway: only an unexpected error (status 500) is logged, without arguments (T1575).
+          if (mapped.status === 500) {
+            try {
+              onInternalError?.(error, {
+                tool: tool.name,
+                method: tool.method,
+                room_id: principal.room_id,
+                participant_id: principal.participant_id,
+                command_id: commandId,
+              });
+            } catch {
+              // A failing logger must not change what the agent is told.
+            }
+          }
           return {
             isError: true,
-            content: [{ type: "text" as const, text: JSON.stringify(toHttpError(error).body) }],
+            content: [{ type: "text" as const, text: JSON.stringify(mapped.body) }],
           };
         }
       },
@@ -146,7 +174,7 @@ export function registerMcp(app: FastifyInstance, options: McpOptions): void {
         request.log.warn({ err: error }, "could not record the MCP client's manifest change");
       }
     }
-    const server = buildMcpServer(options.dispatcher, principal, tools);
+    const server = buildMcpServer(options.dispatcher, principal, tools, options.onInternalError);
     const transport = new StreamableHTTPServerTransport({
       // Stateless: the SDK's own option type doesn't admit `undefined` under our strict flags.
       sessionIdGenerator: undefined,

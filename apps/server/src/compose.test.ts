@@ -468,6 +468,39 @@ describe("composeServer", () => {
     }
   });
 
+  it("logs an MCP tool call that fails with INTERNAL like the REST gateway, without its arguments (T1575)", async () => {
+    const { server } = await start();
+    const { roomId, agent } = await walkthrough(server.app, false);
+    const dispatch = vi
+      .spyOn(server.dispatcher, "dispatch")
+      .mockRejectedValueOnce(new Error("injected internal MCP failure"));
+    const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const result = await callMcpTool(server.app, agent.tokens.access_token, "capabilities_list", {
+        participant_id: "mcp-argument-secret",
+      });
+      expect(JSON.stringify(result)).toContain("INTERNAL");
+      expect(stderr).toHaveBeenCalledOnce();
+      const line = stderr.mock.calls[0]?.[0] as string;
+      expect(JSON.parse(line)).toMatchObject({
+        event: "gateway.internal_error",
+        method: "POST",
+        route: "/mcp",
+        command_method: "capabilities.list",
+        tool: "capabilities_list",
+        room_id: roomId,
+        participant_id: expect.stringMatching(/^part_/),
+        command_id: expect.stringMatching(/^cmd_/),
+        stack: expect.stringContaining("injected internal MCP failure"),
+      });
+      expect(line).not.toContain("mcp-argument-secret");
+      expect(line).not.toContain(agent.tokens.access_token);
+    } finally {
+      dispatch.mockRestore();
+      stderr.mockRestore();
+    }
+  });
+
   it("stops agent sandboxes on freeze and cleans up on participant removal and archive", async () => {
     const driver = new RecordingExecutionDriver();
     const { server } = await start({}, new RecordingPublisher(), { executionDriver: driver });
