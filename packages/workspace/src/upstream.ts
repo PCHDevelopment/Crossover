@@ -305,8 +305,11 @@ export class HttpsGitFetcher implements UpstreamFetcher {
 /**
  * Push one commit to a branch over HTTPS (§24.3): the URL is checked like a fetch's, Git is
  * limited to https and never prompts, and the push is never forced, so a branch that moved on is
- * refused (`push_rejected`) rather than overwritten. The credential reaches Git the same way as
- * for a fetch.
+ * refused (`push_rejected`) rather than overwritten. If the upstream no longer has the commit this
+ * room was imported or last pulled from (the branch was force-pushed away, or the repository was
+ * recreated), the room repo's shallow boundary is unknown to it and the push is refused as
+ * `upstream_history_missing`: pull from the upstream again (`git.pull_upstream`) or re-import,
+ * then export (T1573). The credential reaches Git the same way as for a fetch.
  */
 export class HttpsGitPusher implements UpstreamPusher {
   private readonly run: typeof git;
@@ -345,9 +348,11 @@ export class HttpsGitPusher implements UpstreamPusher {
           reason:
             error instanceof GitError && error.timedOut
               ? "upstream_timeout"
-              : /rejected|non-fast-forward|fetch first/i.test(text)
-                ? "push_rejected"
-                : "push_failed",
+              : /shallow update not allowed/i.test(text)
+                ? "upstream_history_missing"
+                : /rejected|non-fast-forward|fetch first/i.test(text)
+                  ? "push_rejected"
+                  : "push_failed",
           message:
             text
               .split("\n")

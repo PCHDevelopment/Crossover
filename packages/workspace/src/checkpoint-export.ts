@@ -96,7 +96,9 @@ interface Pending {
  * the previous export. The branch must start with `room/`: anything else is `VALIDATION`
  * (`branch_not_allowed`) and nothing is pushed; the default and protected branches are never
  * pushed to. The push goes through the upstream's {@link UpstreamDeps.credentials} (with
- * `write` access), is never forced, and a branch that moved on is `push_rejected`. A checkpoint
+ * `write` access), is never forced, and a branch that moved on is `push_rejected`, and an
+ * upstream that no longer has the commit the room was imported or last pulled from is
+ * `upstream_history_missing` (pull from the upstream again or re-import, then export). A checkpoint
  * already exported is `already_exported`. Emits `checkpoint.exported`.
  *
  * The push runs inside the command, so the room's lease is held while it runs.

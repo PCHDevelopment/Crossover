@@ -1,6 +1,10 @@
+import { execFileSync } from "node:child_process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { CrossoverError } from "@crossover/protocol";
 import { describe, expect, it } from "vitest";
-import { GitError, type git } from "./git.js";
+import { GitError, git as realGit, type git } from "./git.js";
 import {
   assertPublicHttpsUrl,
   HttpsGitFetcher,
@@ -352,5 +356,84 @@ describe("HttpsGitPusher", () => {
       .push(request())
       .catch((e: unknown) => e);
     expect((other as CrossoverError).details).toMatchObject({ reason: "push_failed" });
+  });
+
+  it("names an upstream that lost the imported tip upstream_history_missing, not push_rejected (T1573)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "t1573-"));
+    const sh = (cwd: string, ...args: string[]) =>
+      execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", ...args], {
+        cwd,
+        encoding: "utf8",
+      }).trim();
+    try {
+      // An upstream with three commits, and a room repo that is a --depth=1 import of it (shallow).
+      const upstream = join(root, "upstream.git");
+      const work = join(root, "work");
+      sh(root, "init", "-q", "--bare", "--initial-branch=main", upstream);
+      sh(root, "init", "-q", "--initial-branch=main", work);
+      for (const n of [1, 2, 3]) {
+        await writeFile(join(work, `f${n}.txt`), `${n}\n`);
+        sh(work, "add", ".");
+        sh(work, "commit", "-q", "-m", `c${n}`);
+      }
+      sh(work, "push", "-q", upstream, "main");
+      const room = join(root, "room.git");
+      sh(root, "clone", "-q", "--bare", "--depth=1", `file://${upstream}`, room);
+      const tip = sh(room, "rev-parse", "HEAD");
+      const onTop = (parent: string) =>
+        sh(room, "commit-tree", `${parent}^{tree}`, "-p", parent, "-m", "room export");
+      const exported = onTop(tip);
+      // The push targets the local bare repo through the run seam (the real pusher only allows https).
+      const toLocal = (target: string) =>
+        (async (args: readonly string[], options: { gitDir?: string; env?: NodeJS.ProcessEnv }) => {
+          const env = { ...options.env };
+          delete env["GIT_ALLOW_PROTOCOL"];
+          const local = args.map((arg) => (arg.startsWith("https://") ? target : arg));
+          return realGit(local, { ...options, env, timeoutMs: 30_000 });
+        }) as unknown as typeof git;
+      const pusher = new HttpsGitPusher({ resolve: PUBLIC, run: toLocal(upstream) });
+      const push = (commit: string) => pusher.push({ ...request(), repo: room, commit });
+
+      // The upstream loses the imported tip: the branch is reset one commit back and the object pruned.
+      sh(upstream, "update-ref", "refs/heads/main", "refs/heads/main~1");
+      sh(upstream, "reflog", "expire", "--expire=now", "--all");
+      sh(upstream, "gc", "-q", "--prune=now");
+      const err = await push(exported).catch((e: unknown) => e);
+      expect((err as CrossoverError).details).toMatchObject({
+        reason: "upstream_history_missing",
+      });
+
+      // The remedy the message names: take the upstream's current tip (what a pull does), then export again.
+      const fresh = join(root, "fresh");
+      sh(root, "clone", "-q", "--depth=1", `file://${upstream}`, fresh);
+      sh(
+        room,
+        "fetch",
+        "-q",
+        "--no-tags",
+        "--update-shallow",
+        fresh,
+        "+refs/heads/main:refs/upstream/head",
+      );
+      await expect(push(onTop("refs/upstream/head"))).resolves.toBeUndefined();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("scrubs the credential from an upstream_history_missing failure too (T1573)", async () => {
+    const lost = recorder(
+      new GitError(
+        "push failed",
+        1,
+        " ! [remote rejected] x -> y (shallow update not allowed) tok_secret",
+        false,
+      ),
+    );
+    const err = await new HttpsGitPusher({ resolve: PUBLIC, run: lost.run })
+      .push(request({ type: "bearer", token: "tok_secret" }))
+      .catch((e: unknown) => e);
+    expect((err as CrossoverError).details).toMatchObject({ reason: "upstream_history_missing" });
+    expect(JSON.stringify((err as CrossoverError).details)).not.toContain("tok_secret");
   });
 });
