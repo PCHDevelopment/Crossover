@@ -1,6 +1,6 @@
 import { CrossoverClient } from "@crossover/sdk";
 import { manifest, type WebFixture } from "./web-fixture.js";
-import type { Page } from "playwright-core";
+import type { Page, Request } from "playwright-core";
 import { expect, it } from "vitest";
 
 export function registerWebEditorTests(fixture: WebFixture): void {
@@ -53,6 +53,41 @@ export function registerWebEditorTests(fixture: WebFixture): void {
       const body = await response.text().catch(() => "");
       seen.push(`workspace.read ${response.status()} ${since()} ${body.slice(0, 60)}`);
     });
+    // Every command the page sends, with how it ended: tells a request that never settles (T1559,
+    // the re-read chain and the flush both wait on one) from one the page never sent.
+    const commands = new Map<
+      Request,
+      { name: string; sentAt: number; ended?: string; status?: number }
+    >();
+    page.on("request", (request) => {
+      if (request.method() !== "POST" || !request.url().endsWith("/commands")) return;
+      const name = /"(workspace\.[a-z_]+)"/.exec(request.postData() ?? "")?.[1] ?? "command";
+      commands.set(request, { name, sentAt: Date.now() });
+    });
+    page.on("response", (response) => {
+      const entry = commands.get(response.request());
+      if (entry) entry.status = response.status();
+    });
+    page.on("requestfinished", (request) => {
+      const entry = commands.get(request);
+      if (entry) entry.ended = `done ${Date.now() - entry.sentAt}ms`;
+    });
+    page.on("requestfailed", (request) => {
+      const entry = commands.get(request);
+      if (entry)
+        entry.ended = `failed (${request.failure()?.errorText}) ${Date.now() - entry.sentAt}ms`;
+    });
+    const commandReport = () => {
+      const now = Date.now();
+      const recent = [...commands.values()].filter((c) => !c.ended || now - c.sentAt < 15_000);
+      const pending = recent.filter((c) => !c.ended).map((c) => `${c.name} ${now - c.sentAt}ms`);
+      return (
+        `Commands still pending: ${pending.length ? pending.join(", ") : "none"}. Commands in the ` +
+        `last 15 s (age of the send, then how it ended): ` +
+        `${recent.map((c) => `${c.name} -${now - c.sentAt}ms ${c.status ?? "-"} ${c.ended ?? "PENDING"}`).join("; ") || "none"}. ` +
+        `Page errors: ${problems.length ? problems.join(" | ") : "none"}.`
+      );
+    };
     await page.goto(fixture.baseUrl);
     await page.getByTestId("login-name").fill("Peter");
     await page.getByTestId("login-submit").click();
@@ -150,7 +185,7 @@ export function registerWebEditorTests(fixture: WebFixture): void {
       throw new Error(
         `The clean buffer did not follow the remote change. Seen by the browser since it was ` +
           `applied: ${seen.length ? seen.join("; ") : "nothing"}. Buffer: ` +
-          `${JSON.stringify(await lines.textContent())}`,
+          `${JSON.stringify(await lines.textContent())}. ${commandReport()}`,
         { cause: error },
       );
     }
