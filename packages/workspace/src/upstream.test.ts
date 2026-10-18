@@ -364,6 +364,10 @@ describe("HttpsGitPusher", () => {
       execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", ...args], {
         cwd,
         encoding: "utf8",
+        // A hook's GIT_DIR / GIT_WORK_TREE would make Git ignore cwd, like the production runner.
+        env: Object.fromEntries(
+          Object.entries(process.env).filter(([key]) => !key.toUpperCase().startsWith("GIT_")),
+        ),
       }).trim();
     try {
       // An upstream with three commits, and a room repo that is a --depth=1 import of it (shallow).
