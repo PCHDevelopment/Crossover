@@ -1438,6 +1438,7 @@ Git is a compatibility and export layer. It is not the realtime synchronization 
 - `git.import { repo, branch }` clones from GitHub through the room's GitHub App installation into the room repository.
 - The room records `upstream = { repo, branch, last_synced_sha, last_synced_room_revision }`.
 - The import flow suggests a `health_command` from the repository (package.json scripts, Makefile, pyproject).
+- Room repositories are shallow at the upstream boundary; clone and pack consumers use alternates, never `--reference` or `clone --shared`.
 
 ## 24.2 Pulling upstream changes
 

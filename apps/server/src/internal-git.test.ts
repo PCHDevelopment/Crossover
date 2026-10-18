@@ -9,6 +9,7 @@ import { createSandboxReadToken } from "@crossover/security";
 import { git } from "@crossover/workspace";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildInternalGitServer } from "./internal-git.js";
+import { createShallowRoomFixture } from "../../../packages/workspace/src/shallow-room-test-helper.js";
 
 const TOKEN_SECRET = "internal-git-test-secret-that-is-long-enough-32-bytes";
 const GIT_IDENTITY = {
@@ -251,6 +252,89 @@ describe("internal Git workspace reads", () => {
       await unscopedGit.close();
     }
   }, 20_000);
+
+  it("serves a canonical snapshot when the source room itself is shallow", async () => {
+    const fixture = await createShallowRoomFixture(join(root, "shallow-source"));
+    const shallowRoomId = newId("room");
+    const shallowParticipantId = newId("part");
+    const shallowSandboxId = newId("sandbox");
+    const shallowWorkspaceId = newId("ws");
+    await db.pool.query(
+      "INSERT INTO rooms (id, slug, name, objective, owner_id) VALUES ($1,$1,'Shallow room','Test','owner')",
+      [shallowRoomId],
+    );
+    await db.pool.query(
+      `INSERT INTO participants (id, room_id, kind, display_name, authority, role, status)
+       VALUES ($1,$2,'AGENT','Agent','MEMBER','DEVELOPER','ACTIVE')`,
+      [shallowParticipantId, shallowRoomId],
+    );
+    await db.pool.query("INSERT INTO workspaces (id, room_id, repo_path) VALUES ($1,$2,$3)", [
+      shallowWorkspaceId,
+      shallowRoomId,
+      fixture.repository,
+    ]);
+    await db.pool.query(
+      "INSERT INTO workspace_revisions (workspace_id, room_id, revision, commit_sha) VALUES ($1,$2,1,$3)",
+      [shallowWorkspaceId, shallowRoomId, fixture.canonical],
+    );
+    await db.pool.query(
+      `INSERT INTO sandboxes (id, room_id, participant_id, status, volume_ref, container_ref)
+       VALUES ($1,$2,$3,'RUNNING',$4,$5)`,
+      [
+        shallowSandboxId,
+        shallowRoomId,
+        shallowParticipantId,
+        `volume-${shallowSandboxId}`,
+        `container-${shallowSandboxId}`,
+      ],
+    );
+    const shallowToken = createSandboxReadToken(
+      {
+        room_id: shallowRoomId,
+        participant_id: shallowParticipantId,
+        sandbox_id: shallowSandboxId,
+        revision: 1,
+        expires_at: Date.now() + 120_000,
+      },
+      TOKEN_SECRET,
+    );
+    const server = buildInternalGitServer({
+      pool: db.pool,
+      authorize: allowAll,
+      tokenSecret: TOKEN_SECRET,
+    });
+    const address = await server.listen({ host: "127.0.0.1", port: 0 });
+    const target = join(root, "shallow-source-clone");
+    try {
+      await git(
+        [
+          "clone",
+          "--quiet",
+          "--no-tags",
+          "--depth=1",
+          "--single-branch",
+          "--branch=main",
+          `${new URL(address).origin}/git/${shallowRoomId}/${shallowSandboxId}/1`,
+          target,
+        ],
+        {
+          timeoutMs: 30_000,
+          env: {
+            GIT_CONFIG_COUNT: "1",
+            GIT_CONFIG_KEY_0: "http.extraHeader",
+            GIT_CONFIG_VALUE_0: `Authorization: Bearer ${shallowToken}`,
+            GIT_CONFIG_GLOBAL: "/dev/null",
+          },
+        },
+      );
+      expect(
+        (await git(["rev-parse", "HEAD"], { cwd: target, timeoutMs: 10_000 })).stdout.trim(),
+      ).toBe(fixture.canonical);
+      expect(await readFile(join(target, "file3.txt"), "utf8")).toBe("contents 3\n");
+    } finally {
+      await server.close();
+    }
+  }, 30_000);
 
   it("rejects a token issued for another room", async () => {
     const otherRoomToken = createSandboxReadToken(

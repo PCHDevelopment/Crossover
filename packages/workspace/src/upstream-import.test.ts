@@ -9,6 +9,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { registerWorkspaceCommands } from "./apply.js";
 import { git } from "./git.js";
 import { provisionWorkspace } from "./provision.js";
+import { cloneDepthOneUpstream } from "./shallow-room-test-helper.js";
 import {
   noCredentials,
   type FetchedUpstream,
@@ -80,20 +81,7 @@ class FixtureFetcher implements UpstreamFetcher {
     await this.during?.();
     const dir = await tmp("crossover-fetched-");
     // local clones copy objects/ directly; a background gc could drop one mid-copy (T1549, defence in depth)
-    // --depth is ignored for a plain path, so a shallow clone goes through file://
-    if (this.shallow)
-      await run(dir, [
-        "clone",
-        "-q",
-        "--depth=1",
-        "--bare",
-        "--single-branch",
-        "--no-tags",
-        "--template=",
-        "--branch=main",
-        `file://${this.source}`,
-        "repo",
-      ]);
+    if (this.shallow) await cloneDepthOneUpstream(this.source, join(dir, "repo"), true);
     else await run(dir, ["clone", "-q", "--bare", "--no-local", this.source, "repo"]);
     const repo = join(dir, "repo");
     const sha = (
@@ -173,7 +161,7 @@ describe("git.import (§24.1, T801)", () => {
   // T1572: HttpsGitFetcher clones with --depth=1. Fetching from a shallow clone without
   // --update-shallow makes git reject the ref, and --quiet hides it, so the fetch exits 0 with no ref.
   // This fails without the flag on any git, and the server image's own git is checked in CI (T1570).
-  it("imports from a --depth=1 clone of a repository with history (T1572)", async () => {
+  it("imports depth-1 history; blame stops at the canonical import before the shallow boundary", async () => {
     const up = await upstreamRepo();
     for (const n of [2, 3]) {
       await writeFile(join(up.dir, "src/index.ts"), `export const x = ${n};\n`);
