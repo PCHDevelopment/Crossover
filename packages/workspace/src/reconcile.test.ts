@@ -11,6 +11,7 @@ import { git, GitError } from "./git.js";
 import { provisionWorkspace } from "./provision.js";
 import { materialize } from "./materialize.js";
 import { reconcileRef, updateCanonicalRef } from "./reconcile.js";
+import { createShallowRoomFixture } from "./shallow-room-test-helper.js";
 
 let db: TestDatabase;
 const dirs: string[] = [];
@@ -153,4 +154,45 @@ it("replaces an uncommitted Git head with the PostgreSQL-authoritative commit", 
     (await db.pool.query("SELECT revision FROM workspace_revisions WHERE room_id = $1", [f.room]))
       .rows,
   ).toEqual([{ revision: "0" }]);
+});
+
+it("repairs the canonical ref while the room retains a shallow upstream boundary", async () => {
+  const room = newId("room");
+  const root = await mkdtemp(join(tmpdir(), "crossover-reconcile-shallow-"));
+  dirs.push(root);
+  const shallow = await createShallowRoomFixture(join(root, "fixture"));
+  await db.pool.query(
+    "INSERT INTO rooms (id, slug, name, objective, owner_id) VALUES ($1,$1,'Room','Ship','actor')",
+    [room],
+  );
+  await withTransaction(db.pool, (client) => provisionWorkspace(client, room, root));
+  await db.pool.query("UPDATE workspaces SET repo_path = $2 WHERE room_id = $1", [
+    room,
+    shallow.repository,
+  ]);
+  await db.pool.query("UPDATE workspace_revisions SET commit_sha = $2 WHERE room_id = $1", [
+    room,
+    shallow.canonical,
+  ]);
+  await git(["update-ref", "refs/room/canonical", shallow.initial], {
+    gitDir: shallow.repository,
+    timeoutMs: 10_000,
+  });
+  await reconcileRef(db.pool, room);
+  expect(
+    (
+      await git(["rev-parse", "refs/room/canonical"], {
+        gitDir: shallow.repository,
+        timeoutMs: 10_000,
+      })
+    ).stdout.trim(),
+  ).toBe(shallow.canonical);
+  expect(
+    (
+      await git(["rev-parse", "refs/upstream/head"], {
+        gitDir: shallow.repository,
+        timeoutMs: 10_000,
+      })
+    ).stdout.trim(),
+  ).toBe(shallow.tip);
 });

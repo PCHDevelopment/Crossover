@@ -11,6 +11,7 @@ import {
   parseDockerCpuUsageUsec,
   type DockerInvoker,
 } from "./docker-execution-driver.js";
+import { createShallowRoomFixture } from "./shallow-room-test-helper.js";
 
 const hardOptions = {
   volumeDriver: "local",
@@ -1110,24 +1111,16 @@ describe("DockerExecutionDriver", () => {
         );
       }
       git(work, "push", "-q", up, "main");
-      const canonical = git(work, "rev-parse", "HEAD");
-      // The room repo, built the way fetchIntoRoomRepo does it: a --depth=1 upstream clone fetched
-      // with --update-shallow into a bare repo, or (non-shallow) a full bare clone.
-      const reference = join(root, "reference.git");
+      let canonical = git(work, "rev-parse", "HEAD");
+      let reference = join(root, "reference.git");
+      let upstreamForDocker = up;
       if (room === "shallow") {
-        const clone = join(root, "clone");
-        git(root, "clone", "-q", "--depth=1", `file://${up}`, clone);
-        git(root, "init", "--quiet", "--bare", "--initial-branch=main", reference);
-        git(
-          reference,
-          "fetch",
-          "-q",
-          "--no-tags",
-          "--update-shallow",
-          clone,
-          "+refs/heads/main:refs/heads/main",
-        );
-        expect(await readFile(join(reference, "shallow"), "utf8")).toContain(canonical);
+        const fixture = await createShallowRoomFixture(join(root, "fixture"));
+        reference = fixture.repository;
+        canonical = fixture.canonical;
+        upstreamForDocker = fixture.repository;
+        // Stand in for internal-git's snapshot ref, which advertises the canonical commit as main.
+        git(reference, "update-ref", "refs/heads/main", canonical);
       } else {
         git(root, "clone", "-q", "--bare", `file://${up}`, reference);
       }
@@ -1158,7 +1151,7 @@ describe("DockerExecutionDriver", () => {
             "--mount",
             `type=bind,source=${gitconfig},target=/gitconfig,readonly`,
             "--mount",
-            `type=bind,source=${up},target=/upstream.git,readonly`,
+            `type=bind,source=${upstreamForDocker},target=/upstream.git,readonly`,
             image,
           ],
           options,

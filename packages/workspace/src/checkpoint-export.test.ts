@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { withTransaction } from "@crossover/db";
@@ -10,6 +10,7 @@ import { registerWorkspaceCommands } from "./apply.js";
 import { neutralizeTrailers } from "./checkpoint-export.js";
 import { git } from "./git.js";
 import { provisionWorkspace } from "./provision.js";
+import { cloneDepthOneUpstream } from "./shallow-room-test-helper.js";
 import type {
   FetchedUpstream,
   GitCredential,
@@ -17,6 +18,7 @@ import type {
   UpstreamFetcher,
   UpstreamPusher,
 } from "./upstream.js";
+import { HttpsGitPusher } from "./upstream.js";
 
 let db: TestDatabase;
 const dirs: string[] = [];
@@ -71,12 +73,16 @@ async function upstreamRepo() {
 
 class FixtureFetcher implements UpstreamFetcher {
   fetches = 0;
-  constructor(private readonly source: string) {}
+  constructor(
+    private readonly source: string,
+    private readonly shallow = false,
+  ) {}
   async fetch() {
     this.fetches += 1;
     const dir = await tmp("crossover-fetched-");
     // local clones copy objects/ directly; a background gc could drop one mid-copy (T1549, defence in depth)
-    await run(dir, ["clone", "-q", "--bare", "--no-local", this.source, "repo"]);
+    if (this.shallow) await cloneDepthOneUpstream(this.source, join(dir, "repo"), true);
+    else await run(dir, ["clone", "-q", "--bare", "--no-local", this.source, "repo"]);
     const repo = join(dir, "repo");
     const sha = (
       await git(["rev-parse", "HEAD"], { gitDir: repo, timeoutMs: 10_000 })
@@ -95,8 +101,14 @@ class FixtureFetcher implements UpstreamFetcher {
 
 const URL_OK = "https://github.com/acme/widgets";
 
-async function setup(opts: { pullRequests?: boolean } = {}) {
+async function setup(opts: { pullRequests?: boolean; shallow?: boolean } = {}) {
   const up = await upstreamRepo();
+  if (opts.shallow) {
+    for (const n of [2, 3]) {
+      await writeFile(join(up.dir, "src/a.ts"), `export const a = ${n};\n`);
+      await run(up.dir, ["commit", "-q", "-am", `upstream ${n}`]);
+    }
+  }
   const roomId = newId("room");
   const lead = newId("part");
   const dev = newId("part");
@@ -115,7 +127,7 @@ async function setup(opts: { pullRequests?: boolean } = {}) {
   const repo = (
     await db.pool.query("SELECT repo_path FROM workspaces WHERE room_id = $1", [roomId])
   ).rows[0].repo_path as string;
-  const fetcher = new FixtureFetcher(up.dir);
+  const fetcher = new FixtureFetcher(up.dir, opts.shallow);
   // The "remote" the export pushes to: a bare repository, reached by a local path.
   const remoteDir = await tmp("crossover-remote-");
   await run(remoteDir, ["init", "-q", "--bare", "-b", "main", "remote.git"]);
@@ -127,25 +139,46 @@ async function setup(opts: { pullRequests?: boolean } = {}) {
     permissions?: Readonly<Record<string, "read" | "write">>;
   }[] = [];
   let credentialRevocations = 0;
-  const pusher: UpstreamPusher = {
-    async push(request) {
-      pushes.push({ branch: request.branch, commit: request.commit });
-      try {
-        await git(
-          ["push", "--porcelain", remote, `${request.commit}:refs/heads/${request.branch}`],
-          {
-            gitDir: request.repo,
-            timeoutMs: 30_000,
-          },
-        );
-      } catch (error) {
-        throw new CrossoverError("VALIDATION", "Couldn't push to the upstream", {
-          details: { reason: "push_rejected" },
-          cause: error,
-        });
+  const localPusher = new HttpsGitPusher({
+    resolve: async () => ["93.184.216.34"],
+    run: (async (
+      args: readonly string[],
+      options: { gitDir?: string; env?: NodeJS.ProcessEnv; timeoutMs: number },
+    ) => {
+      const env = { ...options.env };
+      delete env["GIT_ALLOW_PROTOCOL"];
+      return git(
+        args.map((arg) => (arg.startsWith("https://") ? remote : arg)),
+        { ...options, env },
+      );
+    }) as unknown as typeof git,
+  });
+  const pusher: UpstreamPusher = opts.shallow
+    ? {
+        async push(request) {
+          pushes.push({ branch: request.branch, commit: request.commit });
+          await localPusher.push(request);
+        },
       }
-    },
-  };
+    : {
+        async push(request) {
+          pushes.push({ branch: request.branch, commit: request.commit });
+          try {
+            await git(
+              ["push", "--porcelain", remote, `${request.commit}:refs/heads/${request.branch}`],
+              {
+                gitDir: request.repo,
+                timeoutMs: 30_000,
+              },
+            );
+          } catch (error) {
+            throw new CrossoverError("VALIDATION", "Couldn't push to the upstream", {
+              details: { reason: "push_rejected" },
+              cause: error,
+            });
+          }
+        },
+      };
   const d = new Dispatcher({ pool: db.pool, authorize: allowAll, nodeId: roomId });
   // A fake code host: one pull request per head, however often it is asked.
   const opened: { head: string; base: string; title: string; body: string }[] = [];
@@ -294,6 +327,28 @@ const workspaceTree = async (s: Awaited<ReturnType<typeof setup>>, revision: num
 };
 
 describe("checkpoints.export (§24.3, T805)", () => {
+  it("exports from a shallow room when the remote retains the tip and names a lost tip", async () => {
+    const retained = await setup({ shallow: true });
+    const retainedTip = (await retained.upstreamRow()).last_synced_sha as string;
+    expect((await readFile(join(retained.repo, "shallow"), "utf8")).trim()).toBe(retainedTip);
+    await retained.edit("src/a.ts", "export const a = 'room';\n");
+    await retained.checkpoint("room change");
+    await expect(retained.exportIt()).resolves.toMatchObject({ response: { commit_count: 1 } });
+    expect(await retained.remoteGit("rev-parse", `refs/heads/room/${retained.slug}~1`)).toBe(
+      retainedTip,
+    );
+
+    const lost = await setup({ shallow: true });
+    const lostTip = (await lost.upstreamRow()).last_synced_sha as string;
+    await lost.edit("src/a.ts", "export const a = 'room';\n");
+    await lost.checkpoint("room change");
+    await lost.remoteGit("update-ref", "refs/heads/main", "refs/heads/main~1");
+    await lost.remoteGit("reflog", "expire", "--expire=now", "--all");
+    await lost.remoteGit("gc", "--prune=now");
+    await rejects(lost.exportIt(), "upstream_history_missing");
+    expect(await lost.remoteGit("cat-file", "-t", lostTip).catch(() => "missing")).toBe("missing");
+  });
+
   // Measured (T1529): idle 4380 ms, 3x load 3872 ms; budget 7x.
   it("squashed: one commit per checkpoint, with the right tree, author and co-author trailers, on top of the synced upstream commit", async () => {
     const s = await setup();

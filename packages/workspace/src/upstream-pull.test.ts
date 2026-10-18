@@ -9,6 +9,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { registerWorkspaceCommands } from "./apply.js";
 import { git } from "./git.js";
 import { provisionWorkspace } from "./provision.js";
+import { cloneDepthOneUpstream } from "./shallow-room-test-helper.js";
 import type { FetchedUpstream, UpstreamFetcher } from "./upstream.js";
 
 let db: TestDatabase;
@@ -76,20 +77,7 @@ class FixtureFetcher implements UpstreamFetcher {
     await this.during?.();
     const dir = await tmp("crossover-fetched-");
     // local clones copy objects/ directly; a background gc could drop one mid-copy (T1549, defence in depth)
-    // --depth is ignored for a plain path, so a shallow clone goes through file://
-    if (this.shallow)
-      await run(dir, [
-        "clone",
-        "-q",
-        "--depth=1",
-        "--bare",
-        "--single-branch",
-        "--no-tags",
-        "--template=",
-        "--branch=main",
-        `file://${this.source}`,
-        "repo",
-      ]);
+    if (this.shallow) await cloneDepthOneUpstream(this.source, join(dir, "repo"), true);
     else await run(dir, ["clone", "-q", "--bare", "--no-local", this.source, "repo"]);
     const repo = join(dir, "repo");
     const sha = (

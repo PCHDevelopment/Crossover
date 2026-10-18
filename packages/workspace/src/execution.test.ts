@@ -6,7 +6,10 @@ import { join } from "node:path";
 import type { Pool } from "@crossover/db";
 import { createTestDatabase, type TestDatabase } from "@crossover/db/testing";
 import { newId } from "@crossover/protocol";
+import { allowAll, Dispatcher } from "@crossover/kernel";
 import { git } from "./git.js";
+import { createShallowRoomFixture } from "./shallow-room-test-helper.js";
+import { registerSandboxSubmitCommand } from "./sandbox-submit.js";
 import {
   ExecutionService,
   type ExecutionDriver,
@@ -237,6 +240,148 @@ async function makeParticipants(count = 1, kind: "HUMAN" | "AGENT" = "AGENT") {
 }
 
 describe("ExecutionService", () => {
+  it("submits a sandbox snapshot through a shallow room source", async () => {
+    const { roomId, participantIds } = await makeParticipants();
+    const participantId = participantIds[0]!;
+    const root = await mkdtemp(join(tmpdir(), "crossover-submit-shallow-"));
+    try {
+      const fixture = await createShallowRoomFixture(root);
+      const workspaceId = newId("ws");
+      await db.pool.query("INSERT INTO workspaces (id, room_id, repo_path) VALUES ($1,$2,$3)", [
+        workspaceId,
+        roomId,
+        fixture.repository,
+      ]);
+      await db.pool.query(
+        `INSERT INTO workspace_revisions (workspace_id, room_id, revision, commit_sha)
+         VALUES ($1,$2,0,$3)`,
+        [workspaceId, roomId, fixture.canonical],
+      );
+      const baseFiles = await Promise.all(
+        [1, 2, 3].map(async (n) => {
+          const path = `file${n}.txt`;
+          const content = Buffer.from(
+            (
+              await git(["show", `${fixture.canonical}:${path}`], {
+                gitDir: fixture.repository,
+                timeoutMs: 10_000,
+              })
+            ).stdout,
+          );
+          const sha = createHash("sha1")
+            .update(`blob ${content.length}\0`)
+            .update(content)
+            .digest("hex");
+          return { path, mode: "100644", sha, size: content.length, content };
+        }),
+      );
+      const content = Buffer.from("sandbox edit\n");
+      const sha = createHash("sha1")
+        .update(`blob ${content.length}\0`)
+        .update(content)
+        .digest("hex");
+      const snapshotFiles = [
+        ...baseFiles,
+        { path: "new.txt", mode: "100644", sha, size: content.length, content },
+      ];
+      class SnapshotDriver extends MaterializingExecutionDriver {
+        async readSnapshotFiles(): Promise<
+          Array<{ path: string; mode: string; sha: string; size: number; content: Buffer }>
+        > {
+          return snapshotFiles;
+        }
+      }
+      const driver = new SnapshotDriver();
+      driver.snapshotEntries = snapshotFiles.map(({ path, mode, sha, size }) => ({
+        path,
+        mode,
+        sha,
+        size,
+      }));
+      const execution = new ExecutionService(db.pool, driver);
+      await execution.ensure(roomId, participantId);
+      const dispatcher = new Dispatcher({ pool: db.pool, authorize: allowAll, nodeId: roomId });
+      registerSandboxSubmitCommand(dispatcher, execution);
+      const result = await dispatcher.dispatch(
+        {
+          room_id: roomId,
+          participant_id: participantId,
+          kind: "AGENT",
+          authority: "MEMBER",
+          role: "DEVELOPER",
+        },
+        {
+          id: newId("cmd"),
+          method: "changes.submit",
+          idempotency_key: newId("cmd"),
+          params: { message: "sandbox edit" },
+        },
+      );
+      expect(result.response).toMatchObject({ status: "APPLIED", applied_revision: 1 });
+      const head = (
+        await db.pool.query(
+          "SELECT commit_sha FROM workspace_revisions WHERE room_id = $1 AND revision = 1",
+          [roomId],
+        )
+      ).rows[0].commit_sha as string;
+      expect(
+        (await git(["show", `${head}:new.txt`], { gitDir: fixture.repository, timeoutMs: 10_000 }))
+          .stdout,
+      ).toBe("sandbox edit\n");
+      for (const n of [1, 2, 3]) {
+        expect(
+          (
+            await git(["show", `${head}:file${n}.txt`], {
+              gitDir: fixture.repository,
+              timeoutMs: 10_000,
+            })
+          ).stdout,
+        ).toBe(`contents ${n}\n`);
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("syncs a sandbox from a shallow source room through the service", async () => {
+    const { roomId, participantIds } = await makeParticipants();
+    const root = await mkdtemp(join(tmpdir(), "crossover-execution-shallow-"));
+    try {
+      const fixture = await createShallowRoomFixture(root);
+      const workspaceId = newId("ws");
+      await db.pool.query("INSERT INTO workspaces (id, room_id, repo_path) VALUES ($1,$2,$3)", [
+        workspaceId,
+        roomId,
+        fixture.repository,
+      ]);
+      await db.pool.query(
+        `INSERT INTO workspace_revisions (workspace_id, room_id, revision, commit_sha)
+         VALUES ($1,$2,0,$3)`,
+        [workspaceId, roomId, fixture.initial],
+      );
+      const driver = new MaterializingExecutionDriver();
+      const execution = new ExecutionService(db.pool, driver);
+      const sandbox = await execution.ensure(roomId, participantIds[0]!);
+      await db.pool.query(
+        `INSERT INTO workspace_revisions (workspace_id, room_id, revision, commit_sha)
+         VALUES ($1,$2,1,$3)`,
+        [workspaceId, roomId, fixture.canonical],
+      );
+      execution.scheduleCanonicalAdvance(roomId, 1);
+      await vi.waitFor(async () => {
+        expect((await execution.get(roomId, participantIds[0]!))?.base_revision).toBe(1);
+      });
+      expect(driver.snapshotUpdates[0]?.files.map(({ path }) => path).sort()).toEqual([
+        "file1.txt",
+        "file2.txt",
+        "file3.txt",
+      ]);
+      expect((await execution.get(roomId, participantIds[0]!))?.id).toBe(sandbox.id);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("cancels a pending reservation without launching its driver process", async () => {
     const { roomId, participantIds } = await makeParticipants(1, "AGENT");
     const participantId = participantIds[0]!;
