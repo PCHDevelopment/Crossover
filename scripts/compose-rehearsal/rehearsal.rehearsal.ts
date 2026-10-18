@@ -33,10 +33,15 @@ const UI_URL = "http://localhost:5173";
 // Measured (T1570): idle runner, 3 green runs, per step 12 to 1,526 ms (step 0b the slowest, it starts
 // Vite); budget = max x 7 rounded up to the next 5,000 ms, minimum 15,000 (the T1529 rule), so 15 s.
 const STEP_MS = 15_000;
-// Docker work (steps 8, 10) and health runs (step 13) start from the budgets of the in-process demo flow
-// (web-demo-flow.ts); they are replaced by measured values (max x 7) once part B has run three times.
-const DOCKER_MS = 150_000;
-const HEALTH_MS = 150_000;
+// Steps 8, 10, 12 and 13 do Docker work, Git merges or health runs and are measured separately (T1570 part B,
+// 2 green runs on an idle runner; the same rule): step 8 max 4,820 ms -> 35 s, step 10 max 2,733 -> 20 s,
+// step 12 max 1,249 -> 15 s (the minimum), step 13 (two real health runs) max 5,547 -> 40 s.
+const SANDBOX_MS = 35_000;
+const MERGE_MS = 20_000;
+const HEALTH_MS = 40_000;
+// Waits inside those steps end before the step's own budget, so they report what they last saw.
+const EXEC_WAIT_MS = 20_000;
+const HEALTH_WAIT_MS = 15_000;
 // A request that never answers must not outlive the step: every fetch in this file is cut off here.
 const REQUEST_MS = 3_000;
 
@@ -568,7 +573,7 @@ it("rehearses docs/DEMO-RUNBOOK.md steps 1-16 against the real docker compose st
           `${who}'s \`${command}\` to end`,
           async () => exitCode,
           (code) => code !== undefined,
-          60_000,
+          EXEC_WAIT_MS,
         );
       } finally {
         stream.close();
@@ -583,7 +588,7 @@ it("rehearses docs/DEMO-RUNBOOK.md steps 1-16 against the real docker compose st
         title: "A and B edit in their sandboxes and run `node --test` (MCP)",
         expectation:
           "a sandbox container exists (docker ps), the output streams and the exit code is 0",
-        budgetMs: DOCKER_MS,
+        budgetMs: SANDBOX_MS,
       },
       async () => {
         // The first sandbox_exec creates an agent's sandbox (a write before it has nothing to write to).
@@ -666,7 +671,7 @@ it("rehearses docs/DEMO-RUNBOOK.md steps 1-16 against the real docker compose st
         id: "10",
         title: "Agent A syncs and submits (MCP)",
         expectation: "a clean merge: the ChangeSet is applied and auth.js holds both edits",
-        budgetMs: DOCKER_MS,
+        budgetMs: MERGE_MS,
       },
       async () => {
         const current = await read("auth.js");
@@ -730,7 +735,7 @@ it("rehearses docs/DEMO-RUNBOOK.md steps 1-16 against the real docker compose st
         id: "12",
         title: "C syncs and tries twice with stale content; the lead resolves",
         expectation: "ESCALATED, an ESCALATION item in the lead's inbox, then RESOLVED",
-        budgetMs: STEP_MS * 4,
+        budgetMs: STEP_MS,
       },
       async () => {
         await agent("AgentC").call("sandbox_sync", {});
@@ -792,7 +797,7 @@ it("rehearses docs/DEMO-RUNBOOK.md steps 1-16 against the real docker compose st
         id: "13",
         title: "B uses the renamed helper's old name: health RED, B's inbox, the fix, GREEN",
         expectation: "a real Docker health run is RED, B gets HEALTH_RED, the fix runs GREEN",
-        budgetMs: HEALTH_MS * 2 + 30_000,
+        budgetMs: HEALTH_MS,
       },
       async () => {
         const b = agent("AgentB");
@@ -810,7 +815,7 @@ it("rehearses docs/DEMO-RUNBOOK.md steps 1-16 against the real docker compose st
           `the health run for revision ${broken.applied_revision}`,
           () => healthOf(broken.applied_revision),
           (event) => event !== undefined && event.payload["status"] !== "RUNNING",
-          HEALTH_MS,
+          HEALTH_WAIT_MS,
         );
         if (red?.payload["status"] !== "RED")
           throw new Error(
@@ -837,7 +842,7 @@ it("rehearses docs/DEMO-RUNBOOK.md steps 1-16 against the real docker compose st
           `the health run for revision ${fixed.applied_revision}`,
           () => healthOf(fixed.applied_revision),
           (event) => event !== undefined && event.payload["status"] !== "RUNNING",
-          HEALTH_MS,
+          HEALTH_WAIT_MS,
         );
         if (green?.payload["status"] !== "GREEN")
           throw new Error(

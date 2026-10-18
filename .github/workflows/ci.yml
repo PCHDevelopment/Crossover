@@ -580,7 +580,7 @@ jobs:
   compose-rehearsal:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    # Measured (T1570): the job takes 95 to 118 s on an idle runner (3 runs); 118 s x 7 rounded up
+    # Measured (T1570): the job takes 95 to 129 s on an idle runner (steps 0-16, 4 runs); 129 s x 7 rounded up
     # is 15 minutes. Stack build and start: 48 to 67 s; /health is 200 two seconds later.
     timeout-minutes: 15
     permissions:
@@ -630,6 +630,11 @@ jobs:
           echo "built and started in $((SECONDS - start)) s"
           healthy=$SECONDS
           until [ "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/health)" = 200 ]; do
+            if [ "$(docker inspect -f '{{.State.Running}}' crossover-server 2>/dev/null)" = false ]; then
+              echo "ERROR: the server container exited before GET /health answered"
+              docker compose logs --no-color --tail 200 server
+              exit 1
+            fi
             if [ $((SECONDS - healthy)) -ge 180 ]; then
               echo "ERROR: GET /health was not 200 within 180 s of starting the stack"
               docker compose logs --no-color --tail 200 server
