@@ -1,8 +1,8 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { createWriteStream } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import type { Pool, PoolClient } from "@crossover/db";
 import { CrossoverError } from "@crossover/protocol";
@@ -156,13 +156,72 @@ async function writeEvents(
   await pipeline(Readable.from(lines()), createWriteStream(path, { flags: "wx" }));
 }
 
+/**
+ * Bundle the room repository. A room has no branch and its `HEAD` points at a branch that doesn't
+ * exist (`refs/heads/master`), so `bundle create --all` of it has no `HEAD` and a clone checks
+ * nothing out. The room repo must not be changed, so when it has a canonical head the bundle is made
+ * from a temporary bare repo that borrows the room's objects, holds the same refs plus
+ * `refs/heads/main` at the canonical commit, and has `HEAD` pointing at it (T1634).
+ */
 async function makeBundle(repoPath: string, output: string, signal: AbortSignal): Promise<void> {
-  await execFileAsync("git", ["--git-dir", repoPath, "bundle", "create", output, "--all"], {
+  const options = {
     timeout: MAX_GIT_BUNDLE_MS,
     signal,
     maxBuffer: 256 * 1024,
     env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
-  });
+  };
+  const git = (gitDir: string, ...args: string[]) =>
+    execFileAsync("git", ["--git-dir", gitDir, ...args], options);
+  const canonical = (
+    await git(repoPath, "rev-parse", "--verify", "--quiet", "refs/room/canonical^{commit}").catch(
+      () => undefined,
+    )
+  )?.stdout.trim();
+  if (!canonical) {
+    await git(repoPath, "bundle", "create", output, "--all");
+    return;
+  }
+  const temporary = await mkdtemp(join(dirname(output), "bundle-"));
+  try {
+    const format = (await git(repoPath, "rev-parse", "--show-object-format")).stdout.trim();
+    await execFileAsync(
+      "git",
+      ["init", "--quiet", "--bare", "--template=", `--object-format=${format}`, temporary],
+      options,
+    );
+    const objects = (
+      await git(repoPath, "rev-parse", "--path-format=absolute", "--git-path", "objects")
+    ).stdout.trim();
+    await mkdir(join(temporary, "objects", "info"), { recursive: true });
+    await writeFile(join(temporary, "objects", "info", "alternates"), `${objects}\n`);
+    // A shallow boundary without its file makes `bundle create` fail.
+    const shallow = (
+      await git(repoPath, "rev-parse", "--path-format=absolute", "--git-path", "shallow")
+    ).stdout.trim();
+    await copyFile(shallow, join(temporary, "shallow")).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") throw error;
+    });
+    const refs = (await git(repoPath, "for-each-ref", "--format=%(objectname) %(refname)")).stdout
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => line.split(" ") as [string, string]);
+    // One update per ref: a room that already has refs/heads/main gets the canonical commit there.
+    const updates = [
+      ...refs.filter(([, ref]) => ref !== "refs/heads/main"),
+      [canonical, "refs/heads/main"] as [string, string],
+    ]
+      .map(([sha, ref]) => `update ${ref} ${sha}\n`)
+      .join("");
+    const update = execFileAsync("git", ["--git-dir", temporary, "update-ref", "--stdin"], options);
+    // EPIPE is reported by the process promise when Git exits before reading its input.
+    update.child.stdin?.on("error", () => {});
+    update.child.stdin?.end(updates);
+    await update;
+    await git(temporary, "symbolic-ref", "HEAD", "refs/heads/main");
+    await git(temporary, "bundle", "create", output, "--all");
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
 }
 
 function tarStream(

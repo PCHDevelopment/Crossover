@@ -222,7 +222,7 @@ ACTIVE ──freeze──▶ PAUSED ──resume──▶ ACTIVE
 
 - **Archive triggers:** owner action, or 30 days with no mutations (owner notified 7 days before).
 - **Retention** (decided 2026-10-13, T1519): it counts from the moment of archiving, and unarchiving stops the clock. A purge job deletes rooms whose retention has ended. The owner gets a notice 7 days before.
-- **Export bundle:** `git bundle` of the full repository + `events.jsonl` + `memory.json` + `tasks.json` + `decisions.json`.
+- **Export bundle:** `git bundle` of the full repository + `events.jsonl` + `memory.json` + `tasks.json` + `decisions.json`. The bundle's `HEAD` is `refs/heads/main` at the canonical head, so `git clone` of the bundle checks out the room's files; `refs/room/*` and `refs/upstream/*` are included unchanged.
 - This resolves the v0.1 tension: rooms are bounded projects (agents and sandboxes live and die with them), but their history persists.
 
 Room schema:
