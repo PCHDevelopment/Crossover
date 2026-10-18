@@ -1,4 +1,4 @@
-import { execFile, spawn } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -32,6 +32,8 @@ const UI_URL = "http://localhost:5173";
 // Measured (T1570): idle runner, 3 green runs, per step 12 to 1,526 ms (step 0b the slowest, it starts
 // Vite); budget = max x 7 rounded up to the next 5,000 ms, minimum 15,000 (the T1529 rule), so 15 s.
 const STEP_MS = 15_000;
+// A request that never answers must not outlive the step: every fetch in this file is cut off here.
+const REQUEST_MS = 3_000;
 
 interface Participant {
   id: string;
@@ -94,6 +96,16 @@ function joinWithCli(
   });
 }
 
+/** Stop a detached child and everything it started (Vite is a process group), ignoring a child that is gone. */
+function stopGroup(child: ChildProcess | undefined): void {
+  if (!child?.pid) return;
+  try {
+    process.kill(-child.pid, "SIGTERM");
+  } catch {
+    // already gone
+  }
+}
+
 const manifestFor = (name: string) => ({
   name,
   operator: { name: "Peter", contact: "peter@example.com" },
@@ -109,6 +121,8 @@ it("rehearses docs/DEMO-RUNBOOK.md steps 1-7 against the real docker compose sta
   if (process.env["GIT_INTERNAL_TOKEN_SECRET"])
     secret("GIT_INTERNAL_TOKEN_SECRET", process.env["GIT_INTERNAL_TOKEN_SECRET"]);
   const agents: AgentMcp[] = [];
+  // Step 0b's Vite, also stopped below if the step's own timer ends the step before its callback does.
+  let vite: ChildProcess | undefined;
   let failure: unknown;
   try {
     // 0. The demo repository the runbook imports (section 0) is the fixture kept in this repository.
@@ -139,7 +153,7 @@ it("rehearses docs/DEMO-RUNBOOK.md steps 1-7 against the real docker compose sta
         budgetMs: STEP_MS,
       },
       async () => {
-        const vite = spawn("pnpm", ["--filter", "@crossover/web", "dev"], {
+        vite = spawn("pnpm", ["--filter", "@crossover/web", "dev"], {
           cwd: REPO_ROOT,
           stdio: "ignore",
           detached: true,
@@ -147,14 +161,17 @@ it("rehearses docs/DEMO-RUNBOOK.md steps 1-7 against the real docker compose sta
         try {
           await waitFor(
             "the Vite dev server",
-            async () => (await fetch(`${UI_URL}/`)).status,
+            async () =>
+              (await fetch(`${UI_URL}/`, { signal: AbortSignal.timeout(REQUEST_MS) })).status,
             (status) => status === 200,
             // Vite is up in about 1.4 s (3 runs): 7x is 10 s, which leaves the rest of the step's 15 s for
             // the two proxy checks, and this wait reports what it last saw before the step's budget does.
             10_000,
           );
           const providers = async (base: string) => {
-            const response = await fetch(`${base}/v1/auth/providers`);
+            const response = await fetch(`${base}/v1/auth/providers`, {
+              signal: AbortSignal.timeout(REQUEST_MS),
+            });
             return { status: response.status, body: await response.text() };
           };
           const direct = await providers(BASE_URL);
@@ -183,6 +200,7 @@ it("rehearses docs/DEMO-RUNBOOK.md steps 1-7 against the real docker compose sta
                 accept: "application/json, text/event-stream",
               },
               body: initialize,
+              signal: AbortSignal.timeout(REQUEST_MS),
             });
             return { status: response.status, type: response.headers.get("content-type") ?? "" };
           };
@@ -198,13 +216,7 @@ it("rehearses docs/DEMO-RUNBOOK.md steps 1-7 against the real docker compose sta
             );
           return `/v1 and /mcp reach the server through :5173 (POST /mcp -> ${mcpViaUi.status})`;
         } finally {
-          if (vite.pid) {
-            try {
-              process.kill(-vite.pid, "SIGTERM");
-            } catch {
-              // already gone
-            }
-          }
+          stopGroup(vite);
         }
       },
     );
@@ -490,6 +502,7 @@ it("rehearses docs/DEMO-RUNBOOK.md steps 1-7 against the real docker compose sta
   } catch (error) {
     failure = error;
   } finally {
+    stopGroup(vite);
     for (const agentSession of agents) await agentSession.close().catch(() => undefined);
     // 17 needs a real GitHub App; 8-16 are the second half of T1570.
     await summary(["steps 8-16 (T1570 part B)", "step 17 (needs a real GitHub App)"]);
