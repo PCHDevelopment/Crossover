@@ -23,6 +23,7 @@ export function scheduleCanonicalAdvance(
   revision: number,
   skipParticipantId?: string,
 ): void {
+  if (core.closed) return;
   core.pendingAdvances.set(roomId, Math.max(core.pendingAdvances.get(roomId) ?? 0, revision));
   if (skipParticipantId) {
     const skipped = core.pendingAdvanceSkips.get(roomId) ?? new Map<string, number>();
@@ -52,7 +53,7 @@ async function drainCanonicalAdvances(core: ExecutionCore, roomId: string): Prom
 }
 
 function startCanonicalAdvanceWorker(core: ExecutionCore, roomId: string): void {
-  if (core.advanceWorkers.has(roomId) || !core.pendingAdvances.has(roomId)) return;
+  if (core.closed || core.advanceWorkers.has(roomId) || !core.pendingAdvances.has(roomId)) return;
   const worker = drainCanonicalAdvances(core, roomId).finally(() => {
     core.advanceWorkers.delete(roomId);
     if (core.pendingAdvances.has(roomId)) startCanonicalAdvanceWorker(core, roomId);

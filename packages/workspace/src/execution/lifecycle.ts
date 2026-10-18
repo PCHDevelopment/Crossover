@@ -139,9 +139,31 @@ export function startSweeper(core: ExecutionCore): void {
 }
 
 export async function close(core: ExecutionCore): Promise<void> {
+  core.closed = true;
   if (core.sweepTimer) clearInterval(core.sweepTimer);
   core.sweepTimer = undefined;
+  core.pendingAdvances.clear();
+  core.pendingAdvanceSkips.clear();
   await core.hooks.cancelAllExecs("sandbox_stopped");
+  const workers = [...core.advanceWorkers.values()];
+  if (workers.length === 0) return;
+  const waitMs = 30_000;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const settled = await Promise.race([
+      Promise.allSettled(workers).then(() => true),
+      new Promise<false>((resolve) => {
+        timer = setTimeout(() => resolve(false), waitMs);
+      }),
+    ]);
+    if (!settled)
+      console.error("[execution] canonical advance workers did not finish before shutdown", {
+        worker_count: core.advanceWorkers.size,
+        wait_ms: waitMs,
+      });
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 export async function ensureExclusive(
