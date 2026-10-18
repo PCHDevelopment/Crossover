@@ -7,7 +7,7 @@ import * as gitModule from "./git.js";
 import { materialize } from "./materialize.js";
 import { initRoomRepo } from "./repo.js";
 import { runSearch, type SearchMatch } from "./search-runner.js";
-import { refreshSearchTree, withSearchTree } from "./search-tree.js";
+import { exclusiveSearchTree, refreshSearchTree, withSearchTree } from "./search-tree.js";
 
 async function commitFixture(
   repo: string,
@@ -327,6 +327,41 @@ it("does not recreate the search checkout of a room whose repository is gone (T1
     await expect(withSearchTree(repo, head, async () => {})).rejects.toThrow(
       "room repository is gone",
     );
+    await expect(stat(`${repo}.search`)).rejects.toMatchObject({ code: "ENOENT" });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it("runs exclusive work after queued searches and before later ones (T1636)", async () => {
+  const root = await mkdtemp(join(tmpdir(), "crossover-search-tree-"));
+  try {
+    const repo = await initRoomRepo(root, "room_exclusive");
+    const head = (
+      await git(["rev-parse", "refs/room/canonical"], { gitDir: repo, timeoutMs: 10_000 })
+    ).stdout.trim();
+    const order: string[] = [];
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const reader = withSearchTree(repo, head, async () => {
+      await held;
+      order.push("reader done");
+    });
+    const purge = exclusiveSearchTree(repo, async () => {
+      order.push("exclusive");
+      await rm(repo, { recursive: true, force: true });
+      await rm(`${repo}.search`, { recursive: true, force: true });
+    });
+    const later = withSearchTree(repo, head, async () => {
+      order.push("later search");
+    }).catch((error: Error) => order.push(`later search: ${error.message}`));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(order).toEqual([]);
+    release();
+    await Promise.all([reader, purge, later]);
+    expect(order).toEqual(["reader done", "exclusive", "later search: room repository is gone"]);
     await expect(stat(`${repo}.search`)).rejects.toMatchObject({ code: "ENOENT" });
   } finally {
     await rm(root, { recursive: true, force: true });

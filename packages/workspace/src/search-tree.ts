@@ -177,6 +177,15 @@ async function updateChangedPaths(
   }
 }
 
+/**
+ * Run `work` alone on the room repo's search queue: after every cache build or read already queued
+ * has finished, and before any later one starts. A purge uses it so a search can't recreate the
+ * checkout it is removing (T1636).
+ */
+export function exclusiveSearchTree<T>(repo: string, work: () => Promise<T>): Promise<T> {
+  return queued(repo, work);
+}
+
 /** Serialize checkout refresh and readers on the workspace owner (§9.5); commit comes from DB. */
 export async function withSearchTree<T>(
   repo: string,
