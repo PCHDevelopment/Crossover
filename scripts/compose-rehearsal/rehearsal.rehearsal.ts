@@ -9,6 +9,7 @@ import { it } from "vitest";
 import {
   assertNoLeaks,
   BASE_URL,
+  errorText,
   OUT_DIR,
   REPO_ROOT,
   secret,
@@ -23,7 +24,7 @@ import { connectAgent, type AgentMcp } from "./mcp.js";
 const execFileAsync = promisify(execFile);
 
 // docs/DEMO-RUNBOOK.md is the spec; this file follows its section 1 (done by the CI job) and the
-// steps of section 3. Step 17 needs a real GitHub App and is out of scope.
+// steps 1-16 of section 3. Step 17 needs a real GitHub App and is out of scope.
 const DEMO_REPO_URL =
   process.env["DEMO_REPO_URL"] ?? "https://github.com/PCHDevelopment/crossover-demo";
 const FIXTURE = fileURLToPath(new URL("./demo-repo", import.meta.url));
@@ -32,6 +33,10 @@ const UI_URL = "http://localhost:5173";
 // Measured (T1570): idle runner, 3 green runs, per step 12 to 1,526 ms (step 0b the slowest, it starts
 // Vite); budget = max x 7 rounded up to the next 5,000 ms, minimum 15,000 (the T1529 rule), so 15 s.
 const STEP_MS = 15_000;
+// Docker work (steps 8, 10) and health runs (step 13) start from the budgets of the in-process demo flow
+// (web-demo-flow.ts); they are replaced by measured values (max x 7) once part B has run three times.
+const DOCKER_MS = 150_000;
+const HEALTH_MS = 150_000;
 // A request that never answers must not outlive the step: every fetch in this file is cut off here.
 const REQUEST_MS = 3_000;
 
@@ -45,6 +50,15 @@ interface RoomState {
     participants: Participant[];
     room: { lead_participant_id: string | null; settings: Record<string, unknown> | null };
   };
+}
+interface FileView {
+  content: string;
+  workspace_revision: number;
+  file_revision: number;
+}
+interface RoomEvent {
+  type: string;
+  payload: Record<string, unknown>;
 }
 interface TaskView {
   id: string;
@@ -116,7 +130,7 @@ const manifestFor = (name: string) => ({
   description: `${name} in the compose rehearsal`,
 });
 
-it("rehearses docs/DEMO-RUNBOOK.md steps 1-7 against the real docker compose stack", async () => {
+it("rehearses docs/DEMO-RUNBOOK.md steps 1-16 against the real docker compose stack", async () => {
   await mkdir(OUT_DIR, { recursive: true });
   if (process.env["GIT_INTERNAL_TOKEN_SECRET"])
     secret("GIT_INTERNAL_TOKEN_SECRET", process.env["GIT_INTERNAL_TOKEN_SECRET"]);
@@ -499,13 +513,416 @@ it("rehearses docs/DEMO-RUNBOOK.md steps 1-7 against the real docker compose sta
         return `${intents.length} intent(s); A holds auth.js 40-62`;
       },
     );
+
+    const read = async (path: string) =>
+      (await owner.api.workspace.read<FileView>({ path })).response;
+    const roomEvents = async () =>
+      (await owner.api.room.events.list<{ events: RoomEvent[] }>({ limit: 500 })).response.events;
+    const healthOf = async (revision: number) =>
+      (await roomEvents()).find(
+        (event) => event.type === "workspace.health" && event.payload["revision"] === revision,
+      );
+    const versionOf = async (task: TaskView) =>
+      (await owner.api.tasks.list<{ tasks: TaskView[] }>({})).response.tasks.find(
+        (item) => item.id === task.id,
+      )!.version;
+    // The one line the agents fight over: inside Agent A's intent (lines 40-62 of auth.js).
+    const MARK = "or null when it is. */";
+    const mark = (content: string, from: string, to: string) => {
+      if (!content.includes(from)) throw new Error(`auth.js has no ${JSON.stringify(from)}`);
+      return content.replace(from, to);
+    };
+    const initialAuth = await read("auth.js");
+
+    // 8. A and B work in real sandboxes: a container per agent, output streamed, exit code recorded.
+    await step(
+      {
+        id: "8",
+        title: "A and B edit in their sandboxes and run `node --test` (MCP)",
+        expectation:
+          "a sandbox container exists (docker ps), the output streams and the exit code is 0",
+        budgetMs: DOCKER_MS,
+      },
+      async () => {
+        await agent("AgentA").call("sandbox_write_file", {
+          path: "auth.js",
+          content: mark(initialAuth.content, MARK, "or null when it is (A). */"),
+        });
+        await agent("AgentB").call("sandbox_write_file", {
+          path: "refresh.js",
+          content:
+            'import { createSessionToken } from "./auth.js";\n\nexport function refreshHandler(userId) {\n  return { status: 200, token: createSessionToken(userId) };\n}\n',
+        });
+        await agent("AgentB").call("sandbox_write_file", {
+          path: "refresh.test.js",
+          content:
+            'import assert from "node:assert/strict";\nimport test from "node:test";\nimport { refreshHandler } from "./refresh.js";\n\ntest("refreshing returns a token", () => {\n  assert.equal(refreshHandler("Ada").token, "token:ada");\n});\n',
+        });
+        const started = await agent("AgentB").call<{ exec_id: string }>("sandbox_exec", {
+          command: "node --test",
+          timeout_s: 60,
+        });
+        // The owner reads another agent's output stream, as Peter does in the Terminal tab.
+        let text = "";
+        let exitCode: number | null | undefined;
+        const stream = owner.subscribeSandboxOutput(started.exec_id, {
+          onUpdate: (update) => {
+            if (update.kind === "data") text += new TextDecoder().decode(update.data);
+            if (update.kind === "finished") exitCode = update.exit_code;
+          },
+        });
+        try {
+          await waitFor(
+            "the sandbox command's end",
+            async () => exitCode,
+            (code) => code !== undefined,
+            60_000,
+          );
+        } finally {
+          stream.close();
+        }
+        if (exitCode !== 0)
+          throw new Error(`node --test exited ${String(exitCode)}: ${text.slice(-300)}`);
+        if (!text.includes("pass"))
+          throw new Error(`no test output was streamed: ${JSON.stringify(text.slice(-200))}`);
+        const containers = (
+          await run("docker", ["ps", "--filter", "label=crossover.sandbox=true", "-q"])
+        ).stdout
+          .split("\n")
+          .filter(Boolean);
+        if (containers.length === 0)
+          throw new Error("docker ps shows no container with the label crossover.sandbox=true");
+        return `${containers.length} sandbox container(s); ${text.length} bytes streamed; exit 0`;
+      },
+    );
+
+    // 9. Peter renames the helper (the editor's flush is this EDITOR ChangeSet); agents can read it.
+    await step(
+      {
+        id: "9",
+        title: "Peter renames createSessionToken; the draft flushes and agents can read it",
+        expectation: "the canonical auth.js has createAccessToken and an agent reads it",
+        budgetMs: STEP_MS,
+      },
+      async () => {
+        const files = await Promise.all(["auth.js", "routes.js", "auth.test.js"].map(read));
+        const operations = files.map((file, index) => ({
+          type: "modify" as const,
+          path: ["auth.js", "routes.js", "auth.test.js"][index]!,
+          content: file.content.replaceAll("createSessionToken", "createAccessToken"),
+        }));
+        const flushed = (
+          await owner.api.workspace.apply_changeset<{ status: string }>({
+            source: "EDITOR",
+            message: "Rename createSessionToken to createAccessToken",
+            base_workspace_revision: files[0]!.workspace_revision,
+            base_file_revisions: Object.fromEntries(
+              files.map((file, index) => [operations[index]!.path, file.file_revision]),
+            ),
+            operations,
+          })
+        ).response;
+        if (flushed.status !== "APPLIED") throw new Error(`the flush was ${flushed.status}`);
+        const seen = await agent("AgentA").call<{ content: string }>("read_file", {
+          path: "auth.js",
+        });
+        if (!seen.content.includes("createAccessToken"))
+          throw new Error("Agent A does not see the renamed helper");
+        return "renamed in auth.js, routes.js and auth.test.js; Agent A reads it";
+      },
+    );
+
+    // 10. A syncs (a clean rebase over Peter's rename) and submits; the merge keeps both edits.
+    await step(
+      {
+        id: "10",
+        title: "Agent A syncs and submits (MCP)",
+        expectation: "a clean merge: the ChangeSet is applied and auth.js holds both edits",
+        budgetMs: DOCKER_MS,
+      },
+      async () => {
+        const current = await read("auth.js");
+        const synced = await agent("AgentA").call<{
+          synced_to: number;
+          conflicted_paths?: string[];
+        }>("sandbox_sync", {});
+        if (synced.synced_to !== current.workspace_revision || synced.conflicted_paths?.length)
+          throw new Error(`sandbox_sync: ${JSON.stringify(synced)}`);
+        const submitted = await agent("AgentA").call<{ status: string; applied_revision: number }>(
+          "submit_changes",
+          { paths: ["auth.js"], message: "Document the password rule", task_id: tasks[0]!.id },
+        );
+        if (submitted.status !== "APPLIED") throw new Error(`submit_changes: ${submitted.status}`);
+        const merged = (await read("auth.js")).content;
+        if (!merged.includes("createAccessToken") || !merged.includes("(A)"))
+          throw new Error("auth.js does not hold both Peter's rename and Agent A's edit");
+        return `applied at revision ${submitted.applied_revision}; both edits present`;
+      },
+    );
+
+    // 11. C applies an overlapping change from the original (stale) base.
+    let conflictId = "";
+    let afterA!: FileView;
+    await step(
+      {
+        id: "11",
+        title: "Agent C applies an overlapping ChangeSet from a stale base",
+        expectation: "CONFLICT, with A's ChangeSet as the counterparty",
+        budgetMs: STEP_MS,
+      },
+      async () => {
+        afterA = await read("auth.js");
+        const submitted = await agent("AgentC").call<{
+          status: string;
+          conflict_id: string;
+          counterparty_changesets: string[];
+        }>("apply_changeset", {
+          source: "API",
+          message: "Agent C conflicts with Agent A",
+          base_workspace_revision: initialAuth.workspace_revision,
+          base_file_revisions: { "auth.js": initialAuth.file_revision },
+          operations: [
+            {
+              type: "modify",
+              path: "auth.js",
+              content: mark(initialAuth.content, MARK, "or null when it is (C). */"),
+            },
+          ],
+        });
+        if (submitted.status !== "CONFLICT") throw new Error(`status ${submitted.status}`);
+        if (!submitted.counterparty_changesets?.length) throw new Error("no counterparty");
+        conflictId = submitted.conflict_id;
+        return `conflict ${conflictId}`;
+      },
+    );
+
+    // 12. C's two resolutions go stale (B and A edit the line again), so it escalates to the lead.
+    await step(
+      {
+        id: "12",
+        title: "C syncs and tries twice with stale content; the lead resolves",
+        expectation: "ESCALATED, an ESCALATION item in the lead's inbox, then RESOLVED",
+        budgetMs: STEP_MS * 4,
+      },
+      async () => {
+        await agent("AgentC").call("sandbox_sync", {});
+        const apply = (who: string, content: string, base: FileView, extra = {}) =>
+          agent(who).call<{ status: string; conflict_id: string }>("apply_changeset", {
+            message: `${who} edits auth.js`,
+            base_workspace_revision: base.workspace_revision,
+            base_file_revisions: { "auth.js": base.file_revision },
+            operations: [{ type: "modify", path: "auth.js", content }],
+            source: "API",
+            ...extra,
+          });
+        const resolution = (who: string, content: string, base: FileView) =>
+          apply(who, content, base, { source: "RESOLUTION", conflict_id: conflictId });
+        const raceOne = await apply("AgentB", mark(afterA.content, "(A)", "(A, B)"), afterA);
+        if (raceOne.status !== "APPLIED") throw new Error(`B's edit was ${raceOne.status}`);
+        const failedOne = await resolution(
+          "AgentC",
+          mark(afterA.content, "(A)", "(A, C1)"),
+          afterA,
+        );
+        if (failedOne.status !== "CONFLICT") throw new Error(`attempt one: ${failedOne.status}`);
+        const afterB = await read("auth.js");
+        const raceTwo = await apply("AgentA", mark(afterB.content, "(A, B)", "(A, B, A2)"), afterB);
+        if (raceTwo.status !== "APPLIED") throw new Error(`A's edit was ${raceTwo.status}`);
+        const failedTwo = await resolution(
+          "AgentC",
+          mark(afterB.content, "(A, B)", "(A, C2)"),
+          afterB,
+        );
+        if (failedTwo.status !== "CONFLICT") throw new Error(`attempt two: ${failedTwo.status}`);
+        const lead = agent("ArchitectAgent");
+        const conflict = await lead.call<{ status: string; attempts: number }>("conflicts_get", {
+          conflict_id: conflictId,
+        });
+        if (conflict.status !== "ESCALATED" || conflict.attempts !== 2)
+          throw new Error(`conflict ${JSON.stringify(conflict)}`);
+        const inbox = await lead.call<{ items: { kind: string; ref: { id: string } }[] }>(
+          "inbox_list",
+          { unacked_only: true },
+        );
+        if (!inbox.items.some((item) => item.kind === "ESCALATION" && item.ref.id === conflictId))
+          throw new Error("no ESCALATION item for the conflict in the lead's inbox");
+        const latest = await read("auth.js");
+        const resolved = await resolution("ArchitectAgent", latest.content, latest);
+        if (resolved.status !== "APPLIED")
+          throw new Error(`the lead's resolution was ${resolved.status}`);
+        const after = await lead.call<{ status: string }>("conflicts_get", {
+          conflict_id: conflictId,
+        });
+        if (after.status !== "RESOLVED") throw new Error(`conflict is ${after.status}`);
+        return "two stale attempts -> ESCALATED -> lead's RESOLUTION -> RESOLVED";
+      },
+    );
+
+    // 13. B syncs and submits code that uses the old helper name: health goes RED, then GREEN.
+    await step(
+      {
+        id: "13",
+        title: "B uses the renamed helper's old name: health RED, B's inbox, the fix, GREEN",
+        expectation: "a real Docker health run is RED, B gets HEALTH_RED, the fix runs GREEN",
+        budgetMs: HEALTH_MS * 2 + 30_000,
+      },
+      async () => {
+        const b = agent("AgentB");
+        await b.call("sandbox_sync", {});
+        const broken = await b.call<{ status: string; applied_revision: number }>(
+          "submit_changes",
+          {
+            paths: ["refresh.js", "refresh.test.js"],
+            message: "Add a refresh route",
+            task_id: tasks[1]!.id,
+          },
+        );
+        if (broken.status !== "APPLIED") throw new Error(`B's submit was ${broken.status}`);
+        const red = await waitFor(
+          `the health run for revision ${broken.applied_revision}`,
+          () => healthOf(broken.applied_revision),
+          (event) => event !== undefined && event.payload["status"] !== "RUNNING",
+          HEALTH_MS,
+        );
+        if (red?.payload["status"] !== "RED")
+          throw new Error(`health was ${String(red?.payload["status"])}, expected RED`);
+        const inbox = await waitFor(
+          "B's HEALTH_RED inbox item",
+          async () => (await b.call<{ items: { kind: string }[] }>("inbox_list", {})).items,
+          (items) => items.some((item) => item.kind === "HEALTH_RED"),
+          STEP_MS,
+        );
+        await b.call("sandbox_write_file", {
+          path: "refresh.js",
+          content:
+            'import { createAccessToken } from "./auth.js";\n\nexport function refreshHandler(userId) {\n  return { status: 200, token: createAccessToken(userId) };\n}\n',
+        });
+        const fixed = await b.call<{ status: string; applied_revision: number }>("submit_changes", {
+          paths: ["refresh.js"],
+          message: "Use the renamed helper",
+          task_id: tasks[1]!.id,
+        });
+        if (fixed.status !== "APPLIED") throw new Error(`B's fix was ${fixed.status}`);
+        const green = await waitFor(
+          `the health run for revision ${fixed.applied_revision}`,
+          () => healthOf(fixed.applied_revision),
+          (event) => event !== undefined && event.payload["status"] !== "RUNNING",
+          HEALTH_MS,
+        );
+        if (green?.payload["status"] !== "GREEN")
+          throw new Error(`health was ${String(green?.payload["status"])}, expected GREEN`);
+        return `RED at ${broken.applied_revision} (${inbox.length} inbox item(s)), GREEN at ${fixed.applied_revision}`;
+      },
+    );
+
+    // 14. B's production deploy is denied by capability and recorded.
+    await step(
+      {
+        id: "14",
+        title: "B invokes aws.deploy_lambda on prod-api (MCP)",
+        expectation: "denied, with capability.denied in the room events",
+        budgetMs: STEP_MS,
+      },
+      async () => {
+        let denial = "";
+        try {
+          await agent("AgentB").call("tools_invoke", {
+            tool: "aws.deploy_lambda",
+            args: {
+              function: "prod-api",
+              region: "us-east-1",
+              s3_bucket: "project-alpha-artifacts",
+              s3_key: "release.zip",
+              s3_object_version: "v1",
+              publish: false,
+            },
+          });
+        } catch (error) {
+          denial = errorText(error);
+        }
+        if (!denial) throw new Error("the deploy was not refused");
+        const denied = await waitFor(
+          "capability.denied in the room events",
+          async () => (await roomEvents()).filter((event) => event.type === "capability.denied"),
+          (list) => list.length > 0,
+          STEP_MS / 2,
+        );
+        return `refused (${denial.slice(0, 80)}); ${denied.length} capability.denied event(s)`;
+      },
+    );
+
+    // 15. Peter pauses C: its action is refused; resumed, the same action works.
+    await step(
+      {
+        id: "15",
+        title: "Peter pauses Agent C, C acts, Peter resumes",
+        expectation: "C's action fails with PARTICIPANT_PAUSED, then succeeds after the resume",
+        budgetMs: STEP_MS,
+      },
+      async () => {
+        const act = () => agent("AgentC").call("presence_set_intent", { paths: ["routes.js"] });
+        await owner.api.participants.pause({ participant_id: idOf("AgentC") });
+        let refused = "";
+        try {
+          await act();
+        } catch (error) {
+          refused = errorText(error);
+        }
+        if (!refused.includes("PARTICIPANT_PAUSED"))
+          throw new Error(`while paused C's action gave: ${refused || "success"}`);
+        await owner.api.participants.resume({ participant_id: idOf("AgentC") });
+        await act();
+        return "PARTICIPANT_PAUSED while paused; accepted after the resume";
+      },
+    );
+
+    // 16. A and B submit with evidence; the lead approves; health is still GREEN.
+    await step(
+      {
+        id: "16",
+        title: "A and B submit tasks with evidence; the lead approves (MCP)",
+        expectation: "both tasks are DONE and the latest health run is GREEN",
+        budgetMs: STEP_MS,
+      },
+      async () => {
+        const evidence = [
+          {
+            requirement: 0,
+            proof: [{ kind: "test", ref: "Project Alpha Docker health is GREEN" }],
+          },
+        ];
+        const lead = agent("ArchitectAgent");
+        const done: string[] = [];
+        for (const [who, task] of [
+          ["AgentA", tasks[0]!],
+          ["AgentB", tasks[1]!],
+        ] as const) {
+          const submitted = await agent(who).call<TaskView>("tasks_submit", {
+            task_id: task.id,
+            expected_version: await versionOf(task),
+            evidence,
+          });
+          const approved = await lead.call<TaskView>("tasks_review", {
+            task_id: submitted.id,
+            expected_version: submitted.version,
+            verdict: "approve",
+            comments: "The required work and green health evidence are present.",
+          });
+          if (approved.status !== "DONE") throw new Error(`${who}'s task is ${approved.status}`);
+          done.push(approved.status);
+        }
+        const runs = (await roomEvents()).filter((event) => event.type === "workspace.health");
+        const latest = runs.at(-1)?.payload["status"];
+        if (latest !== "GREEN") throw new Error(`the latest health run is ${String(latest)}`);
+        return `${done.length} tasks DONE; latest health GREEN`;
+      },
+    );
   } catch (error) {
     failure = error;
   } finally {
     stopGroup(vite);
     for (const agentSession of agents) await agentSession.close().catch(() => undefined);
-    // 17 needs a real GitHub App; 8-16 are the second half of T1570.
-    await summary(["steps 8-16 (T1570 part B)", "step 17 (needs a real GitHub App)"]);
+    await summary(["step 17 (needs a real GitHub App)"]);
     await writeFile(join(OUT_DIR, "server.log"), await serverLogTail(100_000));
   }
 
