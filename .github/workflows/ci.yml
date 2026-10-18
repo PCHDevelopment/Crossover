@@ -334,16 +334,25 @@ jobs:
           merge-multiple: true
       - name: Load the test images
         env:
+          GH_TOKEN: ${{ github.token }}
           IMAGES: "egress-proxy browser-plugin git-fetcher github-plugin server"
         run: |
           # Each image must have the ID it had where it was built: the tags are the ones the tests
           # use, and the content must be too.
           shopt -s nullglob
           dir="$RUNNER_TEMP/images"
-          # The saved images are kept for a day. "Re-run failed jobs" re-runs this job but not the
-          # `images` jobs that succeeded, and finds nothing to download once they have expired.
+          # download-artifact has finished "successfully" with one image missing or cut short (a
+          # 482 MB file, zstd: "premature end"). Check each image file and fetch a bad one again,
+          # up to three times. The saved images are kept for a day: "Re-run failed jobs" re-runs this
+          # job but not the `images` jobs that succeeded, and finds nothing once they have expired.
           for name in $IMAGES; do
-            [ -f "$dir/$name.tar.zst" ] || { echo "ERROR: the saved image $name is missing; it expires after a day, so re-run all jobs"; exit 1; }
+            for attempt in 1 2 3; do
+              if [ -f "$dir/$name.tar.zst" ] && [ -f "$dir/$name.id" ] && zstd -t -q "$dir/$name.tar.zst"; then break; fi
+              [ "$attempt" -lt 3 ] || { echo "ERROR: the saved image $name is missing or damaged after 3 downloads; it expires after a day, so if it has, re-run all jobs"; exit 1; }
+              echo "The saved image $name is missing or damaged (try $attempt); downloading it again"
+              rm -f "$dir/$name.tar.zst" "$dir/$name.id"
+              gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "image-$name" --dir "$dir" || true
+            done
           done
           files=("$dir"/*.tar.zst)
           for file in "${files[@]}"; do zstd -dc "$file" | docker load; done
@@ -491,16 +500,25 @@ jobs:
           merge-multiple: true
       - name: Load the git-fetcher image
         env:
+          GH_TOKEN: ${{ github.token }}
           IMAGES: "git-fetcher"
         run: |
           # Each image must have the ID it had where it was built: the tags are the ones the tests
           # use, and the content must be too.
           shopt -s nullglob
           dir="$RUNNER_TEMP/images"
-          # The saved images are kept for a day. "Re-run failed jobs" re-runs this job but not the
-          # `images` jobs that succeeded, and finds nothing to download once they have expired.
+          # download-artifact has finished "successfully" with one image missing or cut short (a
+          # 482 MB file, zstd: "premature end"). Check each image file and fetch a bad one again,
+          # up to three times. The saved images are kept for a day: "Re-run failed jobs" re-runs this
+          # job but not the `images` jobs that succeeded, and finds nothing once they have expired.
           for name in $IMAGES; do
-            [ -f "$dir/$name.tar.zst" ] || { echo "ERROR: the saved image $name is missing; it expires after a day, so re-run all jobs"; exit 1; }
+            for attempt in 1 2 3; do
+              if [ -f "$dir/$name.tar.zst" ] && [ -f "$dir/$name.id" ] && zstd -t -q "$dir/$name.tar.zst"; then break; fi
+              [ "$attempt" -lt 3 ] || { echo "ERROR: the saved image $name is missing or damaged after 3 downloads; it expires after a day, so if it has, re-run all jobs"; exit 1; }
+              echo "The saved image $name is missing or damaged (try $attempt); downloading it again"
+              rm -f "$dir/$name.tar.zst" "$dir/$name.id"
+              gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "image-$name" --dir "$dir" || true
+            done
           done
           files=("$dir"/*.tar.zst)
           for file in "${files[@]}"; do zstd -dc "$file" | docker load; done
