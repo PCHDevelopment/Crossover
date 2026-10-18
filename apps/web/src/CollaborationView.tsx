@@ -63,6 +63,9 @@ type Section = "inbox" | "decisions" | "memory";
 const message = (error: unknown): string =>
   error instanceof Error ? error.message : "Something went wrong";
 
+/** A read that failed after a newer read had replaced it: nothing shown depends on it. */
+class SupersededReadError extends Error {}
+
 export default function CollaborationView(props: {
   room: RoomClient;
   selfId: string;
@@ -132,8 +135,13 @@ export default function CollaborationView(props: {
     async (id: string) => {
       const readId = ++decisionReadId.current;
       decisionIdRef.current = id;
-      const detail = await room.api.decisions.get<Decision>({ decision_id: id });
-      if (readId === decisionReadId.current) setSelectedDecision(detail.response);
+      try {
+        const detail = await room.api.decisions.get<Decision>({ decision_id: id });
+        if (readId === decisionReadId.current) setSelectedDecision(detail.response);
+      } catch (error) {
+        if (readId !== decisionReadId.current) throw new SupersededReadError(message(error));
+        throw error;
+      }
     },
     [room],
   );
@@ -149,6 +157,9 @@ export default function CollaborationView(props: {
   );
   // The same for the memory pane: loading a key selects it, and only the newest read is shown.
   const memoryKeyRef = useRef<string | undefined>(undefined);
+  // The revision the write form was filled from (or last saved at): the compare-and-set base.
+  // `memoryEntry` can already be newer when the answer that filled the form arrived late.
+  const memoryDraftRef = useRef<{ key: string; revision: number } | undefined>(undefined);
   const memoryReadId = useRef(0);
   const loadMemoryDetail = useCallback(
     async (key: string) => {
@@ -166,10 +177,9 @@ export default function CollaborationView(props: {
         return entry.response;
       } catch (error) {
         // Only the newest read may empty the pane: an older read that fails says nothing about it.
-        if (readId === memoryReadId.current) {
-          setMemoryEntry(undefined);
-          setMemoryHistory([]);
-        }
+        if (readId !== memoryReadId.current) throw new SupersededReadError(message(error));
+        setMemoryEntry(undefined);
+        setMemoryHistory([]);
         throw error;
       }
     },
@@ -191,16 +201,18 @@ export default function CollaborationView(props: {
       if (event.type.startsWith("decision.")) {
         void loadDecisions().catch((error: unknown) => setNotice(message(error)));
         if (decisionIdRef.current) {
-          void loadDecision(decisionIdRef.current).catch((error: unknown) =>
-            setNotice(message(error)),
-          );
+          void loadDecision(decisionIdRef.current).catch((error: unknown) => {
+            if (!(error instanceof SupersededReadError)) setNotice(message(error));
+          });
         }
       }
       if (event.type.startsWith("memory.")) {
         void loadMemory(memoryPrefix).catch((error: unknown) => setNotice(message(error)));
         const key = memoryKeyRef.current;
         if (key) {
-          void loadMemoryDetail(key).catch((error: unknown) => setNotice(message(error)));
+          void loadMemoryDetail(key).catch((error: unknown) => {
+            if (!(error instanceof SupersededReadError)) setNotice(message(error));
+          });
         }
       }
     });
@@ -303,7 +315,8 @@ export default function CollaborationView(props: {
             id: reference.slice(separator + 1).trim(),
           };
         });
-      const expected_revision = memoryEntry?.key === key ? memoryEntry.revision : 0;
+      const draft = memoryDraftRef.current;
+      const expected_revision = draft?.key === key ? draft.revision : 0;
       await room.api.memory.put({
         key,
         value: memoryWriteValue,
@@ -312,7 +325,8 @@ export default function CollaborationView(props: {
         source_refs,
       });
       setMemoryKey(key);
-      await Promise.all([loadMemory(memoryPrefix), loadMemoryDetail(key)]);
+      const [, saved] = await Promise.all([loadMemory(memoryPrefix), loadMemoryDetail(key)]);
+      memoryDraftRef.current = { key, revision: saved.revision };
     } catch (error) {
       setNotice(message(error));
     } finally {
@@ -365,6 +379,7 @@ export default function CollaborationView(props: {
       const entry = await loadMemoryDetail(key);
       // A later click selected another key; this answer must not overwrite its form.
       if (memoryKeyRef.current !== key) return;
+      memoryDraftRef.current = { key: entry.key, revision: entry.revision };
       setMemoryWriteKey(entry.key);
       setMemoryWriteValue(entry.redacted ? "" : entry.value);
       setMemoryWriteType(entry.content_type as "text/markdown" | "application/json");

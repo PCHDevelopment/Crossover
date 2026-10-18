@@ -1268,6 +1268,7 @@ export function registerWebDecisionsAndInbox(fixture: WebFixture): void {
       if (
         entry.type() === "error" &&
         !entry.text().includes("status of 403") &&
+        !entry.text().includes("status of 409") &&
         !entry.text().includes("status of 500")
       )
         problems.push(`console: ${entry.text()}`);
@@ -1458,7 +1459,35 @@ export function registerWebDecisionsAndInbox(fixture: WebFixture): void {
     await slowRead!.delivered;
     await settle(page);
     expect(await page.getByTestId("memory-detail").textContent()).toContain(secondNote);
+    // ... and the superseded read's failure is not reported beside the newer read's answer.
+    expect(await page.getByTestId("collaboration-notice").count()).toBe(0);
     await failHold.finish();
+
+    // T1559: the click read of the selected key answers after the read an event started, so the
+    // write form is filled from the older entry while the pane already shows the newer one. Saving
+    // must compare against the revision the form was filled from, and so be refused, not overwrite.
+    let heldClickRead = false;
+    const draftHold = await holdCommands(page, (method, params) => {
+      if (method !== "memory.get" || params["key"] !== "notes/race-check" || heldClickRead)
+        return false;
+      return (heldClickRead = true);
+    });
+    const before = await owner.api.memory.get<{ revision: number }>({ key: "notes/race-check" });
+    await page.getByTestId("memory-key").filter({ hasText: "notes/race-check" }).click();
+    const [clickRead] = await draftHold.answered("memory.get");
+    const newestNote = "Newest change, written while the click read was in flight.";
+    await putOutside(newestNote, before.response.revision);
+    await expect.poll(() => page.getByTestId("memory-detail").textContent()).toContain(newestNote);
+    clickRead!.release();
+    await clickRead!.delivered;
+    await settle(page);
+    await page.getByTestId("memory-write").click();
+    await expect
+      .poll(async () => (await page.getByTestId("collaboration-notice").count()) > 0)
+      .toBe(true);
+    const after = await owner.api.memory.get<{ value: string }>({ key: "notes/race-check" });
+    expect(after.response.value).toBe(newestNote);
+    await draftHold.finish();
 
     await page.getByTestId("collab-decisions").click();
     await page
