@@ -625,6 +625,10 @@ jobs:
       # The rehearsal imports @crossover/sdk, which resolves to its build output.
       - name: Build the SDK and typecheck the rehearsal
         run: pnpm exec tsc -b scripts/compose-rehearsal
+      # THROWAWAY DEBUG: log every Git call in the server container with its exit code and stderr.
+      - name: Debug Git wrapper in the server container
+        run: |
+          docker exec -u 0 crossover-server sh -c 'mv /usr/bin/git /usr/bin/git.real && printf "%s\n" "#!/bin/sh" "/usr/bin/git.real \"\$@\" 2>/tmp/git.err; rc=\$?" "echo \"rc=\$rc git \$*\" >> /tmp/git-calls.log" "[ \$rc -ne 0 ] && { echo \"--- stderr:\" >> /tmp/git-calls.log; cat /tmp/git.err >> /tmp/git-calls.log; }" "cat /tmp/git.err >&2" "exit \$rc" > /usr/bin/git && chmod +x /usr/bin/git && cat /usr/bin/git'
       - name: Rehearse the runbook
         run: pnpm exec vitest run --config vitest.rehearsal.config.ts
       # Git's own complaint is not in the server log (by design), so on a failure look at what the
@@ -640,6 +644,7 @@ jobs:
               git --git-dir="$d" rev-parse --git-dir 2>&1 | head -3
               git -C "$d" rev-parse --git-dir 2>&1 | head -3
             done' 2>&1 | head -60 || true
+          docker exec crossover-server sh -c 'echo "== git calls the server made"; tail -80 /tmp/git-calls.log' 2>&1 | cut -c1-300 || true
           # The same Git calls the import makes (packages/workspace upstream.ts and upstream-import.ts),
           # with Git's own stderr, which the server does not log.
           docker exec -e URL="$DEMO_REPO_URL" crossover-server sh -c '
