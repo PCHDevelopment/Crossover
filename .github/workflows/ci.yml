@@ -640,6 +640,17 @@ jobs:
           if [ $rc -ne 0 ]; then
             { echo "--- stderr:"; cat /tmp/git.err; echo "--- env: HOME=$HOME TMPDIR=$TMPDIR USER=$(id -u) $(env | grep '^GIT_' | grep -v TOKEN | tr '\n' ' ')"; } >> /tmp/git-calls.log
           fi
+          case "$*" in
+            *" fetch "*)
+              gd="${1#--git-dir=}"
+              {
+                echo "--- state right after that fetch (rc=$rc): refs, FETCH_HEAD, ref dirs"
+                /usr/bin/git.real --git-dir="$gd" for-each-ref 2>&1 | head -10
+                echo "FETCH_HEAD: $(cat "$gd/FETCH_HEAD" 2>&1 | head -3)"
+                ls -laR "$gd/refs" 2>&1 | head -24
+                echo "config: $(cat "$gd/config" 2>&1 | tr '\n' ' ')"
+              } >> /tmp/git-calls.log ;;
+          esac
           cat /tmp/git.err >&2
           exit $rc
           EOF
