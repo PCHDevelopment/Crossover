@@ -1053,6 +1053,121 @@ describe("DockerExecutionDriver", () => {
   })();
   const skipDockerIntegration = !dockerImageAvailable && !process.env["CI"];
 
+  // The real git-fetcher image and script (T1574): the room repo is the --reference, as in materialize.
+  // CI loads the image as crossover-git-fetcher:test; GIT_FETCHER_IMAGE overrides it locally.
+  const fetcherImage = process.env["GIT_FETCHER_IMAGE"] ?? "crossover-git-fetcher:test";
+  const git = (cwd: string, ...args: string[]) =>
+    execFileSync("git", ["-c", "safe.directory=*", ...args], {
+      cwd,
+      encoding: "utf8",
+      timeout: 30_000,
+    }).trim();
+  async function fetchWithReference(room: "shallow" | "full") {
+    const root = await mkdtemp(join(tmpdir(), "t1574-"));
+    try {
+      const up = join(root, "upstream.git");
+      const work = join(root, "work");
+      git(root, "init", "--quiet", "--bare", "--initial-branch=main", up);
+      git(root, "init", "--quiet", "--initial-branch=main", work);
+      for (const n of [1, 2, 3]) {
+        await writeFile(join(work, `file${n}.txt`), `contents ${n}\n`);
+        git(work, "add", ".");
+        git(
+          work,
+          "-c",
+          "user.name=t",
+          "-c",
+          "user.email=t@example.com",
+          "commit",
+          "-q",
+          "-m",
+          `c${n}`,
+        );
+      }
+      git(work, "push", "-q", up, "main");
+      const canonical = git(work, "rev-parse", "HEAD");
+      // The room repo, built the way fetchIntoRoomRepo does it: a --depth=1 upstream clone fetched
+      // with --update-shallow into a bare repo, or (non-shallow) a full bare clone.
+      const reference = join(root, "reference.git");
+      if (room === "shallow") {
+        const clone = join(root, "clone");
+        git(root, "clone", "-q", "--depth=1", `file://${up}`, clone);
+        git(root, "init", "--quiet", "--bare", "--initial-branch=main", reference);
+        git(
+          reference,
+          "fetch",
+          "-q",
+          "--no-tags",
+          "--update-shallow",
+          clone,
+          "+refs/heads/main:refs/heads/main",
+        );
+        expect(await readFile(join(reference, "shallow"), "utf8")).toContain(canonical);
+      } else {
+        git(root, "clone", "-q", "--bare", `file://${up}`, reference);
+      }
+      const gitconfig = join(root, "gitconfig");
+      await writeFile(gitconfig, "[safe]\n\tdirectory = *\n");
+      const workspace = join(root, "workspace");
+      execFileSync("mkdir", ["-m", "0777", workspace]);
+      execFileSync(
+        "docker",
+        [
+          "run",
+          "--rm",
+          "--network=none",
+          "--read-only",
+          "--user=1000:1000",
+          "--cap-drop=ALL",
+          "--tmpfs",
+          "/tmp:rw,nosuid,size=64m",
+          "--env",
+          `GIT_REMOTE_URL=file:///upstream.git`,
+          // The mounted repos belong to the host user, not uid 1000 (production mounts match).
+          "--env",
+          "GIT_CONFIG_GLOBAL=/gitconfig",
+          "--mount",
+          `type=bind,source=${gitconfig},target=/gitconfig,readonly`,
+          "--mount",
+          `type=bind,source=${workspace},target=/workspace`,
+          "--mount",
+          `type=bind,source=${reference},target=/reference.git,readonly`,
+          "--mount",
+          `type=bind,source=${up},target=/upstream.git,readonly`,
+          fetcherImage,
+        ],
+        { encoding: "utf8", timeout: 60_000, stdio: ["ignore", "pipe", "pipe"] },
+      );
+      return {
+        files: (await readFile(join(workspace, "file3.txt"), "utf8")).trim(),
+        head: git(workspace, "rev-parse", "HEAD"),
+        canonical,
+      };
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+
+  it.skipIf(skipDockerIntegration)(
+    "fetches a workspace when the room repo is a shallow import (--reference is skipped)",
+    async () => {
+      const result = await fetchWithReference("shallow");
+      expect(result.files).toBe("contents 3");
+      expect(result.head).toBe(result.canonical);
+    },
+    90_000,
+  );
+
+  it.skipIf(skipDockerIntegration)(
+    "still fetches with a non-shallow room repo as the --reference",
+    async () => {
+      const result = await fetchWithReference("full");
+      expect(result.files).toBe("contents 3");
+      expect(result.head).toBe(result.canonical);
+    },
+    90_000,
+  );
+
   it.skipIf(skipDockerIntegration)(
     "reuses and removes a real default Docker volume with null inspect options",
     async () => {
