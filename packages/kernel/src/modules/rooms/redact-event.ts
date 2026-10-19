@@ -102,6 +102,12 @@ async function redactCopies(
          WHERE room_id = $1 AND key = $2 AND revision = $3`,
         [roomId, key, revision],
       );
+      // Keep redaction effective even if memory indexing was disabled after a vector was stored.
+      await client.query(
+        `DELETE FROM memory_embeddings
+         WHERE room_id = $1 AND key = $2 AND revision = $3`,
+        [roomId, key, revision],
+      );
       // Every snapshot copy of that revision too (T1603); a copy of another revision keeps its value.
       await client.query(
         `UPDATE workspace_snapshot_memory SET value = '', redacted = true

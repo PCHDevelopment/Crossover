@@ -1198,6 +1198,7 @@ MemoryEntry
 
 - Writes are explicit; entries are revisioned.
 - The blackboard is authoritative for shared knowledge; embeddings and vector search (Phase 2) are derived indexes and never authoritative.
+- Embeddings live in `memory_embeddings`, keyed by model; an indexer outside the room actor keeps them current from `memory_entries`, and they can be dropped and rebuilt at any time (T1579).
 - Private agent memory, chat history and canonical room state remain separate.
 
 ---

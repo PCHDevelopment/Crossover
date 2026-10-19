@@ -307,3 +307,17 @@ describe("browser plugin image configuration", () => {
     expect(loadConfig({ ...env, BROWSER_PLUGIN_IMAGE: image }).browserPluginImage).toBe(image);
   });
 });
+
+describe("memory search provider configuration", () => {
+  it("defaults off and accepts the local provider", () => {
+    expect(loadConfig(env).memorySearchProvider).toBe("off");
+    expect(loadConfig({ ...env, MEMORY_SEARCH_PROVIDER: "local-hash" }).memorySearchProvider).toBe(
+      "local-hash",
+    );
+  });
+  it("rejects unknown providers", () => {
+    expect(() => loadConfig({ ...env, MEMORY_SEARCH_PROVIDER: "remote" })).toThrow(
+      /MEMORY_SEARCH_PROVIDER/,
+    );
+  });
+});

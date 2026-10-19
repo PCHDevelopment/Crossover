@@ -204,3 +204,14 @@ Severity:
 - **wrong:** the result was incorrect.
 - **rough:** it worked, but was confusing or slow.
 - **note:** anything else.
+
+## Rebuild the derived memory index
+
+With the server profile running (`docker compose --profile server up -d`), run the rebuild inside the container, enabling the provider for that process:
+
+```sh
+docker compose exec -e MEMORY_SEARCH_PROVIDER=local-hash server node /app/dist/rebuild-memory-index.js --room <room_id>
+docker compose exec -e MEMORY_SEARCH_PROVIDER=local-hash server node /app/dist/rebuild-memory-index.js --all
+```
+
+The command reports room counts and success/error codes, never memory values.

@@ -52,6 +52,9 @@ import {
   registerLeadCommands,
   registerMemoryAccessCommands,
   registerMemoryCommands,
+  MemoryEmbeddingIndexer,
+  HashEmbeddingProvider,
+  type EmbeddingProvider,
   registerMessageCommands,
   registerParticipantLifecycleCommands,
   registerParticipantManifestCommand,
@@ -148,6 +151,8 @@ export interface ComposeOverrides {
   oauthProviders?: Readonly<Record<string, OAuthProvider>>;
   /** How `git.import` reaches an upstream (fetcher, credentials, host check); production: HTTPS clone, no credentials. */
   upstream?: UpstreamDeps;
+  /** Interval override for memory index catch-up (tests). */
+  memorySweepIntervalMs?: number;
 }
 
 export interface CrossoverServer {
@@ -189,6 +194,17 @@ export async function composeServer(
     connectionName: `crossover:${config.nodeId}`,
     retryStrategy: (times: number) => Math.min(times * 200, 2_000),
   });
+  const memoryProvider =
+    config.memorySearchProvider === "local-hash" ? new HashEmbeddingProvider() : undefined;
+  const memoryIndexer = memoryProvider
+    ? new MemoryEmbeddingIndexer({
+        pool,
+        provider: memoryProvider,
+        ...(overrides.memorySweepIntervalMs
+          ? { sweepIntervalMs: overrides.memorySweepIntervalMs }
+          : {}),
+      })
+    : undefined;
   let publisher: EventPublisher;
   let redis: RedisEventPublisher | undefined;
   let escalations: ConflictEscalationSweeper | undefined;
@@ -211,6 +227,24 @@ export async function composeServer(
   } else {
     redis = new RedisEventPublisher(redisClient);
     publisher = redis;
+  }
+
+  if (memoryIndexer) {
+    const underlying = publisher;
+    publisher = {
+      publish: async (roomId, events) => {
+        if (
+          events.some(
+            (event) =>
+              event.type === "memory.updated" ||
+              event.type === "memory.deleted" ||
+              event.type === "event.redacted",
+          )
+        )
+          memoryIndexer.schedule(roomId);
+        await underlying.publish(roomId, events);
+      },
+    };
   }
 
   let redisSubscriber: RedisEventSubscriber | undefined;
@@ -504,6 +538,7 @@ export async function composeServer(
       upstream,
       integrationOptions,
       now,
+      memoryProvider ? { provider: memoryProvider } : undefined,
     );
 
     const renewer = new LeaseRenewer({ leases: dispatcher.leases, actors: dispatcher.actors });
@@ -658,6 +693,7 @@ export async function composeServer(
         if (healthInstallSweepTimer) clearInterval(healthInstallSweepTimer);
         if (sandboxLogSweepTimer) clearInterval(sandboxLogSweepTimer);
         await wakeWebhooks?.stop();
+        await memoryIndexer?.close();
         await executionService?.close();
         await pluginRunner?.close();
         kmsOperations?.close();
@@ -681,6 +717,9 @@ export async function composeServer(
         if (!overrides.pool) await pool.end();
       })());
 
+    memoryIndexer?.start();
+    if (memoryProvider)
+      console.warn("memory search: local-hash provider (lexical; development and tests)");
     return { app, gitApp, dispatcher, pool, execution: executionService, renewer, close };
   } catch (err) {
     await escalations?.stop();
@@ -690,6 +729,7 @@ export async function composeServer(
     if (healthInstallSweepTimer) clearInterval(healthInstallSweepTimer);
     if (sandboxLogSweepTimer) clearInterval(sandboxLogSweepTimer);
     await wakeWebhooks?.stop();
+    await memoryIndexer?.close();
     await executionService?.close();
     await pluginRunner?.close();
     kmsOperations?.close();
@@ -726,7 +766,9 @@ function registerCommands(
   upstream?: UpstreamDeps,
   integrationOptions: IntegrationCommandsOptions = {},
   now: () => Date = () => new Date(),
+  memorySearch?: { provider: EmbeddingProvider },
 ): void {
+  void memorySearch;
   registerRoomCommands(dispatcher, {
     provision: async ({ client, room_id }) => {
       await provisionWorkspace(client, room_id, config.workspaceRoot);

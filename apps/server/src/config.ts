@@ -28,6 +28,7 @@ function isProxyAddress(entry: string): boolean {
 
 const envSchema = z.object({
   DATABASE_URL: z.string().min(1),
+  MEMORY_SEARCH_PROVIDER: z.enum(["off", "local-hash"]).default("off"),
   REDIS_URL: z.string().min(1),
   WORKSPACE_ROOT: z.string().min(1),
   HOST: z.string().min(1).default("127.0.0.1"),
@@ -147,6 +148,7 @@ const envSchema = z.object({
 
 export interface ServerConfig {
   databaseUrl: string;
+  memorySearchProvider?: "off" | "local-hash";
   redisUrl: string;
   /** Absolute; each room's bare repository lives under it. */
   workspaceRoot: string;
@@ -334,6 +336,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   }
   return {
     databaseUrl: e.DATABASE_URL,
+    memorySearchProvider: e.MEMORY_SEARCH_PROVIDER,
     redisUrl: e.REDIS_URL,
     workspaceRoot: resolve(e.WORKSPACE_ROOT),
     host: e.HOST,
