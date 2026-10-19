@@ -24,7 +24,10 @@ export async function blobsAt(
   return result;
 }
 
-export async function blobSizes(repo: string, oids: readonly string[]): Promise<Map<string, number>> {
+export async function blobSizes(
+  repo: string,
+  oids: readonly string[],
+): Promise<Map<string, number>> {
   const unique = [...new Set(oids)];
   const sizes = new Map<string, number>();
   if (unique.length) {
@@ -94,4 +97,3 @@ export async function readBlobs(
   }
   return contents;
 }
-

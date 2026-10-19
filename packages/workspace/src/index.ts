@@ -13,6 +13,14 @@ export type { ScopedSnapshotRepository } from "./scoped-snapshot.js";
 export type { Operation, ContentEncoding } from "./operations.js";
 export { merge } from "./merge.js";
 export type { MergeResult, MergeFile, MergeStage, MergeMessage } from "./merge.js";
+export { setDefaultMergeDrivers, structuredMergeDrivers } from "./merge-drivers.js";
+export type {
+  MergeDriver,
+  MergeDriverInput,
+  MergeDriverOutcome,
+  MergeDriverRefusal,
+  StructuredMergeRecord,
+} from "./merge-drivers.js";
 export { classifyConflicts } from "./conflicts.js";
 export type { ConflictKind, ClassifiedConflict } from "./conflicts.js";
 export type { ConflictHunk, LineRange } from "./hunks.js";
