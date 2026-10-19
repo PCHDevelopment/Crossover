@@ -410,9 +410,11 @@ Task creation and management are explicit. No task is generated from chat.
 | `artifacts` | Related files / ChangeSets |
 | `reviewer_id` | Optional reviewer (defaults to lead) |
 | `review_required` | If false, submitting goes straight to DONE (default from room settings: true) |
+| `required_approvals` | Approvals a review round needs, 1–5, default 1 |
+| `review_round` | Increments on each submit into REVIEW |
 | `blocked_reason` | Required when BLOCKED |
 | `lease_expires_at` | Agent claim lease (§8.4) |
-| `reviews[]` | `{ reviewer_id, verdict, comments, revision, created_at }` |
+| `reviews[]` | `{ reviewer_id, verdict: APPROVE \| REQUEST_CHANGES \| COMMENT, comments, revision, round, overrides, created_at }` |
 | `version` | Optimistic concurrency |
 | `created_at` / `updated_at` | Audit timestamps |
 
@@ -459,6 +461,10 @@ A participant cannot approve a task they own.
 - An agent's claim carries a 15-minute lease, renewed by any command the agent makes that references the task (ChangeSet with `task_id`, task update, message with the task in `refs`) or by `tasks.heartbeat`.
 - If the lease expires **and** the agent is disconnected, the task returns to OPEN (`task.lease_expired`) and the lead is notified through the inbox.
 - Human claims do not expire; the lead may reassign.
+
+## 8.5 Review workflows
+
+Review requests, rounds and approvals: §8.5.1 (T1595). Line-anchored threads: §8.5.2 (T1596, T1597).
 
 ---
 
@@ -1008,6 +1014,12 @@ TASKS
   tasks.start / tasks.block / tasks.unblock
   tasks.submit / tasks.review / tasks.reopen / tasks.cancel
   tasks.heartbeat
+  tasks.request_review {task_id, expected_version, add?, remove?, required_approvals?}
+
+REVIEWS
+  reviews.threads.list {task_id, at_revision?, include_resolved?}
+  reviews.comment {task_id, thread_id? | anchor?, body}
+  reviews.resolve {thread_id, resolved}
 
 WORKSPACE
   workspace.list / workspace.read / workspace.search
@@ -1016,6 +1028,7 @@ WORKSPACE
   workspace.changeset.get  {changeset_id, path?}; metadata and readable touched paths;
                            path returns candidate content for a pending ChangeSet
   workspace.changeset.decide_hold {changeset_id, decision, reason?}  lead or owner (§22.4)
+  workspace.task_changes {task_id}
   workspace.health.get     latest health per revision
 
 CONFLICTS
@@ -1320,7 +1333,8 @@ message.sent / message.edited
 
 task.created / task.updated / task.claimed / task.assigned / task.released
 task.started / task.blocked / task.unblocked / task.submitted
-task.reviewed / task.reopened / task.cancelled / task.lease_expired
+task.reviewed / task.review_requested / task.reopened / task.cancelled / task.lease_expired
+review.thread_opened / review.commented / review.thread_resolved
 
 decision.proposed / decision.position_added / decision.decided
 decision.withdrawn / decision.vetoed / decision.superseded

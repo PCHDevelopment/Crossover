@@ -1,4 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { mkdtemp, readdir, rm, symlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DEFAULT_MIGRATIONS_DIR, migrate } from "./migrate.js";
 import { withTransaction } from "./index.js";
 import { createTestDatabase, type TestDatabase } from "./testing.js";
 
@@ -1302,5 +1306,105 @@ describe("0037_a2a", () => {
                  'inbox_a2a_cross_room', 'MENTION', 'a2acall_parent')`,
       ),
     ).rejects.toMatchObject({ code: "23503" });
+  });
+});
+
+describe("0038_review_workflows", () => {
+  it("starts existing REVIEW tasks in round 1 and leaves prior reviews in round 0", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "crossover-migrations-"));
+    let oldDb: TestDatabase | undefined;
+    try {
+      for (const file of await readdir(DEFAULT_MIGRATIONS_DIR)) {
+        if (file.startsWith("0038_")) continue;
+        await symlink(join(DEFAULT_MIGRATIONS_DIR, file), join(dir, file));
+      }
+      oldDb = await createTestDatabase({ migrationsDir: dir });
+      await oldDb.pool.query(`
+        INSERT INTO rooms (id, slug, name, objective, owner_id)
+          VALUES ('room_backfill', 'backfill', 'Backfill', 'Backfill', 'part_backfill');
+        INSERT INTO participants (id, room_id, kind, display_name, role)
+          VALUES ('part_backfill', 'room_backfill', 'HUMAN', 'Reviewer', 'REVIEWER');
+        INSERT INTO tasks (id, room_id, title, created_by, owner_id, status)
+          VALUES ('task_backfill', 'room_backfill', 'Review', 'part_backfill', 'part_backfill', 'REVIEW');
+        INSERT INTO task_reviews (id, room_id, task_id, reviewer_id, verdict, revision)
+          VALUES ('rev_backfill', 'room_backfill', 'task_backfill', 'part_backfill', 'APPROVE', 0);
+      `);
+      await migrate(oldDb.pool);
+      const { rows } = await oldDb.pool.query(`SELECT t.review_round, r.round
+        FROM tasks t JOIN task_reviews r ON r.task_id = t.id WHERE t.id = 'task_backfill'`);
+      expect(rows).toEqual([{ review_round: 1, round: 0 }]);
+    } finally {
+      await oldDb?.drop();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+  beforeAll(async () => {
+    await db.pool.query(`
+      INSERT INTO rooms (id, slug, name, objective, owner_id)
+      VALUES ('room_review_1', 'review-1', 'Review', 'Review', 'part_review_1'),
+             ('room_review_2', 'review-2', 'Review', 'Review', 'part_review_2');
+      INSERT INTO participants (id, room_id, kind, display_name, role)
+      VALUES ('part_review_1', 'room_review_1', 'HUMAN', 'Reviewer 1', 'REVIEWER'),
+             ('part_review_2', 'room_review_2', 'HUMAN', 'Reviewer 2', 'REVIEWER');
+      INSERT INTO tasks (id, room_id, title, created_by)
+      VALUES ('task_review_1', 'room_review_1', 'Review task', 'part_review_1');
+    `);
+  });
+
+  it("is recorded and constrains approval counts and verdicts", async () => {
+    const { rows } = await db.pool.query("SELECT name FROM schema_migrations WHERE version = 38");
+    expect(rows).toEqual([{ name: "review_workflows" }]);
+    const task = await db.pool.query(
+      "SELECT required_approvals, review_round FROM tasks WHERE id = 'task_review_1'",
+    );
+    expect(task.rows[0]).toEqual({ required_approvals: 1, review_round: 0 });
+    for (const count of [0, 6]) {
+      await expect(
+        db.pool.query("UPDATE tasks SET required_approvals = $1 WHERE id = 'task_review_1'", [
+          count,
+        ]),
+      ).rejects.toMatchObject({ code: "23514" });
+    }
+    await db.pool.query(`INSERT INTO task_reviews
+      (id, room_id, task_id, reviewer_id, verdict, revision, overrides)
+      VALUES ('rev_review_comment', 'room_review_1', 'task_review_1', 'part_review_1', 'COMMENT', 0, '{health}')`);
+    await expect(
+      db.pool.query(`INSERT INTO task_reviews
+      (id, room_id, task_id, reviewer_id, verdict, revision, overrides)
+      VALUES ('rev_review_bad', 'room_review_1', 'task_review_1', 'part_review_1', 'COMMENT', 0, '{other}')`),
+    ).rejects.toMatchObject({ code: "23514" });
+  });
+
+  it("keeps requests, threads and comments in their room", async () => {
+    await db.pool.query(`INSERT INTO task_review_requests
+      (id, room_id, task_id, reviewer_id, requested_by)
+      VALUES ('rreq_review_1', 'room_review_1', 'task_review_1', 'part_review_1', 'part_review_1')`);
+    await expect(
+      db.pool.query(`INSERT INTO task_review_requests
+      (id, room_id, task_id, reviewer_id, requested_by)
+      VALUES ('rreq_review_2', 'room_review_1', 'task_review_1', 'part_review_1', 'part_review_1')`),
+    ).rejects.toMatchObject({ code: "23505" });
+    await expect(
+      db.pool.query(`INSERT INTO review_threads
+      (id, room_id, task_id, path, anchor_revision, start_line, end_line, created_by)
+      VALUES ('rthr_review_bad', 'room_review_1', 'task_review_1', 'a.ts', 0, 1, 501, 'part_review_1')`),
+    ).rejects.toMatchObject({ code: "23514" });
+    await db.pool.query(`INSERT INTO review_threads
+      (id, room_id, task_id, path, anchor_revision, start_line, end_line, created_by)
+      VALUES ('rthr_review_1', 'room_review_1', 'task_review_1', 'a.ts', 0, 1, 500, 'part_review_1')`);
+    await expect(
+      db.pool.query(`UPDATE review_threads SET status = 'RESOLVED'
+      WHERE id = 'rthr_review_1'`),
+    ).rejects.toMatchObject({ code: "23514" });
+    await expect(
+      db.pool.query(`INSERT INTO review_comments
+      (id, room_id, thread_id, author_id, body)
+      VALUES ('rcmt_review_bad', 'room_review_2', 'rthr_review_1', 'part_review_2', 'x')`),
+    ).rejects.toMatchObject({ code: "23503" });
+    await expect(
+      db.pool.query(`INSERT INTO review_comments
+      (id, room_id, thread_id, author_id, body)
+      VALUES ('rcmt_review_empty', 'room_review_1', 'rthr_review_1', 'part_review_1', '')`),
+    ).rejects.toMatchObject({ code: "23514" });
   });
 });
