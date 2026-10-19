@@ -207,6 +207,36 @@ describe("memory.search (T1580)", () => {
     expect(found.pending).toBe(1);
   });
 
+  it.each([
+    ["a deleted entry", "deleted"],
+    ["a redacted entry (its vector still indexed)", "redacted"],
+    ["an entry changed since it was indexed", "changed"],
+  ] as const)(
+    "the candidate query itself excludes %s, so a scan of one candidate still finds the valid entry",
+    async (_name, kind) => {
+      const s = await setup({ maxScan: 1 });
+      await put(s, "notes/valid", "postgres database valid");
+      await put(s, "notes/invalid", "postgres database invalid");
+      await sync(s); // `invalid` is the newest row, so it comes first in a scan of one
+      // A real delete writes a tombstone at a new revision, which the revision join already
+      // excludes; flag the row at the same revision so only the delete guard can catch it.
+      if (kind === "deleted")
+        await pool.query(
+          "UPDATE memory_entries SET deleted = true WHERE room_id = $1 AND key = 'notes/invalid'",
+          [s.room],
+        );
+      else if (kind === "redacted")
+        await pool.query(
+          "UPDATE memory_entries SET value = '', redacted = true WHERE room_id = $1 AND key = 'notes/invalid'",
+          [s.room],
+        );
+      else await put(s, "notes/invalid", "postgres database changed", 1); // not synced
+      const found = await search(s, {});
+      expect(found.results.map((r) => r.key)).toEqual(["notes/valid"]);
+      expect(found.partial).toBe(false);
+    },
+  );
+
   it("an observer can search; a denied memory.read is FORBIDDEN and never reaches the provider", async () => {
     const s = await setup();
     await put(s, "architecture/database", "PostgreSQL row-level security");
