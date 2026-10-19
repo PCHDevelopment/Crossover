@@ -18,12 +18,13 @@ CREATE TABLE a2a_remotes (
 CREATE TABLE a2a_calls (
   id text PRIMARY KEY,
   room_id text NOT NULL,
+  UNIQUE (id, room_id),
   remote_id text NOT NULL,
   trigger_inbox_id text NOT NULL UNIQUE,
   trigger_kind text NOT NULL CHECK (trigger_kind IN ('MENTION', 'ASSIGNMENT')),
   message_id text,
   task_id text,
-  continues_call_id text REFERENCES a2a_calls (id),
+  continues_call_id text,
   remote_task_id text CHECK (length(remote_task_id) <= 200),
   remote_context_id text CHECK (length(remote_context_id) <= 200),
   state text NOT NULL DEFAULT 'PENDING' CHECK (state IN (
@@ -37,7 +38,8 @@ CREATE TABLE a2a_calls (
   last_error text CHECK (length(last_error) <= 500),
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   finished_at timestamptz,
-  FOREIGN KEY (remote_id, room_id) REFERENCES participants (id, room_id)
+  FOREIGN KEY (remote_id, room_id) REFERENCES participants (id, room_id),
+  FOREIGN KEY (continues_call_id, room_id) REFERENCES a2a_calls (id, room_id)
 );
 
 CREATE INDEX a2a_calls_due ON a2a_calls (next_poll_at) WHERE finished_at IS NULL;
