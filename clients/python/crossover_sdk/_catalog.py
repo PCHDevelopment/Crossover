@@ -59,6 +59,9 @@ METHODS: dict[str, bool] = {
     "presence.update": False,
     "room.accept_lead": True,
     "room.archive": True,
+    "room.branch": True,
+    "room.branches.list": False,
+    "room.branches.merge": True,
     "room.create": True,
     "room.digest": False,
     "room.events.list": False,
@@ -108,4 +111,8 @@ METHODS: dict[str, bool] = {
     "workspace.list": False,
     "workspace.read": False,
     "workspace.search": False,
+    "workspace.snapshot.create": True,
+    "workspace.snapshot.delete": True,
+    "workspace.snapshot.get": False,
+    "workspace.snapshot.list": False,
 }

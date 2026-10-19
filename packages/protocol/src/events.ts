@@ -9,6 +9,9 @@ export const EVENT_TYPES = [
   "room.retention_changed",
   "room.unarchived",
   "room.exported",
+  "room.branched",
+  "room.branched_from",
+  "room.branch_merged",
   "room.egress_allowlist_changed",
   "room.protected_paths_changed",
   "room.health_settings_changed",
@@ -72,6 +75,8 @@ export const EVENT_TYPES = [
 
   "checkpoint.created",
   "checkpoint.exported",
+  "workspace.snapshot.created",
+  "workspace.snapshot.deleted",
 
   "sandbox.created",
   "sandbox.behind",
