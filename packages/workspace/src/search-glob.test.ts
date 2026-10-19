@@ -2,7 +2,12 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, expect, it } from "vitest";
-import { globMatchesPath, globToRegExpSource } from "./search-glob.js";
+import {
+  createGlobMatcher,
+  GlobWorkLimitError,
+  globMatchesPath,
+  globToRegExpSource,
+} from "./search-glob.js";
 import { runSearch } from "./search-runner.js";
 
 let root: string;
@@ -48,6 +53,12 @@ it("bounds matching for repeated wildcard terms", () => {
   const glob = `${"*a".repeat(80)}b`;
   expect(globMatchesPath(glob, "a".repeat(256))).toBe(false);
   expect(globMatchesPath(glob, `${"a".repeat(80)}b`)).toBe(true);
+});
+
+it("shares a matching-work budget across rejected paths", () => {
+  const matcher = createGlobMatcher("*a*b", 100)!;
+  expect(matcher("not-a-match")).toBe(false);
+  expect(() => matcher("another-nonmatching-path")).toThrow(GlobWorkLimitError);
 });
 
 it("declines unsupported gitignore glob constructs", () => {

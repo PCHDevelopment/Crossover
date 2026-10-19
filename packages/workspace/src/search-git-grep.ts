@@ -3,20 +3,18 @@ import { gitStream, GitError } from "./git.js";
 import { normalizePath, PathValidationError } from "./path.js";
 import type { SearchBackend } from "./search-backend.js";
 import { SEARCH_TIMEOUT_MS } from "./search-backend.js";
-import { globMatchesPath, globToRegExpSource } from "./search-glob.js";
+import { createGlobMatcher, GlobWorkLimitError } from "./search-glob.js";
 
 /** Search historical commits directly, without materializing or indexing a checkout. */
 export const gitGrepBackend: SearchBackend = {
   name: "git_grep",
   async search(request, sink) {
     if (request.is_head) return null;
-    const glob = request.glob === undefined ? undefined : globToRegExpSource(request.glob);
-    if (request.glob !== undefined && glob === null)
+    const pathMatches = request.glob === undefined ? undefined : createGlobMatcher(request.glob);
+    if (request.glob !== undefined && pathMatches === null)
       throw new CrossoverError("VALIDATION", "Glob is unsupported for historical search", {
         details: { reason: "glob_unsupported_for_revision" },
       });
-    const pathMatches =
-      glob == null ? undefined : (path: string) => globMatchesPath(request.glob!, path);
     const args = [
       "grep",
       "-z",
@@ -102,6 +100,10 @@ export const gitGrepBackend: SearchBackend = {
       }
       return { truncated: truncated || result.truncated };
     } catch (error) {
+      if (error instanceof GlobWorkLimitError)
+        throw new CrossoverError("VALIDATION", error.message, {
+          details: { reason: "glob_unsupported_for_revision" },
+        });
       if (error instanceof GitError) {
         if (error.timedOut)
           throw new CrossoverError("VALIDATION", "Search timed out", {
