@@ -1409,7 +1409,7 @@ The original ChangeSet payload is retained without advancing the canonical works
 | Injection from external content (web pages, GitHub issues, plugin output) | Labeled `trust: external`; browser and fetch plugins run in the Plugin Runner, not in sandboxes with workspace write |
 | Malicious or compromised agent operator | Room-scoped tokens; least-privilege role bundles; owner can pause/remove instantly; full audit trail |
 | Sandbox escape | gVisor runtime; dedicated sandbox hosts; no credentials in sandboxes; IMDS blocked |
-| Data exfiltration from sandbox | Egress default-deny with allowlist proxy; egress logs per sandbox |
+| Data exfiltration from sandbox | Egress default-deny with allowlist proxy; egress logs per sandbox. A2A outbound calls (§15.5) use `fetchPublicJson`: https, owner allowlist, pinned public DNS, no redirects, bounded size and time. |
 | Credential theft | Secrets Manager + KMS; short-lived minted credentials; plugin execution server-side only |
 | Secrets committed into the workspace or chat | Secret scanning on ChangeSets, messages and memory writes; blocking + redaction |
 | Supply-chain attack via dependency install | Registry allowlist; sandbox isolation limits blast radius to that sandbox; workspace health runs in its own sandbox |

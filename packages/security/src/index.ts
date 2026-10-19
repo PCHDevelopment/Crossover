@@ -23,5 +23,7 @@ export {
 export type { PluginProxyClaims } from "./proxy-credentials.js";
 export { postWebhook } from "./webhook.js";
 export type { PostWebhookOptions, WebhookRequest } from "./webhook.js";
+export { fetchPublicJson, PublicFetchError } from "./public-fetch.js";
+export type { PublicFetchFailure, PublicFetchOptions, PublicFetchRequest } from "./public-fetch.js";
 export { ENTROPY_THRESHOLD, fingerprint, scanSecrets } from "./secret-scanner.js";
 export type { ScanOptions, SecretConfidence, SecretFinding, SecretRule } from "./secret-scanner.js";
