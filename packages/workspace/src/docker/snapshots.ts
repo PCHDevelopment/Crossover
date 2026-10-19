@@ -183,7 +183,7 @@ export function snapshotPruningRetryFailed(path: string, cause: unknown): Crosso
 
 /** Inventory file bytes without calling Git or traversing a symlink from the sandbox. */
 export async function snapshotInventory(
-  ctx: DockerModuleContext,
+  ctx: Pick<DockerModuleContext, "image" | "invoke">,
   input: {
     sandbox_id: string;
     resources: SandboxResources;
@@ -266,7 +266,7 @@ export async function snapshotInventory(
 
 /** Read a single regular file without following a symlink from the working copy. */
 export async function readFile(
-  ctx: DockerModuleContext,
+  ctx: Pick<DockerModuleContext, "image" | "invoke">,
   input: {
     sandbox_id: string;
     resources: SandboxResources;
@@ -301,7 +301,7 @@ export async function readFile(
 
 /** Return exact bytes for the selected inventory paths, rejecting changes between the two reads. */
 export async function readSnapshotFiles(
-  ctx: DockerModuleContext,
+  ctx: Pick<DockerModuleContext, "image" | "invoke">,
   input: {
     sandbox_id: string;
     resources: SandboxResources;
