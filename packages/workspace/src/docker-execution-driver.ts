@@ -23,7 +23,6 @@ import { dockerSocketPath, readDockerCpuUsageUsec } from "./docker/engine-api.js
 import type { DockerModuleContext } from "./docker/context.js";
 import * as dockerNetworks from "./docker/networks.js";
 import * as dockerSnapshots from "./docker/snapshots.js";
-import { snapshotUnavailable } from "./docker/snapshots.js";
 import * as dockerContainers from "./docker/containers.js";
 import * as dockerVolumes from "./docker/volumes.js";
 import { gitFetcherName, sandboxNetworkName } from "./docker/networks.js";
@@ -682,31 +681,7 @@ export class DockerExecutionDriver implements ExecutionDriver {
     delete_paths: readonly string[];
   }): Promise<void> {
     this.assertResources(input.sandbox_id, input.resources);
-    const payload = await this.runSnapshotHelper(
-      input.resources,
-      {
-        action: "install",
-        files: input.files.map((file) => ({
-          path: Buffer.from(file.path, "utf8").toString("base64"),
-          mode: file.mode,
-          content: file.content.toString("base64"),
-          ...(file.preserve_mode ? { preserve_mode: true } : {}),
-        })),
-        delete_paths: input.delete_paths.map((path) =>
-          Buffer.from(path, "utf8").toString("base64"),
-        ),
-      },
-      false,
-    );
-    if (payload.installed !== true) throw snapshotUnavailable();
-  }
-
-  private async runSnapshotHelper(
-    resources: SandboxResources,
-    input: Record<string, unknown>,
-    readOnly = true,
-  ): ReturnType<typeof dockerSnapshots.runSnapshotHelper> {
-    return dockerSnapshots.runSnapshotHelper(this.context, resources, input, readOnly);
+    return dockerSnapshots.updateSnapshot(this.context, input);
   }
 
   async stop(input: { sandbox_id: string; resources: SandboxResources }): Promise<void> {
