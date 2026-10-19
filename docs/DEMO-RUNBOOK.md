@@ -204,3 +204,7 @@ Severity:
 - **wrong:** the result was incorrect.
 - **rough:** it worked, but was confusing or slow.
 - **note:** anything else.
+
+## Rebuild the derived memory index
+
+With `MEMORY_SEARCH_PROVIDER=local-hash`, run `node apps/server/dist/rebuild-memory-index.js --room <room_id>` or `--all`. The command reports room counts and success/error codes, never memory values.
