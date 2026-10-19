@@ -8,7 +8,11 @@ import { newId } from "@crossover/protocol";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { registerWorkspaceCommands } from "./apply.js";
 import { provisionWorkspace } from "./provision.js";
-import { MAX_COPIED_MEMORY_ENTRIES, MAX_SNAPSHOTS_PER_ROOM } from "./snapshots.js";
+import {
+  MAX_COPIED_MEMORY_BYTES,
+  MAX_COPIED_MEMORY_ENTRIES,
+  MAX_SNAPSHOTS_PER_ROOM,
+} from "./snapshots.js";
 
 let db: TestDatabase;
 const dirs: string[] = [];
@@ -200,6 +204,29 @@ describe("workspace.snapshot.* (T1603)", () => {
       entries: MAX_COPIED_MEMORY_ENTRIES + 1,
       limit_entries: MAX_COPIED_MEMORY_ENTRIES,
     });
+  });
+
+  it("copy over 16 MiB is snapshot_memory_too_large, decided in SQL before any value is read", async () => {
+    const s = await setup();
+    await s.edit();
+    await db.pool.query(
+      `INSERT INTO memory_entries (room_id, key, value, content_type, author_id, revision)
+       SELECT $1, 'big/' || g, repeat('x', 65536), 'text/markdown', $2, 1 FROM generate_series(1, 260) g`,
+      [s.roomId, s.lead],
+    );
+    const error = (await s.create("heavy").catch((e: unknown) => e)) as {
+      details: Record<string, unknown>;
+    };
+    expect(error.details).toMatchObject({
+      reason: "snapshot_memory_too_large",
+      entries: 260,
+      bytes: 260 * 65536,
+      limit_bytes: MAX_COPIED_MEMORY_BYTES,
+    });
+    expect(
+      (await db.pool.query("SELECT 1 FROM workspace_snapshots WHERE room_id = $1", [s.roomId]))
+        .rowCount,
+    ).toBe(0);
   });
 
   it("list pages oldest first; unknown cursor is NOT_FOUND; another room's snapshots are not listed", async () => {

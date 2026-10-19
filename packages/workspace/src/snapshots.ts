@@ -20,34 +20,55 @@ export interface CopyableMemoryEntry {
   source_refs: { kind: string; id: string }[];
 }
 
+const COPYABLE = `room_id = $1 AND NOT deleted AND NOT redacted AND key NOT LIKE 'agents/%'`;
+
 /**
- * The room's live, unredacted memory outside `agents/*`, ordered by key (the part of memory a
- * snapshot or a branch copies, T1603/T1605). `VALIDATION` `snapshot_memory_too_large` past
- * {@link MAX_COPIED_MEMORY_ENTRIES} entries or {@link MAX_COPIED_MEMORY_BYTES} bytes of value.
+ * How much memory a snapshot or branch would copy: the live, unredacted entries outside
+ * `agents/*`, counted in SQL, so a room over the caps is refused before any value is read into
+ * Node. `VALIDATION` `snapshot_memory_too_large` past {@link MAX_COPIED_MEMORY_ENTRIES} entries
+ * or {@link MAX_COPIED_MEMORY_BYTES} bytes of value.
  */
-export async function copyableMemory(
+export async function copyableMemoryStats(
   client: PoolClient,
   roomId: string,
-): Promise<CopyableMemoryEntry[]> {
-  const { rows } = await client.query<CopyableMemoryEntry>(
-    `SELECT key, revision, value, content_type, author_id, source_refs
-       FROM memory_entries
-      WHERE room_id = $1 AND NOT deleted AND NOT redacted AND key NOT LIKE 'agents/%'
-      ORDER BY key COLLATE "C"`,
+): Promise<{ entries: number; bytes: number }> {
+  const { rows } = await client.query<{ entries: string; bytes: string }>(
+    `SELECT count(*) AS entries, coalesce(sum(octet_length(value)), 0) AS bytes
+       FROM memory_entries WHERE ${COPYABLE}`,
     [roomId],
   );
-  const bytes = rows.reduce((sum, row) => sum + Buffer.byteLength(row.value), 0);
-  if (rows.length > MAX_COPIED_MEMORY_ENTRIES || bytes > MAX_COPIED_MEMORY_BYTES) {
+  const entries = Number(rows[0]?.entries ?? 0);
+  const bytes = Number(rows[0]?.bytes ?? 0);
+  if (entries > MAX_COPIED_MEMORY_ENTRIES || bytes > MAX_COPIED_MEMORY_BYTES) {
     throw new CrossoverError("VALIDATION", "The room's memory is too large to copy", {
       details: {
         reason: "snapshot_memory_too_large",
-        entries: rows.length,
+        entries,
         bytes,
         limit_entries: MAX_COPIED_MEMORY_ENTRIES,
         limit_bytes: MAX_COPIED_MEMORY_BYTES,
       },
     });
   }
+  return { entries, bytes };
+}
+
+/**
+ * The room's live, unredacted memory outside `agents/*`, ordered by key (the part of memory a
+ * snapshot or a branch copies, T1603/T1605); within the caps of {@link copyableMemoryStats},
+ * which are checked first.
+ */
+export async function copyableMemory(
+  client: PoolClient,
+  roomId: string,
+): Promise<CopyableMemoryEntry[]> {
+  await copyableMemoryStats(client, roomId);
+  const { rows } = await client.query<CopyableMemoryEntry>(
+    `SELECT key, revision, value, content_type, author_id, source_refs
+       FROM memory_entries WHERE ${COPYABLE}
+      ORDER BY key COLLATE "C"`,
+    [roomId],
+  );
   return rows;
 }
 
@@ -160,8 +181,7 @@ export function registerSnapshotCommands(dispatcher: Dispatcher): void {
         throw new CrossoverError("VALIDATION", "The room has the most snapshots it can hold", {
           details: { reason: "too_many_snapshots", limit: MAX_SNAPSHOTS_PER_ROOM },
         });
-      const memory = await copyableMemory(client, room_id);
-      const bytes = memory.reduce((sum, entry) => sum + Buffer.byteLength(entry.value), 0);
+      const memory = await copyableMemoryStats(client, room_id);
       const id = newId("snap");
       let row: Row;
       try {
@@ -177,8 +197,8 @@ export function registerSnapshotCommands(dispatcher: Dispatcher): void {
             p.name,
             p.description,
             ctx.principal.participant_id,
-            memory.length,
-            bytes,
+            memory.entries,
+            memory.bytes,
           ],
         );
         row = rows[0]!;
@@ -194,8 +214,7 @@ export function registerSnapshotCommands(dispatcher: Dispatcher): void {
         `INSERT INTO workspace_snapshot_memory
            (room_id, snapshot_id, key, revision, value, content_type, author_id, source_refs)
          SELECT $1, $2, key, revision, value, content_type, author_id, source_refs
-           FROM memory_entries
-          WHERE room_id = $1 AND NOT deleted AND NOT redacted AND key NOT LIKE 'agents/%'`,
+           FROM memory_entries WHERE ${COPYABLE}`,
         [room_id, id],
       );
       const snapshot = view(row);
