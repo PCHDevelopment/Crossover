@@ -231,6 +231,46 @@ describe("events.redact over HTTP", () => {
     );
   });
 
+  it("redacting memory.updated blanks the snapshot copy of that revision only (T1603)", async () => {
+    const r = await newRoom();
+    await ok(
+      await r.call(r.dev, "workspace.apply_changeset", {
+        source: "API",
+        message: "seed",
+        base_workspace_revision: 0,
+        operations: [{ type: "create", path: "a.txt", content: "a\n" }],
+      }),
+    );
+    await ok(
+      await r.call(r.dev, "memory.put", { key: "notes/k", value: "v1", expected_revision: 0 }),
+    );
+    await ok(
+      await r.call(r.dev, "memory.put", {
+        key: "notes/k",
+        value: `v2 ${SECRET}`,
+        expected_revision: 1,
+      }),
+    );
+    const older = await ok(await r.call(r.owner, "workspace.snapshot.create", { name: "has v2" }));
+    await ok(
+      await r.call(r.dev, "memory.put", { key: "notes/k", value: "v3", expected_revision: 2 }),
+    );
+    const newer = await ok(await r.call(r.owner, "workspace.snapshot.create", { name: "has v3" }));
+    const update = (await r.events(r.owner)).filter((e) => e.type === "memory.updated")[1]!;
+    await ok(await r.call(r.owner, "events.redact", { sequence: update.sequence, reason: "key" }));
+    const copy = async (id: string) =>
+      (await ok(await r.call(r.dev, "workspace.snapshot.get", { snapshot_id: id }))).response.memory
+        .entries[0];
+    expect(await copy(older.response.id)).toMatchObject({ revision: 2, value: "", redacted: true });
+    expect(await copy(newer.response.id)).toMatchObject({
+      revision: 3,
+      value: "v3",
+      redacted: false,
+    });
+    const listed = await ok(await r.call(r.dev, "workspace.snapshot.list", {}));
+    expect(JSON.stringify(listed)).not.toContain(SECRET);
+  });
+
   it("only the owner can: a developer is FORBIDDEN and nothing changes", async () => {
     const r = await newRoom();
     await ok(await r.call(r.dev, "messages.send", { body: `key ${SECRET}` }));

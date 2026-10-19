@@ -528,6 +528,13 @@ A **snapshot** is a named, immutable mark of a workspace revision plus a frozen 
 - **Events and redaction.** `workspace.snapshot.*` events are platform state events and cannot be redacted, so a snapshot's name cannot be redacted. Redacting a `memory.updated` event also blanks every snapshot copy of that revision (§19.6).
 - **The `BRANCH` ChangeSet source** (§10.1) is reserved for a branch merge: `workspace.apply_changeset` refuses it from a client with `VALIDATION` and `details.reason: "reserved_source"`.
 
+**Commands** (T1603; `workspace.snapshot.*`, §16.1):
+
+- `create { name, description?, revision? }` (lead or owner) marks the head, or an older `revision`, and copies the room's **current** live memory outside `agents/*`. **Memory is the room's current memory whatever revision is named**: it is not versioned by workspace revision (§18), so a snapshot of an older revision carries today's memory. Refused as `VALIDATION` with `empty_workspace`, `unknown_revision`, `name_taken`, `too_many_snapshots` or `snapshot_memory_too_large`.
+- `list { limit?, after? }` (oldest first) and `get { snapshot_id, memory_after?, memory_limit? }` (the snapshot and its memory copy, by key) are open to every member and label each author by provenance (§16.5).
+- `delete { snapshot_id }` (the owner) removes the snapshot and its memory copy; branches made from it are unaffected.
+- `workspace.snapshot.created` carries the id, name, revision, counts and creator, never the description. Snapshot names are not redactable (see Events and redaction above).
+
 **Tables** (migration `0035_snapshots_branches.sql`)
 
 ```text
@@ -1301,7 +1308,7 @@ event.redacted
 The ledger is immutable in structure, but payloads can be redacted:
 
 - The owner can redact any event's payload (e.g. a pasted secret). The payload is replaced with a tombstone, `redacted = true`, and an `event.redacted` event records who, when and why. `payload_hash` is kept for audit.
-- Redaction reaches the copies a reader can still fetch (T906): a redacted `message.sent`/`message.edited` blanks the message row (`messages.list` returns `redacted: true` and no body), tombstones every event of that message and the `MENTION` inbox items quoting it; a redacted `memory.updated` blanks that revision's value (and the current entry's, if it is the same revision); the stored response of the idempotent command that wrote the event becomes a tombstone, so a replay doesn't return the text. Task text is not reached (edit it with `tasks.update`). The platform's own state events (`workspace.*`, `lead.*`, `checkpoint.*`, `task.submitted`) can't be redacted. The kept `payload_hash` lets someone confirm a guess at a short secret, so don't rely on redaction for low-entropy text.
+- Redaction reaches the copies a reader can still fetch (T906): a redacted `message.sent`/`message.edited` blanks the message row (`messages.list` returns `redacted: true` and no body), tombstones every event of that message and the `MENTION` inbox items quoting it; a redacted `memory.updated` blanks that revision's value (and the current entry's, if it is the same revision, and every snapshot copy of that revision); the stored response of the idempotent command that wrote the event becomes a tombstone, so a replay doesn't return the text. Task text is not reached (edit it with `tasks.update`). The platform's own state events (`workspace.*`, `lead.*`, `checkpoint.*`, `task.submitted`) can't be redacted. The kept `payload_hash` lets someone confirm a guess at a short secret, so don't rely on redaction for low-entropy text.
 - The secret scanner (§23.3) blocks most secrets before they are written.
 
 ## 19.7 Retention

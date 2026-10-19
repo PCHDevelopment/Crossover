@@ -230,6 +230,24 @@ describe("authority powers (§6.2)", () => {
     expect(isAuthorityPower("snapshots.create")).toBe(false);
   });
 
+  it("an agent LEAD may create snapshots; a DEVELOPER may not; only OWNER may delete", () => {
+    expect(effectiveCapabilities("LEAD", "MEMBER").has("snapshots.create")).toBe(true);
+    expect(effectiveCapabilities("DEVELOPER", "MEMBER").has("snapshots.create")).toBe(false);
+    expect(effectiveCapabilities("DEVELOPER", "ADMIN").has("snapshots.create")).toBe(false);
+    expect(effectiveCapabilities("DEVELOPER", "OWNER").has("snapshots.create")).toBe(true);
+    for (const role of ROLES) {
+      expect(effectiveCapabilities(role, "OWNER").has("snapshots.delete"), `OWNER/${role}`).toBe(
+        true,
+      );
+      expect(effectiveCapabilities(role, "ADMIN").has("snapshots.delete"), `ADMIN/${role}`).toBe(
+        false,
+      );
+      expect(effectiveCapabilities(role, "MEMBER").has("snapshots.delete"), `MEMBER/${role}`).toBe(
+        false,
+      );
+    }
+  });
+
   it("snapshots.read is in every role's bundle", () => {
     for (const role of ROLES) expect(ROLE_BUNDLES[role].has("snapshots.read"), role).toBe(true);
   });
