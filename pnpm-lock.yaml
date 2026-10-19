@@ -141,6 +141,15 @@ importers:
         specifier: ^7.2.0
         version: 7.3.7(@types/node@22.20.5)(lightningcss@1.33.0)
 
+  packages/a2a:
+    dependencies:
+      '@crossover/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      zod:
+        specifier: ^4.6.5
+        version: 4.6.5
+
   packages/db:
     dependencies:
       pg:

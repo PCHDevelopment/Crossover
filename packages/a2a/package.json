@@ -1,0 +1,19 @@
+{
+  "name": "@crossover/a2a",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@crossover/protocol": "workspace:*",
+    "zod": "^4.6.5"
+  },
+  "scripts": {
+    "build": "tsc -b"
+  }
+}

@@ -1247,3 +1247,60 @@ describe("0035_snapshots_branches", () => {
     expect(rows).toEqual([{ parent_room_id: "room_t1602_parent" }]);
   });
 });
+
+describe("0037_a2a", () => {
+  beforeAll(async () => {
+    await db.pool.query(
+      `INSERT INTO rooms (id, slug, name, objective, owner_id)
+       VALUES ('room_a2a_1', 'a2a-1', 'A2A 1', 'test', 'part_a2a'),
+              ('room_a2a_2', 'a2a-2', 'A2A 2', 'test', 'part_a2a')`,
+    );
+    await db.pool.query(
+      `INSERT INTO participants (id, room_id, kind, display_name, role)
+       VALUES ('part_a2a_remote', 'room_a2a_1', 'AGENT', 'Remote', 'DEVELOPER')`,
+    );
+  });
+
+  it("requires an A2A remote participant in the same room", async () => {
+    await expect(
+      db.pool.query(
+        `INSERT INTO a2a_remotes (participant_id, room_id, card_url, created_by)
+       VALUES ('part_a2a_remote', 'room_a2a_2', 'https://example.com/card', 'part_a2a')`,
+      ),
+    ).rejects.toMatchObject({ code: "23503" });
+    await db.pool.query(
+      `INSERT INTO a2a_remotes (participant_id, room_id, card_url, created_by)
+       VALUES ('part_a2a_remote', 'room_a2a_1', 'https://example.com/card', 'part_a2a')`,
+    );
+  });
+
+  it("accepts one call per trigger inbox item", async () => {
+    const insert = (id: string) =>
+      db.pool.query(
+        `INSERT INTO a2a_calls (id, room_id, remote_id, trigger_inbox_id, trigger_kind)
+       VALUES ($1, 'room_a2a_1', 'part_a2a_remote', 'inbox_a2a_trigger', 'MENTION')`,
+        [id],
+      );
+    await insert("a2acall_1");
+    await expect(insert("a2acall_2")).rejects.toMatchObject({ code: "23505" });
+  });
+
+  it("rejects a continuation of a call in another room", async () => {
+    await db.pool.query(
+      `INSERT INTO a2a_calls (id, room_id, remote_id, trigger_inbox_id, trigger_kind)
+       VALUES ('a2acall_parent', 'room_a2a_1', 'part_a2a_remote', 'inbox_a2a_parent', 'MENTION')`,
+    );
+    await db.pool.query(
+      `INSERT INTO participants (id, room_id, kind, display_name, role)
+       VALUES ('part_a2a_remote_2', 'room_a2a_2', 'AGENT', 'Remote 2', 'DEVELOPER')`,
+    );
+    await expect(
+      db.pool.query(
+        `INSERT INTO a2a_calls
+         (id, room_id, remote_id, trigger_inbox_id, trigger_kind, continues_call_id)
+         VALUES ('a2acall_cross_room', 'room_a2a_2', 'part_a2a_remote_2',
+                 'inbox_a2a_cross_room', 'MENTION', 'a2acall_parent')`,
+      ),
+    ).rejects.toMatchObject({ code: "23503" });
+  });
+});

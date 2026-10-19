@@ -15,7 +15,7 @@ const CATALOG = `
   room.digest
   room.events.subscribe
   room.events.list
-  room.set_egress_allowlist
+  room.set_egress_allowlist / room.set_a2a_allowlist
   room.set_protected_paths
   room.set_health
   budgets.get / budgets.set
@@ -79,6 +79,7 @@ const CATALOG = `
 
   tools.list / tools.invoke
 
+  a2a.remotes.add / a2a.remotes.refresh / a2a.remotes.list
   integrations.connect / integrations.disconnect / integrations.verify / integrations.list
 
   git.import / git.pull_upstream
@@ -132,6 +133,7 @@ const READ_ONLY = [
   "decisions.get",
   "tools.list",
   "integrations.list",
+  "a2a.remotes.list",
   "checkpoints.list",
   "workspace.snapshot.list",
   "workspace.snapshot.get",
@@ -154,7 +156,7 @@ const valid = (extra: Record<string, unknown> = {}) => ({
 
 describe("METHODS", () => {
   it("contains every §16.1 method plus room.create, and nothing else", () => {
-    expect(catalog).toHaveLength(112);
+    expect(catalog).toHaveLength(116);
     expect([...METHOD_NAMES].sort()).toEqual([...catalog].sort());
   });
 
@@ -165,7 +167,7 @@ describe("METHODS", () => {
   it("marks exactly the documented methods read-only", () => {
     const readOnly = METHOD_NAMES.filter((m) => !isMutatingMethod(m));
     expect([...readOnly].sort()).toEqual([...READ_ONLY].sort());
-    expect(Object.keys(METHODS).length - readOnly.length).toBe(68);
+    expect(Object.keys(METHODS).length - readOnly.length).toBe(71);
   });
 
   it("isMutatingMethod takes any string and is false for unknown methods", () => {

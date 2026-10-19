@@ -290,6 +290,40 @@ describe("RoomRetentionSweeper", () => {
     }
   });
 
+  it("purges a room with chained a2a_calls", async () => {
+    const { dispatcher, roomId, ownerId } = await archivedRoom();
+    await pool.query(
+      `INSERT INTO a2a_calls (id, room_id, remote_id, trigger_inbox_id, trigger_kind)
+       VALUES ('a2acall_first', $1, $2, 'inbox_first', 'MENTION')`,
+      [roomId, ownerId],
+    );
+    await pool.query(
+      `INSERT INTO a2a_calls (id, room_id, remote_id, trigger_inbox_id, trigger_kind, continues_call_id)
+       VALUES ('a2acall_next', $1, $2, 'inbox_next', 'MENTION', 'a2acall_first')`,
+      [roomId, ownerId],
+    );
+    const now = new Date();
+    await pool.query(
+      `UPDATE rooms SET retention_days = 30, archived_at = $2::timestamptz - interval '31 days'
+       WHERE id = $1`,
+      [roomId, now],
+    );
+    const onError = vi.fn();
+    const sweeper = new RoomRetentionSweeper({
+      pool,
+      dispatcher,
+      now: () => now,
+      purgeWorkspace: async () => {},
+      onError,
+    });
+    expect(await sweeper.tick()).toBe(1);
+    expect(onError).not.toHaveBeenCalled();
+    expect((await pool.query("SELECT id FROM rooms WHERE id = $1", [roomId])).rows).toEqual([]);
+    expect(
+      (await pool.query("SELECT id FROM a2a_calls WHERE room_id = $1", [roomId])).rows,
+    ).toEqual([]);
+  });
+
   it("fails loudly when a room table has an unhandled nullable self-FK cycle", async () => {
     const tableName = "retention_purge_self_cycle";
     await pool.query(`

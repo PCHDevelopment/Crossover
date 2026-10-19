@@ -176,6 +176,7 @@ describe("role bundles (§6.1)", () => {
       "capabilities.grant_tier3",
       "events.redact",
       "integrations.manage",
+      "a2a.manage",
     ]) {
       for (const role of ROLES)
         expect(ROLE_BUNDLES[role].has(c as Capability), `${role} ${c}`).toBe(false);
@@ -211,6 +212,7 @@ describe("authority powers (§6.2)", () => {
     "capabilities.grant_tier3",
     "events.redact",
     "integrations.manage",
+    "a2a.manage",
     "protected_paths.set",
     "snapshots.delete",
   ];
