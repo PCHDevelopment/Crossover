@@ -2238,6 +2238,44 @@ describe("composeServer", () => {
     expect(rows).toEqual([]);
   });
 
+  it("redacts a stored vector after memory indexing is disabled", async () => {
+    const { server } = await start({ memorySearchProvider: "off" });
+    const { roomId, owner, cmd } = await walkthrough(server.app);
+    await ok(
+      await cmd(
+        envelope("memory.put", {
+          key: "architecture/database",
+          value: "PostgreSQL",
+          expected_revision: 0,
+        }),
+        owner.tokens.access_token,
+      ),
+    );
+    await db.pool.query(
+      `INSERT INTO memory_embeddings (room_id, key, model, revision, dims, embedding)
+       VALUES ($1, 'architecture/database', 'local-hash', 1, 1, decode('00000000', 'hex'))`,
+      [roomId],
+    );
+    const { rows } = await db.pool.query<{ sequence: string }>(
+      "SELECT sequence FROM events WHERE room_id = $1 AND type = 'memory.updated' ORDER BY sequence DESC LIMIT 1",
+      [roomId],
+    );
+    await ok(
+      await cmd(
+        envelope("events.redact", {
+          sequence: Number(rows[0]!.sequence),
+          reason: "Remove test memory",
+        }),
+        owner.tokens.access_token,
+      ),
+    );
+    const stored = await db.pool.query(
+      "SELECT 1 FROM memory_embeddings WHERE room_id = $1 AND key = 'architecture/database'",
+      [roomId],
+    );
+    expect(stored.rows).toEqual([]);
+  });
+
   it("serves memory.put over HTTP with compare-and-set", async () => {
     const { server } = await start();
     const { owner, agent, cmd } = await walkthrough(server.app);
