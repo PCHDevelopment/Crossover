@@ -84,7 +84,8 @@ export class ConflictMetricsReporter {
       try {
         const until = this.now();
         const since = new Date(until.getTime() - this.windowMs);
-        const report = await conflictRateReport(this.options.pool, { since, until });
+        // On the client that holds the lock: a pool of one connection must not wait for a second.
+        const report = await conflictRateReport(client, { since, until });
         this.write(`${JSON.stringify({ msg: "conflict_rate_report", ...report })}\n`);
         return true;
       } finally {

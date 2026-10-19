@@ -200,17 +200,36 @@ describe("conflictRateReport", () => {
     ).toEqual(["(other)", "(other)", "(other)", "(other)", "tar", "a1b2c3d4e5"]);
   });
 
-  it("excludes ChangeSets outside [since, until)", async () => {
+  it("excludes ChangeSets outside [since, until): since is inclusive, until is exclusive", async () => {
     const r = await room();
-    await r.byHuman([{ type: "create", path: "a.txt", content: "a" }], 0);
-    await r.byHuman([{ type: "create", path: "b.txt", content: "b" }], 1);
+    for (const [path, base] of [
+      ["a.txt", 0],
+      ["b.txt", 1],
+      ["c.txt", 2],
+      ["d.txt", 3],
+    ] as const)
+      await r.byHuman([{ type: "create", path, content: path }], base);
+    const since = new Date(Date.now() - 86_400_000);
+    const until = new Date(Date.now() + 86_400_000);
+    // Just before since, exactly at since, just before until, exactly at until.
     await db.pool.query(
-      `UPDATE changesets SET created_at = now() - interval '10 days'
-        WHERE room_id = $1 AND applied_revision = 1`,
-      [r.roomId],
+      `UPDATE changesets SET created_at = CASE applied_revision
+         WHEN 1 THEN $2::timestamptz - interval '1 millisecond'
+         WHEN 2 THEN $2::timestamptz
+         WHEN 3 THEN $3::timestamptz - interval '1 millisecond'
+         WHEN 4 THEN $3::timestamptz END
+        WHERE room_id = $1 AND applied_revision IN (1, 2, 3, 4)`,
+      [r.roomId, since, until],
     );
-    const result = await report(r.roomId, { since: new Date(Date.now() - 86_400_000) });
-    expect(result.by_participant.HUMAN.submissions).toBe(1);
+    expect((await report(r.roomId, { since, until })).by_participant.HUMAN.submissions).toBe(2);
+    // One row per edge, so a wrong comparison cannot hide behind another one's miss.
+    const submissions = async (from: Date, to: Date) =>
+      (await report(r.roomId, { since: from, until: to })).by_participant.HUMAN.submissions;
+    const ms = (date: Date, delta: number) => new Date(date.getTime() + delta);
+    expect(await submissions(since, ms(since, 1))).toBe(1); // exactly at since: included
+    expect(await submissions(ms(since, -1), since)).toBe(1); // just before since: only that one
+    expect(await submissions(ms(until, -1), until)).toBe(1); // until itself is excluded: only the row before it
+    expect(await submissions(until, ms(until, 1))).toBe(1); // a window that starts at until includes it
     const future = await report(r.roomId, {
       since: new Date(Date.now() + 60_000),
       until: new Date(Date.now() + 120_000),

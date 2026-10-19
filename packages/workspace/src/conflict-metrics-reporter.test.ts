@@ -51,6 +51,27 @@ describe("ConflictMetricsReporter", () => {
     expect(lines).toHaveLength(1);
   });
 
+  it("runs the report on the client that holds the lock, never asking the pool for a second", async () => {
+    // A pool of one connection would hang if the report asked for another client while the lock
+    // client is held: here any use of the pool itself, apart from the one connect(), fails.
+    let connects = 0;
+    const single = {
+      connect: () => {
+        connects++;
+        return db.pool.connect();
+      },
+      query: () => Promise.reject(new Error("the report used the pool, not the locked client")),
+    } as unknown as ConstructorParameters<typeof ConflictMetricsReporter>[0]["pool"];
+    const lines: string[] = [];
+    const reporter = new ConflictMetricsReporter({
+      pool: single,
+      write: (line) => void lines.push(line),
+    });
+    expect(await reporter.tick()).toBe(true);
+    expect(lines).toHaveLength(1);
+    expect(connects).toBe(1);
+  });
+
   it("rejects an interval Node's timers cannot hold (it would fire every millisecond)", () => {
     for (const intervalMs of [0, -1, 2_147_483_648, 2_592_000_000, 1.5])
       expect(

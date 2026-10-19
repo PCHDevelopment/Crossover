@@ -123,7 +123,7 @@ const PAYLOAD_SQL = `jsonb_build_object(
  * Every statement is scoped to one room; the per-room results are added up here.
  */
 export async function conflictRateReport(
-  pool: Pool,
+  pool: Pick<Pool, "query">,
   options: ConflictRateOptions,
 ): Promise<ConflictRateReport> {
   const roomIds =
