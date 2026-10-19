@@ -361,3 +361,33 @@ export async function readSnapshotFiles(
     };
   });
 }
+
+/** Apply the rebased tree delta with a read/write, no-network helper mounted only to the volume. */
+export async function updateSnapshot(
+  ctx: Pick<DockerModuleContext, "image" | "invoke">,
+  input: {
+    sandbox_id: string;
+    resources: SandboxResources;
+    files: readonly (Pick<SandboxSnapshotFile, "path" | "mode" | "content"> & {
+      preserve_mode?: boolean;
+    })[];
+    delete_paths: readonly string[];
+  },
+): Promise<void> {
+  const payload = await runSnapshotHelper(
+    ctx,
+    input.resources,
+    {
+      action: "install",
+      files: input.files.map((file) => ({
+        path: Buffer.from(file.path, "utf8").toString("base64"),
+        mode: file.mode,
+        content: file.content.toString("base64"),
+        ...(file.preserve_mode ? { preserve_mode: true } : {}),
+      })),
+      delete_paths: input.delete_paths.map((path) => Buffer.from(path, "utf8").toString("base64")),
+    },
+    false,
+  );
+  if (payload.installed !== true) throw snapshotUnavailable();
+}
