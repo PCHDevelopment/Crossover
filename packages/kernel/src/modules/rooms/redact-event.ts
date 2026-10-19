@@ -102,6 +102,12 @@ async function redactCopies(
          WHERE room_id = $1 AND key = $2 AND revision = $3`,
         [roomId, key, revision],
       );
+      // Every snapshot copy of that revision too (T1603); a copy of another revision keeps its value.
+      await client.query(
+        `UPDATE workspace_snapshot_memory SET value = '', redacted = true
+         WHERE room_id = $1 AND key = $2 AND revision = $3`,
+        [roomId, key, revision],
+      );
     }
   }
   return also;
@@ -122,7 +128,7 @@ async function redactCopies(
  *   edits) is tombstoned too, and the `MENTION` inbox items quoting it say `[redacted]`. A
  *   redacted message can't be edited.
  * - **`memory.updated`:** that revision's value is blanked and flagged in `memory_revisions`,
- *   and in `memory_entries` if it is still the current one.
+ *   in `memory_entries` if it is still the current one, and in every snapshot copy of it.
  * - **The stored response of an idempotent command** that wrote a redacted event: a replay of
  *   it returns a tombstone, not the original text.
  * - **Task text** (`task.created`, `task.updated`) is not reached: edit it with `tasks.update`.

@@ -38,6 +38,8 @@ export type { ConflictEscalationSweeperOptions } from "./conflict-escalation-swe
 export { workspaceReadParamsSchema, workspaceListParamsSchema } from "./reads.js";
 export { workspaceSearchParamsSchema } from "./search.js";
 export { exclusiveSearchTree } from "./search-tree.js";
+export { copyableMemory } from "./snapshots.js";
+export type { CopyableMemoryEntry } from "./snapshots.js";
 export { workspaceDiffParamsSchema, workspaceHistoryParamsSchema } from "./history.js";
 export { workspaceBlameParamsSchema } from "./blame.js";
 export { updateCanonicalRef, reconcileRef } from "./reconcile.js";

@@ -23,6 +23,7 @@ import { registerWorkspaceHealthReads } from "./health-events.js";
 import { parseConflicts } from "./parse-check.js";
 import { registerCheckpointExport } from "./checkpoint-export.js";
 import { registerCheckpointCommands } from "./checkpoints.js";
+import { registerSnapshotCommands } from "./snapshots.js";
 import { recordWorkspaceRevision } from "./revision.js";
 import { registerGitImport, type UpstreamDeps } from "./upstream-import.js";
 import {
@@ -244,6 +245,7 @@ export function registerWorkspaceCommands(
   registerWorkspaceConflictActions(dispatcher);
   registerWorkspaceHealthReads(dispatcher);
   registerCheckpointCommands(dispatcher);
+  registerSnapshotCommands(dispatcher);
   registerCheckpointExport(dispatcher, deps.upstream);
   registerGitPullUpstream(dispatcher, deps);
   registerGitImport(dispatcher, deps.upstream, {
