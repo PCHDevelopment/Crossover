@@ -8,6 +8,7 @@ import { loadAuthorKinds, provenanceOf, type AuthorKinds, type Provenance } from
 export const INBOX_KINDS = [
   "ASSIGNMENT",
   "REVIEW_REQUEST",
+  "REVIEW_COMMENT",
   "MENTION",
   "CONFLICT",
   "HEALTH_RED",

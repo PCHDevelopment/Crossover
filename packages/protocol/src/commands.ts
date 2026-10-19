@@ -77,6 +77,10 @@ export const METHODS = {
   "tasks.reopen": { mutating: true },
   "tasks.cancel": { mutating: true },
   "tasks.heartbeat": { mutating: false },
+  "tasks.request_review": { mutating: true },
+  "reviews.threads.list": { mutating: false },
+  "reviews.comment": { mutating: true },
+  "reviews.resolve": { mutating: true },
 
   "workspace.list": { mutating: false },
   "workspace.read": { mutating: false },
@@ -87,6 +91,7 @@ export const METHODS = {
   "workspace.apply_changeset": { mutating: true },
   "workspace.changeset.get": { mutating: false },
   "workspace.changeset.decide_hold": { mutating: true },
+  "workspace.task_changes": { mutating: false },
   "workspace.health.get": { mutating: false },
 
   "conflicts.list": { mutating: false },
