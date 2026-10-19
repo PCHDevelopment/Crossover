@@ -174,6 +174,45 @@ describe("MemoryEmbeddingIndexer", () => {
     await indexer.close();
   });
 
+  it("does not start queued rooms after close", async () => {
+    const firstRoom = await room();
+    const secondRoom = await room();
+    await entry(firstRoom, "first");
+    await entry(secondRoom, "second");
+
+    const base = new HashEmbeddingProvider();
+    let releaseFirst!: () => void;
+    const firstSync = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const embeddedKeys: string[] = [];
+    const provider: EmbeddingProvider = {
+      model: base.model,
+      dimensions: base.dimensions,
+      maxInputChars: base.maxInputChars,
+      embed: async (texts, abort) => {
+        embeddedKeys.push(texts[0]?.split("\n", 1)[0] ?? "");
+        if (embeddedKeys.length === 1) await firstSync;
+        return base.embed(texts, abort);
+      },
+    };
+    const indexer = new MemoryEmbeddingIndexer({
+      pool: db.pool,
+      provider,
+      maxConcurrentRooms: 1,
+      onError: () => {},
+    });
+
+    indexer.schedule(firstRoom);
+    indexer.schedule(secondRoom);
+    await vi.waitFor(() => expect(embeddedKeys).toEqual(["first"]));
+
+    const closing = indexer.close();
+    releaseFirst();
+    await closing;
+    expect(embeddedKeys).toEqual(["first"]);
+  });
+
   it("replaces an old model and retries a provider failure on the next sweep", async () => {
     const id = await room();
     await entry(id, "key");
