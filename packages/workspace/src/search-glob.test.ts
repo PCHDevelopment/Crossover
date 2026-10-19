@@ -2,7 +2,7 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, expect, it } from "vitest";
-import { globToRegExpSource } from "./search-glob.js";
+import { globMatchesPath, globToRegExpSource } from "./search-glob.js";
 import { runSearch } from "./search-runner.js";
 
 let root: string;
@@ -40,7 +40,14 @@ it.each([
   expect(source).not.toBeNull();
   const matcher = new RegExp(source!);
   expect(paths.filter((path) => matcher.test(path)).sort()).toEqual(expected.sort());
+  expect(paths.filter((path) => globMatchesPath(glob, path)).sort()).toEqual(expected.sort());
   expect(actual.sort()).toEqual(expected.sort());
+});
+
+it("bounds matching for repeated wildcard terms", () => {
+  const glob = `${"*a".repeat(80)}b`;
+  expect(globMatchesPath(glob, "a".repeat(256))).toBe(false);
+  expect(globMatchesPath(glob, `${"a".repeat(80)}b`)).toBe(true);
 });
 
 it("declines unsupported gitignore glob constructs", () => {

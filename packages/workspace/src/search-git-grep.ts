@@ -3,7 +3,7 @@ import { gitStream, GitError } from "./git.js";
 import { normalizePath, PathValidationError } from "./path.js";
 import type { SearchBackend } from "./search-backend.js";
 import { SEARCH_TIMEOUT_MS } from "./search-backend.js";
-import { globToRegExpSource } from "./search-glob.js";
+import { globMatchesPath, globToRegExpSource } from "./search-glob.js";
 
 /** Search historical commits directly, without materializing or indexing a checkout. */
 export const gitGrepBackend: SearchBackend = {
@@ -15,13 +15,15 @@ export const gitGrepBackend: SearchBackend = {
       throw new CrossoverError("VALIDATION", "Glob is unsupported for historical search", {
         details: { reason: "glob_unsupported_for_revision" },
       });
-    const pathMatches = glob == null ? undefined : new RegExp(glob, "u");
+    const pathMatches =
+      glob == null ? undefined : (path: string) => globMatchesPath(request.glob!, path);
     const args = [
       "grep",
       "-z",
       "-n",
       "-I",
       "--no-color",
+      "--no-column",
       request.regex ? "-P" : "-F",
       ...(request.case_sensitive ? [] : ["-i"]),
       "-e",
@@ -85,7 +87,7 @@ export const gitGrepBackend: SearchBackend = {
                 if (error instanceof PathValidationError) continue;
                 throw error;
               }
-              if (pathMatches && !pathMatches.test(safePath)) continue;
+              if (pathMatches && !pathMatches(safePath)) continue;
               if (!(await sink({ path: safePath, line, text }))) {
                 truncated = true;
                 return false;
