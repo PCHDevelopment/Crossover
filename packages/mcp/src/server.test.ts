@@ -10,6 +10,9 @@ import {
   registerDecisionDecideCommands,
   registerInboxCommands,
   registerMemoryAccessCommands,
+  registerMemorySearchCommand,
+  HashEmbeddingProvider,
+  MemoryEmbeddingIndexer,
   registerMemoryCommands,
   registerMessageCommands,
   registerParticipantLifecycleCommands,
@@ -161,6 +164,7 @@ async function setup(
   registerInboxCommands(dispatcher);
   registerMemoryCommands(dispatcher);
   registerMemoryAccessCommands(dispatcher);
+  registerMemorySearchCommand(dispatcher, { provider: new HashEmbeddingProvider() });
   registerDecisionCommands(dispatcher);
   registerDecisionDecideCommands(dispatcher);
   registerRoomDigestCommand(dispatcher);
@@ -983,6 +987,7 @@ describe("MCP collaboration tools (T709)", () => {
     registerInboxCommands(d);
     registerMemoryCommands(d);
     registerMemoryAccessCommands(d);
+    registerMemorySearchCommand(d, {});
     registerDecisionCommands(d);
     registerDecisionDecideCommands(d);
     registerRoomDigestCommand(d);
@@ -1098,6 +1103,32 @@ describe("MCP collaboration tools (T709)", () => {
       (await call(owner, "memory_history", { key: "architecture/database" })).body.revisions,
     ).toHaveLength(2);
 
+    // Search: the derived index is synced directly here; results come framed like every tool result.
+    await call(agent, "memory_put", {
+      key: "architecture/cache",
+      value: "Redis caches the session data",
+      expected_revision: 0,
+    });
+    await new MemoryEmbeddingIndexer({
+      pool,
+      provider: new HashEmbeddingProvider(),
+      onError: () => {},
+    }).syncRoom(s.room, new AbortController().signal);
+    const found = await call(owner, "memory_search", { query: "redis session cache" });
+    expect(found.isError).toBe(false);
+    expect(found.body).toMatchObject({
+      model: "local-hash-v1",
+      pending: 0,
+      partial: false,
+      results: [
+        {
+          key: "architecture/cache",
+          snippet: "Redis caches the session data",
+          provenance: { author_id: s.agentId, author_kind: "AGENT", trust: "participant" },
+        },
+      ],
+    });
+
     // Decisions: propose, take a position, read it back; the agent can't decide it.
     const proposed = await call(agent, "decisions_propose", {
       title: "Pick a database",
@@ -1133,7 +1164,7 @@ describe("MCP collaboration tools (T709)", () => {
     const digest = await call(agent, "room_digest");
     expect(digest.body.counts).toMatchObject({
       "message.sent": 2,
-      "memory.updated": 1,
+      "memory.updated": 2,
       "memory.deleted": 1,
       "decision.proposed": 1,
     });

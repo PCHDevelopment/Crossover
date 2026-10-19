@@ -9,6 +9,7 @@ import {
   labelMemory,
   memoryEntryView,
   memoryKey,
+  likePrefix,
 } from "./memory.js";
 
 export const DEFAULT_MEMORY_PAGE = 50;
@@ -49,9 +50,6 @@ interface RevisionRow {
   redacted: boolean;
   created_at: Date;
 }
-
-/** `LIKE` patterns treat `%` and `_` as wildcards; prefixes are literal text. */
-const likePrefix = (prefix: string) => `${prefix.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
 
 /**
  * Register `memory.get`, `memory.list`, `memory.history` and `memory.delete` (T409, §18.2-18.3).

@@ -12,6 +12,7 @@ import {
   memoryDeleteParams,
   memoryGetParams,
   memoryHistoryParams,
+  memorySearchParams,
   memoryListParams,
   memoryPutParams,
   messagesEditParams,
@@ -466,6 +467,13 @@ export const COLLABORATION_TOOLS: readonly McpToolDefinition[] = [
     "memory.history",
     "Every revision of a memory key, including its deletion.",
     memoryHistoryParams.shape,
+    false,
+  ),
+  tool(
+    "memory_search",
+    "memory.search",
+    "Find shared-memory entries related to a question (semantic search over a derived index; read the full entry with memory_get). Results may lag recent writes; see pending.",
+    memorySearchParams.shape,
     false,
   ),
   tool(

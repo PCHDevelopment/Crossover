@@ -41,6 +41,7 @@ METHODS: dict[str, bool] = {
     "memory.history": False,
     "memory.list": False,
     "memory.put": True,
+    "memory.search": False,
     "messages.edit": True,
     "messages.list": False,
     "messages.send": True,

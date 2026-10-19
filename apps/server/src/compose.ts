@@ -51,6 +51,7 @@ import {
   registerJoinCommand,
   registerLeadCommands,
   registerMemoryAccessCommands,
+  registerMemorySearchCommand,
   registerMemoryCommands,
   MemoryEmbeddingIndexer,
   HashEmbeddingProvider,
@@ -768,7 +769,6 @@ function registerCommands(
   now: () => Date = () => new Date(),
   memorySearch?: { provider: EmbeddingProvider },
 ): void {
-  void memorySearch;
   registerRoomCommands(dispatcher, {
     provision: async ({ client, room_id }) => {
       await provisionWorkspace(client, room_id, config.workspaceRoot);
@@ -821,6 +821,10 @@ function registerCommands(
   registerMessageCommands(dispatcher);
   registerMemoryCommands(dispatcher);
   registerMemoryAccessCommands(dispatcher);
+  // Always registered: a server without a provider answers memory_search_disabled (T1580).
+  registerMemorySearchCommand(dispatcher, {
+    ...(memorySearch ? { provider: memorySearch.provider } : {}),
+  });
   registerDecisionCommands(dispatcher);
   registerDecisionDecideCommands(dispatcher);
 
