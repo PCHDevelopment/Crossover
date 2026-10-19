@@ -104,6 +104,7 @@ stat -c '%g' /var/run/docker.sock   # Set this numeric group ID as DOCKER_GID in
 openssl rand -hex 32                 # Set this value as GIT_INTERNAL_TOKEN_SECRET in .env.
 workspace_root="${CROSSOVER_WORKSPACE_ROOT:-$PWD/.data/workspaces}"
 sudo install -d -o 1000 -g 1000 -m 0750 "$workspace_root"
+# If .env sets CROSSOVER_ZOEKT_ROOT, export the same value in this shell first.
 zoekt_root="${CROSSOVER_ZOEKT_ROOT:-$PWD/.data/zoekt}"
 sudo install -d -o 1000 -g 1000 -m 0750 "$zoekt_root"
 docker compose --profile server up --build -d
