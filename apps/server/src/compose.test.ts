@@ -2574,6 +2574,80 @@ describe("loadConfig", () => {
     expect(c.workspaceRoot.startsWith("/")).toBe(true);
   });
 
+  it("A2A_INBOUND_ENABLED without a public base URL is a config error; the origin defaults to OAUTH_PUBLIC_BASE_URL (T1623)", () => {
+    expect(loadConfig(env).a2aInbound).toBeUndefined();
+    expect(() => loadConfig({ ...env, A2A_INBOUND_ENABLED: "true" })).toThrow(
+      /A2A_PUBLIC_BASE_URL/,
+    );
+    expect(
+      loadConfig({
+        ...env,
+        A2A_INBOUND_ENABLED: "true",
+        A2A_PUBLIC_BASE_URL: "https://a2a.example.com",
+      }).a2aInbound,
+    ).toEqual({ publicBaseUrl: "https://a2a.example.com" });
+    expect(
+      loadConfig({
+        ...env,
+        A2A_INBOUND_ENABLED: "1",
+        OAUTH_PUBLIC_BASE_URL: "https://crossover.example.com",
+      }).a2aInbound,
+    ).toEqual({ publicBaseUrl: "https://crossover.example.com" });
+    for (const bad of [
+      "https://a2a.example.com/x",
+      "http://a2a.example.com",
+      "https://a2a.example.com/?q=1",
+    ])
+      expect(
+        () => loadConfig({ ...env, A2A_INBOUND_ENABLED: "true", A2A_PUBLIC_BASE_URL: bad }),
+        bad,
+      ).toThrow();
+    expect(
+      loadConfig({
+        ...env,
+        A2A_INBOUND_ENABLED: "true",
+        A2A_PUBLIC_BASE_URL: "http://localhost:8080",
+      }).a2aInbound,
+    ).toEqual({ publicBaseUrl: "http://localhost:8080" });
+    // Switched off, the base URL alone enables nothing.
+    expect(
+      loadConfig({ ...env, A2A_PUBLIC_BASE_URL: "https://a2a.example.com" }).a2aInbound,
+    ).toBeUndefined();
+  });
+
+  it("the A2A routes exist only when enabled: disabled → /a2a is a 404, enabled → the card is served (T1623)", async () => {
+    const off = await start();
+    const { agent: offAgent, roomId: offRoom } = await walkthrough(off.server.app, false);
+    const post = await off.server.app.inject({
+      method: "POST",
+      url: `/a2a/rooms/${offRoom}`,
+      headers: { authorization: `Bearer ${offAgent.tokens.access_token}`, "a2a-version": "1.0" },
+      payload: "{}",
+    });
+    expect(post.statusCode).toBe(404);
+    expect(
+      (
+        await off.server.app.inject({
+          method: "GET",
+          url: `/a2a/rooms/${offRoom}/.well-known/agent-card.json`,
+          headers: { authorization: `Bearer ${offAgent.tokens.access_token}` },
+        })
+      ).statusCode,
+    ).toBe(404);
+
+    const on = await start({ a2aInbound: { publicBaseUrl: "https://crossover.example.com" } });
+    const { agent, roomId } = await walkthrough(on.server.app, false);
+    const card = await on.server.app.inject({
+      method: "GET",
+      url: `/a2a/rooms/${roomId}/.well-known/agent-card.json`,
+      headers: { authorization: `Bearer ${agent.tokens.access_token}` },
+    });
+    expect(card.statusCode).toBe(200);
+    expect(card.json().supportedInterfaces[0].url).toBe(
+      `https://crossover.example.com/a2a/rooms/${roomId}`,
+    );
+  });
+
   it("reads the conflict report interval (T1586): one day by default, 0 turns it off", () => {
     expect(loadConfig(env).conflictReportIntervalMs).toBe(86_400_000);
     expect(loadConfig({ ...env, CONFLICT_REPORT_INTERVAL_MS: "0" }).conflictReportIntervalMs).toBe(

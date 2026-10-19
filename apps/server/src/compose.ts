@@ -14,6 +14,7 @@ import {
 } from "@crossover/gateway";
 import { MCP_TOOLS, registerMcp } from "@crossover/mcp";
 import { buildInternalGitServer } from "./internal-git.js";
+import { registerA2aInbound } from "./a2a-inbound.js";
 import { purgeRoomWorkspace } from "./purge-workspace.js";
 import { githubOAuthProvider } from "./github-oauth.js";
 import { googleOAuthProvider } from "./google-oauth.js";
@@ -682,6 +683,23 @@ export async function composeServer(
           command_id: context.command_id,
         }),
     });
+
+    // The room A2A endpoint (T1623), only when enabled; off, /a2a/* is a plain 404.
+    if (config.a2aInbound) {
+      registerA2aInbound(app, {
+        dispatcher,
+        pool,
+        publicBaseUrl: config.a2aInbound.publicBaseUrl,
+        onInternalError: (error, context) =>
+          logInternalError(error, {
+            method: "POST",
+            route: "/a2a/rooms/:roomId",
+            command_method: context.method,
+            room_id: context.room_id,
+            participant_id: context.participant_id,
+          }),
+      });
+    }
 
     let closing: Promise<void> | undefined;
     const close = () =>
