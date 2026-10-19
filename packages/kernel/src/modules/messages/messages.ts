@@ -52,6 +52,8 @@ export const messagesListParams = z
     before: z.string().min(1).max(100).optional(),
     /** Messages newer than this message id. */
     after: z.string().min(1).max(100).optional(),
+    /** Only messages that reference this (a task, say): the `refs` they were sent with. */
+    ref: ref.optional(),
     limit: z.number().int().min(1).max(MAX_MESSAGE_PAGE).default(DEFAULT_MESSAGE_PAGE),
   })
   .refine((p) => p.before === undefined || p.after === undefined, "Use before or after, not both");
@@ -309,6 +311,10 @@ export function registerMessageCommands(dispatcher: Dispatcher): void {
         where += older
           ? " AND (created_at, id) < ($3::timestamptz, $4)"
           : " AND (created_at, id) > ($3::timestamptz, $4)";
+      }
+      if (p.ref) {
+        values.push(JSON.stringify([{ kind: p.ref.kind, id: p.ref.id }]));
+        where += ` AND refs @> $${values.length}::jsonb`;
       }
       const { rows } = await ctx.client.query<MessageRow>(
         `SELECT ${COLUMNS} FROM messages WHERE ${where}

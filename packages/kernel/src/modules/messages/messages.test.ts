@@ -445,6 +445,43 @@ describe("messages.list", () => {
     expect(everything.has_more).toBe(false);
   });
 
+  it("messages.list ref filter returns only messages referencing the task", async () => {
+    const s = await setup();
+    const task = async () => {
+      const id = newId("task");
+      await pool.query(
+        `INSERT INTO tasks (id, room_id, title, created_by) VALUES ($1, $2, 'T', $3)`,
+        [id, s.room, s.a.participant_id],
+      );
+      return id;
+    };
+    const [first, second] = [await task(), await task()];
+    await send(s, s.a, { body: "about first", refs: [{ kind: "task", id: first }] });
+    await send(s, s.b, { body: "about second", refs: [{ kind: "task", id: second }] });
+    await send(s, s.b, {
+      body: "about both",
+      refs: [
+        { kind: "task", id: first },
+        { kind: "task", id: second },
+      ],
+    });
+    await send(s, s.a, { body: "about nothing" });
+    const bodies = async (params: Record<string, unknown>) =>
+      (await list(s, s.observer, params)).messages.map((m) => m.body);
+    expect(await bodies({ ref: { kind: "task", id: first } })).toEqual([
+      "about first",
+      "about both",
+    ]);
+    expect(await bodies({ ref: { kind: "task", id: second } })).toEqual([
+      "about second",
+      "about both",
+    ]);
+    expect(await bodies({ ref: { kind: "task", id: second }, limit: 1 })).toEqual(["about both"]);
+    expect(await bodies({ ref: { kind: "task", id: newId("task") } })).toEqual([]);
+    // Without a ref nothing changes.
+    expect(await bodies({})).toHaveLength(4);
+  });
+
   it("pages back with before and forward with after, every message exactly once", async () => {
     const s = await setup();
     const all = await conversation(s, 11);
