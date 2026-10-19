@@ -78,7 +78,7 @@ function hashEmbedding(text: string): Float32Array {
   const normalized = text.normalize("NFKC").toLowerCase();
   for (const token of normalized.split(/[^\p{L}\p{N}]+/u)) {
     const characters = Array.from(token);
-    if (characters.length < 2) continue;
+    if (characters.length === 0) continue;
     addFeature(vector, token, 1);
     const padded = Array.from(`#${token}#`);
     for (let i = 0; i + 3 <= padded.length; i += 1)
@@ -99,6 +99,12 @@ export class HashEmbeddingProvider implements EmbeddingProvider {
     const vectors: Float32Array[] = [];
     for (const text of texts) {
       signal.throwIfAborted();
+      let length = 0;
+      for (let index = 0; index < text.length;) {
+        index += text.codePointAt(index)! > 0xffff ? 2 : 1;
+        if (++length > this.maxInputChars)
+          throw new RangeError(`Embedding input exceeds ${this.maxInputChars} code points`);
+      }
       vectors.push(hashEmbedding(text));
     }
     return vectors;

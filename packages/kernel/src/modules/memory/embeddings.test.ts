@@ -37,6 +37,22 @@ describe("HashEmbeddingProvider", () => {
     expect(cosine(query!, neighbour!)).toBeGreaterThan(cosine(query!, unrelated!));
   });
 
+  it("distinguishes single-character tokens from each other and empty text", async () => {
+    const [a, b, empty] = await provider.embed(["a", "b", ""], signal());
+    expect(norm(a!)).toBeCloseTo(1, 6);
+    expect(a).not.toEqual(b);
+    expect(a).not.toEqual(empty);
+  });
+
+  it("enforces the input limit by Unicode code point", async () => {
+    await expect(
+      provider.embed(["😀".repeat(provider.maxInputChars)], signal()),
+    ).resolves.toHaveLength(1);
+    await expect(
+      provider.embed(["short", "😀".repeat(provider.maxInputChars + 1)], signal()),
+    ).rejects.toThrow(RangeError);
+  });
+
   it("encodes and decodes float32 little-endian values", () => {
     const vector = Float32Array.from([1 / 3, -2.5, 0, Math.PI]);
     const encoded = encodeVector(vector);
