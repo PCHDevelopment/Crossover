@@ -133,9 +133,17 @@ export async function gitStream(
   let outputBytes = 0;
   let stderr = "";
   let callbackError: unknown;
+  let rejectTimeout: (reason: Error) => void = () => {};
+  const timeoutError = new Error("Git command timed out");
+  const timeoutPromise = new Promise<never>((_resolve, reject) => {
+    rejectTimeout = reject;
+  });
+  // The timeout can fire while stdout is being read, before the callback race.
+  void timeoutPromise.catch(() => {});
   const timer = setTimeout(() => {
     timedOut = true;
     child.kill("SIGKILL");
+    rejectTimeout(timeoutError);
   }, options.timeoutMs);
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", (chunk: string) => {
@@ -157,9 +165,9 @@ export async function gitStream(
       let shouldContinue = true;
       if (accepted.length) {
         try {
-          shouldContinue = await onChunk(accepted);
+          shouldContinue = await Promise.race([onChunk(accepted), timeoutPromise]);
         } catch (error) {
-          callbackError = error;
+          if (error !== timeoutError) callbackError = error;
           child.kill("SIGKILL");
           throw error;
         }
@@ -182,6 +190,10 @@ export async function gitStream(
     return { exitCode: code, stderr, truncated };
   } catch (error) {
     if (callbackError !== undefined) throw callbackError;
+    if (timedOut) {
+      const { signal } = await closed;
+      throw new GitError("Git command timed out", null, stderr, true, signal);
+    }
     if (error instanceof GitError) throw error;
     throw new GitError("Git command failed", null, stderr, timedOut, null, { cause: error });
   } finally {

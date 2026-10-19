@@ -56,6 +56,6 @@ it.each([
 });
 
 it("declines unsupported gitignore glob constructs", () => {
-  for (const glob of ["[a].txt", "{a,b}.txt", "\\a.txt", "!a.txt"])
+  for (const glob of ["[a].txt", "{a,b}.txt", "\\a.txt", "!a.txt", "x/a**b.txt"])
     expect(globToRegExpSource(glob)).toBeNull();
 });

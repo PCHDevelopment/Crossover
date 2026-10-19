@@ -9,6 +9,9 @@ export function globToRegExpSource(glob: string): string | null {
   for (let i = 0; i < pattern.length; i += 1) {
     const char = pattern[i]!;
     if (char === "*" && pattern[i + 1] === "*") {
+      const atSegmentStart = i === 0 || pattern[i - 1] === "/";
+      const atSegmentEnd = i + 2 === pattern.length || pattern[i + 2] === "/";
+      if (!atSegmentStart || !atSegmentEnd) return null;
       i += 1;
       if (pattern[i + 1] === "/") {
         i += 1;

@@ -145,6 +145,18 @@ describe("gitStream", () => {
     expect(result.truncated).toBe(true);
   });
 
+  it("bounds a pending callback by the timeout and waits for Git to close", async () => {
+    const f = await fixture('process.stdout.write("match\\n"); setInterval(() => {}, 1000);');
+    let callbackCalled = false;
+    await expect(
+      gitStream([], { env: f.env, timeoutMs: 500 }, () => {
+        callbackCalled = true;
+        return new Promise<boolean>(() => {});
+      }),
+    ).rejects.toMatchObject({ name: "GitError", timedOut: true, signal: "SIGKILL" });
+    expect(callbackCalled).toBe(true);
+  });
+
   it("propagates a callback error without converting it into a Git error", async () => {
     const f = await fixture('process.stdout.write("match\\n");');
     const denied = new Error("denied");
