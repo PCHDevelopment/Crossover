@@ -16,6 +16,7 @@ import { registerWorkspaceChangesetReads } from "./changeset-reads.js";
 import { registerWorkspaceHistory } from "./history.js";
 import { registerWorkspaceBlame } from "./blame.js";
 import { registerWorkspaceSearch } from "./search.js";
+import type { SearchBackend, SearchBackendName } from "./search-backend.js";
 import { refreshSearchTree } from "./search-tree.js";
 import { registerWorkspaceConflictReads } from "./conflict-reads.js";
 import { escalateOpenConflict, registerWorkspaceConflictActions } from "./conflict-actions.js";
@@ -53,6 +54,10 @@ export interface WorkspaceCommandDeps {
   scheduleSandboxAdvance?: (roomId: string, revision: number) => void;
   /** How `git.import` reaches an upstream: the fetcher, the credentials, the host check. */
   upstream?: UpstreamDeps;
+  /** Optional head search backends, primarily for controlled backend selection and tests. */
+  searchHeadBackends?: SearchBackend[];
+  /** Test/observability seam reporting the backend that served a search request. */
+  searchOnBackend?: (name: SearchBackendName) => void;
 }
 
 export type ApplyResponse =
@@ -240,7 +245,10 @@ export function registerWorkspaceCommands(
   registerWorkspaceChangesetReads(dispatcher);
   registerWorkspaceHistory(dispatcher);
   registerWorkspaceBlame(dispatcher);
-  registerWorkspaceSearch(dispatcher);
+  registerWorkspaceSearch(dispatcher, {
+    ...(deps.searchHeadBackends ? { headBackends: deps.searchHeadBackends } : {}),
+    ...(deps.searchOnBackend ? { onBackend: deps.searchOnBackend } : {}),
+  });
   registerWorkspaceConflictReads(dispatcher);
   registerWorkspaceConflictActions(dispatcher);
   registerWorkspaceHealthReads(dispatcher);

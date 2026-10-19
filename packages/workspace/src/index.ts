@@ -37,6 +37,16 @@ export {
 export type { ConflictEscalationSweeperOptions } from "./conflict-escalation-sweeper.js";
 export { workspaceReadParamsSchema, workspaceListParamsSchema } from "./reads.js";
 export { workspaceSearchParamsSchema } from "./search.js";
+export { ripgrepBackend } from "./search-backend.js";
+export { gitGrepBackend } from "./search-git-grep.js";
+export { globToRegExpSource } from "./search-glob.js";
+export type {
+  SearchBackend,
+  SearchBackendName,
+  SearchMatch,
+  SearchRequest,
+  SearchSink,
+} from "./search-backend.js";
 export { exclusiveSearchTree } from "./search-tree.js";
 export { copyableMemory, copyableMemoryStats } from "./snapshots.js";
 export type { CopyableMemoryEntry } from "./snapshots.js";

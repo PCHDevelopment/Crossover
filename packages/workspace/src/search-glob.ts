@@ -32,3 +32,61 @@ export function globToRegExpSource(glob: string): string | null {
 
   return hasSlash ? `^${body}$` : `(?:^|/)${body}$`;
 }
+
+export class GlobWorkLimitError extends Error {}
+
+/** Compile the supported subset once and bound total matching work across a search. */
+export function createGlobMatcher(
+  glob: string,
+  maxWork = 2_000_000,
+): ((path: string) => boolean) | null {
+  if (globToRegExpSource(glob) === null) return null;
+  const pattern = glob.includes("/") ? glob.replace(/^\//, "") : glob;
+  const tokens: string[] = [];
+  for (let i = 0; i < pattern.length; i += 1) {
+    if (pattern.startsWith("**/", i)) {
+      tokens.push("**/");
+      i += 2;
+    } else if (pattern.startsWith("**", i)) {
+      tokens.push("**");
+      i += 1;
+    } else {
+      tokens.push(pattern[i]!);
+    }
+  }
+
+  let remaining = maxWork;
+  return (path: string) => {
+    const target = glob.includes("/") ? path : path.slice(path.lastIndexOf("/") + 1);
+    const cost = (tokens.length + 1) * (target.length + 1);
+    if (cost > remaining) throw new GlobWorkLimitError("Historical glob work limit exceeded");
+    remaining -= cost;
+    let next = new Uint8Array(target.length + 1);
+    next[target.length] = 1;
+    for (let i = tokens.length - 1; i >= 0; i -= 1) {
+      const token = tokens[i]!;
+      const current = new Uint8Array(target.length + 1);
+      let suffixAfterSlash = false;
+      for (let j = target.length; j >= 0; j -= 1) {
+        const char = target[j];
+        if (token === "**/") {
+          if (char === "/" && next[j + 1]) suffixAfterSlash = true;
+          current[j] = next[j] || suffixAfterSlash ? 1 : 0;
+        } else if (token === "**") {
+          current[j] = next[j] || (j < target.length && current[j + 1]) ? 1 : 0;
+        } else if (token === "*") {
+          current[j] = next[j] || (j < target.length && char !== "/" && current[j + 1]) ? 1 : 0;
+        } else if (j < target.length && (token === "?" ? char !== "/" : char === token)) {
+          current[j] = next[j + 1]!;
+        }
+      }
+      next = current;
+    }
+    return next[0] === 1;
+  };
+}
+
+/** Match one path with the same bounded algorithm used by historical search. */
+export function globMatchesPath(glob: string, path: string): boolean {
+  return createGlobMatcher(glob)?.(path) ?? false;
+}

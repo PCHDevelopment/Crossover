@@ -9,6 +9,7 @@ import { afterAll, beforeAll, expect, it } from "vitest";
 import { registerWorkspaceCommands, type WorkspaceCommandDeps } from "./apply.js";
 import { provisionWorkspace } from "./provision.js";
 import type { Operation } from "./operations.js";
+import { ripgrepBackend } from "./search-backend.js";
 
 let db: TestDatabase;
 const dirs: string[] = [];
@@ -134,28 +135,79 @@ it("authorizes distinct matched paths once and silently excludes forbidden paths
   });
 });
 
-it("supports literal defaults, regex, case sensitivity and globs; rejects non-head revisions and malformed inputs", async () => {
-  const f = await fixture();
+it("searches a past revision with git grep, honouring regex, case and glob", async () => {
+  const backends: string[] = [];
+  const f = await fixture(allowAll, { searchOnBackend: (name) => backends.push(name) });
   await f.apply([
-    { type: "create", path: "file.txt", content: "needle.*\nNEEDLE.*\nneedle other\n" },
-    { type: "create", path: "other.js", content: "needle.*\n" },
+    { type: "create", path: "file.txt", content: "old needle.*\nOLD NEEDLE.*\nneedle other\n" },
+    { type: "create", path: "other.js", content: "old needle.*\n" },
   ]);
   expect(
     (await f.dispatch("workspace.search", { query: "needle.*", glob: "*.txt" })).response,
-  ).toMatchObject({ matches: [{ line: 1, text: "needle.*" }] });
+  ).toMatchObject({ workspace_revision: 1, matches: [{ line: 1, text: "old needle.*" }] });
+  expect(backends).toEqual(["ripgrep"]);
+  await f.apply(
+    [{ type: "modify", path: "file.txt", content: "new needle.*\nNEW NEEDLE.*\nneedle other\n" }],
+    1,
+  );
   expect(
     (
       await f.dispatch("workspace.search", {
-        query: "^needle",
+        query: "^.*needle",
         regex: true,
         case_sensitive: false,
         glob: "*.txt",
       })
     ).response,
   ).toMatchObject({ matches: [{ line: 1 }, { line: 2 }, { line: 3 }] });
+  expect(backends).toEqual(["ripgrep", "ripgrep"]);
+  await expect(
+    f.dispatch("workspace.search", { query: "^old", regex: true, revision: 1, glob: "*.txt" }),
+  ).resolves.toMatchObject({
+    response: {
+      workspace_revision: 1,
+      matches: [{ path: "file.txt", line: 1, text: "old needle.*" }],
+      truncated: false,
+    },
+  });
+  expect(backends).toEqual(["ripgrep", "ripgrep", "git_grep"]);
+  expect(
+    (
+      await f.dispatch("workspace.search", {
+        query: "OLD",
+        case_sensitive: false,
+        revision: 1,
+        glob: "*.txt",
+      })
+    ).response,
+  ).toMatchObject({
+    matches: [
+      { path: "file.txt", line: 1 },
+      { path: "file.txt", line: 2 },
+    ],
+  });
+  expect(
+    (await f.dispatch("workspace.search", { query: "needle", revision: 1, glob: "*.md" })).response,
+  ).toMatchObject({ matches: [] });
+  await expect(
+    f.dispatch("workspace.search", { query: "[", regex: true, revision: 1 }),
+  ).rejects.toMatchObject({ code: "VALIDATION", details: { reason: "invalid_search" } });
   await expect(
     f.dispatch("workspace.search", { query: "needle", revision: 0 }),
-  ).rejects.toMatchObject({ code: "VALIDATION", details: { reason: "search_head_only" } });
+  ).resolves.toMatchObject({
+    response: { workspace_revision: 0, matches: [], truncated: false },
+  });
+  await expect(
+    f.dispatch("workspace.search", { query: "needle", revision: 99 }),
+  ).rejects.toMatchObject({
+    code: "NOT_FOUND",
+  });
+  await expect(
+    f.dispatch("workspace.search", { query: "needle", revision: 1, glob: "{a,b}.txt" }),
+  ).rejects.toMatchObject({
+    code: "VALIDATION",
+    details: { reason: "glob_unsupported_for_revision" },
+  });
   for (const params of [
     { query: "" },
     { query: "a\0" },
@@ -166,6 +218,65 @@ it("supports literal defaults, regex, case sensitivity and globs; rejects non-he
     await expect(f.dispatch("workspace.search", params)).rejects.toMatchObject({
       code: "VALIDATION",
     });
+});
+
+it("past-revision search authorizes per path and rejects bad input", async () => {
+  const paths: string[] = [];
+  const f = await fixture(async (_principal, action, resource) => {
+    if (action === "workspace.read" && resource?.path) {
+      const path = resource.path as string;
+      paths.push(path);
+      if (path === "private") throw new CrossoverError("FORBIDDEN", "Denied");
+    }
+  });
+  await f.apply([
+    { type: "create", path: "private", content: "needle\n" },
+    { type: "create", path: "public", content: "needle\n" },
+  ]);
+  await f.apply([{ type: "modify", path: "public", content: "changed\n" }], 1);
+  expect((await f.dispatch("workspace.search", { query: "needle", revision: 1 })).response).toEqual(
+    {
+      workspace_revision: 1,
+      matches: [{ path: "public", line: 1, text: "needle" }],
+      truncated: false,
+    },
+  );
+  expect(paths.sort()).toEqual(["private", "public"]);
+  await expect(
+    f.dispatch("workspace.search", { query: "needle", revision: 1, glob: "{a,b}.txt" }),
+  ).rejects.toMatchObject({
+    code: "VALIDATION",
+    details: { reason: "glob_unsupported_for_revision" },
+  });
+  await expect(
+    f.dispatch("workspace.search", { query: "needle", revision: 99 }),
+  ).rejects.toMatchObject({
+    code: "NOT_FOUND",
+  });
+  await expect(
+    f.dispatch("workspace.search", { query: "[", regex: true, revision: 1 }),
+  ).rejects.toMatchObject({ code: "VALIDATION", details: { reason: "invalid_search" } });
+});
+
+it("falls through declined head backends and reports unavailable when none can serve", async () => {
+  const backend = { name: "zoekt" as const, search: async () => null };
+  const fallback = await fixture(allowAll, {
+    searchHeadBackends: [backend, ripgrepBackend],
+    searchOnBackend: (name) => expect(name).toBe("ripgrep"),
+  });
+  await fallback.apply([{ type: "create", path: "file", content: "needle" }]);
+  expect((await fallback.dispatch("workspace.search", { query: "needle" })).response).toMatchObject(
+    {
+      matches: [{ path: "file", text: "needle" }],
+    },
+  );
+  const unavailable = await fixture(allowAll, { searchHeadBackends: [] });
+  await expect(unavailable.dispatch("workspace.search", { query: "needle" })).rejects.toMatchObject(
+    {
+      code: "UNAVAILABLE",
+      details: { reason: "no_search_backend" },
+    },
+  );
 });
 
 // Measured (T1529): idle 2870 ms, 3x load 3407 ms; budget 7x.

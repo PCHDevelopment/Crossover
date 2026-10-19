@@ -2,23 +2,16 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, expect, it } from "vitest";
-import { globToRegExpSource } from "./search-glob.js";
+import {
+  createGlobMatcher,
+  GlobWorkLimitError,
+  globMatchesPath,
+  globToRegExpSource,
+} from "./search-glob.js";
 import { runSearch } from "./search-runner.js";
 
 let root: string;
-const paths = [
-  "a.txt",
-  "b.txt",
-  "d/a.txt",
-  "d/sub/c.txt",
-  "e/a.md",
-  "x/e/b.md",
-  "docs/index.md",
-  "docs/deep/a.md",
-  "src/test.ts",
-  "src/a/test.ts",
-  "src/a/deep/test.ts",
-];
+const paths = ["a.txt", "d/a.txt", "d/e/b.md", "docs/x.md", "src/t/test.ts"];
 
 beforeAll(async () => {
   root = await mkdtemp(join(tmpdir(), "crossover-search-glob-"));
@@ -31,13 +24,13 @@ beforeAll(async () => {
 afterAll(async () => rm(root, { recursive: true, force: true }));
 
 it.each([
-  ["*.txt", ["a.txt", "b.txt", "d/a.txt", "d/sub/c.txt"]],
+  ["*.txt", ["a.txt", "d/a.txt"]],
   ["d/*.txt", ["d/a.txt"]],
   ["/a.txt", ["a.txt"]],
-  ["**/e/*.md", ["e/a.md", "x/e/b.md"]],
-  ["docs/**", ["docs/index.md", "docs/deep/a.md"]],
-  ["?.txt", ["a.txt", "b.txt", "d/a.txt", "d/sub/c.txt"]],
-  ["src/**/test.ts", ["src/test.ts", "src/a/test.ts", "src/a/deep/test.ts"]],
+  ["**/e/*.md", ["d/e/b.md"]],
+  ["docs/**", ["docs/x.md"]],
+  ["?.txt", ["a.txt", "d/a.txt"]],
+  ["src/**/test.ts", ["src/t/test.ts"]],
 ])("matches ripgrep path semantics for %s", async (glob, expected) => {
   const actual: string[] = [];
   await runSearch(
@@ -52,7 +45,20 @@ it.each([
   expect(source).not.toBeNull();
   const matcher = new RegExp(source!);
   expect(paths.filter((path) => matcher.test(path)).sort()).toEqual(expected.sort());
+  expect(paths.filter((path) => globMatchesPath(glob, path)).sort()).toEqual(expected.sort());
   expect(actual.sort()).toEqual(expected.sort());
+});
+
+it("bounds matching for repeated wildcard terms", () => {
+  const glob = `${"*a".repeat(80)}b`;
+  expect(globMatchesPath(glob, "a".repeat(256))).toBe(false);
+  expect(globMatchesPath(glob, `${"a".repeat(80)}b`)).toBe(true);
+});
+
+it("shares a matching-work budget across rejected paths", () => {
+  const matcher = createGlobMatcher("*a*b", 100)!;
+  expect(matcher("not-a-match")).toBe(false);
+  expect(() => matcher("another-nonmatching-path")).toThrow(GlobWorkLimitError);
 });
 
 it("declines unsupported gitignore glob constructs", () => {

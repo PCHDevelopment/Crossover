@@ -496,14 +496,14 @@ The Git CLI (≥ 2.38) runs on the workspace node. `git merge-tree --write-tree`
 
 ## 9.5 Search
 
-The workspace node maintains a checked-out working tree of the canonical head (updated after every commit). `workspace.search` runs ripgrep against it, which is fast enough for repositories up to the NFR limit. A trigram index (e.g. Zoekt) is a Phase 2 upgrade for larger repositories.
+The workspace node maintains a checked-out working tree of the canonical head (updated after every commit). `workspace.search` runs ripgrep against it, which is fast enough for repositories up to the NFR limit. Past revisions are searched with `git grep` against the stored commit (no index); globs for past revisions support `*`, `?` and `**` only. A trigram index (e.g. Zoekt) is a Phase 2 upgrade for larger repositories.
 
 ## 9.6 File operations (read side)
 
 ```text
 workspace.list        path, revision?
 workspace.read        path, revision?   → content + file_revision + workspace_revision
-workspace.search      query, glob?, revision? (head only in MVP)
+workspace.search      query, glob?, revision? (any committed revision)
 workspace.diff        from_revision, to_revision, paths?
 workspace.history     path? , limit, before?
 workspace.blame       path, revision?
