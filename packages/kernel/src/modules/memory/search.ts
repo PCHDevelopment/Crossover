@@ -74,6 +74,8 @@ export function registerMemorySearchCommand(
         });
       let query: Float32Array;
       try {
+        // Before any I/O-bound (remote) provider ships, this must run before the pooled client is
+        // checked out (a read-side prepare); the in-process provider holds nothing up (O1, #492).
         const [vector] = await provider.embed([p.query], AbortSignal.timeout(timeoutMs));
         if (!vector || vector.length !== provider.dimensions) throw new Error("bad vector");
         query = normalize(vector);
