@@ -19,11 +19,11 @@ import {
   MAX_STATUS_OUTPUT_BYTES,
   type SandboxFileChanges,
 } from "./sandbox-status.js";
-import { dockerSocketPath, readDockerCpuUsageUsec } from "./docker/engine-api.js";
 import type { DockerModuleContext } from "./docker/context.js";
 import * as dockerNetworks from "./docker/networks.js";
 import * as dockerSnapshots from "./docker/snapshots.js";
 import * as dockerContainers from "./docker/containers.js";
+import * as dockerLifecycle from "./docker/lifecycle.js";
 import * as dockerVolumes from "./docker/volumes.js";
 import { gitFetcherName, sandboxNetworkName } from "./docker/networks.js";
 import { sandboxResources } from "./docker/containers.js";
@@ -174,35 +174,11 @@ export class DockerExecutionDriver implements ExecutionDriver {
     participant_id: string;
     limits: SandboxLimits;
   }): Promise<SandboxResources> {
-    const hard = input.limits.disk_enforcement === "hard";
-    if (hard && (!this.volumeDriver || Object.keys(this.volumeOptions).length === 0)) {
-      throw new Error(
-        "ERROR: SANDBOX_DISK_ENFORCEMENT=hard requires SANDBOX_VOLUME_DRIVER and nonempty SANDBOX_VOLUME_OPTS",
-      );
-    }
-
-    const resources = sandboxResources(input.sandbox_id);
-    if (this.egressProxyContainer) await this.ensureProxyNetwork(input.sandbox_id);
-    if (hard) await this.ensureHardVolume(resources.volume_ref);
-    else await this.ensureSoftVolume(resources.volume_ref);
-    await this.ensureContainer(input, resources, hard);
-    return resources;
+    return dockerLifecycle.create(this.context, input);
   }
 
   async start(input: { sandbox_id: string; resources: SandboxResources }): Promise<void> {
-    this.assertResources(input.sandbox_id, input.resources);
-    const inspected = await this.inspectContainer(input.resources.container_ref);
-    if (!inspected)
-      throw new Error(`ERROR: Docker sandbox container ${input.sandbox_id} is missing`);
-    if (inspected.running) return;
-    try {
-      await this.mustSucceed(
-        ["container", "start", input.resources.container_ref],
-        "ERROR: Docker container start failed",
-      );
-    } catch (error) {
-      if (!(await this.inspectContainer(input.resources.container_ref))?.running) throw error;
-    }
+    return dockerLifecycle.start(this.context, input);
   }
 
   /** Read cumulative CPU time from Docker's host-side stats API, keyed by container generation. */
@@ -210,46 +186,7 @@ export class DockerExecutionDriver implements ExecutionDriver {
     sandbox_id: string;
     resources: SandboxResources;
   }): Promise<SandboxCpuUsage> {
-    this.assertResources(input.sandbox_id, input.resources);
-    const inspected = await this.invoke([
-      "container",
-      "inspect",
-      "--format",
-      "{{.State.Running}}|{{.State.StartedAt}}",
-      input.resources.container_ref,
-    ]);
-    if (inspected.code !== 0)
-      throw new Error(`ERROR: Docker CPU inspect failed: ${inspected.stderr.trim()}`);
-    const [running, generation] = inspected.stdout.trim().split("|");
-    if (running !== "true" || !generation)
-      throw new Error(`ERROR: Docker sandbox ${input.sandbox_id} is not running for CPU sampling`);
-
-    let usage_usec: bigint;
-    try {
-      usage_usec = await readDockerCpuUsageUsec(
-        input.resources.container_ref,
-        dockerSocketPath(this.dockerStatsSocketPath),
-      );
-    } catch (error) {
-      throw new Error(
-        `ERROR: Docker host CPU stats read failed: ${error instanceof Error ? error.message : String(error)}`,
-        { cause: error },
-      );
-    }
-
-    const afterStats = await this.invoke([
-      "container",
-      "inspect",
-      "--format",
-      "{{.State.Running}}|{{.State.StartedAt}}",
-      input.resources.container_ref,
-    ]);
-    if (afterStats.code !== 0)
-      throw new Error(`ERROR: Docker CPU generation check failed: ${afterStats.stderr.trim()}`);
-    const [stillRunning, currentGeneration] = afterStats.stdout.trim().split("|");
-    if (stillRunning !== "true" || currentGeneration !== generation)
-      throw new Error(`ERROR: Docker sandbox ${input.sandbox_id} changed during CPU sampling`);
-    return { usage_usec, generation };
+    return dockerLifecycle.cpuUsage(this.context, input);
   }
 
   /** Run a shell command in a fresh process group and capture stdout and stderr separately. */
