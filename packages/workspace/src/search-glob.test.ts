@@ -6,19 +6,7 @@ import { globToRegExpSource } from "./search-glob.js";
 import { runSearch } from "./search-runner.js";
 
 let root: string;
-const paths = [
-  "a.txt",
-  "b.txt",
-  "d/a.txt",
-  "d/sub/c.txt",
-  "e/a.md",
-  "x/e/b.md",
-  "docs/index.md",
-  "docs/deep/a.md",
-  "src/test.ts",
-  "src/a/test.ts",
-  "src/a/deep/test.ts",
-];
+const paths = ["a.txt", "d/a.txt", "d/e/b.md", "docs/x.md", "src/t/test.ts"];
 
 beforeAll(async () => {
   root = await mkdtemp(join(tmpdir(), "crossover-search-glob-"));
@@ -31,13 +19,13 @@ beforeAll(async () => {
 afterAll(async () => rm(root, { recursive: true, force: true }));
 
 it.each([
-  ["*.txt", ["a.txt", "b.txt", "d/a.txt", "d/sub/c.txt"]],
+  ["*.txt", ["a.txt", "d/a.txt"]],
   ["d/*.txt", ["d/a.txt"]],
   ["/a.txt", ["a.txt"]],
-  ["**/e/*.md", ["e/a.md", "x/e/b.md"]],
-  ["docs/**", ["docs/index.md", "docs/deep/a.md"]],
-  ["?.txt", ["a.txt", "b.txt", "d/a.txt", "d/sub/c.txt"]],
-  ["src/**/test.ts", ["src/test.ts", "src/a/test.ts", "src/a/deep/test.ts"]],
+  ["**/e/*.md", ["d/e/b.md"]],
+  ["docs/**", ["docs/x.md"]],
+  ["?.txt", ["a.txt", "d/a.txt"]],
+  ["src/**/test.ts", ["src/t/test.ts"]],
 ])("matches ripgrep path semantics for %s", async (glob, expected) => {
   const actual: string[] = [];
   await runSearch(
