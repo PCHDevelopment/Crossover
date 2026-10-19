@@ -1,7 +1,8 @@
 import { CrossoverError } from "@crossover/protocol";
 import { normalizePath } from "../path.js";
 import { SANDBOX_SNAPSHOT_HELPER } from "../sandbox-snapshot-helper.js";
-import type { SandboxResources } from "../execution.js";
+import type { SandboxResources, SandboxSnapshotEntry, SandboxSnapshotFile } from "../execution.js";
+import { ignoredPrunedDirectories } from "../ignore.js";
 import type { DockerModuleContext } from "./context.js";
 
 const MAX_SNAPSHOT_OUTPUT_BYTES = 96 * 1024 * 1024;
@@ -178,4 +179,185 @@ export function snapshotPruningRetryFailed(path: string, cause: unknown): Crosso
     `Gitignore matcher disagreed for ${path}; unpruned re-inventory failed`,
     { cause, retryable: false, details: { reason: "ignore_pruning_retry_failed", path } },
   );
+}
+
+/** Inventory file bytes without calling Git or traversing a symlink from the sandbox. */
+export async function snapshotInventory(
+  ctx: DockerModuleContext,
+  input: {
+    sandbox_id: string;
+    resources: SandboxResources;
+    tracked_paths: readonly string[];
+    object_format: "sha1" | "sha256";
+    ignore_rules?: { path: string; patterns: string[] }[];
+  },
+): Promise<SandboxSnapshotEntry[]> {
+  const request = {
+    action: "inventory",
+    hash: input.object_format,
+    tracked_paths: input.tracked_paths.map((path) => Buffer.from(path, "utf8").toString("base64")),
+    ignore_rules: input.ignore_rules ?? [],
+    max_bytes: 1024 * 1024 * 1024,
+  };
+  let payload = await runSnapshotHelper(ctx, input.resources, request);
+  if (!Array.isArray(payload.entries) || !Array.isArray(payload.pruned_directories))
+    throw snapshotUnavailable();
+  const verifiedPrunedDirectories = async (reported: unknown[]) => {
+    const paths = reported.map((path) => {
+      if (typeof path !== "string") throw snapshotUnavailable();
+      return decodeSnapshotPath(path);
+    });
+    let ignored: ReadonlySet<string>;
+    try {
+      ignored = await ignoredPrunedDirectories(input.ignore_rules ?? [], paths);
+    } catch (cause) {
+      throw new CrossoverError(
+        "UNAVAILABLE",
+        "Canonical Git ignore rules could not verify sandbox pruning; retry the request",
+        { cause, retryable: true, details: { reason: "ignore_pruning_verification_failed" } },
+      );
+    }
+    return paths.filter((path) => !ignored.has(path));
+  };
+  let mismatches = await verifiedPrunedDirectories(payload.pruned_directories);
+  if (mismatches.length) {
+    const path = mismatches[0]!;
+    try {
+      payload = await runSnapshotHelper(ctx, input.resources, {
+        ...request,
+        unprune_directories: mismatches.map((entry) =>
+          Buffer.from(entry, "utf8").toString("base64"),
+        ),
+      });
+      if (!Array.isArray(payload.entries) || !Array.isArray(payload.pruned_directories))
+        throw new Error("invalid_inventory");
+      mismatches = await verifiedPrunedDirectories(payload.pruned_directories);
+      if (mismatches.length) throw new Error(`pruning_mismatch:${mismatches[0]}`);
+    } catch (cause) {
+      if (cause instanceof CrossoverError && cause.retryable) throw cause;
+      throw snapshotPruningRetryFailed(path, cause);
+    }
+  }
+  return payload.entries.map((entry: unknown) => {
+    if (
+      !entry ||
+      typeof entry !== "object" ||
+      !("path" in entry) ||
+      typeof entry.path !== "string" ||
+      !("mode" in entry) ||
+      typeof entry.mode !== "string" ||
+      !("sha" in entry) ||
+      (entry.sha !== null && typeof entry.sha !== "string") ||
+      !("size" in entry) ||
+      typeof entry.size !== "number" ||
+      !Number.isSafeInteger(entry.size) ||
+      entry.size < 0
+    ) {
+      throw snapshotUnavailable();
+    }
+    return {
+      path: decodeSnapshotPath(entry.path),
+      mode: entry.mode,
+      sha: entry.sha,
+      size: entry.size,
+    };
+  });
+}
+
+/** Read a single regular file without following a symlink from the working copy. */
+export async function readFile(
+  ctx: DockerModuleContext,
+  input: {
+    sandbox_id: string;
+    resources: SandboxResources;
+    path: string;
+    max_bytes: number;
+  },
+): Promise<{ mode: string; content: Buffer }> {
+  const encodedPath = Buffer.from(input.path, "utf8").toString("base64");
+  const payload = await runSnapshotHelper(ctx, input.resources, {
+    action: "file_read",
+    path: encodedPath,
+    max_bytes: input.max_bytes,
+  });
+  const file = payload.file as
+    { path?: unknown; mode?: unknown; size?: unknown; content?: unknown } | undefined;
+  if (
+    !file ||
+    file.path !== encodedPath ||
+    (file.mode !== "100644" && file.mode !== "100755") ||
+    typeof file.size !== "number" ||
+    !Number.isSafeInteger(file.size) ||
+    file.size < 0 ||
+    typeof file.content !== "string"
+  ) {
+    throw snapshotUnavailable();
+  }
+  const content = Buffer.from(file.content, "base64");
+  if (content.length !== file.size || content.toString("base64") !== file.content)
+    throw snapshotUnavailable();
+  return { mode: file.mode, content };
+}
+
+/** Return exact bytes for the selected inventory paths, rejecting changes between the two reads. */
+export async function readSnapshotFiles(
+  ctx: DockerModuleContext,
+  input: {
+    sandbox_id: string;
+    resources: SandboxResources;
+    files: readonly SandboxSnapshotEntry[];
+    object_format: "sha1" | "sha256";
+    max_bytes: number;
+  },
+): Promise<SandboxSnapshotFile[]> {
+  const payload = await runSnapshotHelper(ctx, input.resources, {
+    action: "read",
+    hash: input.object_format,
+    paths: input.files.map((file) => ({
+      path: Buffer.from(file.path, "utf8").toString("base64"),
+      mode: file.mode,
+      sha: file.sha,
+      size: file.size,
+    })),
+    max_bytes: input.max_bytes,
+  });
+  if (!Array.isArray(payload.entries) || payload.entries.length !== input.files.length)
+    throw snapshotUnavailable();
+  return payload.entries.map((entry: unknown, index: number) => {
+    if (
+      !entry ||
+      typeof entry !== "object" ||
+      !("path" in entry) ||
+      typeof entry.path !== "string" ||
+      !("mode" in entry) ||
+      typeof entry.mode !== "string" ||
+      !("sha" in entry) ||
+      typeof entry.sha !== "string" ||
+      !("size" in entry) ||
+      typeof entry.size !== "number" ||
+      !Number.isSafeInteger(entry.size) ||
+      !("content" in entry) ||
+      typeof entry.content !== "string"
+    ) {
+      throw snapshotUnavailable();
+    }
+    const expected = input.files[index]!;
+    const content = Buffer.from(entry.content, "base64");
+    if (
+      decodeSnapshotPath(entry.path) !== expected.path ||
+      entry.mode !== expected.mode ||
+      (expected.sha !== null && entry.sha !== expected.sha) ||
+      content.length !== entry.size ||
+      entry.size !== expected.size
+    ) {
+      throw snapshotChanged();
+    }
+    return {
+      path: expected.path,
+      mode: entry.mode,
+      sha: entry.sha,
+      size: entry.size,
+      content,
+    };
+  });
 }
