@@ -1,7 +1,6 @@
 import { spawn } from "node:child_process";
 import { isAbsolute } from "node:path";
 import type { Readable } from "node:stream";
-import { createSandboxReadToken, SANDBOX_READ_TOKEN_MAX_TTL_MS } from "@crossover/security";
 import { CrossoverError, isId } from "@crossover/protocol";
 import type {
   ExecutionDriver,
@@ -25,7 +24,7 @@ import * as dockerSnapshots from "./docker/snapshots.js";
 import * as dockerContainers from "./docker/containers.js";
 import * as dockerLifecycle from "./docker/lifecycle.js";
 import * as dockerVolumes from "./docker/volumes.js";
-import { gitFetcherName, sandboxNetworkName } from "./docker/networks.js";
+import { sandboxNetworkName } from "./docker/networks.js";
 import { sandboxResources } from "./docker/containers.js";
 import {
   invokeDocker,
@@ -44,7 +43,6 @@ export type {
 const DEFAULT_IMAGE = "node:22-bookworm-slim";
 const DEFAULT_GIT_FETCHER_IMAGE = "crossover-git-fetcher:latest";
 export const DEFAULT_GIT_INTERNAL_NETWORK = "crossover-git";
-const FETCH_TIMEOUT_MS = 4 * 60 * 1000;
 
 /** Local Docker implementation of the execution host interface (§14.6). */
 export class DockerExecutionDriver implements ExecutionDriver {
@@ -386,92 +384,7 @@ export class DockerExecutionDriver implements ExecutionDriver {
     resources: SandboxResources;
     workspace: { repo_path: string; revision: number };
   }): Promise<void> {
-    if (!this.gitInternalContainer || !this.gitInternalTokenSecret)
-      throw new Error("Internal Git fetch is not configured");
-    this.assertResources(input.sandbox_id, input.resources);
-    if (!isAbsolute(input.workspace.repo_path) || input.workspace.repo_path.includes("\0"))
-      throw new Error("Workspace reference repository path must be absolute");
-    if (!Number.isSafeInteger(input.workspace.revision) || input.workspace.revision < 0)
-      throw new Error("Workspace revision must be a nonnegative safe integer");
-
-    await this.ensureGitNetwork();
-    const now = Date.now();
-    const token = createSandboxReadToken(
-      {
-        room_id: input.room_id,
-        participant_id: input.participant_id,
-        sandbox_id: input.sandbox_id,
-        revision: input.workspace.revision,
-        expires_at: now + SANDBOX_READ_TOKEN_MAX_TTL_MS,
-      },
-      this.gitInternalTokenSecret,
-      now,
-    );
-    const containerName = gitFetcherName(input.sandbox_id);
-    const remote = `http://${this.gitInternalContainer}:${this.gitInternalPort}/git/${encodeURIComponent(input.room_id)}/${encodeURIComponent(input.sandbox_id)}/${input.workspace.revision}`;
-    const args = [
-      "run",
-      "--rm",
-      "--init",
-      "--name",
-      containerName,
-      "--label",
-      "crossover.git.fetch=true",
-      "--label",
-      `crossover.room=${input.room_id}`,
-      "--label",
-      `crossover.sandbox=${input.sandbox_id}`,
-      `--network=${this.gitInternalNetwork}`,
-      "--read-only",
-      "--user=1000:1000",
-      "--cap-drop=ALL",
-      "--security-opt=no-new-privileges",
-      "--memory=1g",
-      "--cpus=1",
-      "--pids-limit=64",
-      "--tmpfs",
-      "/tmp:rw,nosuid,size=512m",
-      "--env",
-      "HOME=/tmp",
-      "--env",
-      `GIT_REMOTE_URL=${remote}`,
-      "--env",
-      "GIT_TERMINAL_PROMPT=0",
-      "--env",
-      "GIT_CONFIG_NOSYSTEM=1",
-      "--env",
-      "GIT_CONFIG_GLOBAL=/dev/null",
-      "--env",
-      "GIT_CONFIG_COUNT=1",
-      "--env",
-      "GIT_CONFIG_KEY_0=http.extraHeader",
-      "--env",
-      "GIT_CONFIG_VALUE_0",
-      "--mount",
-      `type=volume,source=${input.resources.volume_ref},target=/workspace,volume-nocopy`,
-      "--mount",
-      `type=bind,source=${input.workspace.repo_path},target=/reference.git,readonly`,
-    ];
-    if (this.runtime) args.push("--runtime", this.runtime);
-    args.push(this.gitFetcherImage);
-
-    await this.removeFetcher(containerName);
-    try {
-      const result = await this.invoke(args, {
-        timeoutMs: FETCH_TIMEOUT_MS,
-        maxBuffer: 1024 * 1024,
-        env: { GIT_CONFIG_VALUE_0: `Authorization: Bearer ${token}` },
-      });
-      if (result.code !== 0) {
-        throw new Error(
-          `ERROR: workspace fetch failed: ${result.stderr.replaceAll(token, "[REDACTED]").trim()}`,
-        );
-      }
-    } finally {
-      await this.removeFetcher(containerName).catch((error: unknown) =>
-        console.error("[execution] failed to remove Git fetcher container", error),
-      );
-    }
+    return dockerLifecycle.materialize(this.context, input);
   }
 
   /** Inspect the sandbox volume with Git, even when the agent image has no Git binary. */
