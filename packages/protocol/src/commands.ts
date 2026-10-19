@@ -18,6 +18,7 @@ export const METHODS = {
   "room.events.subscribe": { mutating: false },
   "room.events.list": { mutating: false },
   "room.set_egress_allowlist": { mutating: true },
+  "room.set_a2a_allowlist": { mutating: true },
   "room.set_protected_paths": { mutating: true },
   "room.set_health": { mutating: true },
   "budgets.get": { mutating: false },
@@ -119,6 +120,10 @@ export const METHODS = {
 
   "tools.list": { mutating: false },
   "tools.invoke": { mutating: true },
+
+  "a2a.remotes.add": { mutating: true },
+  "a2a.remotes.refresh": { mutating: true },
+  "a2a.remotes.list": { mutating: false },
 
   "integrations.connect": { mutating: true },
   "integrations.disconnect": { mutating: true },

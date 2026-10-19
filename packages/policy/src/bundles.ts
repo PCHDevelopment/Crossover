@@ -78,6 +78,7 @@ export const CAPABILITIES = {
   "room.transfer_lead": { mutating: true },
 
   // ---- authority powers (§6.2)
+  "a2a.manage": { mutating: true },
   "room.invite": { mutating: true },
   "room.set_lead": { mutating: true },
   "participants.set_role": { mutating: true },
@@ -249,6 +250,7 @@ const OWNER_POWERS = [
   "capabilities.grant_tier3",
   "events.redact",
   "integrations.manage",
+  "a2a.manage",
   "protected_paths.set",
   "health.set",
   "workspace.decide_hold",

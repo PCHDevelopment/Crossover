@@ -6,7 +6,7 @@ const CATALOG = `
 room.created / room.paused / room.resumed / room.archived / room.unarchived / room.exported
 room.branched / room.branched_from / room.branch_merged
 room.retention_changed
-room.egress_allowlist_changed
+room.egress_allowlist_changed / room.a2a_allowlist_changed
 room.protected_paths_changed
 room.health_settings_changed
 room.budgets_changed
@@ -45,6 +45,8 @@ sandbox.exec.started / sandbox.exec.finished
 
 tool.invoked / tool.completed / tool.failed
 
+a2a.remote_added / a2a.remote_card_updated / a2a.remote_card_failed
+a2a.call_sent / a2a.call_updated / a2a.call_finished
 integration.connected / integration.disconnected
 
 budget.exceeded / circuit_breaker.tripped / loop.detected
@@ -68,7 +70,7 @@ const valid = {
 
 describe("EVENT_TYPES", () => {
   it("contains every type in the §19.5 catalog, and nothing else", () => {
-    expect(catalogTypes).toHaveLength(82);
+    expect(catalogTypes).toHaveLength(89);
     expect([...EVENT_TYPES].sort()).toEqual([...catalogTypes].sort());
   });
 

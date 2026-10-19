@@ -3,6 +3,9 @@ PROTOCOL_VERSION = 1
 
 # method name -> True when the command mutates (it gets an idempotency key)
 METHODS: dict[str, bool] = {
+    "a2a.remotes.add": True,
+    "a2a.remotes.list": False,
+    "a2a.remotes.refresh": True,
     "approvals.decide": True,
     "approvals.list": False,
     "approvals.withdraw": True,
@@ -70,6 +73,7 @@ METHODS: dict[str, bool] = {
     "room.get_state": False,
     "room.invite": True,
     "room.resume": True,
+    "room.set_a2a_allowlist": True,
     "room.set_egress_allowlist": True,
     "room.set_health": True,
     "room.set_lead": True,
