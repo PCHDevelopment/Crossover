@@ -201,13 +201,16 @@ describe("MemoryEmbeddingIndexer", () => {
       onError: (_error, roomId) => attempted.push(roomId),
     });
 
-    await indexer.sweep();
-    await vi.waitFor(() => expect(attempted).toHaveLength(100), { timeout: 15_000 });
-    await indexer.sweep();
-    await vi.waitFor(() => expect(attempted).toContain(ids.sort()[100]), { timeout: 15_000 });
-    await indexer.close();
-    await db.pool.query("DELETE FROM memory_entries WHERE room_id = ANY($1::text[])", [ids]);
-    await db.pool.query("DELETE FROM rooms WHERE id = ANY($1::text[])", [ids]);
+    try {
+      await indexer.sweep();
+      await vi.waitFor(() => expect(attempted).toHaveLength(100), { timeout: 15_000 });
+      await indexer.sweep();
+      await vi.waitFor(() => expect(attempted).toContain(ids.sort()[100]), { timeout: 15_000 });
+    } finally {
+      await indexer.close();
+      await db.pool.query("DELETE FROM memory_entries WHERE room_id = ANY($1::text[])", [ids]);
+      await db.pool.query("DELETE FROM rooms WHERE id = ANY($1::text[])", [ids]);
+    }
   }, 20_000);
 
   it("does not start queued rooms after close", async () => {
