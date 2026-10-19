@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { CrossoverError } from "@crossover/protocol";
+import type { SearchMatch } from "./search-backend.js";
 
 export type SearchOptions = {
   query: string;
@@ -7,7 +8,7 @@ export type SearchOptions = {
   case_sensitive: boolean;
   glob?: string;
 };
-export type SearchMatch = { path: string; line: number; text: string };
+export type { SearchMatch } from "./search-backend.js";
 
 /** Stream JSON with backpressure; callback false stops the child once public limits are reached. */
 export async function runSearch(

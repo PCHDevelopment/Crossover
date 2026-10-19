@@ -37,6 +37,16 @@ export {
 export type { ConflictEscalationSweeperOptions } from "./conflict-escalation-sweeper.js";
 export { workspaceReadParamsSchema, workspaceListParamsSchema } from "./reads.js";
 export { workspaceSearchParamsSchema } from "./search.js";
+export { ripgrepBackend } from "./search-backend.js";
+export { gitGrepBackend } from "./search-git-grep.js";
+export { globToRegExpSource } from "./search-glob.js";
+export type {
+  SearchBackend,
+  SearchBackendName,
+  SearchMatch,
+  SearchRequest,
+  SearchSink,
+} from "./search-backend.js";
 export { exclusiveSearchTree } from "./search-tree.js";
 export { workspaceDiffParamsSchema, workspaceHistoryParamsSchema } from "./history.js";
 export { workspaceBlameParamsSchema } from "./blame.js";
