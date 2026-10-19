@@ -582,6 +582,39 @@ describe("A2A inbound: SendMessage (T1623)", () => {
     expect(await s.taskCount()).toBe(0);
   });
 
+  it('a data-only message gets the title "A2A request", never a code fence', async () => {
+    const s = await setup();
+    const { body } = await send(s, s.dev.token, { parts: [{ data: { retries: 3 } }] });
+    const row = await pool.query("SELECT title FROM tasks WHERE id = $1", [body["result"].task.id]);
+    expect(row.rows[0].title).toBe("A2A request");
+    expect((await s.messages())[0]!.body).toBe("New A2A request: A2A request");
+    // With a text part, the title comes from it even when a data part is first.
+    const mixed = await send(s, s.dev.token, {
+      parts: [{ data: { a: 1 } }, { text: "Fix the build" }],
+    });
+    const mixedRow = await pool.query("SELECT title FROM tasks WHERE id = $1", [
+      mixed.body["result"].task.id,
+    ]);
+    expect(mixedRow.rows[0].title).toBe("Fix the build");
+  });
+
+  it("a messageId containing a colon cannot collide with another operation's key", async () => {
+    const s = await setup();
+    const created = (await send(s, s.dev.token, { messageId: "x" })).body["result"].task.id;
+    for (const messageId of ["x:create", "x:notify", "create:x", "reply:x"]) {
+      const reply = await send(s, s.dev.token, {
+        messageId,
+        taskId: created,
+        parts: [{ text: `reply ${messageId}` }],
+      });
+      expect(reply.body["error"], messageId).toBeUndefined();
+    }
+    const bodies = (await s.messages()).map((m) => m.body);
+    for (const messageId of ["x:create", "x:notify", "create:x", "reply:x"])
+      expect(bodies, messageId).toContain(`reply ${messageId}`);
+    expect(await s.taskCount()).toBe(1);
+  });
+
   it("a data part becomes a fenced json block after the text", async () => {
     const s = await setup();
     const { body } = await send(s, s.dev.token, {

@@ -40,6 +40,7 @@ const DEFAULT_PAGE = 50;
 const NO_STORE = "no-store";
 const MAX_TEXT_CHARS = 20_000;
 const MAX_TITLE_CHARS = 200;
+const DEFAULT_TITLE = "A2A request";
 const DEFAULT_REQUIREMENT = "Answer the requesting agent's message";
 
 /** A JSON-RPC method this server declines on purpose, with the error that says why (§15.5). */
@@ -222,9 +223,14 @@ export function registerA2aInbound(app: FastifyInstance, options: A2aInboundOpti
         if (m.taskId === undefined) {
           const meta = m.metadata ?? {};
           const named = typeof meta["crossover.title"] === "string" ? meta["crossover.title"] : "";
-          const title = (
-            named.trim() || (text.split("\n").find((l) => l.trim()) ?? "").trim()
-          ).slice(0, MAX_TITLE_CHARS);
+          // From the text parts only: a data part's fenced block must never become a title.
+          const firstLine = m.parts
+            .flatMap((part) => (part.text === undefined ? [] : part.text.split("\n")))
+            .find((line) => line.trim());
+          const title = (named.trim() || firstLine?.trim() || DEFAULT_TITLE).slice(
+            0,
+            MAX_TITLE_CHARS,
+          );
           const requirements = meta["crossover.requirements"];
           const created = (await call(
             principal,
@@ -234,7 +240,7 @@ export function registerA2aInbound(app: FastifyInstance, options: A2aInboundOpti
               description: text,
               requirements: Array.isArray(requirements) ? requirements : [DEFAULT_REQUIREMENT],
             },
-            `a2a:${m.messageId}:create`,
+            `a2a:create:${m.messageId}`,
           )) as CrossoverTaskView;
           taskId = created.id;
           await call(
@@ -245,13 +251,14 @@ export function registerA2aInbound(app: FastifyInstance, options: A2aInboundOpti
               refs: [{ kind: "task", id: taskId }],
               mentions: people.lead && people.lead !== caller ? [people.lead] : [],
             },
-            `a2a:${m.messageId}:notify`,
+            `a2a:notify:${m.messageId}`,
           );
         } else {
           const task = await loadTask(principal, m.taskId);
           taskId = task.id;
-          // The lead, and the owner when a human; another agent is never mentioned, so no
-          // agent-to-agent send check can apply to an inbound message.
+          // The lead (an agent or a human) and the owner when a human; an agent that merely owns
+          // the task is not mentioned. Each key has its own prefix with the caller's value last,
+          // so a messageId containing ":" cannot collide with another operation's key.
           const targets = [
             people.lead,
             task.owner_id && people.kindOf(task.owner_id) === "HUMAN" ? task.owner_id : null,
@@ -260,7 +267,7 @@ export function registerA2aInbound(app: FastifyInstance, options: A2aInboundOpti
             principal,
             "messages.send",
             { body: text, refs: [{ kind: "task", id: taskId }], mentions: [...new Set(targets)] },
-            `a2a:${m.messageId}`,
+            `a2a:reply:${m.messageId}`,
           );
         }
         const task = await loadTask(principal, taskId);
