@@ -414,7 +414,7 @@ Task creation and management are explicit. No task is generated from chat.
 | `review_round` | Increments on each submit into REVIEW |
 | `blocked_reason` | Required when BLOCKED |
 | `lease_expires_at` | Agent claim lease (§8.4) |
-| `reviews[]` | `{ reviewer_id, verdict: APPROVE | REQUEST_CHANGES | COMMENT, comments, revision, round, overrides, created_at }` |
+| `reviews[]` | `{ reviewer_id, verdict: APPROVE \| REQUEST_CHANGES \| COMMENT, comments, revision, round, overrides, created_at }` |
 | `version` | Optimistic concurrency |
 | `created_at` / `updated_at` | Audit timestamps |
 
