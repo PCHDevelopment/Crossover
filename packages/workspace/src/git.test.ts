@@ -2,7 +2,7 @@ import { mkdtemp, writeFile, rm, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { assertGitVersion, git, GitError } from "./git.js";
+import { assertGitVersion, git, gitStream, GitError } from "./git.js";
 
 const dirs: string[] = [];
 async function fixture(source: string) {
@@ -119,6 +119,52 @@ describe("git", () => {
     ).rejects.toMatchObject({ name: "GitError", timedOut: true, signal: "SIGKILL" });
     const pid = Number(await readFile(pidFile, "utf8"));
     expect(() => process.kill(pid, 0)).toThrow();
+  });
+});
+
+describe("gitStream", () => {
+  it("streams output and treats exit 1 as a completed no-match search", async () => {
+    const f = await fixture('process.stdout.write("first\\nsecond\\n"); process.exit(1);');
+    const chunks: Buffer[] = [];
+    const result = await gitStream([], { env: f.env, timeoutMs: 5000 }, (chunk) => {
+      chunks.push(chunk);
+      return true;
+    });
+    expect(Buffer.concat(chunks).toString()).toBe("first\nsecond\n");
+    expect(result).toMatchObject({ exitCode: 1, truncated: false });
+  });
+
+  it("bounds output before passing it to the callback", async () => {
+    const f = await fixture('process.stdout.write("x".repeat(1000));');
+    const chunks: Buffer[] = [];
+    const result = await gitStream([], { env: f.env, timeoutMs: 5000, maxBuffer: 10 }, (chunk) => {
+      chunks.push(chunk);
+      return true;
+    });
+    expect(Buffer.concat(chunks).toString()).toBe("x".repeat(10));
+    expect(result.truncated).toBe(true);
+  });
+
+  it("bounds a pending callback by the timeout and waits for Git to close", async () => {
+    const f = await fixture('process.stdout.write("match\\n"); setInterval(() => {}, 1000);');
+    let callbackCalled = false;
+    await expect(
+      gitStream([], { env: f.env, timeoutMs: 500 }, () => {
+        callbackCalled = true;
+        return new Promise<boolean>(() => {});
+      }),
+    ).rejects.toMatchObject({ name: "GitError", timedOut: true, signal: "SIGKILL" });
+    expect(callbackCalled).toBe(true);
+  });
+
+  it("propagates a callback error without converting it into a Git error", async () => {
+    const f = await fixture('process.stdout.write("match\\n");');
+    const denied = new Error("denied");
+    await expect(
+      gitStream([], { env: f.env, timeoutMs: 5000 }, () => {
+        throw denied;
+      }),
+    ).rejects.toBe(denied);
   });
 });
 
