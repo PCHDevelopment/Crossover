@@ -1,15 +1,10 @@
 import { spawn } from "node:child_process";
 import { isAbsolute } from "node:path";
 import type { Readable } from "node:stream";
-import {
-  createSandboxProxyCredential,
-  createSandboxReadToken,
-  SANDBOX_READ_TOKEN_MAX_TTL_MS,
-} from "@crossover/security";
+import { createSandboxReadToken, SANDBOX_READ_TOKEN_MAX_TTL_MS } from "@crossover/security";
 import { CrossoverError, isId } from "@crossover/protocol";
 import { normalizePath } from "./path.js";
 import { ignoredPrunedDirectories } from "./ignore.js";
-import { SANDBOX_VCPU_COUNT } from "./execution.js";
 import type {
   ExecutionDriver,
   SandboxCpuUsage,
@@ -30,8 +25,10 @@ import { SANDBOX_SNAPSHOT_HELPER } from "./sandbox-snapshot-helper.js";
 import { dockerSocketPath, readDockerCpuUsageUsec } from "./docker/engine-api.js";
 import type { DockerModuleContext } from "./docker/context.js";
 import * as dockerNetworks from "./docker/networks.js";
+import * as dockerContainers from "./docker/containers.js";
 import * as dockerVolumes from "./docker/volumes.js";
-import { gitFetcherName, safeSandboxId, sandboxNetworkName } from "./docker/networks.js";
+import { gitFetcherName, sandboxNetworkName } from "./docker/networks.js";
+import { sandboxResources } from "./docker/containers.js";
 import {
   invokeDocker,
   mustSucceed,
@@ -1058,103 +1055,7 @@ export class DockerExecutionDriver implements ExecutionDriver {
     hard: boolean,
   ): Promise<void> {
     const network = this.egressProxyContainer ? sandboxNetworkName(input.sandbox_id) : "none";
-    const existing = await this.inspectContainer(resources.container_ref);
-    if (existing) {
-      await this.assertIsolation(resources.container_ref, network);
-      if (hard) await this.assertHardContainer(resources.container_ref);
-      return;
-    }
-    await this.initializeWorkspaceVolume(resources.volume_ref);
-    const args = [
-      "container",
-      "create",
-      "--name",
-      resources.container_ref,
-      "--label",
-      "crossover.sandbox=true",
-      "--label",
-      `crossover.room=${input.room_id}`,
-      "--label",
-      `crossover.participant=${input.participant_id}`,
-      "--init",
-      `--network=${network}`,
-      "--user=1000:1000",
-      "--cap-drop=ALL",
-      "--security-opt=no-new-privileges",
-      "--pids-limit=256",
-      "--env",
-      "HOME=/tmp",
-      `--cpus=${SANDBOX_VCPU_COUNT}`,
-      "--memory=4g",
-      "--tmpfs",
-      "/tmp:rw,nosuid,size=512m",
-    ];
-    if (this.egressProxyContainer) {
-      const credential = createSandboxProxyCredential(input.sandbox_id, this.egressProxySecret!);
-      const proxyUrl = `http://${encodeURIComponent(input.sandbox_id)}:${encodeURIComponent(credential)}@${this.egressProxyContainer}:${this.egressProxyPort}`;
-      for (const [name, value] of [
-        ["HTTP_PROXY", proxyUrl],
-        ["HTTPS_PROXY", proxyUrl],
-        ["ALL_PROXY", proxyUrl],
-        ["NO_PROXY", "localhost,127.0.0.1,::1"],
-        ["http_proxy", proxyUrl],
-        ["https_proxy", proxyUrl],
-        ["all_proxy", proxyUrl],
-        ["no_proxy", "localhost,127.0.0.1,::1"],
-      ]) {
-        args.push("--env", `${name}=${value}`);
-      }
-    }
-    if (this.runtime) args.push("--runtime", this.runtime);
-    if (hard) args.push("--storage-opt=size=20G");
-    args.push(
-      "--mount",
-      `type=volume,source=${resources.volume_ref},target=/workspace,volume-nocopy`,
-      "--workdir",
-      "/workspace",
-      this.image,
-      "sleep",
-      "infinity",
-    );
-    try {
-      await this.mustSucceed(
-        args,
-        hard
-          ? "ERROR: hard-enforced sandbox container creation failed"
-          : "ERROR: sandbox container creation failed",
-      );
-    } catch (error) {
-      if (!(await this.inspectContainer(resources.container_ref))) throw error;
-      await this.assertIsolation(resources.container_ref, network);
-      if (hard) await this.assertHardContainer(resources.container_ref);
-    }
-  }
-
-  /** Give the sandbox's unprivileged UID write access to the workspace volume root. */
-  private async initializeWorkspaceVolume(name: string): Promise<void> {
-    return dockerVolumes.initializeWorkspaceVolume(this.context, name);
-  }
-
-  /** Reject resources created before the default-deny and unprivileged defaults were enforced. */
-  private async assertIsolation(name: string, expectedNetwork: string): Promise<void> {
-    const inspected = await this.invoke([
-      "container",
-      "inspect",
-      "--format",
-      "{{.Config.User}}|{{.HostConfig.NetworkMode}}|{{.HostConfig.Runtime}}",
-      name,
-    ]);
-    if (inspected.code !== 0)
-      throw new Error(`ERROR: Docker inspect failed: ${inspected.stderr.trim()}`);
-    const [user, network, runtime] = inspected.stdout.trim().split("|");
-    if (
-      user !== "1000:1000" ||
-      network !== expectedNetwork ||
-      (this.runtime && runtime !== this.runtime)
-    )
-      throw new Error(
-        `ERROR: existing Docker sandbox container ${name} does not enforce non-root and network isolation`,
-      );
+    return dockerContainers.ensureContainer(this.context, input, resources, hard, network);
   }
 
   private async ensureProxyNetwork(sandboxId: string): Promise<void> {
@@ -1170,40 +1071,7 @@ export class DockerExecutionDriver implements ExecutionDriver {
   }
 
   private async inspectContainer(name: string): Promise<{ running: boolean } | null> {
-    const inspected = await this.invoke([
-      "container",
-      "inspect",
-      "--format",
-      "{{.State.Running}}",
-      name,
-    ]);
-    if (inspected.code !== 0) {
-      const message = inspected.stderr.toLowerCase();
-      if (message.includes("no such object") || message.includes("no such container")) return null;
-      throw new Error(`ERROR: Docker inspect failed: ${inspected.stderr.trim()}`);
-    }
-    return { running: inspected.stdout.trim() === "true" };
-  }
-
-  private async assertHardContainer(name: string): Promise<void> {
-    const inspected = await this.invoke([
-      "container",
-      "inspect",
-      "--format",
-      "{{json .HostConfig.StorageOpt}}",
-      name,
-    ]);
-    if (inspected.code !== 0)
-      throw new Error(`ERROR: Docker inspect failed: ${inspected.stderr.trim()}`);
-    try {
-      const storage = JSON.parse(inspected.stdout.trim()) as Record<string, string>;
-      if (storage.size === "20G") return;
-    } catch {
-      // Report the same fail-closed message for malformed and missing runtime limits.
-    }
-    throw new Error(
-      `ERROR: existing Docker container ${name} does not enforce its 20 GB writable-layer cap`,
-    );
+    return dockerContainers.inspectContainer(this.context, name);
   }
 
   private async inspectVolume(
@@ -1273,10 +1141,4 @@ function snapshotPruningRetryFailed(path: string, cause: unknown): CrossoverErro
     `Gitignore matcher disagreed for ${path}; unpruned re-inventory failed`,
     { cause, retryable: false, details: { reason: "ignore_pruning_retry_failed", path } },
   );
-}
-
-function sandboxResources(sandboxId: string): SandboxResources {
-  const safeId = safeSandboxId(sandboxId);
-  const name = `crossover-sbx-${safeId}`;
-  return { volume_ref: name, container_ref: name };
 }

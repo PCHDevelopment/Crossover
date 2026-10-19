@@ -1,4 +1,5 @@
 import type { DockerModuleContext } from "./context.js";
+import { safeSandboxId } from "./containers.js";
 import { mustSucceed } from "./invoke.js";
 
 type ProxyNetworkContext = Pick<DockerModuleContext, "invoke" | "egressProxyContainer">;
@@ -163,8 +164,4 @@ export function sandboxNetworkName(sandboxId: string): string {
 
 export function gitFetcherName(sandboxId: string): string {
   return `crossover-git-fetch-${safeSandboxId(sandboxId)}`;
-}
-
-export function safeSandboxId(sandboxId: string): string {
-  return sandboxId.toLowerCase().replaceAll(/[^a-z0-9_.-]/g, "-");
 }
