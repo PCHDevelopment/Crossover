@@ -53,12 +53,16 @@ const CATALOG = `
   tasks.start / tasks.block / tasks.unblock
   tasks.submit / tasks.review / tasks.reopen / tasks.cancel
   tasks.heartbeat
+  tasks.request_review
+
+  reviews.threads.list / reviews.comment / reviews.resolve
 
   workspace.list / workspace.read / workspace.search
   workspace.diff / workspace.history / workspace.blame
   workspace.apply_changeset
   workspace.changeset.get
   workspace.changeset.decide_hold
+  workspace.task_changes
   workspace.health.get
 
   conflicts.list / conflicts.get
@@ -113,6 +117,8 @@ const READ_ONLY = [
   "tasks.list",
   "tasks.get",
   "tasks.heartbeat",
+  "reviews.threads.list",
+  "workspace.task_changes",
   "workspace.list",
   "workspace.read",
   "workspace.search",
@@ -156,7 +162,7 @@ const valid = (extra: Record<string, unknown> = {}) => ({
 
 describe("METHODS", () => {
   it("contains every §16.1 method plus room.create, and nothing else", () => {
-    expect(catalog).toHaveLength(116);
+    expect(catalog).toHaveLength(121);
     expect([...METHOD_NAMES].sort()).toEqual([...catalog].sort());
   });
 
@@ -167,7 +173,7 @@ describe("METHODS", () => {
   it("marks exactly the documented methods read-only", () => {
     const readOnly = METHOD_NAMES.filter((m) => !isMutatingMethod(m));
     expect([...readOnly].sort()).toEqual([...READ_ONLY].sort());
-    expect(Object.keys(METHODS).length - readOnly.length).toBe(71);
+    expect(Object.keys(METHODS).length - readOnly.length).toBe(74);
   });
 
   it("isMutatingMethod takes any string and is false for unknown methods", () => {

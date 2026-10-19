@@ -49,9 +49,13 @@ export const EVENT_TYPES = [
   "task.unblocked",
   "task.submitted",
   "task.reviewed",
+  "task.review_requested",
   "task.reopened",
   "task.cancelled",
   "task.lease_expired",
+  "review.thread_opened",
+  "review.commented",
+  "review.thread_resolved",
 
   "decision.proposed",
   "decision.position_added",

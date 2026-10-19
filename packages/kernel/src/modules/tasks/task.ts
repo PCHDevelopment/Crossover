@@ -29,6 +29,8 @@ export interface TaskRow {
   artifacts: unknown[];
   reviewer_id: string | null;
   review_required: boolean;
+  required_approvals: number;
+  review_round: number;
   override_dependencies: boolean;
   blocked_reason: string | null;
   /** The latest submission's evidence (§34.3). */
@@ -49,7 +51,7 @@ export interface TaskView extends Omit<TaskRow, "lease_expires_at" | "created_at
 }
 
 export const TASK_COLUMNS = `id, room_id, title, description, requirements, owner_id, created_by, status,
-  priority, dependencies, artifacts, reviewer_id, review_required, override_dependencies,
+  priority, dependencies, artifacts, reviewer_id, review_required, required_approvals, review_round, override_dependencies,
   blocked_reason, evidence, lease_expires_at, version, created_at, updated_at`;
 
 export function taskView(row: TaskRow): TaskView {

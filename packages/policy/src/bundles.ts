@@ -59,6 +59,7 @@ export const CAPABILITIES = {
 
   // ---- reviewer
   "tasks.review": { mutating: true },
+  "reviews.comment": { mutating: true },
 
   // ---- lead
   "tasks.assign": { mutating: true },
@@ -151,6 +152,7 @@ const DEVELOPER = [
   "tasks.unblock",
   "tasks.submit",
   "tasks.release",
+  "reviews.comment",
   "tasks.heartbeat",
   "workspace.write",
   "conflicts.abandon",
@@ -171,6 +173,7 @@ const REVIEWER = [
   "messages.edit",
   "inbox.ack",
   "tasks.review",
+  "reviews.comment",
   "conflicts.abandon",
   "conflicts.escalate",
   "decisions.propose",

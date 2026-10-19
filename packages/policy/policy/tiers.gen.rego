@@ -59,6 +59,7 @@ catalog_mutating := {
 	"decisions.withdraw": true,
 	"room.accept_lead": true,
 	"tasks.review": true,
+	"reviews.comment": true,
 	"tasks.assign": true,
 	"tasks.cancel": true,
 	"tasks.reopen": true,
