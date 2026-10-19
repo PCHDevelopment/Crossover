@@ -115,6 +115,7 @@ import {
   type UpstreamDeps,
   type WorkspaceCommandDeps,
   DEFAULT_GIT_INTERNAL_NETWORK,
+  ConflictMetricsReporter,
 } from "@crossover/workspace";
 import type { ServerConfig } from "./config.js";
 
@@ -193,6 +194,7 @@ export async function composeServer(
   let escalations: ConflictEscalationSweeper | undefined;
   let leaseSweeper: LeaseSweeper | undefined;
   let roomRetentionSweeper: RoomRetentionSweeper | undefined;
+  let conflictReporter: ConflictMetricsReporter | undefined;
   let wakeWebhooks: WakeWebhookService | undefined;
   let executionService: ExecutionService | undefined;
   let pluginRunner: DockerToolRunner | undefined;
@@ -529,6 +531,15 @@ export async function composeServer(
         }),
     });
     roomRetentionSweeper.start();
+    // A daily conflict-rate report on stdout (T1586); an interval of 0 turns it off.
+    if ((config.conflictReportIntervalMs ?? 86_400_000) > 0) {
+      conflictReporter = new ConflictMetricsReporter({
+        pool,
+        intervalMs: config.conflictReportIntervalMs ?? 86_400_000,
+        now,
+      });
+      conflictReporter.start();
+    }
     // Runs without a key too: then it sends nothing and only keeps the outbox from growing.
     wakeWebhooks = new WakeWebhookService({
       pool,
@@ -643,6 +654,7 @@ export async function composeServer(
         await escalations?.stop();
         await leaseSweeper?.stop();
         await roomRetentionSweeper?.stop();
+        await conflictReporter?.stop();
         if (healthInstallSweepTimer) clearInterval(healthInstallSweepTimer);
         if (sandboxLogSweepTimer) clearInterval(sandboxLogSweepTimer);
         await wakeWebhooks?.stop();
@@ -674,6 +686,7 @@ export async function composeServer(
     await escalations?.stop();
     await leaseSweeper?.stop();
     await roomRetentionSweeper?.stop();
+    await conflictReporter?.stop();
     if (healthInstallSweepTimer) clearInterval(healthInstallSweepTimer);
     if (sandboxLogSweepTimer) clearInterval(sandboxLogSweepTimer);
     await wakeWebhooks?.stop();

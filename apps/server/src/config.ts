@@ -69,6 +69,13 @@ const envSchema = z.object({
     }),
   /** Refresh requests and OAuth starts per client address per minute. Default 30. */
   REFRESH_PER_MINUTE: z.coerce.number().int().min(1).max(100_000).default(30),
+  /** Milliseconds between conflict-rate reports on stdout (T1586); 0 turns the report off. */
+  CONFLICT_REPORT_INTERVAL_MS: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(31_536_000_000)
+    .default(86_400_000),
   /** Serve the built web app (`apps/web/dist`) from this directory next to the API. */
   WEB_ROOT: z.string().min(1).optional(),
   /** Comma-separated operator-approved images usable by room health checks. */
@@ -159,6 +166,8 @@ export interface ServerConfig {
   trustProxy?: string[];
   /** Per-address limit for refresh requests and OAuth starts. */
   refreshPerMinute?: number;
+  /** Milliseconds between conflict-rate reports (T1586); 0 turns them off. Default one day. */
+  conflictReportIntervalMs?: number;
   /** Directory of the built web app, served next to the API. */
   webRoot?: string;
   /** Operator allowlist for room-selected health container images. */
@@ -360,6 +369,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
       : {}),
     trustProxy: e.TRUST_PROXY,
     refreshPerMinute: e.REFRESH_PER_MINUTE,
+    conflictReportIntervalMs: e.CONFLICT_REPORT_INTERVAL_MS,
     ...(e.WEB_ROOT ? { webRoot: resolve(e.WEB_ROOT) } : {}),
     healthImages: e.HEALTH_IMAGES,
     sandboxDiskEnforcement,

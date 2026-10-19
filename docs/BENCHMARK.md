@@ -15,3 +15,13 @@ Stage timers are nested: binary detection is inside merge, and materialize/merge
 For a smoke run use `BENCH_ITERATIONS=2`; full reports use the default 200. Set `BENCH_OUTPUT=/tmp/workspace-benchmark.json` to save the report. The benchmark runs separately from `pnpm check`; CI runs it as a non-blocking job and uploads its JSON report. Missing latency targets are reported, not asserted. The benchmark uses Vitest spies only; production code has no timing hooks.
 
 This workload exercises full-content modifications, not patch index rebuilding or ignore-rule preparation for introduced paths. Performance findings for those paths need additional workloads.
+
+## Conflict-rate report
+
+`conflict_rate_report` (T1586) measures how often ChangeSets conflict, by participant kind (human, agent, system) and file extension, to show where syntax-aware merge would pay off. The server writes one JSON line per day to stdout (`CONFLICT_REPORT_INTERVAL_MS`, `0` turns it off). To read the same report for any window from the database in `DATABASE_URL` (or `.env`):
+
+```sh
+pnpm --filter @crossover/workspace conflict-report -- --since 2026-09-20 --until 2026-10-18 --format md
+```
+
+`--since` defaults to 28 days ago, `--until` to now, `--room <id>` (repeatable) limits it to rooms, and `--format json` prints the full report. It counts only: no paths, room ids, participant ids or content. A ChangeSet is contended when a real merge ran (it conflicted, or it applied more than one revision after its base); the conflict rate is conflicted divided by contended.

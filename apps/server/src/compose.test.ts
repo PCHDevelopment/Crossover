@@ -2474,6 +2474,14 @@ describe("loadConfig", () => {
     expect(c.workspaceRoot.startsWith("/")).toBe(true);
   });
 
+  it("reads the conflict report interval (T1586): one day by default, 0 turns it off", () => {
+    expect(loadConfig(env).conflictReportIntervalMs).toBe(86_400_000);
+    expect(loadConfig({ ...env, CONFLICT_REPORT_INTERVAL_MS: "0" }).conflictReportIntervalMs).toBe(
+      0,
+    );
+    expect(() => loadConfig({ ...env, CONFLICT_REPORT_INTERVAL_MS: "-1" })).toThrow();
+  });
+
   it("reads the proxy and refresh-limit settings", () => {
     expect(loadConfig(env)).toMatchObject({ trustProxy: [], refreshPerMinute: 30 });
     expect(
