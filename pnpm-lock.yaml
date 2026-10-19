@@ -54,6 +54,9 @@ importers:
       '@aws-sdk/client-sts':
         specifier: ^3.1149.0
         version: 3.1149.0
+      '@crossover/a2a':
+        specifier: workspace:*
+        version: link:../../packages/a2a
       '@crossover/db':
         specifier: workspace:*
         version: link:../../packages/db

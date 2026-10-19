@@ -3,6 +3,7 @@
   "compilerOptions": { "rootDir": "src", "outDir": "dist" },
   "include": ["src/**/*.ts"],
   "references": [
+    { "path": "../../packages/a2a" },
     { "path": "../../packages/protocol" },
     { "path": "../../packages/db" },
     { "path": "../../packages/kernel" },

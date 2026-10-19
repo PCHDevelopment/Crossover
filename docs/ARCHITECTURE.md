@@ -987,7 +987,7 @@ CAPABILITIES
   approvals.list / approvals.decide / approvals.withdraw   (§22.2)
 
 MESSAGES
-  messages.list            before/after, limit
+  messages.list            before/after, ref?, limit
   messages.send            body, mentions[], refs[], reply_to?
   messages.edit            (author only; original kept in ledger)
 
