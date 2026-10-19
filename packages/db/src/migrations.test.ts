@@ -837,6 +837,76 @@ describe("0013_memory", () => {
   });
 });
 
+describe("0036_memory_embeddings", () => {
+  let n = 0;
+  const room = async (): Promise<string> => {
+    const id = `room_embedding_${++n}`;
+    await db.pool.query(
+      `INSERT INTO rooms (id, slug, name, objective, owner_id) VALUES ($1, $1, 'n', 'o', 'x')`,
+      [id],
+    );
+    return id;
+  };
+  const entry = (roomId: string, key: string) =>
+    db.pool.query(
+      `INSERT INTO memory_entries (room_id, key, value, content_type, author_id, revision)
+       VALUES ($1, $2, 'value', 'text/markdown', 'part_x', 1)`,
+      [roomId, key],
+    );
+  const embedding = (
+    roomId: string,
+    key: string,
+    overrides: { model?: string; revision?: number; dims?: number; bytes?: Buffer } = {},
+  ) => {
+    const model = overrides.model ?? "local-hash-v1";
+    const revision = overrides.revision ?? 1;
+    const dims = overrides.dims ?? 2;
+    const bytes = overrides.bytes ?? Buffer.alloc(dims * 4);
+    return db.pool.query(
+      `INSERT INTO memory_embeddings (room_id, key, model, revision, dims, embedding)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [roomId, key, model, revision, dims, bytes],
+    );
+  };
+
+  it("is recorded as applied", async () => {
+    const { rows } = await db.pool.query("SELECT name FROM schema_migrations WHERE version = 36");
+    expect(rows).toEqual([{ name: "memory_embeddings" }]);
+  });
+
+  it("checks vector shape and cascades from its composite memory entry", async () => {
+    const roomId = await room();
+    await entry(roomId, "present");
+    await embedding(roomId, "present");
+    await expect(embedding(roomId, "present", { model: "" })).rejects.toMatchObject({
+      code: "23514",
+    });
+    await expect(embedding(roomId, "present", { revision: 0 })).rejects.toMatchObject({
+      code: "23514",
+    });
+    await expect(
+      embedding(roomId, "present", { dims: 0, bytes: Buffer.alloc(0) }),
+    ).rejects.toMatchObject({
+      code: "23514",
+    });
+    await expect(
+      embedding(roomId, "present", { dims: 2, bytes: Buffer.alloc(4) }),
+    ).rejects.toMatchObject({
+      code: "23514",
+    });
+    await expect(embedding(roomId, "missing")).rejects.toMatchObject({ code: "23503" });
+
+    await db.pool.query("DELETE FROM memory_entries WHERE room_id = $1 AND key = 'present'", [
+      roomId,
+    ]);
+    const { rows } = await db.pool.query(
+      "SELECT room_id FROM memory_embeddings WHERE room_id = $1",
+      [roomId],
+    );
+    expect(rows).toEqual([]);
+  });
+});
+
 describe("0024_task_evidence", () => {
   const room = async () => {
     const id = `room_ev${Math.random().toString(36).slice(2)}`;
