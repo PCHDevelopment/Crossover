@@ -120,3 +120,6 @@ export * from "./health-suggestion.js";
 export * from "./checkpoints.js";
 export * from "./upstream-pull.js";
 export * from "./checkpoint-export.js";
+export { conflictRateReport } from "./conflict-metrics.js";
+export type { ConflictRateReport } from "./conflict-metrics.js";
+export { ConflictMetricsReporter } from "./conflict-metrics-reporter.js";

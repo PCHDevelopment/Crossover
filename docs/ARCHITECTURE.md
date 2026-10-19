@@ -1520,7 +1520,8 @@ Upstream changes are just another concurrent writer, so no special merge path is
   - sandbox cold start and resume time,
   - WebSocket reconnect and resync rate,
   - health-check queue time,
-  - policy evaluation latency.
+  - policy evaluation latency,
+  - conflict rate by participant kind and file extension (`conflict_rate_report`, daily).
 
 ## 25.2 Room-level visibility (in the UI)
 
