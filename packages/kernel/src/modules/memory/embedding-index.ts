@@ -27,6 +27,7 @@ export class MemoryEmbeddingIndexer {
   private readonly pending = new Set<string>();
   private readonly queued = new Set<string>();
   private readonly queue: string[] = [];
+  private sweepCursor: string | undefined;
   private timer: NodeJS.Timeout | undefined;
 
   constructor(options: MemoryEmbeddingIndexerOptions) {
@@ -93,15 +94,11 @@ export class MemoryEmbeddingIndexer {
   }
 
   private async syncScheduledRoom(roomId: string): Promise<void> {
-    do {
-      this.pending.delete(roomId);
-      try {
-        await this.syncRoom(roomId, this.controller.signal);
-      } catch (error) {
-        if (!this.controller.signal.aborted) this.onError(error, roomId);
-        return;
-      }
-    } while (this.pending.has(roomId) && !this.controller.signal.aborted);
+    try {
+      await this.syncRoom(roomId, this.controller.signal);
+    } catch (error) {
+      if (!this.controller.signal.aborted) this.onError(error, roomId);
+    }
   }
 
   /** Synchronize a room without holding a room actor or SQL transaction during embedding. */
@@ -179,16 +176,20 @@ export class MemoryEmbeddingIndexer {
   async sweep(): Promise<void> {
     if (this.controller.signal.aborted) return;
     const rooms = await this.pool.query<{ room_id: string }>(
-      `SELECT DISTINCT m.room_id FROM memory_entries m
+      `WITH eligible AS (SELECT DISTINCT m.room_id FROM memory_entries m
        JOIN rooms r ON r.id = m.room_id AND r.purge_started_at IS NULL
        LEFT JOIN memory_embeddings e ON e.room_id = m.room_id AND e.key = m.key AND e.model = $1
        WHERE (NOT m.deleted AND NOT m.redacted AND (e.revision IS NULL OR e.revision <> m.revision))
           OR (e.room_id IS NOT NULL AND (m.deleted OR m.redacted))
           OR EXISTS (SELECT 1 FROM memory_embeddings old
-                     WHERE old.room_id = m.room_id AND old.key = m.key AND old.model <> $1)
+                     WHERE old.room_id = m.room_id AND old.key = m.key AND old.model <> $1))
+       SELECT room_id FROM eligible
+       ORDER BY CASE WHEN $2::text IS NULL OR room_id COLLATE "C" > $2::text COLLATE "C" THEN 0 ELSE 1 END,
+                room_id COLLATE "C"
        LIMIT 100`,
-      [this.provider.model],
+      [this.provider.model, this.sweepCursor ?? null],
     );
+    if (rooms.rows.length > 0) this.sweepCursor = rooms.rows[rooms.rows.length - 1]!.room_id;
     for (const room of rooms.rows) this.schedule(room.room_id);
   }
 

@@ -171,8 +171,44 @@ describe("MemoryEmbeddingIndexer", () => {
     expect(maxActive).toBe(2);
     expect(embeddedKeys.filter((key) => key === "key-4")).toHaveLength(1);
     expect(embeddedKeys.filter((key) => key === activeKey)).toHaveLength(2);
+    expect(embeddedKeys.indexOf("key-4")).toBeLessThan(embeddedKeys.lastIndexOf(activeKey));
     await indexer.close();
   });
+
+  it("rotates the sweep past rooms that repeatedly fail to index", async () => {
+    const ids = Array.from({ length: 101 }, () => newId("room"));
+    await db.pool.query(
+      `INSERT INTO rooms (id, slug, name, objective, owner_id)
+       SELECT id, id, 'n', 'o', 'x' FROM unnest($1::text[]) AS id`,
+      [ids],
+    );
+    await db.pool.query(
+      `INSERT INTO memory_entries (room_id, key, value, content_type, author_id, revision)
+       SELECT id, 'key', 'value', 'text/markdown', 'x', 1
+       FROM unnest($1::text[]) AS id`,
+      [ids],
+    );
+    const base = new HashEmbeddingProvider();
+    const attempted: string[] = [];
+    const indexer = new MemoryEmbeddingIndexer({
+      pool: db.pool,
+      provider: {
+        ...base,
+        embed: async () => {
+          throw new Error("provider unavailable");
+        },
+      },
+      onError: (_error, roomId) => attempted.push(roomId),
+    });
+
+    await indexer.sweep();
+    await vi.waitFor(() => expect(attempted).toHaveLength(100), { timeout: 15_000 });
+    await indexer.sweep();
+    await vi.waitFor(() => expect(attempted).toContain(ids.sort()[100]), { timeout: 15_000 });
+    await indexer.close();
+    await db.pool.query("DELETE FROM memory_entries WHERE room_id = ANY($1::text[])", [ids]);
+    await db.pool.query("DELETE FROM rooms WHERE id = ANY($1::text[])", [ids]);
+  }, 20_000);
 
   it("does not start queued rooms after close", async () => {
     const firstRoom = await room();
