@@ -7,6 +7,7 @@ export interface MemoryEmbeddingIndexerOptions {
   batchSize?: number;
   timeoutMs?: number;
   sweepIntervalMs?: number;
+  maxConcurrentRooms?: number; // default 4; caps concurrent scheduled room syncs
   onError?: (error: unknown, roomId: string) => void;
 }
 
@@ -19,10 +20,13 @@ export class MemoryEmbeddingIndexer {
   private readonly batchSize: number;
   private readonly timeoutMs: number;
   private readonly sweepIntervalMs: number;
+  private readonly maxConcurrentRooms: number;
   private readonly onError: (error: unknown, roomId: string) => void;
   private readonly controller = new AbortController();
   private readonly running = new Map<string, Promise<void>>();
   private readonly pending = new Set<string>();
+  private readonly queued = new Set<string>();
+  private readonly queue: string[] = [];
   private timer: NodeJS.Timeout | undefined;
 
   constructor(options: MemoryEmbeddingIndexerOptions) {
@@ -31,6 +35,7 @@ export class MemoryEmbeddingIndexer {
     this.batchSize = options.batchSize ?? 32;
     this.timeoutMs = options.timeoutMs ?? 10_000;
     this.sweepIntervalMs = options.sweepIntervalMs ?? 60_000;
+    this.maxConcurrentRooms = options.maxConcurrentRooms ?? 4;
     this.onError =
       options.onError ??
       ((error, roomId) =>
@@ -43,7 +48,10 @@ export class MemoryEmbeddingIndexer {
       this.batchSize < 1 ||
       this.batchSize > 256 ||
       this.timeoutMs < 1 ||
-      this.sweepIntervalMs < 1
+      this.sweepIntervalMs < 1 ||
+      !Number.isInteger(this.maxConcurrentRooms) ||
+      this.maxConcurrentRooms < 1 ||
+      this.maxConcurrentRooms > 100
     )
       throw new RangeError("Invalid memory indexer limits");
     if (this.provider.dimensions < 1 || this.provider.dimensions > 4096)
@@ -57,18 +65,43 @@ export class MemoryEmbeddingIndexer {
       this.pending.add(roomId);
       return;
     }
-    const work = (async () => {
-      do {
-        this.pending.delete(roomId);
-        try {
-          await this.syncRoom(roomId, this.controller.signal);
-        } catch (error) {
-          if (!this.controller.signal.aborted) this.onError(error, roomId);
-          break;
+    if (this.queued.has(roomId)) return;
+    this.queued.add(roomId);
+    this.queue.push(roomId);
+    this.startQueuedSyncs();
+  }
+
+  private startQueuedSyncs(): void {
+    while (
+      !this.controller.signal.aborted &&
+      this.running.size < this.maxConcurrentRooms &&
+      this.queue.length > 0
+    ) {
+      const roomId = this.queue.shift()!;
+      this.queued.delete(roomId);
+      if (this.running.has(roomId)) continue;
+      const work = this.syncScheduledRoom(roomId).finally(() => {
+        this.running.delete(roomId);
+        if (this.pending.delete(roomId) && !this.controller.signal.aborted) {
+          this.queued.add(roomId);
+          this.queue.push(roomId);
         }
-      } while (this.pending.has(roomId) && !this.controller.signal.aborted);
-    })().finally(() => this.running.delete(roomId));
-    this.running.set(roomId, work);
+        this.startQueuedSyncs();
+      });
+      this.running.set(roomId, work);
+    }
+  }
+
+  private async syncScheduledRoom(roomId: string): Promise<void> {
+    do {
+      this.pending.delete(roomId);
+      try {
+        await this.syncRoom(roomId, this.controller.signal);
+      } catch (error) {
+        if (!this.controller.signal.aborted) this.onError(error, roomId);
+        return;
+      }
+    } while (this.pending.has(roomId) && !this.controller.signal.aborted);
   }
 
   /** Synchronize a room without holding a room actor or SQL transaction during embedding. */
@@ -181,6 +214,8 @@ export class MemoryEmbeddingIndexer {
     this.timer = undefined;
     this.controller.abort();
     this.pending.clear();
+    this.queued.clear();
+    this.queue.length = 0;
     await Promise.all(this.running.values());
   }
 }

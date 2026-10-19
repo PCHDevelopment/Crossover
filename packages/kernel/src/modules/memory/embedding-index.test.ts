@@ -108,6 +108,72 @@ describe("MemoryEmbeddingIndexer", () => {
     await indexer.close();
   });
 
+  it("bounds concurrent room syncs and deduplicates queued work", async () => {
+    const ids = await Promise.all(Array.from({ length: 5 }, () => room()));
+    const keyToRoom = new Map<string, string>();
+    for (const [index, id] of ids.entries()) {
+      const key = `key-${index}`;
+      keyToRoom.set(key, id);
+      await entry(id, key);
+    }
+
+    const base = new HashEmbeddingProvider();
+    let active = 0;
+    let maxActive = 0;
+    let completed = 0;
+    let holdInitialCalls = true;
+    let releaseInitialCalls!: () => void;
+    const initialCalls = new Promise<void>((resolve) => {
+      releaseInitialCalls = resolve;
+    });
+    const embeddedKeys: string[] = [];
+    const provider: EmbeddingProvider = {
+      model: base.model,
+      dimensions: base.dimensions,
+      maxInputChars: base.maxInputChars,
+      embed: async (texts, abort) => {
+        const key = texts[0]?.split("\n", 1)[0] ?? "";
+        embeddedKeys.push(key);
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        if (holdInitialCalls) await initialCalls;
+        active -= 1;
+        completed += 1;
+        return base.embed(texts, abort);
+      },
+    };
+    const indexer = new MemoryEmbeddingIndexer({
+      pool: db.pool,
+      provider,
+      maxConcurrentRooms: 2,
+      onError: () => {},
+    });
+
+    for (const id of ids) indexer.schedule(id);
+    await vi.waitFor(() => expect(embeddedKeys).toHaveLength(2));
+
+    const activeKey = embeddedKeys[0]!;
+    const activeRoom = keyToRoom.get(activeKey)!;
+    indexer.schedule(activeRoom);
+    await db.pool.query(
+      "UPDATE memory_entries SET revision = 2, value = 'updated while queued' WHERE room_id = $1",
+      [activeRoom],
+    );
+    const queuedRoom = keyToRoom.get("key-4")!;
+    indexer.schedule(queuedRoom);
+    indexer.schedule(queuedRoom);
+    indexer.schedule(queuedRoom);
+
+    holdInitialCalls = false;
+    releaseInitialCalls();
+    await vi.waitFor(() => expect(completed).toBe(6));
+
+    expect(maxActive).toBe(2);
+    expect(embeddedKeys.filter((key) => key === "key-4")).toHaveLength(1);
+    expect(embeddedKeys.filter((key) => key === activeKey)).toHaveLength(2);
+    await indexer.close();
+  });
+
   it("replaces an old model and retries a provider failure on the next sweep", async () => {
     const id = await room();
     await entry(id, "key");
