@@ -79,13 +79,18 @@ const extensionCell = (): ExtensionCell => ({
   by_kind: kindCounts(),
 });
 
-/** The lower-cased text after the last dot of the basename; "(none)" or "(dotfile)" otherwise. */
+/**
+ * The lower-cased text after the last dot of the basename; "(none)" or "(dotfile)" otherwise.
+ * It is a key of a report that is logged, and a path is user text, so anything that is not a short
+ * run of letters and digits (a name that could carry content or a secret) is "(other)".
+ */
 export function extensionOf(path: string): string {
   const base = path.slice(path.lastIndexOf("/") + 1);
   const dot = base.lastIndexOf(".");
   if (dot === -1 || dot === base.length - 1) return "(none)";
   if (dot === 0) return "(dotfile)";
-  return base.slice(dot + 1).toLowerCase();
+  const extension = base.slice(dot + 1).toLowerCase();
+  return /^[a-z0-9]{1,10}$/.test(extension) ? extension : "(other)";
 }
 
 interface Row {
@@ -102,6 +107,15 @@ interface Row {
 }
 
 const KIND_SQL = "COALESCE(p.kind, 'SYSTEM')";
+// Only what the report reads: a payload also holds every file's content, which can be megabytes.
+const PAYLOAD_SQL = `jsonb_build_object(
+  'operations', COALESCE((SELECT jsonb_agg(jsonb_build_object('path', o->'path', 'from', o->'from', 'to', o->'to'))
+                            FROM jsonb_array_elements(CASE WHEN jsonb_typeof(c.payload->'operations') = 'array'
+                                                           THEN c.payload->'operations' ELSE '[]'::jsonb END) o), '[]'::jsonb),
+  'conflicts', COALESCE((SELECT jsonb_agg(jsonb_build_object('path', f->'path', 'kind', f->'kind'))
+                           FROM jsonb_array_elements(CASE WHEN jsonb_typeof(c.payload->'conflicts') = 'array'
+                                                          THEN c.payload->'conflicts' ELSE '[]'::jsonb END) f), '[]'::jsonb),
+  'counterparty_changesets', COALESCE(c.payload->'counterparty_changesets', '[]'::jsonb))`;
 
 /**
  * Conflict rates by participant kind and file extension over `[since, until)` (T1586). Read-only
@@ -139,8 +153,8 @@ export async function conflictRateReport(
 
   for (const roomId of roomIds) {
     const { rows } = await pool.query<Row>(
-      `SELECT c.id, c.status, c.base_workspace_revision, c.applied_revision, c.payload,
-              ${KIND_SQL} AS kind
+      `SELECT c.id, c.status, c.base_workspace_revision, c.applied_revision,
+              ${PAYLOAD_SQL} AS payload, ${KIND_SQL} AS kind
          FROM changesets c
          LEFT JOIN participants p ON p.id = c.actor_id AND p.room_id = c.room_id
         WHERE c.room_id = $1 AND c.created_at >= $2 AND c.created_at < $3

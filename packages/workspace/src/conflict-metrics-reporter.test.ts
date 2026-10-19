@@ -51,6 +51,17 @@ describe("ConflictMetricsReporter", () => {
     expect(lines).toHaveLength(1);
   });
 
+  it("rejects an interval Node's timers cannot hold (it would fire every millisecond)", () => {
+    for (const intervalMs of [0, -1, 2_147_483_648, 2_592_000_000, 1.5])
+      expect(
+        () => new ConflictMetricsReporter({ pool: db.pool, intervalMs }),
+        String(intervalMs),
+      ).toThrow(RangeError);
+    expect(
+      () => new ConflictMetricsReporter({ pool: db.pool, intervalMs: 2_147_483_647 }),
+    ).not.toThrow();
+  });
+
   it("stop() clears the timer", async () => {
     vi.useFakeTimers();
     try {

@@ -187,6 +187,19 @@ describe("conflictRateReport", () => {
     ]);
   });
 
+  it("keeps a path-derived extension key short and plain: anything else is (other)", () => {
+    expect(
+      [
+        "notes.thisisaverylongextension",
+        "a.b c",
+        "key.AKIAIOSFODNN7EXAMPLE",
+        "x.<script>",
+        "ok.tar",
+        "ok.a1b2c3d4e5",
+      ].map(extensionOf),
+    ).toEqual(["(other)", "(other)", "(other)", "(other)", "tar", "a1b2c3d4e5"]);
+  });
+
   it("excludes ChangeSets outside [since, until)", async () => {
     const r = await room();
     await r.byHuman([{ type: "create", path: "a.txt", content: "a" }], 0);

@@ -74,7 +74,7 @@ const envSchema = z.object({
     .number()
     .int()
     .min(0)
-    .max(31_536_000_000)
+    .max(2_147_483_647)
     .default(86_400_000),
   /** Serve the built web app (`apps/web/dist`) from this directory next to the API. */
   WEB_ROOT: z.string().min(1).optional(),

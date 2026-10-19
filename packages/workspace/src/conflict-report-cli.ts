@@ -9,7 +9,8 @@ import {
 } from "./conflict-metrics.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-const date = z.string().refine((v) => !Number.isNaN(Date.parse(v)), "must be an ISO date");
+// A calendar date, or a date-time with an explicit offset: never the host's time zone.
+const date = z.union([z.iso.date(), z.iso.datetime({ offset: true })]);
 const argsSchema = z.object({
   since: date.optional(),
   until: date.optional(),
@@ -39,21 +40,23 @@ export function markdown(report: ConflictRateReport): string {
     "| extension | kind | contended touches | conflicted files |",
     "|---|---|---|---|",
   ];
-  const rows = Object.entries(report.by_extension).flatMap(([ext, cells]) =>
-    KINDS.filter(
-      (kind) => cells[kind].contended_file_touches + cells[kind].conflicted_files > 0,
-    ).map((kind) => ({ ext, kind, ...cells[kind] })),
-  );
-  rows.sort(
-    (a, b) =>
-      b.conflicted_files - a.conflicted_files ||
-      a.ext.localeCompare(b.ext) ||
-      a.kind.localeCompare(b.kind),
-  );
-  for (const row of rows.slice(0, 20))
-    lines.push(
-      `| ${row.ext} | ${row.kind} | ${row.contended_file_touches} | ${row.conflicted_files} |`,
-    );
+  // Rank the extensions by their conflicted files first, then show each one's kinds.
+  const totals = Object.entries(report.by_extension)
+    .map(([ext, cells]) => ({
+      ext,
+      cells,
+      conflicted: KINDS.reduce((sum, kind) => sum + cells[kind].conflicted_files, 0),
+    }))
+    .sort((a, b) => b.conflicted - a.conflicted || a.ext.localeCompare(b.ext))
+    .slice(0, 20);
+  for (const { ext, cells } of totals)
+    for (const kind of KINDS) {
+      const cell = cells[kind];
+      if (cell.contended_file_touches + cell.conflicted_files > 0)
+        lines.push(
+          `| ${ext} | ${kind} | ${cell.contended_file_touches} | ${cell.conflicted_files} |`,
+        );
+    }
   lines.push("", "## Conflicted ChangeSets by submitter -> counterparty", "");
   lines.push("| submitter | HUMAN | AGENT | SYSTEM |", "|---|---|---|---|");
   for (const from of KINDS)
@@ -86,6 +89,10 @@ export async function main(argv: string[]): Promise<number> {
   }
   const until = args.until ? new Date(args.until) : new Date();
   const since = args.since ? new Date(args.since) : new Date(until.getTime() - 28 * DAY_MS);
+  if (since >= until) {
+    process.stderr.write("conflict-report: --since must be earlier than --until\n");
+    return 1;
+  }
   const pool = createPool();
   try {
     const report = await conflictRateReport(pool, {
@@ -103,4 +110,7 @@ export async function main(argv: string[]): Promise<number> {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href)
-  void main(process.argv.slice(2)).then((code) => process.exit(code));
+  void main(process.argv.slice(2)).then((code) => {
+    // Let a piped stdout drain: process.exit() could cut the report short.
+    process.exitCode = code;
+  });

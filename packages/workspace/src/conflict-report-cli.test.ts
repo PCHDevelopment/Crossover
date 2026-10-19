@@ -1,6 +1,6 @@
 import { createTestDatabase, type TestDatabase } from "@crossover/db/testing";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { main } from "./conflict-report-cli.js";
+import { main, markdown } from "./conflict-report-cli.js";
 
 let db: TestDatabase;
 const original = process.env["DATABASE_URL"];
@@ -26,6 +26,77 @@ describe("conflict-report CLI", () => {
     expect(await main(["--since", "not-a-date"])).toBe(1);
     expect(err.mock.calls.join("")).toContain("conflict-report:");
     expect(await main(["--format", "xml"])).toBe(1);
+  });
+
+  it("accepts only a calendar date or a date-time with an offset", async () => {
+    vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    for (const since of ["2026-02-30", "2026-10-01T00:00:00", "10/01/2026", "2026-13-01"])
+      expect(await main(["--since", since, "--room", "room_none"]), since).toBe(1);
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    expect(
+      await main([
+        "--since",
+        "2026-10-01",
+        "--until",
+        "2026-10-02T00:00:00+02:00",
+        "--room",
+        "room_none",
+      ]),
+    ).toBe(0);
+  });
+
+  it("rejects a reversed or empty window", async () => {
+    const err = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    expect(
+      await main(["--since", "2026-10-02", "--until", "2026-10-01", "--room", "room_none"]),
+    ).toBe(1);
+    expect(
+      await main(["--since", "2026-10-01", "--until", "2026-10-01", "--room", "room_none"]),
+    ).toBe(1);
+    expect(err.mock.calls.join("")).toContain("--since must be earlier than --until");
+  });
+
+  it("ranks the top 20 extensions before expanding their kinds", () => {
+    const cell = () => ({
+      contended_file_touches: 1,
+      conflicted_files: 0,
+      by_kind: { CONTENT: 0, MODIFY_DELETE: 0, RENAME: 0, ADD_ADD: 0, BINARY: 0, PARSE: 0 },
+    });
+    const by_extension: Record<
+      string,
+      Record<"HUMAN" | "AGENT" | "SYSTEM", ReturnType<typeof cell>>
+    > = {};
+    for (let i = 0; i < 25; i++)
+      by_extension[`e${String(i).padStart(2, "0")}`] = {
+        HUMAN: { ...cell(), conflicted_files: i + 1 },
+        AGENT: { ...cell(), conflicted_files: 1 },
+        SYSTEM: cell(),
+      };
+    const none = { submissions: 0, contended: 0, conflicted: 0, conflict_rate: null };
+    const by_participant = { HUMAN: none, AGENT: none, SYSTEM: none };
+    const by_pair = Object.fromEntries(
+      ["HUMAN", "AGENT", "SYSTEM"].flatMap((a) =>
+        ["HUMAN", "AGENT", "SYSTEM"].map((b) => [`${a}->${b}`, 0]),
+      ),
+    );
+    const text = markdown({
+      since: "s",
+      until: "u",
+      rooms: 1,
+      by_participant,
+      by_extension,
+      by_pair,
+      structured_candidates: { HUMAN: 0, AGENT: 0 },
+    } as unknown as Parameters<typeof markdown>[0]);
+    const shown = new Set(
+      text
+        .split("\n")
+        .filter((l) => /^\| e\d\d /.test(l))
+        .map((l) => l.split(" ")[1]),
+    );
+    expect(shown.size).toBe(20);
+    expect(shown.has("e24")).toBe(true);
+    expect(shown.has("e04")).toBe(false);
   });
 
   it("prints markdown tables for a seeded room", async () => {

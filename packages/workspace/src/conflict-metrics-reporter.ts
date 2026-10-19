@@ -3,6 +3,7 @@ import { conflictRateReport } from "./conflict-metrics.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const FIRST_TICK_MS = 60_000;
+const MAX_TIMER_MS = 2_147_483_647;
 const LOCK = "crossover.conflict_rate_report";
 
 export interface ConflictMetricsReporterOptions {
@@ -30,8 +31,13 @@ export class ConflictMetricsReporter {
   constructor(private readonly options: ConflictMetricsReporterOptions) {
     this.intervalMs = options.intervalMs ?? DAY_MS;
     this.windowMs = options.windowMs ?? 7 * DAY_MS;
-    if (!Number.isSafeInteger(this.intervalMs) || this.intervalMs < 1)
-      throw new RangeError("Conflict report interval must be a positive safe integer");
+    // Node timers cap at 2^31-1 ms; a longer delay would fire every millisecond.
+    if (
+      !Number.isSafeInteger(this.intervalMs) ||
+      this.intervalMs < 1 ||
+      this.intervalMs > MAX_TIMER_MS
+    )
+      throw new RangeError("Conflict report interval must be between 1 and 2147483647 ms");
     this.now = options.now ?? (() => new Date());
     this.write = options.write ?? ((line) => void process.stdout.write(line));
     this.onError =
