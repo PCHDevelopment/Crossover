@@ -1,6 +1,12 @@
 import { isAbsolute } from "node:path";
+import { CrossoverError } from "@crossover/protocol";
 import { createSandboxReadToken, SANDBOX_READ_TOKEN_MAX_TTL_MS } from "@crossover/security";
 import type { SandboxCpuUsage, SandboxLimits, SandboxResources } from "../execution.js";
+import {
+  createPorcelainStatusAccumulator,
+  MAX_STATUS_OUTPUT_BYTES,
+  type SandboxFileChanges,
+} from "../sandbox-status.js";
 import { sandboxResources } from "./containers.js";
 import * as dockerContainers from "./containers.js";
 import type { DockerModuleContext } from "./context.js";
@@ -232,5 +238,100 @@ export async function materialize(
       .catch((error: unknown) =>
         console.error("[execution] failed to remove Git fetcher container", error),
       );
+  }
+}
+
+/** Inspect the sandbox volume with Git, even when the agent image has no Git binary. */
+export async function status(
+  ctx: Pick<DockerModuleContext, "invoke" | "gitFetcherImage">,
+  input: { sandbox_id: string; resources: SandboxResources },
+): Promise<SandboxFileChanges> {
+  assertResources(input.sandbox_id, input.resources);
+  try {
+    const status = createPorcelainStatusAccumulator();
+    let streamed = false;
+    let stoppedByLimit = false;
+    let statusBytes = 0;
+    const consumeStatusChunk = (chunk: string): boolean => {
+      streamed = true;
+      const chunkBytes = Buffer.byteLength(chunk);
+      const remainingBytes = MAX_STATUS_OUTPUT_BYTES - statusBytes;
+      if (chunkBytes > remainingBytes) {
+        if (remainingBytes > 0) {
+          const prefix = Buffer.from(chunk).subarray(0, remainingBytes).toString("utf8");
+          if (!status.write(prefix)) {
+            stoppedByLimit = true;
+            return false;
+          }
+        }
+        status.truncate();
+        stoppedByLimit = true;
+        return false;
+      }
+      statusBytes += chunkBytes;
+      const keepReading = status.write(chunk);
+      if (!keepReading) stoppedByLimit = true;
+      return keepReading;
+    };
+    const result = await ctx.invoke(
+      [
+        "run",
+        "--rm",
+        "--init",
+        "--network=none",
+        "--read-only",
+        "--user=1000:1000",
+        "--cap-drop=ALL",
+        "--security-opt=no-new-privileges",
+        "--memory=512m",
+        "--cpus=1",
+        "--pids-limit=32",
+        "--tmpfs",
+        "/tmp:rw,nosuid,noexec,size=16m",
+        "--env",
+        "HOME=/tmp",
+        "--env",
+        "GIT_CONFIG_NOSYSTEM=1",
+        "--env",
+        "GIT_CONFIG_GLOBAL=/dev/null",
+        "--env",
+        "GIT_OPTIONAL_LOCKS=0",
+        "--mount",
+        `type=volume,source=${input.resources.volume_ref},target=/workspace,readonly,volume-nocopy`,
+        "--workdir",
+        "/workspace",
+        "--entrypoint",
+        "git",
+        ctx.gitFetcherImage,
+        "-C",
+        "/workspace",
+        "-c",
+        "core.excludesFile=/workspace/.roomignore",
+        "-c",
+        "core.fsmonitor=false",
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+        "--no-renames",
+      ],
+      {
+        timeoutMs: 20_000,
+        maxBuffer: 8 * 1024 * 1024,
+        onStdout: consumeStatusChunk,
+      },
+    );
+    if (!streamed && result.stdout) consumeStatusChunk(result.stdout);
+    if (result.code !== 0 && !stoppedByLimit)
+      throw new CrossoverError(
+        "UNAVAILABLE",
+        "Sandbox status could not be read; retry the request",
+      );
+    return status.finish();
+  } catch (cause) {
+    if (cause instanceof CrossoverError) throw cause;
+    throw new CrossoverError("UNAVAILABLE", "Sandbox status could not be read; retry the request", {
+      cause,
+    });
   }
 }
