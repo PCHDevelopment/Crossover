@@ -22,7 +22,7 @@ describe("search benchmark fixture", () => {
       const second = await build("room_B");
       expect(first.fixture.tree).toBe(second.fixture.tree);
       expect(first.fixture.paths).toEqual(second.fixture.paths);
-      expect(first.fixture.paths).toHaveLength(510);
+      expect(first.fixture.paths).toHaveLength(500);
 
       for (let token = 0; token < 10; token++) {
         const { stdout } = await git(

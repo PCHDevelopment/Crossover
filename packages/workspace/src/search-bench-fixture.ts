@@ -20,7 +20,7 @@ export interface SearchFixtureOptions {
   repo: string;
   /** Commit the fixture commit is built on. */
   parent: string;
-  /** Regular files; 50,000 is the §3 working-tree limit. */
+  /** Total files, the ten `big/` ones included; 50,000 is the §3 working-tree limit. */
   files: number;
   /** Size of each of the 10 single-line files. */
   bigBytes: number;
@@ -36,6 +36,7 @@ export interface SearchFixture {
 }
 
 const VOCABULARY = 5_000;
+const BIG_FILES = 10;
 const MEAN_KIB = 20;
 const RARE_TOKENS = 10;
 const RARE_FILES = 3;
@@ -62,10 +63,11 @@ export async function buildSearchFixture(options: SearchFixtureOptions): Promise
     words.add(word);
   }
   const vocabulary = [...words];
-  const rare = sample(random, RARE_TOKENS * RARE_FILES, options.files);
+  const regular = options.files - BIG_FILES;
+  const rare = sample(random, RARE_TOKENS * RARE_FILES, regular);
   const rareFiles = new Map<number, number>();
   [...rare].forEach((file, index) => rareFiles.set(file, Math.floor(index / RARE_FILES)));
-  const common = sample(random, COMMON_LINES, options.files);
+  const common = sample(random, COMMON_LINES, regular);
 
   const paths: string[] = [];
   const child = spawn("git", ["--git-dir", options.repo, "fast-import", "--quiet"], {
@@ -108,7 +110,7 @@ export async function buildSearchFixture(options: SearchFixtureOptions): Promise
     }
     return text;
   };
-  for (let index = 0; index < options.files; index++) {
+  for (let index = 0; index < regular; index++) {
     const slot = `m${Math.floor(index / 250)}/f${index % 250}`;
     const target = (MEAN_KIB / 2) * 1024 + Math.floor(random() * MEAN_KIB * 1024);
     const lines: string[] = [];
@@ -124,7 +126,7 @@ export async function buildSearchFixture(options: SearchFixtureOptions): Promise
     if (common.has(index)) lines.splice(Math.floor(lines.length / 3), 0, "  return common_word;");
     await blob(index % 20 === 0 ? `docs/${slot}.md` : `src/${slot}.ts`, `${lines.join("\n")}\n`);
   }
-  for (let k = 0; k < 10; k++) {
+  for (let k = 0; k < BIG_FILES; k++) {
     let text = "";
     while (text.length < options.bigBytes)
       text += `${vocabulary[Math.floor(random() * VOCABULARY)]!} `;
