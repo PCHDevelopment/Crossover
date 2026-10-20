@@ -690,14 +690,8 @@ export async function composeServer(
         dispatcher,
         pool,
         publicBaseUrl: config.a2aInbound.publicBaseUrl,
-        onInternalError: (error, context) =>
-          logInternalError(error, {
-            method: "POST",
-            route: "/a2a/rooms/:roomId",
-            command_method: context.method,
-            room_id: context.room_id,
-            participant_id: context.participant_id,
-          }),
+        // The error and the route pattern only: no method, room or participant ids (T1623).
+        onInternalError: (error) => logInternalError(error, { route: "/a2a/rooms/:roomId" }),
       });
     }
 

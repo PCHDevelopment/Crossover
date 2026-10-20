@@ -2648,6 +2648,53 @@ describe("loadConfig", () => {
     );
   });
 
+  it("logs an internal A2A failure with the route pattern only, and answers a generic error (T1623)", async () => {
+    const { server } = await start({
+      a2aInbound: { publicBaseUrl: "https://crossover.example.com" },
+    });
+    const { roomId, agent } = await walkthrough(server.app, false);
+    const dispatch = vi
+      .spyOn(server.dispatcher, "dispatch")
+      .mockRejectedValueOnce(new Error("injected internal A2A failure"));
+    const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const response = await server.app.inject({
+        method: "POST",
+        url: `/a2a/rooms/${roomId}`,
+        headers: {
+          authorization: `Bearer ${agent.tokens.access_token}`,
+          "a2a-version": "1.0",
+          "content-type": "application/json",
+        },
+        payload: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "ListTasks",
+          params: { pageToken: "a2a-param-secret" },
+        }),
+      });
+      expect(response.statusCode).toBe(200);
+      const answer = response.json();
+      expect(answer.error.message).toBe("Internal error");
+      expect(JSON.stringify(answer)).not.toContain("injected internal A2A failure");
+      expect(stderr).toHaveBeenCalledOnce();
+      const line = stderr.mock.calls[0]?.[0] as string;
+      const record = JSON.parse(line) as Record<string, unknown>;
+      expect(Object.keys(record).sort()).toEqual(["event", "route", "stack"]);
+      expect(record).toMatchObject({
+        event: "gateway.internal_error",
+        route: "/a2a/rooms/:roomId",
+        stack: expect.stringContaining("injected internal A2A failure"),
+      });
+      expect(line).not.toContain("a2a-param-secret");
+      expect(line).not.toContain(roomId);
+      expect(line).not.toContain(agent.tokens.access_token);
+    } finally {
+      dispatch.mockRestore();
+      stderr.mockRestore();
+    }
+  });
+
   it("reads the conflict report interval (T1586): one day by default, 0 turns it off", () => {
     expect(loadConfig(env).conflictReportIntervalMs).toBe(86_400_000);
     expect(loadConfig({ ...env, CONFLICT_REPORT_INTERVAL_MS: "0" }).conflictReportIntervalMs).toBe(
