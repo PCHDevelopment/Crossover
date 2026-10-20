@@ -99,6 +99,8 @@ import {
   ExecutionService,
   HealthCheckQueue,
   ZoektIndexer,
+  ripgrepBackend,
+  zoektBackend,
   workspaceHealthGate,
   provisionWorkspace,
   reconcileRef,
@@ -880,6 +882,12 @@ function registerCommands(
         }
       : {}),
     ...(upstream ? { upstream } : {}),
+    ...(config.searchBackend === "zoekt" && config.zoektUrl
+      ? {
+          searchHeadBackends: [zoektBackend({ url: config.zoektUrl }), ripgrepBackend],
+          searchOnBackend: (name: string) => console.warn(`workspace.search backend: ${name}`),
+        }
+      : {}),
   };
   registerWorkspaceCommands(dispatcher, workspaceDeps);
   registerSandboxStatusCommand(dispatcher, execution);

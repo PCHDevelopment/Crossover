@@ -47,6 +47,8 @@ export { workspaceReadParamsSchema, workspaceListParamsSchema } from "./reads.js
 export { workspaceSearchParamsSchema } from "./search.js";
 export { ripgrepBackend } from "./search-backend.js";
 export { gitGrepBackend } from "./search-git-grep.js";
+export { zoektBackend, zoektQuery } from "./zoekt-search.js";
+export type { ZoektBackendOptions } from "./zoekt-search.js";
 export { globToRegExpSource } from "./search-glob.js";
 export type {
   SearchBackend,
