@@ -183,6 +183,7 @@ jobs:
           - { name: git-fetcher, file: apps/git-fetcher/Dockerfile, target: "" }
           - { name: github-plugin, file: plugins/github/Dockerfile, target: "" }
           - { name: server, file: apps/server/Dockerfile, target: "" }
+          - { name: zoekt, file: apps/zoekt/Dockerfile, target: "" }
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
@@ -310,7 +311,7 @@ jobs:
       - name: Wait for the images
         env:
           GH_TOKEN: ${{ github.token }}
-          IMAGES: "egress-proxy browser-plugin git-fetcher github-plugin server"
+          IMAGES: "egress-proxy browser-plugin git-fetcher github-plugin server zoekt"
         run: |
           # One failed API call is not a failed job: try again on the next pass, and give up only
           # after several in a row. Poll gently; the token's requests are shared by the repository.
@@ -360,7 +361,7 @@ jobs:
       - name: Load the test images
         env:
           GH_TOKEN: ${{ github.token }}
-          IMAGES: "egress-proxy browser-plugin git-fetcher github-plugin server"
+          IMAGES: "egress-proxy browser-plugin git-fetcher github-plugin server zoekt"
         run: |
           # Each image must have the ID it had where it was built: the tags are the ones the tests
           # use, and the content must be too.
