@@ -53,7 +53,7 @@ const manifest = (name: string) => ({
 });
 
 /** A room with an owner, a lead agent and a developer agent, behind the real policy. */
-async function setup() {
+async function setup(options: { lead?: boolean } = {}) {
   const dispatcher = new Dispatcher({ pool, authorize, nodeId: `node-${++n}` });
   registerRoomCommands(dispatcher);
   registerInviteCommands(dispatcher);
@@ -126,12 +126,21 @@ async function setup() {
   };
   const lead = await join("Lead");
   const dev = await join("Dev");
-  await dispatcher.dispatch(ownerP, {
-    id: newId("cmd"),
-    method: "room.set_lead",
-    params: { participant_id: lead.id },
-    idempotency_key: `k-${++n}`,
-  });
+  if (options.lead !== false)
+    await dispatcher.dispatch(ownerP, {
+      id: newId("cmd"),
+      method: "room.set_lead",
+      params: { participant_id: lead.id },
+      idempotency_key: `k-${++n}`,
+    });
+  else {
+    // The creator holds the lead role until it is moved; a room with no lead has nobody in it.
+    await pool.query("UPDATE rooms SET lead_participant_id = NULL WHERE id = $1", [room.id]);
+    await pool.query(
+      "UPDATE participants SET role = 'DEVELOPER' WHERE room_id = $1 AND role = 'LEAD'",
+      [room.id],
+    );
+  }
   const ownerToken = (await issueTokens(pool, participant.id)).access_token;
 
   const rpc = async (
@@ -171,11 +180,33 @@ async function setup() {
       })
     ).response as { id: string };
   /** Move a task to a status directly; every state but OPEN needs an owner. */
-  const setStatus = (id: string, status: string, blockedReason: string | null = null) =>
+  const setStatus = (
+    id: string,
+    status: string,
+    blockedReason: string | null = null,
+    ownerId: string = dev.id,
+  ) =>
     pool.query(
       `UPDATE tasks SET status = $2, owner_id = CASE WHEN $2 = 'OPEN' THEN NULL ELSE $3 END,
               blocked_reason = $4 WHERE id = $1`,
-      [id, status, dev.id, blockedReason],
+      [id, status, ownerId, blockedReason],
+    );
+  /** The messages of the room, oldest first, as the tables hold them. */
+  const messages = async () =>
+    (
+      await pool.query<{
+        body: string;
+        author_id: string;
+        mentions: string[];
+        refs: { id: string }[];
+      }>(
+        "SELECT body, author_id, mentions, refs FROM messages WHERE room_id = $1 ORDER BY created_at, id",
+        [room.id],
+      )
+    ).rows;
+  const taskCount = async () =>
+    Number(
+      (await pool.query("SELECT count(*) AS n FROM tasks WHERE room_id = $1", [room.id])).rows[0].n,
     );
   const card = (token: string | undefined, roomId = room.id) =>
     app.inject({
@@ -183,7 +214,21 @@ async function setup() {
       url: `/a2a/rooms/${roomId}/.well-known/agent-card.json`,
       headers: token ? { authorization: `Bearer ${token}` } : {},
     });
-  return { app, room: room.id, ownerToken, lead, dev, rpc, as, task, card, setStatus };
+  return {
+    app,
+    room: room.id,
+    ownerId: participant.id,
+    ownerToken,
+    lead,
+    dev,
+    rpc,
+    as,
+    task,
+    card,
+    setStatus,
+    messages,
+    taskCount,
+  };
 }
 
 describe("A2A inbound: the agent card (T1623)", () => {
@@ -251,8 +296,6 @@ describe("A2A inbound: the JSON-RPC pipeline (T1623)", () => {
         .body,
     ).toMatchObject({ id: 7, error: { code: -32600 } });
     expect((await s.rpc(s.dev.token, "Nope")).body["error"].code).toBe(-32601);
-    // SendMessage arrives with the next part.
-    expect((await s.rpc(s.dev.token, "SendMessage", {})).body["error"].code).toBe(-32601);
   });
 
   it("streaming and push methods → -32004 / -32003; the extended card → -32007", async () => {
@@ -386,5 +429,200 @@ describe("A2A inbound: GetTask, ListTasks and CancelTask (T1623)", () => {
     expect((await s.rpc(s.lead.token, "CancelTask", { id: "task_nope" })).body["error"].code).toBe(
       -32001,
     );
+  });
+});
+
+const send = (
+  s: Awaited<ReturnType<typeof setup>>,
+  token: string,
+  message: Record<string, unknown>,
+  extra: Record<string, unknown> = {},
+) =>
+  s.rpc(token, "SendMessage", {
+    message: {
+      messageId: `m-${++n}`,
+      role: "ROLE_USER",
+      parts: [{ text: "Please add a login page" }],
+      ...message,
+    },
+    ...extra,
+  });
+
+describe("A2A inbound: SendMessage (T1623)", () => {
+  it("creates a task, mentions the lead, and answers TASK_STATE_SUBMITTED at once", async () => {
+    const s = await setup();
+    const { body } = await send(s, s.dev.token, {
+      parts: [{ text: "Add a login page\nWith a remember-me box" }],
+    });
+    const task = body["result"].task;
+    expect(task.status.state).toBe("TASK_STATE_SUBMITTED");
+    expect(task).toMatchObject({ contextId: s.room, id: expect.stringMatching(/^task_/) });
+    const created = (await s.rpc(s.dev.token, "GetTask", { id: task.id })).body["result"];
+    expect(created.metadata.crossover.status).toBe("OPEN");
+    const row = await pool.query(
+      "SELECT title, description, requirements FROM tasks WHERE id = $1",
+      [task.id],
+    );
+    expect(row.rows[0]).toEqual({
+      title: "Add a login page",
+      description: "Add a login page\nWith a remember-me box",
+      requirements: ["Answer the requesting agent's message"],
+    });
+    const [note] = await s.messages();
+    expect(note).toMatchObject({
+      body: "New A2A request: Add a login page",
+      author_id: s.dev.id,
+      mentions: [s.lead.id],
+      refs: [{ kind: "task", id: task.id }],
+    });
+    expect(task.history).toHaveLength(1);
+    expect(task.history[0].role).toBe("ROLE_USER");
+  });
+
+  it("uses the crossover.title and crossover.requirements metadata when given", async () => {
+    const s = await setup();
+    const { body } = await send(s, s.dev.token, {
+      metadata: { "crossover.title": "  Ship it  ", "crossover.requirements": ["A", "B"] },
+    });
+    const row = await pool.query("SELECT title, requirements FROM tasks WHERE id = $1", [
+      body["result"].task.id,
+    ]);
+    expect(row.rows[0]).toEqual({ title: "Ship it", requirements: ["A", "B"] });
+    const long = await send(s, s.dev.token, { parts: [{ text: "x".repeat(300) }] });
+    const longRow = await pool.query("SELECT title FROM tasks WHERE id = $1", [
+      long.body["result"].task.id,
+    ]);
+    expect(longRow.rows[0].title).toHaveLength(200);
+  });
+
+  it("same messageId twice from one caller → one task; another caller's is separate", async () => {
+    const s = await setup();
+    const message = { messageId: "retry-me" };
+    const first = (await send(s, s.dev.token, message)).body["result"].task.id;
+    const again = (await send(s, s.dev.token, message)).body["result"].task.id;
+    expect(again).toBe(first);
+    expect(await s.taskCount()).toBe(1);
+    expect((await s.messages()).filter((m) => m.body.startsWith("New A2A request"))).toHaveLength(
+      1,
+    );
+    const other = (await send(s, s.lead.token, message)).body["result"].task.id;
+    expect(other).not.toBe(first);
+    expect(await s.taskCount()).toBe(2);
+  });
+
+  it("a lead's own request mentions nobody; a room with no lead still creates the task", async () => {
+    const s = await setup();
+    await send(s, s.lead.token, {});
+    expect((await s.messages())[0]!.mentions).toEqual([]);
+    const none = await setup({ lead: false });
+    const { body } = await send(none, none.dev.token, {});
+    expect(body["result"].task.status.state).toBe("TASK_STATE_SUBMITTED");
+    expect((await none.messages())[0]!.mentions).toEqual([]);
+  });
+
+  it("with taskId: posts a message with the task ref and mentions the lead and a human owner, never an agent owner", async () => {
+    const s = await setup();
+    const human = await s.task("owned by a human");
+    await s.setStatus(human.id, "IN_PROGRESS", null, s.ownerId);
+    const agentOwned = await s.task("owned by an agent");
+    await s.setStatus(agentOwned.id, "IN_PROGRESS", null, s.dev.id);
+
+    const reply = await send(s, s.lead.token, { taskId: human.id, parts: [{ text: "Any news?" }] });
+    // The lead is the caller, so only the human owner is mentioned.
+    expect(reply.body["result"].task.id).toBe(human.id);
+    let messages = await s.messages();
+    expect(messages.at(-1)).toMatchObject({
+      body: "Any news?",
+      mentions: [s.ownerId],
+      refs: [{ id: human.id }],
+    });
+
+    await send(s, s.dev.token, { taskId: human.id, parts: [{ text: "Done soon" }] });
+    messages = await s.messages();
+    expect(messages.at(-1)!.mentions.sort()).toEqual([s.lead.id, s.ownerId].sort());
+
+    // An agent owner is not mentioned; only the lead.
+    await send(s, s.lead.token, { taskId: agentOwned.id, parts: [{ text: "Status?" }] });
+    expect((await s.messages()).at(-1)!.mentions).toEqual([]);
+    await send(s, s.dev.token, { taskId: agentOwned.id, parts: [{ text: "Working on it" }] });
+    expect((await s.messages()).at(-1)!.mentions).toEqual([s.lead.id]);
+    expect(await s.taskCount()).toBe(2);
+  });
+
+  it("with taskId and no lead: still mentions the human owner and does not fail", async () => {
+    const s = await setup({ lead: false });
+    const t = await s.task();
+    await s.setStatus(t.id, "IN_PROGRESS", null, s.ownerId);
+    const { body } = await send(s, s.dev.token, { taskId: t.id, parts: [{ text: "ping" }] });
+    expect(body["error"]).toBeUndefined();
+    expect((await s.messages()).at(-1)!.mentions).toEqual([s.ownerId]);
+  });
+
+  it("an unknown task, or another room's, is TaskNotFound", async () => {
+    const a = await setup();
+    const b = await setup();
+    const foreign = await b.task();
+    expect((await send(a, a.dev.token, { taskId: foreign.id })).body["error"].code).toBe(-32001);
+    expect((await send(a, a.dev.token, { taskId: "task_nope" })).body["error"].code).toBe(-32001);
+    expect((await a.messages()).length).toBe(0);
+  });
+
+  it("file part → -32005; bad role, contextId, messageId or text → -32602", async () => {
+    const s = await setup();
+    const code = async (message: Record<string, unknown>) =>
+      (await send(s, s.dev.token, message)).body["error"]?.code;
+    expect(await code({ parts: [{ url: "https://example.com/a.pdf" }] })).toBe(-32005);
+    expect(await code({ parts: [{ raw: "aGk=" }] })).toBe(-32005);
+    expect(await code({ role: "ROLE_AGENT" })).toBe(-32602);
+    expect(await code({ contextId: "room_other" })).toBe(-32602);
+    expect(await code({ messageId: "m".repeat(101) })).toBe(-32602);
+    expect(await code({ parts: [{ text: "x".repeat(20_001) }] })).toBe(-32602);
+    expect(await code({ parts: [{ text: "   " }] })).toBe(-32602);
+    expect((await s.rpc(s.dev.token, "SendMessage", {})).body["error"].code).toBe(-32602);
+    expect(await s.taskCount()).toBe(0);
+  });
+
+  it('a data-only message gets the title "A2A request", never a code fence', async () => {
+    const s = await setup();
+    const { body } = await send(s, s.dev.token, { parts: [{ data: { retries: 3 } }] });
+    const row = await pool.query("SELECT title FROM tasks WHERE id = $1", [body["result"].task.id]);
+    expect(row.rows[0].title).toBe("A2A request");
+    expect((await s.messages())[0]!.body).toBe("New A2A request: A2A request");
+    // With a text part, the title comes from it even when a data part is first.
+    const mixed = await send(s, s.dev.token, {
+      parts: [{ data: { a: 1 } }, { text: "Fix the build" }],
+    });
+    const mixedRow = await pool.query("SELECT title FROM tasks WHERE id = $1", [
+      mixed.body["result"].task.id,
+    ]);
+    expect(mixedRow.rows[0].title).toBe("Fix the build");
+  });
+
+  it("a messageId containing a colon cannot collide with another operation's key", async () => {
+    const s = await setup();
+    const created = (await send(s, s.dev.token, { messageId: "x" })).body["result"].task.id;
+    for (const messageId of ["x:create", "x:notify", "create:x", "reply:x"]) {
+      const reply = await send(s, s.dev.token, {
+        messageId,
+        taskId: created,
+        parts: [{ text: `reply ${messageId}` }],
+      });
+      expect(reply.body["error"], messageId).toBeUndefined();
+    }
+    const bodies = (await s.messages()).map((m) => m.body);
+    for (const messageId of ["x:create", "x:notify", "create:x", "reply:x"])
+      expect(bodies, messageId).toContain(`reply ${messageId}`);
+    expect(await s.taskCount()).toBe(1);
+  });
+
+  it("a data part becomes a fenced json block after the text", async () => {
+    const s = await setup();
+    const { body } = await send(s, s.dev.token, {
+      parts: [{ text: "Config:" }, { data: { retries: 3 } }],
+    });
+    const row = await pool.query("SELECT description FROM tasks WHERE id = $1", [
+      body["result"].task.id,
+    ]);
+    expect(row.rows[0].description).toBe('Config:\n\n```json\n{\n  "retries": 3\n}\n```');
   });
 });

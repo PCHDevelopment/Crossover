@@ -8,6 +8,7 @@ import {
   jsonRpcError,
   jsonRpcRequestSchema,
   listTasksRequestSchema,
+  sendMessageRequestSchema,
   toA2aTask,
   type AgentCard,
   type CrossoverMessageView,
@@ -37,6 +38,10 @@ const DEFAULT_HISTORY = 20;
 const MAX_HISTORY = 100;
 const DEFAULT_PAGE = 50;
 const NO_STORE = "no-store";
+const MAX_TEXT_CHARS = 20_000;
+const MAX_TITLE_CHARS = 200;
+const DEFAULT_TITLE = "A2A request";
+const DEFAULT_REQUIREMENT = "Answer the requesting agent's message";
 
 /** A JSON-RPC method this server declines on purpose, with the error that says why (§15.5). */
 const DECLINED: Record<string, { code: number; message: string }> = {
@@ -143,6 +148,38 @@ export function registerA2aInbound(app: FastifyInstance, options: A2aInboundOpti
     }
   }
 
+  /** The lead and each participant's kind, from the summary room state (no SQL here). */
+  async function roomPeople(principal: Principal) {
+    const state = (await call(principal, "room.get_state", { view: "summary" })) as {
+      sections: {
+        room: { lead_participant_id: string | null };
+        participants: { id: string; kind: string }[];
+      };
+    };
+    return {
+      lead: state.sections.room.lead_participant_id,
+      kindOf: (id: string | null) => state.sections.participants.find((p) => p.id === id)?.kind,
+    };
+  }
+
+  /** The text of a message: its text parts, then each data part as a fenced JSON block. */
+  function messageText(
+    parts: { text?: string | undefined; data?: unknown; raw?: unknown; url?: unknown }[],
+  ) {
+    if (parts.some((part) => part.raw !== undefined || part.url !== undefined))
+      throw new RpcError(A2A_ERRORS.ContentTypeNotSupported, "Files are not supported");
+    const text = parts
+      .map((part) =>
+        part.text !== undefined
+          ? part.text
+          : `\`\`\`json\n${JSON.stringify(part.data, null, 2)}\n\`\`\``,
+      )
+      .join("\n\n");
+    if (text.trim() === "" || text.length > MAX_TEXT_CHARS)
+      throw new RpcError(A2A_ERRORS.InvalidParams, "The message text is empty or too long");
+    return text;
+  }
+
   async function history(principal: Principal, taskId: string, length: number) {
     if (length === 0) return undefined;
     const listed = (await call(principal, "messages.list", {
@@ -169,6 +206,79 @@ export function registerA2aInbound(app: FastifyInstance, options: A2aInboundOpti
           callerId: principal.participant_id,
           history: await history(principal, task.id, length),
         });
+      }
+      case "SendMessage": {
+        const p = parse(sendMessageRequestSchema);
+        const m = p.message;
+        if (m.role !== "ROLE_USER")
+          throw new RpcError(A2A_ERRORS.InvalidParams, "The message role must be ROLE_USER");
+        if (m.contextId !== undefined && m.contextId !== room)
+          throw new RpcError(A2A_ERRORS.InvalidParams, "Unknown contextId");
+        if (m.messageId.length > 100)
+          throw new RpcError(A2A_ERRORS.InvalidParams, "messageId is too long");
+        const text = messageText(m.parts);
+        const people = await roomPeople(principal);
+        const caller = principal.participant_id;
+        let taskId: string;
+        if (m.taskId === undefined) {
+          const meta = m.metadata ?? {};
+          const named = typeof meta["crossover.title"] === "string" ? meta["crossover.title"] : "";
+          // From the text parts only: a data part's fenced block must never become a title.
+          const firstLine = m.parts
+            .flatMap((part) => (part.text === undefined ? [] : part.text.split("\n")))
+            .find((line) => line.trim());
+          const title = (named.trim() || firstLine?.trim() || DEFAULT_TITLE).slice(
+            0,
+            MAX_TITLE_CHARS,
+          );
+          const requirements = meta["crossover.requirements"];
+          const created = (await call(
+            principal,
+            "tasks.create",
+            {
+              title,
+              description: text,
+              requirements: Array.isArray(requirements) ? requirements : [DEFAULT_REQUIREMENT],
+            },
+            `a2a:create:${m.messageId}`,
+          )) as CrossoverTaskView;
+          taskId = created.id;
+          await call(
+            principal,
+            "messages.send",
+            {
+              body: `New A2A request: ${title}`,
+              refs: [{ kind: "task", id: taskId }],
+              mentions: people.lead && people.lead !== caller ? [people.lead] : [],
+            },
+            `a2a:notify:${m.messageId}`,
+          );
+        } else {
+          const task = await loadTask(principal, m.taskId);
+          taskId = task.id;
+          // The lead (an agent or a human) and the owner when a human; an agent that merely owns
+          // the task is not mentioned. Each key has its own prefix with the caller's value last,
+          // so a messageId containing ":" cannot collide with another operation's key.
+          const targets = [
+            people.lead,
+            task.owner_id && people.kindOf(task.owner_id) === "HUMAN" ? task.owner_id : null,
+          ].filter((id): id is string => id !== null && id !== caller);
+          await call(
+            principal,
+            "messages.send",
+            { body: text, refs: [{ kind: "task", id: taskId }], mentions: [...new Set(targets)] },
+            `a2a:reply:${m.messageId}`,
+          );
+        }
+        const task = await loadTask(principal, taskId);
+        const length = Math.min(p.configuration?.historyLength ?? DEFAULT_HISTORY, MAX_HISTORY);
+        return {
+          task: toA2aTask(task, {
+            contextId: room,
+            callerId: caller,
+            history: await history(principal, taskId, length),
+          }),
+        };
       }
       case "ListTasks": {
         const p = parse(listTasksRequestSchema);
