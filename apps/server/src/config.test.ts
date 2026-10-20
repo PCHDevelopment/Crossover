@@ -11,6 +11,12 @@ const env = {
   ALLOW_UNSANDBOXED_DEV: "1",
 };
 
+it("defaults structured merge to off and rejects other values", () => {
+  expect(loadConfig(env).structuredMerge).toBe("off");
+  expect(loadConfig({ ...env, STRUCTURED_MERGE: "on" }).structuredMerge).toBe("on");
+  expect(() => loadConfig({ ...env, STRUCTURED_MERGE: "enabled" })).toThrow(/STRUCTURED_MERGE/);
+});
+
 describe("OAuth provider configuration", () => {
   it("does not select a test stub provider from environment variables", () => {
     expect(

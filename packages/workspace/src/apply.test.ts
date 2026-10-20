@@ -884,6 +884,88 @@ describe("workspace.apply_changeset", () => {
     expect(await f.rowsFor("events")).toHaveLength(1);
   });
 
+  it("records structured_merges in an applied ChangeSet payload", async () => {
+    const f = await fixture(allowAll, {
+      merge: (repo, base, head, candidate) =>
+        merge(repo, base, head, candidate, {
+          drivers: [
+            {
+              name: "test",
+              matches: (path) => path === "file.txt",
+              merge: async () => ({ ok: true, content: "merged\n" }),
+            },
+          ],
+        }),
+    });
+    await f.apply([{ type: "create", path: "file.txt", content: "base\n" }]);
+    await f.apply([{ type: "modify", path: "file.txt", content: "head\n" }], 1);
+    const result = await f.apply([{ type: "modify", path: "file.txt", content: "candidate\n" }], 1);
+    expect(result.response).toMatchObject({ status: "APPLIED", applied_revision: 3 });
+    expect(result.events).toMatchObject([
+      { type: "workspace.changeset.applied", payload: { applied_revision: 3 } },
+    ]);
+    expect(Object.keys(result.response).sort()).toEqual([
+      "applied_revision",
+      "changeset_id",
+      "status",
+    ]);
+    expect(
+      result.events.every((event) => !Object.keys(event.payload).includes("structured_merges")),
+    ).toBe(true);
+    const payload = (await f.rowsFor("changesets")).find(
+      (row) => row.applied_revision === "3",
+    )?.payload;
+    expect(payload?.structured_merges).toEqual([{ path: "file.txt", driver: "test" }]);
+  });
+
+  it("keeps classified conflicts unchanged and records structured_merge_refusals", async () => {
+    const setup = async (withDriver: boolean) => {
+      const f = await fixture(
+        allowAll,
+        withDriver
+          ? {
+              merge: (repo, base, head, candidate) =>
+                merge(repo, base, head, candidate, {
+                  drivers: [
+                    {
+                      name: "test",
+                      matches: (path) => path === "file.txt",
+                      merge: async () => ({ ok: false, reason: "unsupported" }),
+                    },
+                  ],
+                }),
+            }
+          : {},
+      );
+      await f.apply([{ type: "create", path: "file.txt", content: "base\n" }]);
+      await f.apply([{ type: "modify", path: "file.txt", content: "head\n" }], 1);
+      const response = await f.apply(
+        [{ type: "modify", path: "file.txt", content: "candidate\n" }],
+        1,
+      );
+      const payload = (await f.rowsFor("changesets")).find(
+        (row) => row.status === "CONFLICT",
+      )?.payload;
+      return { response, payload };
+    };
+    const baseline = await setup(false);
+    const refused = await setup(true);
+    expect(refused.response.response).toMatchObject({ status: "CONFLICT" });
+    expect(Object.keys(refused.response.response).sort()).toEqual(
+      Object.keys(baseline.response.response).sort(),
+    );
+    expect(
+      refused.response.events.map((event) => [event.type, Object.keys(event.payload).sort()]),
+    ).toEqual(
+      baseline.response.events.map((event) => [event.type, Object.keys(event.payload).sort()]),
+    );
+    expect(refused.payload?.conflicts).toEqual(baseline.payload?.conflicts);
+    expect(refused.payload?.structured_merge_refusals).toEqual([
+      { path: "file.txt", driver: "test", reason: "unsupported" },
+    ]);
+    expect(baseline.payload?.structured_merge_refusals).toBeUndefined();
+  });
+
   // Measured (T1529): idle 1770 ms, 3x load 3781 ms; budget 7x.
   it("persists conflict data and its event while applying none of the operations", async () => {
     const f = await fixture();

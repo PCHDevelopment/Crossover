@@ -99,6 +99,8 @@ import {
   ExecutionService,
   HealthCheckQueue,
   ZoektIndexer,
+  setDefaultMergeDrivers,
+  structuredMergeDrivers,
   workspaceHealthGate,
   provisionWorkspace,
   reconcileRef,
@@ -881,6 +883,7 @@ function registerCommands(
       : {}),
     ...(upstream ? { upstream } : {}),
   };
+  setDefaultMergeDrivers(config.structuredMerge === "on" ? structuredMergeDrivers() : []);
   registerWorkspaceCommands(dispatcher, workspaceDeps);
   registerSandboxStatusCommand(dispatcher, execution);
   registerSandboxFileCommands(dispatcher, execution);
