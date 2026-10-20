@@ -961,13 +961,23 @@ export async function apply(
         ],
       );
     }
+    const refusalPayload = result.structuredRefusals?.length
+      ? JSON.stringify(result.structuredRefusals)
+      : undefined;
     await client.query(
       `UPDATE changesets SET status = 'CONFLICT', conflict_id = $3,
        payload = payload || jsonb_build_object(
-         'conflicts', $4::jsonb, 'counterparty_changesets', $5::jsonb
+         'conflicts', $4::jsonb, 'counterparty_changesets', $5::jsonb${refusalPayload ? ", 'structured_merge_refusals', $6::jsonb" : ""}
        )
        WHERE room_id = $1 AND id = $2`,
-      [room_id, id, conflictId, JSON.stringify(classified), JSON.stringify(counterpartyChangesets)],
+      [
+        room_id,
+        id,
+        conflictId,
+        JSON.stringify(classified),
+        JSON.stringify(counterpartyChangesets),
+        ...(refusalPayload ? [refusalPayload] : []),
+      ],
     );
     return {
       response: {
@@ -1030,10 +1040,13 @@ export async function apply(
       [ws.id, room_id, path, revision, blob, actorId],
     );
   }
+  const structuredPayload = result.structured?.length
+    ? JSON.stringify(result.structured)
+    : undefined;
   await client.query(
-    `UPDATE changesets SET status = 'APPLIED', applied_revision = $3, applied_at = now()
+    `UPDATE changesets SET status = 'APPLIED', applied_revision = $3, applied_at = now()${structuredPayload ? ", payload = payload || jsonb_build_object('structured_merges', $4::jsonb)" : ""}
      WHERE room_id = $1 AND id = $2`,
-    [room_id, id, revision],
+    [room_id, id, revision, ...(structuredPayload ? [structuredPayload] : [])],
   );
   // Flagged secrets: for a normal apply, the low-confidence findings (high
   // confidence already threw); for an upstream pull, every finding, since the

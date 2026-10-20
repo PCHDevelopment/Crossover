@@ -167,6 +167,7 @@ const envSchema = z.object({
   /** The key agents' wake-up webhooks are signed with (derived per agent, §17.4). Off without it. */
   WAKE_WEBHOOK_KEY: z.string().min(32).optional(),
   SEARCH_BACKEND: z.enum(["ripgrep", "zoekt"]).default("ripgrep"),
+  STRUCTURED_MERGE: z.enum(["on", "off"]).default("off"),
   ZOEKT_URL: z.string().url().optional(),
   ZOEKT_INDEX_DIR: z.string().min(1).optional(),
   ZOEKT_INDEX_CONCURRENCY: z.coerce.number().int().min(1).max(8).default(2),
@@ -244,6 +245,7 @@ export interface ServerConfig {
   /** Platform key wake-up webhook secrets are derived from; no wake-ups without it. */
   wakeWebhookKey?: string;
   searchBackend?: "ripgrep" | "zoekt";
+  structuredMerge?: "on" | "off";
   zoektUrl?: string;
   zoektIndexDir?: string;
   zoektIndexConcurrency?: number;
@@ -486,6 +488,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     gitFetcherImage: e.GIT_FETCHER_IMAGE,
     ...(e.WAKE_WEBHOOK_KEY ? { wakeWebhookKey: e.WAKE_WEBHOOK_KEY } : {}),
     searchBackend: e.SEARCH_BACKEND,
+    structuredMerge: e.STRUCTURED_MERGE,
     ...(e.ZOEKT_URL ? { zoektUrl: e.ZOEKT_URL } : {}),
     ...(zoektIndexDir ? { zoektIndexDir } : {}),
     zoektIndexConcurrency: e.ZOEKT_INDEX_CONCURRENCY,
