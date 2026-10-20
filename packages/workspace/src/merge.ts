@@ -1,5 +1,12 @@
 import { git, GitError } from "./git.js";
 import { concurrentBinaryFiles, enforceBinaryConflicts } from "./binary.js";
+import {
+  defaultMergeDrivers,
+  resolveStructurally,
+  type MergeDriver,
+  type StructuredMergeRecord,
+  type StructuredMergeRefusalRecord,
+} from "./merge-drivers.js";
 
 export interface MergeStage {
   mode: string;
@@ -20,10 +27,15 @@ export interface MergeMessage {
 }
 
 export type MergeResult =
-  | { clean: true; tree: string }
-  | { clean: false; tree: string; conflicts: { files: MergeFile[]; messages: MergeMessage[] } };
+  | { clean: true; tree: string; structured?: StructuredMergeRecord[] }
+  | {
+      clean: false;
+      tree: string;
+      conflicts: { files: MergeFile[]; messages: MergeMessage[] };
+      structuredRefusals?: StructuredMergeRefusalRecord[];
+    };
 
-function parseConflict(stdout: string): MergeResult {
+function parseConflict(stdout: string): Extract<MergeResult, { clean: false }> {
   const fields = stdout.split("\0");
   let index = 0;
   const take = (): string => {
@@ -71,20 +83,21 @@ export async function merge(
   base: string,
   head: string,
   candidate: string,
+  options: { drivers?: readonly MergeDriver[] } = {},
 ): Promise<MergeResult> {
-  const options = { gitDir: repo, timeoutMs: 10_000, env: { GIT_CONFIG_GLOBAL: "/dev/null" } };
+  const gitOptions = { gitDir: repo, timeoutMs: 10_000, env: { GIT_CONFIG_GLOBAL: "/dev/null" } };
   // Resolve revisions before building commands, preventing options or moving refs in arguments.
   const [baseOid, headOid, candidateOid] = await Promise.all(
     [base, head, candidate].map(async (revision) =>
       (
-        await git(["rev-parse", "--verify", "--end-of-options", `${revision}^{commit}`], options)
+        await git(["rev-parse", "--verify", "--end-of-options", `${revision}^{commit}`], gitOptions)
       ).stdout.trim(),
     ),
   );
   if (baseOid === headOid) {
     return {
       clean: true,
-      tree: (await git(["rev-parse", `${candidateOid}^{tree}`], options)).stdout.trim(),
+      tree: (await git(["rev-parse", `${candidateOid}^{tree}`], gitOptions)).stdout.trim(),
     };
   }
   const binaryFiles = await concurrentBinaryFiles(repo, [baseOid!, headOid!, candidateOid!]);
@@ -99,7 +112,7 @@ export async function merge(
         headOid!,
         candidateOid!,
       ],
-      options,
+      gitOptions,
     );
     const tree = result.stdout.split("\0")[0]!;
     if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(tree))
@@ -121,9 +134,15 @@ export async function merge(
       error.signal !== null
     )
       throw error;
+    const parsed = parseConflict(
+      typeof error.stdout === "string" ? error.stdout : error.stdout.toString("utf8"),
+    );
     return enforceBinaryConflicts(
-      parseConflict(
-        typeof error.stdout === "string" ? error.stdout : error.stdout.toString("utf8"),
+      await resolveStructurally(
+        repo,
+        parsed,
+        new Set(binaryFiles.map((file) => file.path)),
+        options.drivers ?? defaultMergeDrivers(),
       ),
       binaryFiles,
     );
