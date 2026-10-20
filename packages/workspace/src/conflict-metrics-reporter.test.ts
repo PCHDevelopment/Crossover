@@ -24,7 +24,7 @@ describe("ConflictMetricsReporter", () => {
     expect(lines[0]!.endsWith("\n")).toBe(true);
     expect(JSON.parse(lines[0]!)).toMatchObject({
       msg: "conflict_rate_report",
-      report_version: 1,
+      report_version: 2,
       since: "2026-10-12T00:00:00.000Z",
       until: "2026-10-19T00:00:00.000Z",
     });

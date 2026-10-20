@@ -1,5 +1,6 @@
 import type { Pool } from "@crossover/db";
 import type { ConflictKind } from "./conflicts.js";
+import type { StructuredMergeRefusalRecord } from "./merge-drivers.js";
 
 export interface ConflictRateOptions {
   since: Date;
@@ -27,8 +28,23 @@ interface ExtensionCell {
   by_kind: Record<ConflictKind, number>;
 }
 
+/** What structured merge did with the contended ChangeSets (T1592, §25.1). */
+export interface StructuredOutcomes {
+  /** APPLIED ChangeSets with at least one file resolved by a driver. */
+  resolved_changesets: Record<ParticipantKind, number>;
+  /** Extension -> driver -> files a driver resolved. */
+  resolved_files: Record<string, Record<string, number>>;
+  /** Refused files of CONFLICT ChangeSets: kind -> reason -> count. */
+  refusals: Record<ParticipantKind, Record<string, number>>;
+  refusals_by_extension: Record<string, Record<string, number>>;
+  /** resolved / (resolved + conflicted), 4 decimals; null if both are 0. */
+  saved_rate: Record<ParticipantKind, number | null>;
+  /** Stored values or entries that were not in the recorded shape, skipped. */
+  malformed: number;
+}
+
 export interface ConflictRateReport {
-  report_version: 1;
+  report_version: 2;
   since: string;
   until: string;
   rooms: number;
@@ -40,6 +56,7 @@ export interface ConflictRateReport {
   by_pair: Record<`${ParticipantKind}->${ParticipantKind}`, number>;
   /** CONTENT conflicts in languages structured merge could handle. */
   structured_candidates: { HUMAN: number; AGENT: number };
+  structured: StructuredOutcomes;
 }
 
 const KINDS: readonly ParticipantKind[] = ["HUMAN", "AGENT", "SYSTEM"];
@@ -63,6 +80,53 @@ const STRUCTURED_EXTENSIONS = new Set([
   "py",
   "json",
 ]);
+
+// The only strings a driver or reason may put in the report: stored text is bucketed as "other".
+const KNOWN_DRIVERS: ReadonlySet<string> = new Set([
+  "typescript-toplevel",
+  "python-toplevel",
+  "json-keys",
+]);
+const REFUSAL_REASONS: Record<StructuredMergeRefusalRecord["reason"], true> = {
+  parse_error: true,
+  same_key: true,
+  add_add: true,
+  delete_modify: true,
+  duplicate_key: true,
+  unkeyed_change: true,
+  reorder: true,
+  trailer: true,
+  result_parse_error: true,
+  verify_mismatch: true,
+  not_canonical: true,
+  unsupported: true,
+  too_large: true,
+  driver_error: true,
+  ineligible: true,
+  no_driver: true,
+  budget: true,
+  not_utf8: true,
+};
+const known = (value: unknown, set: ReadonlySet<string>): string =>
+  typeof value === "string" && set.has(value) ? value : "other";
+const KNOWN_REASONS: ReadonlySet<string> = new Set(Object.keys(REFUSAL_REASONS));
+const bump = (counts: Record<string, number>, key: string) => {
+  counts[key] = (counts[key] ?? 0) + 1;
+};
+
+/** The well-formed entries of a stored array (an absent value is none), and how many were not. */
+function storedEntries(
+  value: unknown,
+  valid: (entry: Record<string, unknown>) => boolean,
+): { entries: Record<string, unknown>[]; malformed: number } {
+  if (value === undefined || value === null) return { entries: [], malformed: 0 };
+  if (!Array.isArray(value)) return { entries: [], malformed: 1 };
+  const entries: Record<string, unknown>[] = [];
+  for (const entry of value as unknown[])
+    if (typeof entry === "object" && entry !== null && !Array.isArray(entry))
+      if (valid(entry as Record<string, unknown>)) entries.push(entry as Record<string, unknown>);
+  return { entries, malformed: value.length - entries.length };
+}
 
 const kindCounts = (): Record<ConflictKind, number> =>
   Object.fromEntries(CONFLICT_KINDS.map((kind) => [kind, 0])) as Record<ConflictKind, number>;
@@ -102,6 +166,8 @@ interface Row {
     operations?: { path?: string; from?: string; to?: string }[];
     conflicts?: { path?: string; kind?: ConflictKind }[];
     counterparty_changesets?: string[];
+    structured_merges?: unknown;
+    structured_merge_refusals?: unknown;
   };
   kind: ParticipantKind;
 }
@@ -115,7 +181,9 @@ const PAYLOAD_SQL = `jsonb_build_object(
   'conflicts', COALESCE((SELECT jsonb_agg(jsonb_build_object('path', f->'path', 'kind', f->'kind'))
                            FROM jsonb_array_elements(CASE WHEN jsonb_typeof(c.payload->'conflicts') = 'array'
                                                           THEN c.payload->'conflicts' ELSE '[]'::jsonb END) f), '[]'::jsonb),
-  'counterparty_changesets', COALESCE(c.payload->'counterparty_changesets', '[]'::jsonb))`;
+  'counterparty_changesets', COALESCE(c.payload->'counterparty_changesets', '[]'::jsonb),
+  'structured_merges', c.payload->'structured_merges',
+  'structured_merge_refusals', c.payload->'structured_merge_refusals')`;
 
 /**
  * Conflict rates by participant kind and file extension over `[since, until)` (T1586). Read-only
@@ -130,7 +198,7 @@ export async function conflictRateReport(
     options.roomIds ??
     (await pool.query<{ id: string }>("SELECT id FROM rooms ORDER BY id")).rows.map((r) => r.id);
   const report: ConflictRateReport = {
-    report_version: 1,
+    report_version: 2,
     since: options.since.toISOString(),
     until: options.until.toISOString(),
     rooms: roomIds.length,
@@ -141,6 +209,14 @@ export async function conflictRateReport(
       KINDS.flatMap((from) => KINDS.map((to) => [`${from}->${to}`, 0])),
     ) as ConflictRateReport["by_pair"],
     structured_candidates: { HUMAN: 0, AGENT: 0 },
+    structured: {
+      resolved_changesets: { HUMAN: 0, AGENT: 0, SYSTEM: 0 },
+      resolved_files: {},
+      refusals: { HUMAN: {}, AGENT: {}, SYSTEM: {} },
+      refusals_by_extension: {},
+      saved_rate: { HUMAN: null, AGENT: null, SYSTEM: null },
+      malformed: 0,
+    },
   };
   const extension = (ext: string, kind: ParticipantKind): ExtensionCell => {
     report.by_extension[ext] ??= {
@@ -180,6 +256,37 @@ export async function conflictRateReport(
       const cell = report.by_participant[row.kind];
       cell.submissions++;
       const conflicted = row.status === "CONFLICT";
+      // Stored history is never trusted: only fixed strings reach the report, the rest is "other".
+      const structured = report.structured;
+      if (!conflicted) {
+        const merged = storedEntries(
+          row.payload.structured_merges,
+          (entry) => typeof entry["path"] === "string" && typeof entry["driver"] === "string",
+        );
+        structured.malformed += merged.malformed;
+        if (merged.entries.length > 0) structured.resolved_changesets[row.kind]++;
+        for (const entry of merged.entries) {
+          const ext = extensionOf(entry["path"] as string);
+          structured.resolved_files[ext] ??= {};
+          bump(structured.resolved_files[ext]!, known(entry["driver"], KNOWN_DRIVERS));
+        }
+      } else {
+        const refused = storedEntries(
+          row.payload.structured_merge_refusals,
+          (entry) =>
+            typeof entry["path"] === "string" &&
+            (typeof entry["driver"] === "string" || entry["driver"] === null) &&
+            typeof entry["reason"] === "string",
+        );
+        structured.malformed += refused.malformed;
+        for (const entry of refused.entries) {
+          const reason = known(entry["reason"], KNOWN_REASONS);
+          const ext = extensionOf(entry["path"] as string);
+          bump(structured.refusals[row.kind], reason);
+          structured.refusals_by_extension[ext] ??= {};
+          bump(structured.refusals_by_extension[ext]!, reason);
+        }
+      }
       // A fast-forward (applied = base + 1) ran no merge, so it was not contended.
       const contended =
         conflicted ||
@@ -226,6 +333,12 @@ export async function conflictRateReport(
     }
   }
 
+  for (const kind of KINDS) {
+    const saved = report.structured.resolved_changesets[kind];
+    const total = saved + report.by_participant[kind].conflicted;
+    report.structured.saved_rate[kind] =
+      total === 0 ? null : Math.round((saved / total) * 10_000) / 10_000;
+  }
   for (const cell of Object.values(report.by_participant))
     cell.conflict_rate =
       cell.contended === 0

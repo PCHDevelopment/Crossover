@@ -21,7 +21,7 @@ const argsSchema = z.object({
 const KINDS: readonly ParticipantKind[] = ["HUMAN", "AGENT", "SYSTEM"];
 const percent = (rate: number | null) => (rate === null ? "-" : `${(rate * 100).toFixed(1)}%`);
 
-/** The three tables of the markdown report, then the structured-merge candidate line. */
+/** The markdown report: the kind, extension and pair tables, the structured-merge outcomes, then the candidate line. */
 export function markdown(report: ConflictRateReport): string {
   const lines = [
     `# Conflict-rate report, ${report.since} to ${report.until} (${report.rooms} rooms)`,
@@ -61,6 +61,26 @@ export function markdown(report: ConflictRateReport): string {
   lines.push("| submitter | HUMAN | AGENT | SYSTEM |", "|---|---|---|---|");
   for (const from of KINDS)
     lines.push(`| ${from} | ${KINDS.map((to) => report.by_pair[`${from}->${to}`]).join(" | ")} |`);
+  lines.push("", "## Structured merge", "");
+  lines.push("| kind | resolved | conflicted | saved rate |", "|---|---|---|---|");
+  for (const kind of KINDS)
+    lines.push(
+      `| ${kind} | ${report.structured.resolved_changesets[kind]} | ${report.by_participant[kind].conflicted} | ${percent(report.structured.saved_rate[kind])} |`,
+    );
+  const refusals = KINDS.flatMap((kind) =>
+    Object.entries(report.structured.refusals[kind]).map(([reason, count]) => ({
+      reason,
+      kind,
+      count,
+    })),
+  )
+    .sort(
+      (a, b) =>
+        b.count - a.count || a.reason.localeCompare(b.reason) || a.kind.localeCompare(b.kind),
+    )
+    .slice(0, 10);
+  lines.push("", "## Top refusal reasons", "", "| reason | kind | files |", "|---|---|---|");
+  for (const { reason, kind, count } of refusals) lines.push(`| ${reason} | ${kind} | ${count} |`);
   lines.push(
     "",
     `Structured-merge candidates (CONTENT conflicts in supported languages): HUMAN ${report.structured_candidates.HUMAN}, AGENT ${report.structured_candidates.AGENT}`,
