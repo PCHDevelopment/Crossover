@@ -137,14 +137,7 @@ export async function merge(
     const parsed = parseConflict(
       typeof error.stdout === "string" ? error.stdout : error.stdout.toString("utf8"),
     );
-    return enforceBinaryConflicts(
-      await resolveStructurally(
-        repo,
-        parsed,
-        new Set(binaryFiles.map((file) => file.path)),
-        options.drivers ?? defaultMergeDrivers(),
-      ),
-      binaryFiles,
-    );
+    if (binaryFiles.length) return enforceBinaryConflicts(parsed, binaryFiles);
+    return resolveStructurally(repo, parsed, new Set(), options.drivers ?? defaultMergeDrivers());
   }
 }

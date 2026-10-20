@@ -111,6 +111,31 @@ describe("resolveStructurally", () => {
     expect(result).toMatchObject({ clean: true, structured: [{ path: f.path, driver: "fake" }] });
   });
 
+  it("preserves text conflicts when a concurrent binary file also conflicts", async () => {
+    const f = await fixture();
+    const base = await materialize(f.repo, f.base, [
+      { type: "create", path: "binary.dat", content: "base\0data" },
+    ]);
+    const head = await materialize(f.repo, base, [
+      { type: "modify", path: f.path, content: "HEAD\ntwo\n" },
+      { type: "modify", path: "binary.dat", content: "shared\0data" },
+    ]);
+    const candidate = await materialize(f.repo, base, [
+      { type: "modify", path: f.path, content: "CANDIDATE\ntwo\n" },
+      { type: "modify", path: "binary.dat", content: "shared\0data" },
+    ]);
+    const called = vi.fn(async () => ({ ok: true as const, content: "resolved\n" }));
+    const result = await merge(f.repo, base, head, candidate, { drivers: [driver(called)] });
+    expect(result.clean).toBe(false);
+    if (result.clean) throw new Error("Expected mixed conflicts");
+    expect(result.conflicts.files.map((file) => file.path)).toContain(f.path);
+    expect(result.conflicts.messages).toContainEqual(
+      expect.objectContaining({ paths: [f.path], type: "CONFLICT (contents)" }),
+    );
+    expect(result).not.toHaveProperty("structured");
+    expect(called).not.toHaveBeenCalled();
+  });
+
   it("keeps both files conflicted when the second file has no driver", async () => {
     const f = await fixture("file.txt", "other.txt");
     const original = f.original;
