@@ -12,6 +12,7 @@ export async function purgeRoomWorkspace(options: {
   roomId: string;
   repoPath: string | null | undefined;
   destroyRoom: (roomId: string) => Promise<void>;
+  removeSearchIndex?: (roomId: string) => Promise<void>;
 }): Promise<void> {
   const { roomId, repoPath } = options;
   await options.destroyRoom(roomId);
@@ -22,6 +23,8 @@ export async function purgeRoomWorkspace(options: {
   // On the search queue (keyed as search keys it: by the recorded repo path), so a search that is
   // building the checkout finishes first and a later one finds the repository gone (T1636).
   await exclusiveSearchTree(repoPath ?? expectedRepoPath, async () => {
+    // Stop any active indexer before removing its repository, then remove its shards.
+    await options.removeSearchIndex?.(roomId);
     await rm(expectedRepoPath, { recursive: true, force: true });
     // The search checkout is the room's whole file tree: removed after the repo, errors not swallowed.
     await rm(`${expectedRepoPath}.search`, { recursive: true, force: true });

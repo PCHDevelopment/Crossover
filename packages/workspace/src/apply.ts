@@ -52,6 +52,7 @@ export interface WorkspaceCommandDeps {
   scheduleHealthCheck?: (roomId: string, revision: number) => void;
   /** Coalesce sandbox reconciliation work after a canonical revision commits. */
   scheduleSandboxAdvance?: (roomId: string, revision: number) => void;
+  scheduleSearchIndex?: (roomId: string, revision: number) => void;
   /** How `git.import` reaches an upstream: the fetcher, the credentials, the host check. */
   upstream?: UpstreamDeps;
   /** Optional head search backends, primarily for controlled backend selection and tests. */
@@ -261,6 +262,7 @@ export function registerWorkspaceCommands(
     ...(deps.refreshSearchTree ? { refreshSearchTree: deps.refreshSearchTree } : {}),
     ...(deps.scheduleHealthCheck ? { scheduleHealthCheck: deps.scheduleHealthCheck } : {}),
     ...(deps.scheduleSandboxAdvance ? { scheduleSandboxAdvance: deps.scheduleSandboxAdvance } : {}),
+    ...(deps.scheduleSearchIndex ? { scheduleSearchIndex: deps.scheduleSearchIndex } : {}),
   });
 }
 
@@ -1104,6 +1106,7 @@ export async function apply(
   });
   if (deps.scheduleHealthCheck) ctx.afterCommit(() => deps.scheduleHealthCheck!(room_id, revision));
   if (completion?.afterCommit) ctx.afterCommit(completion.afterCommit);
+  if (deps.scheduleSearchIndex) ctx.afterCommit(() => deps.scheduleSearchIndex!(room_id, revision));
   return {
     response: { status: "APPLIED" as const, changeset_id: id, applied_revision: revision },
     events: [

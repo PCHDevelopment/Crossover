@@ -218,6 +218,30 @@ describe("internal Git listener configuration", () => {
       }),
     ).toThrow(/specific private-network address/);
   });
+
+  it("keeps ripgrep by default and validates enabled Zoekt paths", () => {
+    expect(loadConfig(env).searchBackend).toBe("ripgrep");
+    expect(() =>
+      loadConfig({ ...env, SEARCH_BACKEND: "zoekt", ZOEKT_INDEX_DIR: "/tmp/zoekt" }),
+    ).toThrow(/requires ZOEKT_URL and ZOEKT_INDEX_DIR/);
+    expect(() =>
+      loadConfig({
+        ...env,
+        SEARCH_BACKEND: "zoekt",
+        ZOEKT_URL: "http://zoekt:6070",
+        ZOEKT_INDEX_DIR: `${env.WORKSPACE_ROOT}/shards`,
+      }),
+    ).toThrow(/outside WORKSPACE_ROOT/);
+    expect(
+      loadConfig({
+        ...env,
+        SEARCH_BACKEND: "zoekt",
+        ZOEKT_URL: "http://zoekt:6070",
+        ZOEKT_INDEX_DIR: "/tmp/crossover-zoekt",
+        ZOEKT_INDEX_CONCURRENCY: "4",
+      }),
+    ).toMatchObject({ searchBackend: "zoekt", zoektIndexConcurrency: 4 });
+  });
 });
 
 describe("GitHub integration configuration", () => {

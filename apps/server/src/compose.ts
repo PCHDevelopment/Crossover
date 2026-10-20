@@ -97,6 +97,7 @@ import {
   DEFAULT_HEALTH_IMAGE,
   ExecutionService,
   HealthCheckQueue,
+  ZoektIndexer,
   workspaceHealthGate,
   provisionWorkspace,
   reconcileRef,
@@ -223,6 +224,7 @@ export async function composeServer(
     : undefined;
   let healthInstallSweepTimer: NodeJS.Timeout | undefined;
   let sandboxLogSweepTimer: NodeJS.Timeout | undefined;
+  let zoektIndexer: ZoektIndexer | undefined;
   if (overrides.publisher) {
     publisher = overrides.publisher;
   } else {
@@ -377,6 +379,17 @@ export async function composeServer(
     });
     executionService.startSweeper();
 
+    if (config.searchBackend === "zoekt") {
+      if (!config.zoektUrl || !config.zoektIndexDir)
+        throw new Error("SEARCH_BACKEND=zoekt requires ZOEKT_URL and ZOEKT_INDEX_DIR");
+      zoektIndexer = new ZoektIndexer({
+        pool,
+        indexDir: config.zoektIndexDir,
+        concurrency: config.zoektIndexConcurrency ?? 2,
+        timeoutMs: config.zoektIndexTimeoutMs ?? 600_000,
+      });
+    }
+
     const dispatcher = new Dispatcher({
       pool,
       authorize: pathAuthorizer,
@@ -391,6 +404,14 @@ export async function composeServer(
         const room = rows[0];
         if (!(room?.status === "ARCHIVED" && room.purge_started_at)) {
           await reconcileRef(pool, roomId);
+          if (zoektIndexer) {
+            const head = await pool.query<{ revision: string }>(
+              "SELECT max(revision) AS revision FROM workspace_revisions WHERE room_id = $1",
+              [roomId],
+            );
+            if (head.rows[0]?.revision != null)
+              zoektIndexer.schedule(roomId, Number(head.rows[0].revision));
+          }
         }
       },
       ...(overrides.leaseTtlMs !== undefined ? { leaseTtlMs: overrides.leaseTtlMs } : {}),
@@ -525,6 +546,7 @@ export async function composeServer(
       dispatcher,
       config,
       healthQueue,
+      zoektIndexer,
       intentStore,
       presenceStore,
       executionService,
@@ -564,6 +586,9 @@ export async function composeServer(
           roomId,
           repoPath,
           destroyRoom: (id) => executionService!.destroyRoom(id),
+          ...(zoektIndexer
+            ? { removeSearchIndex: zoektIndexer.removeRoom.bind(zoektIndexer) }
+            : {}),
         }),
     });
     roomRetentionSweeper.start();
@@ -702,6 +727,7 @@ export async function composeServer(
         await gitApp?.close();
         await app.close();
         await healthQueue.close();
+        await zoektIndexer?.close();
         await renewer.close(); // releases every lease once nothing can take a new one
         await redis?.close();
         await redisSubscriber?.close();
@@ -734,6 +760,7 @@ export async function composeServer(
     await executionService?.close();
     await pluginRunner?.close();
     kmsOperations?.close();
+    await zoektIndexer?.close();
     await gitApp?.close();
     await redis?.close();
     await redisSubscriber?.close();
@@ -757,6 +784,7 @@ function registerCommands(
   dispatcher: Dispatcher,
   config: ServerConfig,
   healthQueue: HealthCheckQueue,
+  zoektIndexer: ZoektIndexer | undefined,
   intentStore: RedisEditIntentStore,
   presenceStore: RedisPresenceStore,
   execution: ExecutionService,
@@ -833,6 +861,12 @@ function registerCommands(
     scheduleHealthCheck: (roomId, revision) => healthQueue.enqueue(roomId, revision),
     scheduleSandboxAdvance: (roomId, revision) =>
       execution.scheduleCanonicalAdvance(roomId, revision),
+    ...(zoektIndexer
+      ? {
+          scheduleSearchIndex: (roomId: string, revision: number) =>
+            zoektIndexer.schedule(roomId, revision),
+        }
+      : {}),
     ...(upstream ? { upstream } : {}),
   };
   registerWorkspaceCommands(dispatcher, workspaceDeps);
