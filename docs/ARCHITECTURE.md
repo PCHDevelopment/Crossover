@@ -1297,6 +1297,7 @@ command ─▶ room actor (owner node)
 ```
 
 - Because one actor writes each room inside one transaction, sequences are **gap-free** and totally ordered.
+- A command may create one child room in its transaction (`room.branch`, §9.7). The child's lease is taken in that transaction and its ledger starts at sequence 1.
 - **The event table is the outbox.** If the Redis publish fails or a gateway misses a message, gateways detect a sequence gap and backfill from PostgreSQL. Clients do the same with `room.events.list?after=`.
 
 ## 19.3 What goes in the ledger

@@ -1,7 +1,7 @@
 import type { PoolClient } from "@crossover/db";
 import { CrossoverError, newId } from "@crossover/protocol";
 import { z } from "zod";
-import type { Dispatcher, RoomlessContext } from "../../dispatcher.js";
+import type { Dispatcher, EmittedEvent, RoomlessContext, UserPrincipal } from "../../dispatcher.js";
 import { registerRoomEgressAllowlistCommand } from "./egress.js";
 import { registerRoomStateCommand, type StateSectionRegistry } from "./state.js";
 
@@ -74,44 +74,11 @@ async function createRoom(
   deps: RoomCommandDeps,
 ): Promise<{
   response: RoomCreateResponse;
-  events: {
-    type: "room.created" | "participant.joined";
-    actor_id: string;
-    payload: Record<string, unknown>;
-  }[];
+  events: EmittedEvent[];
 }> {
-  const participantId = newId("part");
   const { room_id, client, user } = ctx;
-
-  try {
-    await client.query(
-      `INSERT INTO rooms (id, slug, name, objective, status, owner_id, lead_participant_id, settings)
-       VALUES ($1, $2, $3, $4, 'ACTIVE', $5, $5, $6::jsonb)`,
-      [
-        room_id,
-        params.slug,
-        params.name,
-        params.objective,
-        participantId,
-        JSON.stringify(params.settings),
-      ],
-    );
-  } catch (err) {
-    if (isUniqueViolation(err, "rooms_slug_key")) {
-      throw new CrossoverError("VALIDATION", `Slug "${params.slug}" is already taken`, {
-        details: { slug: params.slug, reason: "slug_taken" },
-        cause: err,
-      });
-    }
-    throw err;
-  }
-
-  await client.query(
-    `INSERT INTO participants
-       (id, room_id, kind, display_name, authority, role, status, user_id, joined_at)
-     VALUES ($1, $2, 'HUMAN', $3, 'OWNER', 'LEAD', 'ACTIVE', $4, clock_timestamp())`,
-    [participantId, room_id, user.display_name, user.user_id],
-  );
+  const room = { id: room_id, ...params };
+  const { participant_id: participantId } = await insertRoomWithOwner(client, room, user);
 
   await deps.provision?.({ client, room_id });
 
@@ -138,30 +105,73 @@ async function createRoom(
         user_id: user.user_id,
       },
     },
-    events: [
-      {
-        type: "room.created",
-        actor_id: participantId,
-        payload: {
-          slug: params.slug,
-          name: params.name,
-          objective: params.objective,
-          owner_id: participantId,
-        },
-      },
-      {
-        type: "participant.joined",
-        actor_id: participantId,
-        payload: {
-          participant_id: participantId,
-          kind: "HUMAN",
-          authority: "OWNER",
-          role: "LEAD",
-          display_name: user.display_name,
-        },
-      },
-    ],
+    events: roomCreatedEvents(room, {
+      participant_id: participantId,
+      display_name: user.display_name,
+    }),
   };
+}
+
+/** Insert a new room and its human owner in the caller's transaction. */
+export async function insertRoomWithOwner(
+  client: PoolClient,
+  room: RoomCreateParams & { id: string },
+  user: UserPrincipal,
+): Promise<{ participant_id: string }> {
+  const participantId = newId("part");
+  try {
+    await client.query(
+      `INSERT INTO rooms (id, slug, name, objective, status, owner_id, lead_participant_id, settings)
+       VALUES ($1, $2, $3, $4, 'ACTIVE', $5, $5, $6::jsonb)`,
+      [room.id, room.slug, room.name, room.objective, participantId, JSON.stringify(room.settings)],
+    );
+  } catch (err) {
+    if (isUniqueViolation(err, "rooms_slug_key")) {
+      throw new CrossoverError("VALIDATION", `Slug "${room.slug}" is already taken`, {
+        details: { slug: room.slug, reason: "slug_taken" },
+        cause: err,
+      });
+    }
+    throw err;
+  }
+
+  await client.query(
+    `INSERT INTO participants
+       (id, room_id, kind, display_name, authority, role, status, user_id, joined_at)
+     VALUES ($1, $2, 'HUMAN', $3, 'OWNER', 'LEAD', 'ACTIVE', $4, clock_timestamp())`,
+    [participantId, room.id, user.display_name, user.user_id],
+  );
+  return { participant_id: participantId };
+}
+
+/** Build the first two ledger events for a newly created room. */
+export function roomCreatedEvents(
+  room: RoomCreateParams & { id: string },
+  owner: { participant_id: string; display_name: string },
+): EmittedEvent[] {
+  return [
+    {
+      type: "room.created",
+      actor_id: owner.participant_id,
+      payload: {
+        slug: room.slug,
+        name: room.name,
+        objective: room.objective,
+        owner_id: owner.participant_id,
+      },
+    },
+    {
+      type: "participant.joined",
+      actor_id: owner.participant_id,
+      payload: {
+        participant_id: owner.participant_id,
+        kind: "HUMAN",
+        authority: "OWNER",
+        role: "LEAD",
+        display_name: owner.display_name,
+      },
+    },
+  ];
 }
 
 function isUniqueViolation(err: unknown, constraint: string): boolean {

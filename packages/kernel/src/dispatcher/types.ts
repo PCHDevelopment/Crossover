@@ -125,6 +125,14 @@ export interface CommandResult<R> {
   /** Appended to the room's ledger in the same transaction. Not allowed for reads. */
   events?: EmittedEvent[];
   /**
+   * A room this command created in its transaction (T1604): `execute` inserted its `rooms` row.
+   * The dispatcher takes its lease in the same transaction, appends `events` to its ledger
+   * starting at sequence 1, adopts the lease after commit and publishes the events. Every
+   * event needs an explicit `actor_id`. Only for commands registered with `spawnsRoom: true`.
+   * A replay neither re-appends nor re-publishes the child events.
+   */
+  spawnRoom?: { room_id: string; events: EmittedEvent[] };
+  /**
    * Same as `ctx.afterCommit(…)`, for a command that only knows what to run once it has
    * finished executing. Runs after any callbacks registered through `ctx`.
    */
@@ -165,6 +173,8 @@ export interface CommandDefinition<S extends z.ZodType, R> {
    * with this flag can't be queued for approval; `returnsOneTime` implies the same restriction.
    */
   notApprovable?: boolean;
+  /** May return `spawnRoom`. Implies `notApprovable`. */
+  spawnsRoom?: boolean;
   /**
    * How a **read** command keeps one participant from seeing what another may not (§34.5,
    * T1301). Required for every non-mutating command; checked at registration.

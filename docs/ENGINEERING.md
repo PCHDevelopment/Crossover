@@ -74,6 +74,7 @@ Migrations live in `packages/db/migrations` and are numbered globally (`0001_…
 - Validate at the boundary, trust types inside. Every command handler takes zod-parsed params.
 - Errors are `CrossoverError` with a code from ARCHITECTURE §16.3 (T114). Don't throw strings.
 - Every mutation runs in one PostgreSQL transaction that also appends its events (§19.2). No state change without an event.
+- A command may create one child room in that transaction. The dispatcher takes the child's lease and appends its first events there, then adopts the lease after commit (§19.2).
 - Every SQL query that touches room data is scoped by `room_id`.
 - Use parameterized queries only. Never build SQL or shell commands by string concatenation.
 - No secrets in code, tests, fixtures or logs. Tokens are stored hashed.
