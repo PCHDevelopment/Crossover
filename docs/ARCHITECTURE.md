@@ -503,7 +503,7 @@ The Git CLI (≥ 2.38) runs on the workspace node. `git merge-tree --write-tree`
 
 ## 9.5 Search
 
-The workspace node maintains a checked-out working tree of the canonical head (updated after every commit). `workspace.search` runs ripgrep against it, which is fast enough for repositories up to the NFR limit. Past revisions are searched with `git grep` against the stored commit (no index); globs for past revisions support `*`, `?` and `**` only. A trigram index (e.g. Zoekt) is a Phase 2 upgrade for larger repositories.
+The workspace node maintains a checked-out working tree of the canonical head (updated after every commit). `workspace.search` runs ripgrep against it. Past revisions are searched with `git grep` against the stored commit (no index); globs for past revisions support `*`, `?` and `**` only. With `SEARCH_BACKEND=zoekt`, the server builds canonical-head shards off the room actor and a read-only Zoekt sidecar serves them; search routing to that sidecar follows in T1582.
 
 ## 9.6 File operations (read side)
 
@@ -1665,7 +1665,7 @@ Additions over v0.1:
 | Workspace storage | Bare Git repository per room (Git CLI ≥ 2.38, `merge-tree`) on EBS + replica + S3 bundles |
 | Large files / logs / archives | S3 |
 | Parse checks | tree-sitter |
-| Search | ripgrep over a checked-out head (Zoekt in Phase 2) |
+| Search | ripgrep over a checked-out head; optional Zoekt sidecar index (`SEARCH_BACKEND=zoekt`) |
 | Policy engine | OPA compiled to WASM, embedded |
 | Sandbox | Docker + gVisor on dedicated EC2 hosts; platform TypeScript HTTPS egress proxy |
 | Secrets | AWS Secrets Manager + KMS, STS, GitHub App |

@@ -78,6 +78,8 @@ export type {
 } from "./health-runner.js";
 export { HealthCheckQueue } from "./health-queue.js";
 export type { HealthCheckQueueOptions } from "./health-queue.js";
+export { ZoektIndexer, zoektArgs } from "./zoekt-index.js";
+export type { ZoektIndexerOptions } from "./zoekt-index.js";
 export { workspaceHealthGate } from "./health-gate.js";
 export { healthGetParamsSchema, publishHealthResult } from "./health-events.js";
 export { ExecutionService } from "./execution.js";

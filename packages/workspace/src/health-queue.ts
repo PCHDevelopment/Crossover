@@ -64,6 +64,15 @@ export class HealthCheckQueue {
     await Promise.all([...this.rooms.values()].map(({ worker }) => worker));
   }
 
+  /** Abort one room's active run and discard its pending revision. */
+  async cancel(roomId: string): Promise<void> {
+    const state = this.rooms.get(roomId);
+    if (!state) return;
+    state.queuedRevision = undefined;
+    state.activeController?.abort();
+    await state.worker;
+  }
+
   private async drain(roomId: string, state: RoomQueue): Promise<void> {
     while (true) {
       const revision = state.activeRevision;

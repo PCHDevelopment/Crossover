@@ -1,3 +1,6 @@
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { loadConfig } from "./config.js";
 
@@ -217,6 +220,57 @@ describe("internal Git listener configuration", () => {
         GIT_INTERNAL_TOKEN_SECRET: "0123456789abcdef0123456789abcdef",
       }),
     ).toThrow(/specific private-network address/);
+  });
+
+  it("keeps ripgrep by default and validates enabled Zoekt paths", () => {
+    expect(loadConfig(env).searchBackend).toBe("ripgrep");
+    expect(() =>
+      loadConfig({ ...env, SEARCH_BACKEND: "zoekt", ZOEKT_INDEX_DIR: "/tmp/zoekt" }),
+    ).toThrow(/requires ZOEKT_URL and ZOEKT_INDEX_DIR/);
+    expect(() =>
+      loadConfig({
+        ...env,
+        SEARCH_BACKEND: "zoekt",
+        ZOEKT_URL: "http://zoekt:6070",
+        ZOEKT_INDEX_DIR: `${env.WORKSPACE_ROOT}/shards`,
+      }),
+    ).toThrow(/outside WORKSPACE_ROOT/);
+    expect(
+      loadConfig({
+        ...env,
+        SEARCH_BACKEND: "zoekt",
+        ZOEKT_URL: "http://zoekt:6070",
+        ZOEKT_INDEX_DIR: "/tmp/crossover-zoekt",
+        ZOEKT_INDEX_CONCURRENCY: "4",
+      }),
+    ).toMatchObject({ searchBackend: "zoekt", zoektIndexConcurrency: 4 });
+  });
+
+  it("rejects an index path through a symlinked workspace parent and caps the timeout", () => {
+    const root = mkdtempSync(join(tmpdir(), "zoekt-config-"));
+    try {
+      const workspace = join(root, "workspace");
+      mkdirSync(workspace);
+      symlinkSync(workspace, join(root, "alias"));
+      const zoekt = {
+        ...env,
+        WORKSPACE_ROOT: workspace,
+        SEARCH_BACKEND: "zoekt",
+        ZOEKT_URL: "http://zoekt:6070",
+      };
+      expect(() =>
+        loadConfig({ ...zoekt, ZOEKT_INDEX_DIR: join(root, "alias", "missing", "shards") }),
+      ).toThrow(/outside WORKSPACE_ROOT/);
+      expect(
+        loadConfig({ ...zoekt, ZOEKT_INDEX_DIR: join(root, "alias-other", "shards") })
+          .zoektIndexDir,
+      ).toBe(join(root, "alias-other", "shards"));
+      expect(() =>
+        loadConfig({ ...zoekt, ZOEKT_INDEX_DIR: root, ZOEKT_INDEX_TIMEOUT_MS: "2147483648" }),
+      ).toThrow(/ZOEKT_INDEX_TIMEOUT_MS/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

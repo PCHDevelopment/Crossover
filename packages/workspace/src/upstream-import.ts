@@ -54,6 +54,7 @@ export interface ImportHooks {
   refreshSearchTree?: (repo: string, commit: string, previousCommit?: string) => Promise<void>;
   scheduleHealthCheck?: (roomId: string, revision: number) => void;
   scheduleSandboxAdvance?: (roomId: string, revision: number) => void;
+  scheduleSearchIndex?: (roomId: string, revision: number) => void;
 }
 
 export const refuse = (reason: string, message: string, details: Record<string, unknown> = {}) =>
@@ -410,6 +411,7 @@ async function importUpstream(
       else await refreshSearchTree(ws.repo_path, commit, head.commit_sha);
     });
     if (hooks.scheduleHealthCheck) ctx.afterCommit(() => hooks.scheduleHealthCheck!(room_id, 1));
+    if (hooks.scheduleSearchIndex) ctx.afterCommit(() => hooks.scheduleSearchIndex!(room_id, 1));
 
     // §24.1: suggest a health command from the repository. Returned, never applied.
     const suggested_health_command = await suggestHealthCommand(async (path) => {

@@ -273,6 +273,7 @@ describe("provenance labels (§16.5)", () => {
       "memory.get",
       "memory.list",
       "memory.history",
+      "memory.search",
       "decisions.get",
       "decisions.list",
       "tasks.get",

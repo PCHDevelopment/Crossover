@@ -1,6 +1,7 @@
+import { lstatSync, realpathSync } from "node:fs";
 import { isIP } from "node:net";
 import { hostname } from "node:os";
-import { resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import {
   DEFAULT_GIT_INTERNAL_NETWORK,
@@ -16,6 +17,23 @@ const flag = z
 /** Compose's optional pass-through values are empty strings when unset. */
 const optionalEnv = <T extends z.ZodType>(schema: T) =>
   z.preprocess((value) => (value === "" ? undefined : value), schema.optional());
+
+/** Resolve symlinked parents even when the configured directory does not exist yet. */
+function canonicalPath(path: string): string {
+  const absolute = resolve(path);
+  try {
+    return realpathSync(absolute);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    try {
+      lstatSync(absolute);
+    } catch (statError) {
+      if ((statError as NodeJS.ErrnoException).code !== "ENOENT") throw statError;
+      return join(canonicalPath(dirname(absolute)), basename(absolute));
+    }
+    throw error; // A broken symlink must not be treated as an ordinary missing leaf.
+  }
+}
 
 /** An IP address, or an address with a CIDR prefix length. */
 function isProxyAddress(entry: string): boolean {
@@ -144,6 +162,11 @@ const envSchema = z.object({
   GIT_FETCHER_IMAGE: z.string().trim().min(1).default("crossover-git-fetcher:latest"),
   /** The key agents' wake-up webhooks are signed with (derived per agent, §17.4). Off without it. */
   WAKE_WEBHOOK_KEY: z.string().min(32).optional(),
+  SEARCH_BACKEND: z.enum(["ripgrep", "zoekt"]).default("ripgrep"),
+  ZOEKT_URL: z.string().url().optional(),
+  ZOEKT_INDEX_DIR: z.string().min(1).optional(),
+  ZOEKT_INDEX_CONCURRENCY: z.coerce.number().int().min(1).max(8).default(2),
+  ZOEKT_INDEX_TIMEOUT_MS: z.coerce.number().int().min(10_000).max(2_147_483_647).default(600_000),
 });
 
 export interface ServerConfig {
@@ -214,6 +237,11 @@ export interface ServerConfig {
   gitFetcherImage?: string;
   /** Platform key wake-up webhook secrets are derived from; no wake-ups without it. */
   wakeWebhookKey?: string;
+  searchBackend?: "ripgrep" | "zoekt";
+  zoektUrl?: string;
+  zoektIndexDir?: string;
+  zoektIndexConcurrency?: number;
+  zoektIndexTimeoutMs?: number;
 }
 
 /**
@@ -299,6 +327,23 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     throw new Error(
       "Invalid server configuration:\n  GIT_INTERNAL_HOST must be a specific private-network address, not a wildcard",
     );
+  if (e.SEARCH_BACKEND === "zoekt" && (!e.ZOEKT_URL || !e.ZOEKT_INDEX_DIR))
+    throw new Error(
+      "Invalid server configuration:\n  SEARCH_BACKEND=zoekt requires ZOEKT_URL and ZOEKT_INDEX_DIR",
+    );
+  const zoektIndexDir = e.ZOEKT_INDEX_DIR && canonicalPath(e.ZOEKT_INDEX_DIR);
+  const workspaceRoot = canonicalPath(e.WORKSPACE_ROOT);
+  const indexRelative = zoektIndexDir && relative(workspaceRoot, zoektIndexDir);
+  if (
+    indexRelative !== undefined &&
+    (indexRelative === "" ||
+      (indexRelative !== ".." &&
+        !indexRelative.startsWith(`..${sep}`) &&
+        !isAbsolute(indexRelative)))
+  )
+    throw new Error(
+      "Invalid server configuration:\n  ZOEKT_INDEX_DIR must be outside WORKSPACE_ROOT",
+    );
   if (
     sandboxDiskEnforcement === "hard" &&
     (!e.SANDBOX_VOLUME_DRIVER || Object.keys(sandboxVolumeOptions).length === 0)
@@ -338,7 +383,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     databaseUrl: e.DATABASE_URL,
     memorySearchProvider: e.MEMORY_SEARCH_PROVIDER,
     redisUrl: e.REDIS_URL,
-    workspaceRoot: resolve(e.WORKSPACE_ROOT),
+    workspaceRoot,
     host: e.HOST,
     port: e.PORT,
     nodeId: e.NODE_ID ?? `${hostname()}-${process.pid}`,
@@ -417,6 +462,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     ...(e.GIT_INTERNAL_TOKEN_SECRET ? { gitInternalTokenSecret: e.GIT_INTERNAL_TOKEN_SECRET } : {}),
     gitFetcherImage: e.GIT_FETCHER_IMAGE,
     ...(e.WAKE_WEBHOOK_KEY ? { wakeWebhookKey: e.WAKE_WEBHOOK_KEY } : {}),
+    searchBackend: e.SEARCH_BACKEND,
+    ...(e.ZOEKT_URL ? { zoektUrl: e.ZOEKT_URL } : {}),
+    ...(zoektIndexDir ? { zoektIndexDir } : {}),
+    zoektIndexConcurrency: e.ZOEKT_INDEX_CONCURRENCY,
+    zoektIndexTimeoutMs: e.ZOEKT_INDEX_TIMEOUT_MS,
   };
 }
 

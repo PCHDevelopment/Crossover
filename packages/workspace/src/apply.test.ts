@@ -274,6 +274,28 @@ describe("workspace.apply_changeset", () => {
     await queue.close();
   }, 35_000);
 
+  it("schedules Zoekt indexing after apply without waiting for the index process", async () => {
+    const releaseIndex = deferred();
+    const started = deferred();
+    const queue = new HealthCheckQueue({
+      run: async () => {
+        started.resolve();
+        await releaseIndex.promise;
+      },
+    });
+    const f = await fixture(allowAll, {
+      scheduleSearchIndex: (roomId, revision) => queue.enqueue(roomId, revision),
+    });
+    try {
+      const applied = await f.apply([{ type: "create", path: "index-me.txt", content: "head\n" }]);
+      expect(applied.response).toMatchObject({ status: "APPLIED", applied_revision: 1 });
+      await started.promise;
+    } finally {
+      releaseIndex.resolve();
+      await queue.close();
+    }
+  });
+
   // Measured (T1529): idle 2682 ms, 3x load 3714 ms; budget 7x.
   it("does not schedule health checks for conflicted or rejected ChangeSets", async () => {
     const scheduled: number[] = [];
