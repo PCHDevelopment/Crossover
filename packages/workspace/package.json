@@ -21,6 +21,7 @@
   "scripts": {
     "build": "tsc -b",
     "bench": "vitest run --config ../../vitest.bench.config.ts",
+    "bench:search": "vitest run --config ../../vitest.search-bench.config.ts",
     "conflict-report": "tsc -b && node --env-file-if-exists=../../.env dist/conflict-report-cli.js"
   }
 }

@@ -16,6 +16,28 @@ For a smoke run use `BENCH_ITERATIONS=2`; full reports use the default 200. Set 
 
 This workload exercises full-content modifications, not patch index rebuilding or ignore-rule preparation for introduced paths. Performance findings for those paths need additional workloads.
 
+## Search benchmark
+
+Search at scale (T1583, §9.5) is measured by two benchmarks that run together:
+
+```sh
+docker build -f apps/zoekt/Dockerfile -t crossover-zoekt:bench .
+pnpm --filter @crossover/workspace bench:search
+```
+
+The workspace half (`packages/workspace/src/search.bench.ts`) builds one repository with `git fast-import`, seeded (`1583`): 50,000 files in all, about 1 GB: 49,990 text files of about 20 KiB plus ten single-line 1 MiB files in `big/`, `src/m<0..199>/f<0..249>.ts` with every twentieth slot a `docs/**.md`, `rare_token_<k>` in exactly three files for each k in 0..9, and `common_word` on about 1,000 lines. It is revision 1 of a room in a test database. It then:
+
+1. Builds the whole Zoekt index (`index_build_ms`, plus `shard_bytes` and `repo_bytes`) with `ZoektIndexer` and the `crossover-zoekt:bench` image, and starts the webserver on `127.0.0.1:16070`.
+2. Runs 20 queries (10 literal, 5 regex, 5 with a glob) 20 times each through `Dispatcher.dispatch("workspace.search")`, timed from dispatch to response. Mode `zoekt` uses the head backends `[zoekt, ripgrep]` and **fails if any run was served by another backend**; mode `ripgrep` uses `[ripgrep]`.
+3. Applies 20 ChangeSets of 20 files each and measures the **index lag**: from the apply response until `/api/list` reports the new commit.
+4. Runs mode `git_grep` last, on revision 1, which is no longer the head.
+
+The memory half (`packages/kernel/src/modules/memory/search.bench.ts`) writes 5,000 entries (`topic<0..49>/note<0..99>`, 200 to 2,000 characters of Markdown), times `syncRoom` with the local `HashEmbeddingProvider` (256 dimensions), and runs 30 `memory.search` queries 20 times each, half of them under a `topic<n>/` prefix.
+
+Targets, measured on the CI runner (`workflow_dispatch` of `search-benchmark` on the PR head): `workspace.search` p95 in mode `zoekt` ≤ 300 ms, full index build ≤ 300,000 ms, index lag p95 ≤ 30,000 ms, `memory.search` p95 ≤ 250 ms, `syncRoom` for 5,000 entries ≤ 60,000 ms. The reports list the targets with `*_met` flags; a miss is reported, not asserted, and ripgrep and git grep timings have no target. The JSON goes to `BENCH_OUTPUT` and `BENCH_OUTPUT_MEMORY`; CI uploads both as the artifact `search-benchmark`.
+
+For a smoke run use `BENCH_FILES=500 BENCH_RUNS=2` (500 files, about 10 MiB, 2 runs; 5,000 memory entries stay unless `BENCH_MEMORY_ENTRIES` is set) and `ZOEKT_IMAGE=crossover-zoekt:test` if you have that image. A full run needs about 8 GiB of free disk and Docker. The job runs separately from `pnpm check`.
+
 ## Conflict-rate report
 
 `conflict_rate_report` (T1586) measures how often ChangeSets conflict, by participant kind (human, agent, system) and file extension, to show where syntax-aware merge would pay off. The server writes one JSON line per day to stdout (`CONFLICT_REPORT_INTERVAL_MS`, `0` turns it off). To read the same report for any window from the database in `DATABASE_URL` (or `.env`):

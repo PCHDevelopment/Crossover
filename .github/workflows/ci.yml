@@ -735,3 +735,71 @@ jobs:
         with:
           name: workspace-benchmark
           path: benchmark-results.json
+
+  search-benchmark:
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 90
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: crossover
+          POSTGRES_PASSWORD: crossover
+          POSTGRES_DB: crossover
+        ports: ["5434:5432"]
+        options: >-
+          --health-cmd "pg_isready -U crossover"
+          --health-interval 2s
+          --health-retries 15
+    env:
+      DATABASE_URL: postgres://crossover:crossover@localhost:5434/crossover
+      BENCH_OUTPUT: ${{ github.workspace }}/search-benchmark.json
+      BENCH_OUTPUT_MEMORY: ${{ github.workspace }}/memory-search-benchmark.json
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      # The fixture is about 1 GB of blobs, a checkout of it and a Zoekt shard: refuse a small disk.
+      - name: Check free disk
+        run: |
+          df -h .
+          test "$(df --output=avail -BG . | tail -1 | tr -dc 0-9)" -ge 8
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      # workspace.search runs ripgrep; the pinned binary is the one the test job uses (no sudo).
+      - name: Install ripgrep
+        run: |
+          if command -v rg >/dev/null; then rg --version | head -1; exit 0; fi
+          case "$(uname -m)" in
+            x86_64) target=x86_64-unknown-linux-musl; sum=4cf9f2741e6c465ffdb7c26f38056a59e2a2544b51f7cc128ef28337eeae4d8e ;;
+            aarch64) target=aarch64-unknown-linux-gnu; sum=c827481c4ff4ea10c9dc7a4022c8de5db34a5737cb74484d62eb94a95841ab2f ;;
+            *) echo "No pinned ripgrep for $(uname -m)"; exit 1 ;;
+          esac
+          dir="$RUNNER_TEMP/ripgrep"
+          mkdir -p "$dir"
+          curl -fsSL -o "$dir/rg.tar.gz" "https://github.com/BurntSushi/ripgrep/releases/download/14.1.1/ripgrep-14.1.1-$target.tar.gz"
+          echo "$sum  $dir/rg.tar.gz" | sha256sum -c -
+          tar -xzf "$dir/rg.tar.gz" -C "$dir" --strip-components=1
+          echo "$dir" >> "$GITHUB_PATH"
+      - run: docker build -f apps/zoekt/Dockerfile -t crossover-zoekt:bench .
+      - run: pnpm --filter @crossover/workspace bench:search
+      # A run that died before its final write leaves no report, or half of one: upload only both.
+      - name: Verify benchmark reports
+        id: verify-benchmark-reports
+        if: always()
+        run: |
+          test -s search-benchmark.json
+          test -s memory-search-benchmark.json
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() && steps.verify-benchmark-reports.outcome == 'success' }}
+        with:
+          name: search-benchmark
+          if-no-files-found: error
+          path: |
+            search-benchmark.json
+            memory-search-benchmark.json
