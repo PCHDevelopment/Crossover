@@ -5,9 +5,10 @@ import { withTransaction } from "@crossover/db";
 import { createTestDatabase, type TestDatabase } from "@crossover/db/testing";
 import { allowAll, Dispatcher } from "@crossover/kernel";
 import { newId } from "@crossover/protocol";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { registerWorkspaceCommands } from "./apply.js";
 import { conflictRateReport, extensionOf } from "./conflict-metrics.js";
+import { setDefaultMergeDrivers, type MergeDriver } from "./merge-drivers.js";
 import type { Operation } from "./operations.js";
 import { provisionWorkspace } from "./provision.js";
 
@@ -246,5 +247,121 @@ describe("conflictRateReport", () => {
     for (const forbidden of [r.roomId, r.human, r.agent, "secret-dir", "plans"])
       expect(text, forbidden).not.toContain(forbidden);
     expect(text).toContain('"ts"');
+  });
+});
+
+describe("conflictRateReport: structured merge outcomes (T1592)", () => {
+  afterEach(() => setDefaultMergeDrivers([]));
+  const driver = (reason?: "same_key" | "reorder"): MergeDriver => ({
+    name: "typescript-toplevel",
+    matches: (path) => path.endsWith(".ts"),
+    merge: async ({ head, candidate }) =>
+      reason ? { ok: false, reason } : { ok: true, content: `${head}${candidate}` },
+  });
+  const ledger = (roomId: string) => report(roomId).then((result) => result.structured);
+
+  /** x.ts and y.ts both changed by the human; the agent edits each from the old base. */
+  async function twoStaleEdits(first: MergeDriver | null, second: MergeDriver | null) {
+    const r = await room();
+    await r.byHuman(
+      [
+        { type: "create", path: "src/x.ts", content: "one\n" },
+        { type: "create", path: "src/y.ts", content: "one\n" },
+      ],
+      0,
+    );
+    await r.byHuman(
+      [
+        { type: "modify", path: "src/x.ts", content: "human\n" },
+        { type: "modify", path: "src/y.ts", content: "human\n" },
+      ],
+      1,
+    );
+    setDefaultMergeDrivers(first ? [first] : []);
+    const x = await r.byAgent([{ type: "modify", path: "src/x.ts", content: "agent\n" }], 1);
+    setDefaultMergeDrivers(second ? [second] : []);
+    const y = await r.byAgent([{ type: "modify", path: "src/y.ts", content: "agent\n" }], 1);
+    return { r, x, y };
+  }
+
+  it("counts an AGENT ChangeSet resolved by a driver as resolved, contended and not conflicted", async () => {
+    const { r, x } = await twoStaleEdits(driver(), null);
+    expect(x.response).toMatchObject({ status: "APPLIED" });
+    const result = await report(r.roomId);
+    expect(result.structured.resolved_changesets).toEqual({ HUMAN: 0, AGENT: 1, SYSTEM: 0 });
+    expect(result.structured.resolved_files).toEqual({ ts: { "typescript-toplevel": 1 } });
+    expect(result.by_participant.AGENT).toMatchObject({ contended: 2, conflicted: 1 });
+  });
+
+  it("counts refusal reasons per kind and extension from structured_merge_refusals", async () => {
+    const { r, x } = await twoStaleEdits(driver("same_key"), driver("reorder"));
+    expect(x.response).toMatchObject({ status: "CONFLICT" });
+    const structured = await ledger(r.roomId);
+    expect(structured.refusals.AGENT).toEqual({ same_key: 1, reorder: 1 });
+    expect(structured.refusals.HUMAN).toEqual({});
+    expect(structured.refusals_by_extension).toEqual({ ts: { same_key: 1, reorder: 1 } });
+    expect(structured.resolved_changesets.AGENT).toBe(0);
+  });
+
+  it("computes saved_rate and returns null when there is nothing to save", async () => {
+    const { r } = await twoStaleEdits(driver(), driver("same_key"));
+    expect((await ledger(r.roomId)).saved_rate).toEqual({ HUMAN: null, AGENT: 0.5, SYSTEM: null });
+  });
+
+  it("treats pre-T1587 rows without the fields as zero", async () => {
+    const { r } = await twoStaleEdits(null, null);
+    const structured = await ledger(r.roomId);
+    expect(structured).toEqual({
+      resolved_changesets: { HUMAN: 0, AGENT: 0, SYSTEM: 0 },
+      resolved_files: {},
+      refusals: { HUMAN: {}, AGENT: {}, SYSTEM: {} },
+      refusals_by_extension: {},
+      saved_rate: { HUMAN: null, AGENT: 0, SYSTEM: null },
+      malformed: 0,
+    });
+  });
+
+  it("skips malformed structured payload entries and counts them as malformed", async () => {
+    const { r } = await twoStaleEdits(driver(), driver("same_key"));
+    await db.pool.query(
+      `UPDATE changesets SET payload = jsonb_set(payload, '{structured_merges}', $2::jsonb)
+        WHERE room_id = $1 AND status = 'APPLIED' AND payload ? 'structured_merges'`,
+      [
+        r.roomId,
+        JSON.stringify([
+          { path: 5, driver: "typescript-toplevel" },
+          "x",
+          { path: "a.ts", driver: "typescript-toplevel" },
+        ]),
+      ],
+    );
+    await db.pool.query(
+      `UPDATE changesets SET payload = jsonb_set(payload, '{structured_merge_refusals}', '"oops"'::jsonb)
+        WHERE room_id = $1 AND status = 'CONFLICT'`,
+      [r.roomId],
+    );
+    const structured = await ledger(r.roomId);
+    expect(structured.malformed).toBe(3);
+    expect(structured.resolved_changesets.AGENT).toBe(1);
+    expect(structured.resolved_files).toEqual({ ts: { "typescript-toplevel": 1 } });
+    expect(structured.refusals.AGENT).toEqual({});
+  });
+
+  it("buckets unknown driver or reason strings as other and never echoes them", async () => {
+    const { r } = await twoStaleEdits(driver(), driver("same_key"));
+    await db.pool.query(
+      `UPDATE changesets SET payload = jsonb_set(payload, '{structured_merges}', $2::jsonb)
+        WHERE room_id = $1 AND status = 'APPLIED' AND payload ? 'structured_merges'`,
+      [r.roomId, JSON.stringify([{ path: "a.ts", driver: "EVIL-driver-xyz" }])],
+    );
+    await db.pool.query(
+      `UPDATE changesets SET payload = jsonb_set(payload, '{structured_merge_refusals}', $2::jsonb)
+        WHERE room_id = $1 AND status = 'CONFLICT'`,
+      [r.roomId, JSON.stringify([{ path: "a.ts", driver: null, reason: "SECRET-reason-xyz" }])],
+    );
+    const result = await report(r.roomId);
+    expect(result.structured.resolved_files).toEqual({ ts: { other: 1 } });
+    expect(result.structured.refusals.AGENT).toEqual({ other: 1 });
+    expect(JSON.stringify(result)).not.toMatch(/EVIL|SECRET/);
   });
 });

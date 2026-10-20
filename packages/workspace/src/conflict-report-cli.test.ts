@@ -87,6 +87,11 @@ describe("conflict-report CLI", () => {
       by_extension,
       by_pair,
       structured_candidates: { HUMAN: 0, AGENT: 0 },
+      structured: {
+        resolved_changesets: { HUMAN: 0, AGENT: 0, SYSTEM: 0 },
+        refusals: { HUMAN: {}, AGENT: {}, SYSTEM: {} },
+        saved_rate: { HUMAN: null, AGENT: null, SYSTEM: null },
+      },
     } as unknown as Parameters<typeof markdown>[0]);
     const shown = new Set(
       text
@@ -97,6 +102,41 @@ describe("conflict-report CLI", () => {
     expect(shown.size).toBe(20);
     expect(shown.has("e24")).toBe(true);
     expect(shown.has("e04")).toBe(false);
+  });
+
+  it("prints the Structured merge and Top refusal reasons tables", () => {
+    const none = { submissions: 0, contended: 0, conflicted: 0, conflict_rate: null };
+    const text = markdown({
+      since: "s",
+      until: "u",
+      rooms: 1,
+      by_participant: { HUMAN: none, AGENT: { ...none, conflicted: 1 }, SYSTEM: none },
+      by_extension: {},
+      by_pair: {},
+      structured_candidates: { HUMAN: 0, AGENT: 0 },
+      structured: {
+        resolved_changesets: { HUMAN: 0, AGENT: 2, SYSTEM: 0 },
+        refusals: {
+          HUMAN: {},
+          AGENT: { same_key: 3, reorder: 1 },
+          SYSTEM: { same_key: 3 },
+        },
+        saved_rate: { HUMAN: null, AGENT: 0.6667, SYSTEM: null },
+      },
+    } as unknown as Parameters<typeof markdown>[0]);
+    expect(text).toContain("## Structured merge");
+    expect(text).toContain("| AGENT | 2 | 1 | 66.7% |");
+    expect(text).toContain("| HUMAN | 0 | 0 | - |");
+    expect(text).toContain("## Top refusal reasons");
+    const reasons = text
+      .split("## Top refusal reasons")[1]!
+      .split("\n")
+      .filter((l) => /^\| (same_key|reorder) /.test(l));
+    expect(reasons).toEqual([
+      "| same_key | AGENT | 3 |",
+      "| same_key | SYSTEM | 3 |",
+      "| reorder | AGENT | 1 |",
+    ]);
   });
 
   it("prints markdown tables for a seeded room", async () => {
@@ -126,6 +166,6 @@ describe("conflict-report CLI", () => {
 
     out.length = 0;
     expect(await main(["--room", roomId, "--format", "json"])).toBe(0);
-    expect(JSON.parse(out.join(""))).toMatchObject({ report_version: 1, rooms: 1 });
+    expect(JSON.parse(out.join(""))).toMatchObject({ report_version: 2, rooms: 1 });
   });
 });

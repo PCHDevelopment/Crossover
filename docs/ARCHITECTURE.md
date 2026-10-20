@@ -1595,7 +1595,7 @@ Upstream changes are just another concurrent writer, so no special merge path is
   - WebSocket reconnect and resync rate,
   - health-check queue time,
   - policy evaluation latency,
-  - conflict rate by participant kind and file extension (`conflict_rate_report`, daily).
+  - conflict rate by participant kind and file extension, including structured-merge saves and refusal reasons (`conflict_rate_report`, daily).
 
 ## 25.2 Room-level visibility (in the UI)
 
