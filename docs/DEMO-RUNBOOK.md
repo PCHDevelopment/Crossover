@@ -205,6 +205,14 @@ Severity:
 - **rough:** it worked, but was confusing or slow.
 - **note:** anything else.
 
+## Enable Zoekt search
+
+To serve current-head searches from the local Zoekt sidecar, start the server profile with
+`SEARCH_BACKEND=zoekt docker compose --profile server up -d`. Keep the shared index directory
+configured as in `docker-compose.yml`. The server log line `workspace.search backend: zoekt`
+shows an indexed response; `workspace.search backend: ripgrep` means the index was unavailable
+or had not reached the DB head. Historical revision searches continue through Git grep.
+
 ## Rebuild the derived memory index
 
 With the server profile running (`docker compose --profile server up -d`), run the rebuild inside the container, enabling the provider for that process:
