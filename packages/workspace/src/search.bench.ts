@@ -21,7 +21,11 @@ import { ZoektIndexer } from "./zoekt-index.js";
 import { zoektBackend } from "./zoekt-search.js";
 
 const FILES = Number(process.env["BENCH_FILES"] ?? 50_000);
+if (!Number.isSafeInteger(FILES) || FILES < 1)
+  throw new RangeError(`BENCH_FILES must be a positive integer, got ${process.env["BENCH_FILES"]}`);
 const RUNS = Number(process.env["BENCH_RUNS"] ?? 20);
+if (!Number.isSafeInteger(RUNS) || RUNS < 1)
+  throw new RangeError(`BENCH_RUNS must be a positive integer, got ${process.env["BENCH_RUNS"]}`);
 const FULL = FILES >= 50_000;
 const IMAGE = process.env["ZOEKT_IMAGE"] ?? "crossover-zoekt:bench";
 const PORT = 16_070;

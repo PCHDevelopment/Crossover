@@ -47,10 +47,6 @@ function sample(random: () => number, count: number, of: number): Set<number> {
   return chosen;
 }
 
-async function send(stream: Writable, chunk: Buffer | string): Promise<void> {
-  if (!stream.write(chunk)) await once(stream, "drain");
-}
-
 /**
  * Build the search-benchmark tree with `git fast-import`: `src/m<0..199>/f<0..249>.ts` (every
  * twentieth slot is a `docs/**.md`), `rare_token_<k>` in exactly three files each, `common_word`
@@ -84,6 +80,15 @@ export async function buildSearchFixture(options: SearchFixtureOptions): Promise
     );
   });
   closed.catch(() => {});
+  // A write after fast-import exited is reported by `closed` with git's own stderr, not as EPIPE.
+  child.stdin.on("error", () => {});
+  const send = async (stream: Writable, chunk: Buffer | string): Promise<void> => {
+    if (stream.write(chunk)) return;
+    await Promise.race([
+      once(stream, "drain"),
+      closed.then(() => Promise.reject(new Error("git fast-import exited while it was being fed"))),
+    ]);
+  };
   let bytes = 0;
   let mark = 0;
   const blob = async (path: string, content: string): Promise<void> => {

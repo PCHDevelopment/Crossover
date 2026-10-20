@@ -12,7 +12,13 @@ import { putMemory } from "./memory.js";
 import { registerMemorySearchCommand } from "./search.js";
 
 const ENTRIES = Number(process.env["BENCH_MEMORY_ENTRIES"] ?? 5_000);
+if (!Number.isSafeInteger(ENTRIES) || ENTRIES < 1)
+  throw new RangeError(
+    `BENCH_MEMORY_ENTRIES must be a positive integer, got ${process.env["BENCH_MEMORY_ENTRIES"]}`,
+  );
 const RUNS = Number(process.env["BENCH_RUNS"] ?? 20);
+if (!Number.isSafeInteger(RUNS) || RUNS < 1)
+  throw new RangeError(`BENCH_RUNS must be a positive integer, got ${process.env["BENCH_RUNS"]}`);
 
 /** Seeded PRNG (mulberry32), so every run writes the same entries. */
 function prng(seed: number): () => number {
