@@ -6,7 +6,7 @@ import { performance } from "node:perf_hooks";
 import * as database from "@crossover/db";
 import { createTestDatabase } from "@crossover/db/testing";
 import { allowAll, Dispatcher } from "@crossover/kernel";
-import { newId } from "@crossover/protocol";
+import { CrossoverError, newId } from "@crossover/protocol";
 import { expect, it } from "vitest";
 import { registerWorkspaceCommands } from "./apply.js";
 import { git } from "./git.js";
@@ -219,6 +219,9 @@ it("measures workspace.search latency, index build and index lag on a 50,000-fil
       })),
     ];
     const perQuery: Record<string, unknown>[] = [];
+    // A past revision refuses some globs once the repository is big ("Historical glob work limit
+    // exceeded"): a finding to report, not a reason to stop the run.
+    const unsupportedGlobs: string[] = [];
     const runMode = async (mode: Mode, backends: SearchBackend[], revision?: number) => {
       const dispatcher = dispatcherFor(backends);
       const pooled: number[] = [];
@@ -226,23 +229,41 @@ it("measures workspace.search latency, index build and index lag on a 50,000-fil
       for (const query of queries) {
         const samples: number[] = [];
         let matches = 0;
-        for (let run = 0; run < RUNS; run++) {
+        let unsupported = false;
+        for (let run = 0; run < RUNS && !unsupported; run++) {
           last = undefined;
           const started = performance.now();
-          const result = await dispatcher.dispatch(principal, {
-            id: newId("cmd"),
-            method: "workspace.search",
-            params: {
-              query: query.query,
-              regex: query.regex ?? false,
-              case_sensitive: true,
-              ...(query.glob === undefined ? {} : { glob: query.glob }),
-              ...(revision === undefined ? {} : { revision }),
-            },
-          });
-          samples.push(performance.now() - started);
-          matches = (result.response as { matches: unknown[] }).matches.length;
+          try {
+            const result = await dispatcher.dispatch(principal, {
+              id: newId("cmd"),
+              method: "workspace.search",
+              params: {
+                query: query.query,
+                regex: query.regex ?? false,
+                case_sensitive: true,
+                ...(query.glob === undefined ? {} : { glob: query.glob }),
+                ...(revision === undefined ? {} : { revision }),
+              },
+            });
+            samples.push(performance.now() - started);
+            matches = (result.response as { matches: unknown[] }).matches.length;
+          } catch (error) {
+            const reason = (error as CrossoverError).details as { reason?: string } | undefined;
+            if (
+              mode !== "git_grep" ||
+              !(error instanceof CrossoverError) ||
+              reason?.reason !== "glob_unsupported_for_revision"
+            )
+              throw error;
+            unsupported = true;
+            unsupportedGlobs.push(query.glob ?? query.query);
+            continue;
+          }
           if (mode === "zoekt" && last !== "zoekt") unserved.push(query.query);
+        }
+        if (unsupported) {
+          perQuery.push({ mode, ...query, unsupported: true });
+          continue;
         }
         pooled.push(...samples);
         perQuery.push({ mode, ...query, matches, ...stats(samples) });
@@ -307,6 +328,7 @@ it("measures workspace.search latency, index build and index lag on a 50,000-fil
       index_build_ms: Math.round(index_build_ms),
       lag_ms: stats(lag),
       search,
+      git_grep_unsupported_globs: unsupportedGlobs,
       targets: {
         zoekt_p95_ms: 300,
         index_build_ms: 300_000,

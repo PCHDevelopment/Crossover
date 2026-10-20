@@ -70,7 +70,13 @@ export async function buildSearchFixture(options: SearchFixtureOptions): Promise
   const common = sample(random, COMMON_LINES, regular);
 
   const paths: string[] = [];
+  // `--git-dir` overrides only GIT_DIR: an inherited GIT_OBJECT_DIRECTORY and the like would send
+  // the objects to the caller's repository instead.
+  const env = Object.fromEntries(
+    Object.entries(process.env).filter(([name]) => !name.startsWith("GIT_")),
+  );
   const child = spawn("git", ["--git-dir", options.repo, "fast-import", "--quiet"], {
+    env,
     stdio: ["pipe", "ignore", "pipe"],
   });
   let stderr = "";
