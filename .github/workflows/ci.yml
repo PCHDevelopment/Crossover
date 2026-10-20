@@ -735,3 +735,48 @@ jobs:
         with:
           name: workspace-benchmark
           path: benchmark-results.json
+
+  search-benchmark:
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 90
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: crossover
+          POSTGRES_PASSWORD: crossover
+          POSTGRES_DB: crossover
+        ports: ["5434:5432"]
+        options: >-
+          --health-cmd "pg_isready -U crossover"
+          --health-interval 2s
+          --health-retries 15
+    env:
+      DATABASE_URL: postgres://crossover:crossover@localhost:5434/crossover
+      BENCH_OUTPUT: ${{ github.workspace }}/search-benchmark.json
+      BENCH_OUTPUT_MEMORY: ${{ github.workspace }}/memory-search-benchmark.json
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      # The fixture is about 1 GB of blobs, a checkout of it and a Zoekt shard: refuse a small disk.
+      - name: Check free disk
+        run: |
+          df -h .
+          test "$(df --output=avail -BG . | tail -1 | tr -dc 0-9)" -ge 8
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: docker build -f apps/zoekt/Dockerfile -t crossover-zoekt:bench .
+      - run: pnpm --filter @crossover/workspace bench:search
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: search-benchmark
+          path: |
+            search-benchmark.json
+            memory-search-benchmark.json

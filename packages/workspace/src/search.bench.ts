@@ -260,13 +260,11 @@ it("measures workspace.search latency, index build and index lag on a 50,000-fil
     const lag: number[] = [];
     let head = 1;
     for (let index = 0; index < Math.min(20, RUNS); index++) {
-      const operations = lagPaths
-        .slice(index * 20, index * 20 + 20)
-        .map((path): Operation => ({
-          type: "modify",
-          path,
-          content: `// lag edit ${index}\n${path}\n`,
-        }));
+      const operations = lagPaths.slice(index * 20, index * 20 + 20).map((path): Operation => ({
+        type: "modify",
+        path,
+        content: `// lag edit ${index}\n${path}\n`,
+      }));
       const applied = await applier.dispatch(principal, {
         id: newId("cmd"),
         method: "workspace.apply_changeset",
