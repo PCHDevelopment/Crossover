@@ -150,6 +150,37 @@ it("sorts matches, removes symlinks and reports sink truncation", async () => {
   expect(fetch).toHaveBeenCalledTimes(2);
 });
 
+it("strips a standalone carriage return and honors the reported match limit", async () => {
+  const result = found([{ path: "a.txt", lines: ["needle\r"] }]);
+  result.Result.MatchCount = 10_000;
+  const matches: SearchMatch[] = [];
+  expect(
+    await zoektBackend({ url: "http://127.0.0.1/", fetch: fakeFetch(listed(), result) }).search(
+      request(),
+      async (match) => {
+        matches.push(match);
+        return true;
+      },
+    ),
+  ).toEqual({ truncated: true });
+  expect(matches).toEqual([{ path: "a.txt", line: 1, text: "needle" }]);
+});
+
+it("emits available matches if Zoekt returns more than its match limit", async () => {
+  const result = found([{ path: "a.txt", lines: Array(10_001).fill("needle") }]);
+  let emitted = 0;
+  expect(
+    await zoektBackend({ url: "http://127.0.0.1/", fetch: fakeFetch(listed(), result) }).search(
+      request(),
+      async () => {
+        emitted++;
+        return true;
+      },
+    ),
+  ).toEqual({ truncated: true });
+  expect(emitted).toBe(10_000);
+});
+
 it("propagates a sink failure after emitting a match", async () => {
   const backend = zoektBackend({
     url: "http://127.0.0.1/",

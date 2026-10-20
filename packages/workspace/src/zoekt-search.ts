@@ -173,17 +173,22 @@ export function zoektBackend(options: ZoektBackendOptions): SearchBackend {
         const { Files: files, MatchCount, FilesSkipped, ShardsSkipped } = parsed.data.Result;
         if (FilesSkipped || ShardsSkipped) return decline(request.room_id, "incomplete");
         const matches: SearchMatch[] = [];
+        let matchLimitReached = false;
         for (const file of files ?? []) {
           if (file.Repository !== request.room_id || file.Version !== request.commit)
             return decline(request.room_id, "version_race");
           for (const line of file.LineMatches) {
-            if (matches.length === MAX_MATCHES) return decline(request.room_id, "match_limit");
+            if (matches.length === MAX_MATCHES) {
+              matchLimitReached = true;
+              continue;
+            }
             matches.push({
               path: file.FileName,
               line: line.LineNumber,
               text: Buffer.from(line.Line, "base64")
                 .toString("utf8")
-                .replace(/\r?\n$/, ""),
+                .replace(/\r?\n$/, "")
+                .replace(/\r$/, ""),
             });
           }
         }
@@ -192,7 +197,7 @@ export function zoektBackend(options: ZoektBackendOptions): SearchBackend {
         matches.sort(
           (a, b) => Buffer.compare(Buffer.from(a.path), Buffer.from(b.path)) || a.line - b.line,
         );
-        emit = { matches, modes, truncated: MatchCount >= MAX_MATCHES };
+        emit = { matches, modes, truncated: MatchCount >= MAX_MATCHES || matchLimitReached };
       } catch (error) {
         if (error instanceof CrossoverError) throw error;
         return decline(request.room_id, "unavailable");
