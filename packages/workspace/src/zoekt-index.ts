@@ -136,7 +136,10 @@ export class ZoektIndexer {
     if (!/^room_[0-9A-Za-z]+$/.test(roomId)) throw new Error("Invalid room ID for Zoekt shard");
     this.removing.add(roomId);
     await this.queue.cancel(roomId);
-    const names = await readdir(this.options.indexDir);
+    const names = await readdir(this.options.indexDir).catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw error;
+    });
     await Promise.all(
       names
         .filter((name) => name.startsWith(`${roomId}_v`))

@@ -117,6 +117,18 @@ describe("ZoektIndexer", () => {
     await indexer.close();
   });
 
+  it("removes a room when the index directory is absent", async () => {
+    const f = await fixture();
+    const indexer = new ZoektIndexer({
+      pool: f.pool,
+      indexDir: f.indexDir,
+      concurrency: 1,
+      timeoutMs: 10_000,
+    });
+    await expect(indexer.removeRoom("room_A")).resolves.toBeUndefined();
+    await indexer.close();
+  });
+
   it("limits child processes across rooms", async () => {
     const f = await fixture();
     const script = join(f.root, "slow.cjs");

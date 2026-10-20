@@ -1,6 +1,7 @@
+import { lstatSync, realpathSync } from "node:fs";
 import { isIP } from "node:net";
 import { hostname } from "node:os";
-import { resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import {
   DEFAULT_GIT_INTERNAL_NETWORK,
@@ -16,6 +17,23 @@ const flag = z
 /** Compose's optional pass-through values are empty strings when unset. */
 const optionalEnv = <T extends z.ZodType>(schema: T) =>
   z.preprocess((value) => (value === "" ? undefined : value), schema.optional());
+
+/** Resolve symlinked parents even when the configured directory does not exist yet. */
+function canonicalPath(path: string): string {
+  const absolute = resolve(path);
+  try {
+    return realpathSync(absolute);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    try {
+      lstatSync(absolute);
+    } catch (statError) {
+      if ((statError as NodeJS.ErrnoException).code !== "ENOENT") throw statError;
+      return join(canonicalPath(dirname(absolute)), basename(absolute));
+    }
+    throw error; // A broken symlink must not be treated as an ordinary missing leaf.
+  }
+}
 
 /** An IP address, or an address with a CIDR prefix length. */
 function isProxyAddress(entry: string): boolean {
@@ -148,7 +166,7 @@ const envSchema = z.object({
   ZOEKT_URL: z.string().url().optional(),
   ZOEKT_INDEX_DIR: z.string().min(1).optional(),
   ZOEKT_INDEX_CONCURRENCY: z.coerce.number().int().min(1).max(8).default(2),
-  ZOEKT_INDEX_TIMEOUT_MS: z.coerce.number().int().min(10_000).default(600_000),
+  ZOEKT_INDEX_TIMEOUT_MS: z.coerce.number().int().min(10_000).max(2_147_483_647).default(600_000),
 });
 
 export interface ServerConfig {
@@ -313,11 +331,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     throw new Error(
       "Invalid server configuration:\n  SEARCH_BACKEND=zoekt requires ZOEKT_URL and ZOEKT_INDEX_DIR",
     );
-  const zoektIndexDir = e.ZOEKT_INDEX_DIR && resolve(e.ZOEKT_INDEX_DIR);
-  const workspaceRoot = resolve(e.WORKSPACE_ROOT);
+  const zoektIndexDir = e.ZOEKT_INDEX_DIR && canonicalPath(e.ZOEKT_INDEX_DIR);
+  const workspaceRoot = canonicalPath(e.WORKSPACE_ROOT);
+  const indexRelative = zoektIndexDir && relative(workspaceRoot, zoektIndexDir);
   if (
-    zoektIndexDir &&
-    (zoektIndexDir === workspaceRoot || zoektIndexDir.startsWith(`${workspaceRoot}/`))
+    indexRelative !== undefined &&
+    (indexRelative === "" ||
+      (indexRelative !== ".." &&
+        !indexRelative.startsWith(`..${sep}`) &&
+        !isAbsolute(indexRelative)))
   )
     throw new Error(
       "Invalid server configuration:\n  ZOEKT_INDEX_DIR must be outside WORKSPACE_ROOT",
