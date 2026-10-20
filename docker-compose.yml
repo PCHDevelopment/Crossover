@@ -19,6 +19,18 @@ services:
       test: ["CMD", "redis-cli", "ping"]
       interval: 2s
       retries: 15
+  zoekt:
+    image: crossover-zoekt:local
+    build:
+      context: .
+      dockerfile: apps/zoekt/Dockerfile
+    profiles: ["server"]
+    volumes:
+      - "${CROSSOVER_ZOEKT_ROOT:-${PWD}/.data/zoekt}:/data/index:ro"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:6070/healthz"]
+      interval: 5s
+      retries: 12
   # Development/demo only: sandboxes share the app host through its Docker
   # socket, unlike the separate sandbox hosts described in ARCHITECTURE §4.1.
   server:
@@ -38,6 +50,9 @@ services:
       DATABASE_URL: postgres://crossover:crossover@postgres:5432/crossover
       REDIS_URL: redis://redis:6379
       WORKSPACE_ROOT: ${CROSSOVER_WORKSPACE_ROOT:-${PWD}/.data/workspaces}
+      SEARCH_BACKEND: ${SEARCH_BACKEND:-ripgrep}
+      ZOEKT_URL: http://zoekt:6070
+      ZOEKT_INDEX_DIR: /var/lib/crossover/zoekt
       HOST: 0.0.0.0
       PORT: 8080
       DEV_LOGIN: "true"
@@ -68,6 +83,7 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - "${CROSSOVER_WORKSPACE_ROOT:-${PWD}/.data/workspaces}:${CROSSOVER_WORKSPACE_ROOT:-${PWD}/.data/workspaces}"
+      - "${CROSSOVER_ZOEKT_ROOT:-${PWD}/.data/zoekt}:/var/lib/crossover/zoekt"
     networks:
       default: {}
       crossover-git: {}

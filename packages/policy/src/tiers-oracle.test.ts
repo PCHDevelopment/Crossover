@@ -138,6 +138,7 @@ describe("tier rules: the policy against capabilityTier()", () => {
     expect(engine.tier("tasks.read", undefined)).toBe(0);
     expect(engine.tier("messages.send", undefined)).toBe(1);
     expect(engine.tier("slack.post_message", undefined)).toBe(2);
+    expect(engine.tier("a2a.send", "part_remote")).toBe(2);
     expect(engine.tier("aws.deploy_lambda", "staging-api")).toBe(2);
     expect(engine.tier("aws.deploy_lambda", "prod-api")).toBe(3);
     expect(engine.tier("aws.deploy_lambda", undefined)).toBe(3);

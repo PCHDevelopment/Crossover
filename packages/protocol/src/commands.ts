@@ -18,6 +18,7 @@ export const METHODS = {
   "room.events.subscribe": { mutating: false },
   "room.events.list": { mutating: false },
   "room.set_egress_allowlist": { mutating: true },
+  "room.set_a2a_allowlist": { mutating: true },
   "room.set_protected_paths": { mutating: true },
   "room.set_health": { mutating: true },
   "budgets.get": { mutating: false },
@@ -76,6 +77,10 @@ export const METHODS = {
   "tasks.reopen": { mutating: true },
   "tasks.cancel": { mutating: true },
   "tasks.heartbeat": { mutating: false },
+  "tasks.request_review": { mutating: true },
+  "reviews.threads.list": { mutating: false },
+  "reviews.comment": { mutating: true },
+  "reviews.resolve": { mutating: true },
 
   "workspace.list": { mutating: false },
   "workspace.read": { mutating: false },
@@ -86,6 +91,7 @@ export const METHODS = {
   "workspace.apply_changeset": { mutating: true },
   "workspace.changeset.get": { mutating: false },
   "workspace.changeset.decide_hold": { mutating: true },
+  "workspace.task_changes": { mutating: false },
   "workspace.health.get": { mutating: false },
 
   "conflicts.list": { mutating: false },
@@ -120,6 +126,10 @@ export const METHODS = {
 
   "tools.list": { mutating: false },
   "tools.invoke": { mutating: true },
+
+  "a2a.remotes.add": { mutating: true },
+  "a2a.remotes.refresh": { mutating: true },
+  "a2a.remotes.list": { mutating: false },
 
   "integrations.connect": { mutating: true },
   "integrations.disconnect": { mutating: true },

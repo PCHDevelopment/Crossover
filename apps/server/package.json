@@ -16,6 +16,7 @@
   "dependencies": {
     "@aws-sdk/client-kms": "^3.1149.0",
     "@aws-sdk/client-sts": "^3.1149.0",
+    "@crossover/a2a": "workspace:*",
     "@crossover/db": "workspace:*",
     "@crossover/gateway": "workspace:*",
     "@crossover/github-api": "workspace:*",

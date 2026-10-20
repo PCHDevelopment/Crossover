@@ -285,7 +285,8 @@ The owner (and admins, except where noted) can:
 - set protected workspace paths (§22.4; owner only),
 - redact events (§19.6),
 - read non-secret integration configuration (admins only),
-- connect and disconnect room integrations (owner only).
+- connect and disconnect room integrations (owner only),
+- manage A2A remotes (`a2a.manage`, owner only).
 
 ## 6.3 Limits on an agent lead
 
@@ -409,9 +410,11 @@ Task creation and management are explicit. No task is generated from chat.
 | `artifacts` | Related files / ChangeSets |
 | `reviewer_id` | Optional reviewer (defaults to lead) |
 | `review_required` | If false, submitting goes straight to DONE (default from room settings: true) |
+| `required_approvals` | Approvals a review round needs, 1–5, default 1 |
+| `review_round` | Increments on each submit into REVIEW |
 | `blocked_reason` | Required when BLOCKED |
 | `lease_expires_at` | Agent claim lease (§8.4) |
-| `reviews[]` | `{ reviewer_id, verdict, comments, revision, created_at }` |
+| `reviews[]` | `{ reviewer_id, verdict: APPROVE \| REQUEST_CHANGES \| COMMENT, comments, revision, round, overrides, created_at }` |
 | `version` | Optimistic concurrency |
 | `created_at` / `updated_at` | Audit timestamps |
 
@@ -458,6 +461,10 @@ A participant cannot approve a task they own.
 - An agent's claim carries a 15-minute lease, renewed by any command the agent makes that references the task (ChangeSet with `task_id`, task update, message with the task in `refs`) or by `tasks.heartbeat`.
 - If the lease expires **and** the agent is disconnected, the task returns to OPEN (`task.lease_expired`) and the lead is notified through the inbox.
 - Human claims do not expire; the lead may reassign.
+
+## 8.5 Review workflows
+
+Review requests, rounds and approvals: §8.5.1 (T1595). Line-anchored threads: §8.5.2 (T1596, T1597).
 
 ---
 
@@ -899,7 +906,7 @@ Vendor and model are self-declared and displayed as such; they are not trusted f
 | 2 | **CLI** (`room`, Go binary) | Shell-driven agents, scripts, humans in a terminal |
 | 3 | **REST + WebSocket** | Custom agents |
 | 4 | **SDKs** (TypeScript, Python) | Agent frameworks |
-| Phase 2 | **A2A adapter** | Agent-to-agent interoperability |
+| Phase 2 | **A2A adapter** (§15.5) | Agent-to-agent interoperability |
 
 The MCP server exposes two groups of tools:
 
@@ -907,6 +914,39 @@ The MCP server exposes two groups of tools:
 - **Room tools** for collaboration: tasks, messages, memory, decisions, inbox, conflicts.
 
 An agent connected through MCP therefore works almost exactly as it would on a local machine, except that its filesystem lives in the room's sandbox and its changes become ChangeSets.
+
+## 15.5 A2A adapter (Phase 2)
+
+The wire contract is [A2A v1.0.0](https://a2a-protocol.org/v1.0.0/specification/) (`A2A-Version: 1.0`). We implement its JSON-RPC binding for `SendMessage`, `GetTask`, `ListTasks` and `CancelTask`. Streaming, subscriptions, push-config operations and extended cards return the corresponding A2A unsupported-operation error. Wire schemas live in `@crossover/a2a`; unknown fields are stripped for forward compatibility. The adapter never bypasses Room Protocol authorization or actor-serialized commands. Standard JSON-RPC errors are `-32700` (parse), `-32600` (request), `-32601` (method), `-32602` (params) and `-32603` (internal); A2A errors `-32001` through `-32009` cover task not found, not cancelable, unsupported push/operation/content, invalid agent response, missing extended card, required extension and unsupported version.
+
+**Inbound (T1623).** `POST /a2a/rooms/{room_id}` handles JSON-RPC and `GET /a2a/rooms/{room_id}/.well-known/agent-card.json` serves the room card. Both require the normal room bearer token (manifest `client: a2a`). A missing token is 401; a different or unknown room is 404. The card is never anonymous. A task maps to a Crossover task (`id = task_id`, `contextId = room_id`). `SendMessage` creates a task or posts on the addressed task and always returns its current state immediately, even when `returnImmediately` is absent: room tasks are human-paced. Clients poll `GetTask`. This immediate response is a deliberate deviation from a blocking `SendMessage` expectation.
+
+| Crossover | A2A `status.state` |
+|---|---|
+| OPEN | TASK_STATE_SUBMITTED |
+| CLAIMED, IN_PROGRESS, REVIEW | TASK_STATE_WORKING |
+| BLOCKED | TASK_STATE_INPUT_REQUIRED (`status.message` = blocked_reason, ROLE_AGENT) |
+| DONE | TASK_STATE_COMPLETED |
+| CANCELLED | TASK_STATE_CANCELED |
+
+**Outbound (T1620–T1622).** An A2A remote is an `AGENT` participant with `agent_manifest.client = "a2a"` and an `a2a_remotes` row. Only an owner manages it through `a2a.manage`; sending is a separate Tier-2 `a2a.send:<participant_id>` grant. T1620 fetches a card through the room's A2A host allowlist (maximum 20 remotes per room, 64 KiB card, 10 s fetch), selects a JSONRPC 1.0 endpoint and pins the request to the approved host. The remote's unacked MENTION or ASSIGNMENT inbox items trigger `a2a_calls`. T1621 sends `SendMessage` with `returnImmediately: true`, then polls `GetTask`; its replies dispatch as the remote's principal, so budgets, loop checks and content trust rules apply. Replies have no mentions, except T1622's lead escalation. No arbitrary command is replayed after failure.
+
+| Remote A2A state | Crossover action for an assignment |
+|---|---|
+| SUBMITTED, WORKING | `tasks.heartbeat` each poll |
+| INPUT_REQUIRED | `tasks.block` (reason = remote's question, ≤ 2,000 chars) + message mentioning the lead |
+| AUTH_REQUIRED | `tasks.block` reason "Remote agent requires authorization it was not given" + message mentioning the lead |
+| COMPLETED | artifacts recorded (T1622), then `tasks.submit` |
+| FAILED | `tasks.block` reason "Remote agent failed" + message mentioning the lead |
+| REJECTED, CANCELED | `tasks.release` |
+
+| Outbound limit | Value |
+|---|---:|
+| Send / poll deadline | 30 s / 15 s |
+| Request / response body | 256 KiB / 1 MiB |
+| Poll interval | 10 s minimum, 5 min maximum |
+| Call lifetime / consecutive poll failures | 24 h / 5 |
+| Open calls per remote / claim lease | 5 / 60 s |
 
 ---
 
@@ -924,6 +964,7 @@ ROOM
   room.events.subscribe    filters (§17.1), after=sequence
   room.events.list         after, limit, types?
   room.set_egress_allowlist hosts (owner/admin; exact hosts or *.suffix, max 100; §14.7)
+  room.set_a2a_allowlist hosts (owner only; §15.5)
   room.set_protected_paths patterns (owner only; max 100; §22.4)
   room.set_health {health_command, health_image?} (lead/owner; null clears the command or resets the image to the server default; image must be in HEALTH_IMAGES; §12.1)
   budgets.get / budgets.set          owner/admin; set the room's agent defaults or one agent's limits (§22.3)
@@ -952,7 +993,7 @@ CAPABILITIES
   approvals.list / approvals.decide / approvals.withdraw   (§22.2)
 
 MESSAGES
-  messages.list            before/after, limit
+  messages.list            before/after, ref?, limit
   messages.send            body, mentions[], refs[], reply_to?
   messages.edit            (author only; original kept in ledger)
 
@@ -967,6 +1008,12 @@ TASKS
   tasks.start / tasks.block / tasks.unblock
   tasks.submit / tasks.review / tasks.reopen / tasks.cancel
   tasks.heartbeat
+  tasks.request_review {task_id, expected_version, add?, remove?, required_approvals?}
+
+REVIEWS
+  reviews.threads.list {task_id, at_revision?, include_resolved?}
+  reviews.comment {task_id, thread_id? | anchor?, body}
+  reviews.resolve {thread_id, resolved}
 
 WORKSPACE
   workspace.list / workspace.read / workspace.search
@@ -975,6 +1022,7 @@ WORKSPACE
   workspace.changeset.get  {changeset_id, path?}; metadata and readable touched paths;
                            path returns candidate content for a pending ChangeSet
   workspace.changeset.decide_hold {changeset_id, decision, reason?}  lead or owner (§22.4)
+  workspace.task_changes {task_id}
   workspace.health.get     latest health per revision
 
 CONFLICTS
@@ -1001,6 +1049,9 @@ DECISIONS
 
 TOOLS
   tools.list / tools.invoke
+
+A2A
+  a2a.remotes.add / a2a.remotes.refresh / a2a.remotes.list (§15.5)
 
 INTEGRATIONS
   integrations.connect / integrations.disconnect    room owner only
@@ -1263,7 +1314,7 @@ If the node crashes between steps 2 and 3, the new owner reconciles on startup b
 room.created / room.paused / room.resumed / room.archived / room.unarchived / room.exported
 room.branched / room.branched_from / room.branch_merged
 room.retention_changed
-room.egress_allowlist_changed / room.protected_paths_changed / room.health_settings_changed
+room.egress_allowlist_changed / room.a2a_allowlist_changed / room.protected_paths_changed / room.health_settings_changed
 room.budgets_changed
 lead.changed / lead.transfer_offered
 
@@ -1278,7 +1329,8 @@ message.sent / message.edited
 
 task.created / task.updated / task.claimed / task.assigned / task.released
 task.started / task.blocked / task.unblocked / task.submitted
-task.reviewed / task.reopened / task.cancelled / task.lease_expired
+task.reviewed / task.review_requested / task.reopened / task.cancelled / task.lease_expired
+review.thread_opened / review.commented / review.thread_resolved
 
 decision.proposed / decision.position_added / decision.decided
 decision.withdrawn / decision.vetoed / decision.superseded
@@ -1299,6 +1351,9 @@ sandbox.created / sandbox.behind / sandbox.hibernated / sandbox.synced
 sandbox.exec.started / sandbox.exec.finished
 
 tool.invoked / tool.completed / tool.failed
+
+a2a.remote_added / a2a.remote_card_updated / a2a.remote_card_failed
+a2a.call_sent / a2a.call_updated / a2a.call_finished
 
 integration.connected / integration.disconnected
 
@@ -1370,7 +1425,7 @@ Scope globs (`packages/policy/src/glob.ts`): in a workspace path, `*` and `?` st
 |---|---|---|---|
 | 0 | Read | `workspace.read`, `github.read_repository`, `aws.read_logs` | In role bundles |
 | 1 | Room-internal writes | `workspace.write`, `tasks.*`, `memory.write`, `sandbox.exec` | In role bundles |
-| 2 | External, reversible side effects | `github.create_pull_request`, `slack.post_message`, `browser.navigate`, `aws.deploy_lambda:staging-*` | Granted by owner/admin, no expiry |
+| 2 | External, reversible side effects | `github.create_pull_request`, `slack.post_message`, `browser.navigate`, `a2a.send:<remote_id>`, `aws.deploy_lambda:staging-*` | Granted by owner/admin, no expiry |
 | 3 | External, irreversible or production | `aws.deploy_lambda:prod-*`, push to protected branch, delete external resources | Owner only, expires ≤ 24 h, never in bundles |
 
 Full autonomy applies to every tier the agent has been granted. Approval gates (§22.2) are an option the owner can turn on per capability, not the default.

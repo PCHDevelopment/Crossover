@@ -15,7 +15,7 @@ const CATALOG = `
   room.digest
   room.events.subscribe
   room.events.list
-  room.set_egress_allowlist
+  room.set_egress_allowlist / room.set_a2a_allowlist
   room.set_protected_paths
   room.set_health
   budgets.get / budgets.set
@@ -53,12 +53,16 @@ const CATALOG = `
   tasks.start / tasks.block / tasks.unblock
   tasks.submit / tasks.review / tasks.reopen / tasks.cancel
   tasks.heartbeat
+  tasks.request_review
+
+  reviews.threads.list / reviews.comment / reviews.resolve
 
   workspace.list / workspace.read / workspace.search
   workspace.diff / workspace.history / workspace.blame
   workspace.apply_changeset
   workspace.changeset.get
   workspace.changeset.decide_hold
+  workspace.task_changes
   workspace.health.get
 
   conflicts.list / conflicts.get
@@ -79,6 +83,7 @@ const CATALOG = `
 
   tools.list / tools.invoke
 
+  a2a.remotes.add / a2a.remotes.refresh / a2a.remotes.list
   integrations.connect / integrations.disconnect / integrations.verify / integrations.list
 
   git.import / git.pull_upstream
@@ -112,6 +117,8 @@ const READ_ONLY = [
   "tasks.list",
   "tasks.get",
   "tasks.heartbeat",
+  "reviews.threads.list",
+  "workspace.task_changes",
   "workspace.list",
   "workspace.read",
   "workspace.search",
@@ -133,6 +140,7 @@ const READ_ONLY = [
   "decisions.get",
   "tools.list",
   "integrations.list",
+  "a2a.remotes.list",
   "checkpoints.list",
   "workspace.snapshot.list",
   "workspace.snapshot.get",
@@ -155,7 +163,7 @@ const valid = (extra: Record<string, unknown> = {}) => ({
 
 describe("METHODS", () => {
   it("contains every §16.1 method plus room.create, and nothing else", () => {
-    expect(catalog).toHaveLength(113);
+    expect(catalog).toHaveLength(122);
     expect([...METHOD_NAMES].sort()).toEqual([...catalog].sort());
   });
 
@@ -166,7 +174,7 @@ describe("METHODS", () => {
   it("marks exactly the documented methods read-only", () => {
     const readOnly = METHOD_NAMES.filter((m) => !isMutatingMethod(m));
     expect([...readOnly].sort()).toEqual([...READ_ONLY].sort());
-    expect(Object.keys(METHODS).length - readOnly.length).toBe(68);
+    expect(Object.keys(METHODS).length - readOnly.length).toBe(74);
   });
 
   it("isMutatingMethod takes any string and is false for unknown methods", () => {

@@ -3,6 +3,9 @@ PROTOCOL_VERSION = 1
 
 # method name -> True when the command mutates (it gets an idempotency key)
 METHODS: dict[str, bool] = {
+    "a2a.remotes.add": True,
+    "a2a.remotes.list": False,
+    "a2a.remotes.refresh": True,
     "approvals.decide": True,
     "approvals.list": False,
     "approvals.withdraw": True,
@@ -58,6 +61,9 @@ METHODS: dict[str, bool] = {
     "presence.list_intents": False,
     "presence.set_intent": False,
     "presence.update": False,
+    "reviews.comment": True,
+    "reviews.resolve": True,
+    "reviews.threads.list": False,
     "room.accept_lead": True,
     "room.archive": True,
     "room.branch": True,
@@ -71,6 +77,7 @@ METHODS: dict[str, bool] = {
     "room.get_state": False,
     "room.invite": True,
     "room.resume": True,
+    "room.set_a2a_allowlist": True,
     "room.set_egress_allowlist": True,
     "room.set_health": True,
     "room.set_lead": True,
@@ -95,6 +102,7 @@ METHODS: dict[str, bool] = {
     "tasks.list": False,
     "tasks.release": True,
     "tasks.reopen": True,
+    "tasks.request_review": True,
     "tasks.review": True,
     "tasks.start": True,
     "tasks.submit": True,
@@ -116,4 +124,5 @@ METHODS: dict[str, bool] = {
     "workspace.snapshot.delete": True,
     "workspace.snapshot.get": False,
     "workspace.snapshot.list": False,
+    "workspace.task_changes": False,
 }

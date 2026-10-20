@@ -1,4 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { mkdtemp, readdir, rm, symlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DEFAULT_MIGRATIONS_DIR, migrate } from "./migrate.js";
 import { withTransaction } from "./index.js";
 import { createTestDatabase, type TestDatabase } from "./testing.js";
 
@@ -1245,5 +1249,162 @@ describe("0035_snapshots_branches", () => {
       "SELECT parent_room_id FROM room_branches WHERE room_id = 'room_t1602_branch'",
     );
     expect(rows).toEqual([{ parent_room_id: "room_t1602_parent" }]);
+  });
+});
+
+describe("0037_a2a", () => {
+  beforeAll(async () => {
+    await db.pool.query(
+      `INSERT INTO rooms (id, slug, name, objective, owner_id)
+       VALUES ('room_a2a_1', 'a2a-1', 'A2A 1', 'test', 'part_a2a'),
+              ('room_a2a_2', 'a2a-2', 'A2A 2', 'test', 'part_a2a')`,
+    );
+    await db.pool.query(
+      `INSERT INTO participants (id, room_id, kind, display_name, role)
+       VALUES ('part_a2a_remote', 'room_a2a_1', 'AGENT', 'Remote', 'DEVELOPER')`,
+    );
+  });
+
+  it("requires an A2A remote participant in the same room", async () => {
+    await expect(
+      db.pool.query(
+        `INSERT INTO a2a_remotes (participant_id, room_id, card_url, created_by)
+       VALUES ('part_a2a_remote', 'room_a2a_2', 'https://example.com/card', 'part_a2a')`,
+      ),
+    ).rejects.toMatchObject({ code: "23503" });
+    await db.pool.query(
+      `INSERT INTO a2a_remotes (participant_id, room_id, card_url, created_by)
+       VALUES ('part_a2a_remote', 'room_a2a_1', 'https://example.com/card', 'part_a2a')`,
+    );
+  });
+
+  it("accepts one call per trigger inbox item", async () => {
+    const insert = (id: string) =>
+      db.pool.query(
+        `INSERT INTO a2a_calls (id, room_id, remote_id, trigger_inbox_id, trigger_kind)
+       VALUES ($1, 'room_a2a_1', 'part_a2a_remote', 'inbox_a2a_trigger', 'MENTION')`,
+        [id],
+      );
+    await insert("a2acall_1");
+    await expect(insert("a2acall_2")).rejects.toMatchObject({ code: "23505" });
+  });
+
+  it("rejects a continuation of a call in another room", async () => {
+    await db.pool.query(
+      `INSERT INTO a2a_calls (id, room_id, remote_id, trigger_inbox_id, trigger_kind)
+       VALUES ('a2acall_parent', 'room_a2a_1', 'part_a2a_remote', 'inbox_a2a_parent', 'MENTION')`,
+    );
+    await db.pool.query(
+      `INSERT INTO participants (id, room_id, kind, display_name, role)
+       VALUES ('part_a2a_remote_2', 'room_a2a_2', 'AGENT', 'Remote 2', 'DEVELOPER')`,
+    );
+    await expect(
+      db.pool.query(
+        `INSERT INTO a2a_calls
+         (id, room_id, remote_id, trigger_inbox_id, trigger_kind, continues_call_id)
+         VALUES ('a2acall_cross_room', 'room_a2a_2', 'part_a2a_remote_2',
+                 'inbox_a2a_cross_room', 'MENTION', 'a2acall_parent')`,
+      ),
+    ).rejects.toMatchObject({ code: "23503" });
+  });
+});
+
+describe("0038_review_workflows", () => {
+  it("starts existing REVIEW tasks in round 1 and leaves prior reviews in round 0", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "crossover-migrations-"));
+    let oldDb: TestDatabase | undefined;
+    try {
+      for (const file of await readdir(DEFAULT_MIGRATIONS_DIR)) {
+        if (file.startsWith("0038_")) continue;
+        await symlink(join(DEFAULT_MIGRATIONS_DIR, file), join(dir, file));
+      }
+      oldDb = await createTestDatabase({ migrationsDir: dir });
+      await oldDb.pool.query(`
+        INSERT INTO rooms (id, slug, name, objective, owner_id)
+          VALUES ('room_backfill', 'backfill', 'Backfill', 'Backfill', 'part_backfill');
+        INSERT INTO participants (id, room_id, kind, display_name, role)
+          VALUES ('part_backfill', 'room_backfill', 'HUMAN', 'Reviewer', 'REVIEWER');
+        INSERT INTO tasks (id, room_id, title, created_by, owner_id, status)
+          VALUES ('task_backfill', 'room_backfill', 'Review', 'part_backfill', 'part_backfill', 'REVIEW');
+        INSERT INTO task_reviews (id, room_id, task_id, reviewer_id, verdict, revision)
+          VALUES ('rev_backfill', 'room_backfill', 'task_backfill', 'part_backfill', 'APPROVE', 0);
+      `);
+      await migrate(oldDb.pool);
+      const { rows } = await oldDb.pool.query(`SELECT t.review_round, r.round
+        FROM tasks t JOIN task_reviews r ON r.task_id = t.id WHERE t.id = 'task_backfill'`);
+      expect(rows).toEqual([{ review_round: 1, round: 0 }]);
+    } finally {
+      await oldDb?.drop();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+  beforeAll(async () => {
+    await db.pool.query(`
+      INSERT INTO rooms (id, slug, name, objective, owner_id)
+      VALUES ('room_review_1', 'review-1', 'Review', 'Review', 'part_review_1'),
+             ('room_review_2', 'review-2', 'Review', 'Review', 'part_review_2');
+      INSERT INTO participants (id, room_id, kind, display_name, role)
+      VALUES ('part_review_1', 'room_review_1', 'HUMAN', 'Reviewer 1', 'REVIEWER'),
+             ('part_review_2', 'room_review_2', 'HUMAN', 'Reviewer 2', 'REVIEWER');
+      INSERT INTO tasks (id, room_id, title, created_by)
+      VALUES ('task_review_1', 'room_review_1', 'Review task', 'part_review_1');
+    `);
+  });
+
+  it("is recorded and constrains approval counts and verdicts", async () => {
+    const { rows } = await db.pool.query("SELECT name FROM schema_migrations WHERE version = 38");
+    expect(rows).toEqual([{ name: "review_workflows" }]);
+    const task = await db.pool.query(
+      "SELECT required_approvals, review_round FROM tasks WHERE id = 'task_review_1'",
+    );
+    expect(task.rows[0]).toEqual({ required_approvals: 1, review_round: 0 });
+    for (const count of [0, 6]) {
+      await expect(
+        db.pool.query("UPDATE tasks SET required_approvals = $1 WHERE id = 'task_review_1'", [
+          count,
+        ]),
+      ).rejects.toMatchObject({ code: "23514" });
+    }
+    await db.pool.query(`INSERT INTO task_reviews
+      (id, room_id, task_id, reviewer_id, verdict, revision, overrides)
+      VALUES ('rev_review_comment', 'room_review_1', 'task_review_1', 'part_review_1', 'COMMENT', 0, '{health}')`);
+    await expect(
+      db.pool.query(`INSERT INTO task_reviews
+      (id, room_id, task_id, reviewer_id, verdict, revision, overrides)
+      VALUES ('rev_review_bad', 'room_review_1', 'task_review_1', 'part_review_1', 'COMMENT', 0, '{other}')`),
+    ).rejects.toMatchObject({ code: "23514" });
+  });
+
+  it("keeps requests, threads and comments in their room", async () => {
+    await db.pool.query(`INSERT INTO task_review_requests
+      (id, room_id, task_id, reviewer_id, requested_by)
+      VALUES ('rreq_review_1', 'room_review_1', 'task_review_1', 'part_review_1', 'part_review_1')`);
+    await expect(
+      db.pool.query(`INSERT INTO task_review_requests
+      (id, room_id, task_id, reviewer_id, requested_by)
+      VALUES ('rreq_review_2', 'room_review_1', 'task_review_1', 'part_review_1', 'part_review_1')`),
+    ).rejects.toMatchObject({ code: "23505" });
+    await expect(
+      db.pool.query(`INSERT INTO review_threads
+      (id, room_id, task_id, path, anchor_revision, start_line, end_line, created_by)
+      VALUES ('rthr_review_bad', 'room_review_1', 'task_review_1', 'a.ts', 0, 1, 501, 'part_review_1')`),
+    ).rejects.toMatchObject({ code: "23514" });
+    await db.pool.query(`INSERT INTO review_threads
+      (id, room_id, task_id, path, anchor_revision, start_line, end_line, created_by)
+      VALUES ('rthr_review_1', 'room_review_1', 'task_review_1', 'a.ts', 0, 1, 500, 'part_review_1')`);
+    await expect(
+      db.pool.query(`UPDATE review_threads SET status = 'RESOLVED'
+      WHERE id = 'rthr_review_1'`),
+    ).rejects.toMatchObject({ code: "23514" });
+    await expect(
+      db.pool.query(`INSERT INTO review_comments
+      (id, room_id, thread_id, author_id, body)
+      VALUES ('rcmt_review_bad', 'room_review_2', 'rthr_review_1', 'part_review_2', 'x')`),
+    ).rejects.toMatchObject({ code: "23503" });
+    await expect(
+      db.pool.query(`INSERT INTO review_comments
+      (id, room_id, thread_id, author_id, body)
+      VALUES ('rcmt_review_empty', 'room_review_1', 'rthr_review_1', 'part_review_1', '')`),
+    ).rejects.toMatchObject({ code: "23514" });
   });
 });

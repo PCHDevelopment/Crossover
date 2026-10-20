@@ -10,6 +10,7 @@ external := {
 	"github.create_pull_request": 2,
 	"slack.post_message": 2,
 	"browser.navigate": 2,
+	"a2a.send": 2,
 	"aws.deploy_lambda": 3,
 }
 
@@ -58,6 +59,7 @@ catalog_mutating := {
 	"decisions.withdraw": true,
 	"room.accept_lead": true,
 	"tasks.review": true,
+	"reviews.comment": true,
 	"tasks.assign": true,
 	"tasks.cancel": true,
 	"tasks.reopen": true,
@@ -73,6 +75,7 @@ catalog_mutating := {
 	"git.pull_upstream": true,
 	"workspace.decide_hold": true,
 	"room.transfer_lead": true,
+	"a2a.manage": true,
 	"room.invite": true,
 	"room.set_lead": true,
 	"participants.set_role": true,

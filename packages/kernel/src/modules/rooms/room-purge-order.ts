@@ -3,6 +3,7 @@ import type { PoolClient } from "@crossover/db";
 const EXCLUDED_TABLES = ["room_deletion_audit", "room_leases", "rooms"];
 
 const NULLIFIED_FOREIGN_KEY_COLUMNS: Readonly<Record<string, ReadonlySet<string>>> = {
+  a2a_calls: new Set(["continues_call_id"]),
   messages: new Set(["reply_to"]),
   decisions: new Set(["supersedes"]),
   changesets: new Set(["conflict_id", "applied_revision"]),

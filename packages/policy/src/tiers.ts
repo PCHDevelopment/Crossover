@@ -15,6 +15,7 @@ export const EXTERNAL_TIERS: Readonly<Record<string, Tier>> = {
   "github.create_pull_request": 2,
   "slack.post_message": 2,
   "browser.navigate": 2,
+  "a2a.send": 2,
   // 3: external, irreversible or production. Owner only, expires within 24 h, never in bundles.
   "aws.deploy_lambda": 3,
 };

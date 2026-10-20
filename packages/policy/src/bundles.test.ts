@@ -46,6 +46,7 @@ const DEVELOPER_WORK: Capability[] = [
   "tasks.unblock",
   "tasks.submit",
   "tasks.release",
+  "reviews.comment",
   "tasks.heartbeat",
   "workspace.write",
   "conflicts.abandon",
@@ -70,6 +71,7 @@ const EXPECTED: Record<(typeof ROLES)[number], Capability[]> = {
     "messages.edit",
     "inbox.ack",
     "tasks.review",
+    "reviews.comment",
     "conflicts.abandon",
     "conflicts.escalate",
     "decisions.propose",
@@ -176,6 +178,7 @@ describe("role bundles (§6.1)", () => {
       "capabilities.grant_tier3",
       "events.redact",
       "integrations.manage",
+      "a2a.manage",
     ]) {
       for (const role of ROLES)
         expect(ROLE_BUNDLES[role].has(c as Capability), `${role} ${c}`).toBe(false);
@@ -211,6 +214,7 @@ describe("authority powers (§6.2)", () => {
     "capabilities.grant_tier3",
     "events.redact",
     "integrations.manage",
+    "a2a.manage",
     "protected_paths.set",
     "snapshots.delete",
   ];

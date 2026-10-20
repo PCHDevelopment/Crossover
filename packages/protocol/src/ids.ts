@@ -23,6 +23,10 @@ export const ID_PREFIXES = [
   "appr",
   "ckpt",
   "snap",
+  "a2acall",
+  "rreq",
+  "rthr",
+  "rcmt",
 ] as const;
 
 export type IdPrefix = (typeof ID_PREFIXES)[number];

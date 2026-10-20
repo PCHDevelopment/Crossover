@@ -183,6 +183,7 @@ jobs:
           - { name: git-fetcher, file: apps/git-fetcher/Dockerfile, target: "" }
           - { name: github-plugin, file: plugins/github/Dockerfile, target: "" }
           - { name: server, file: apps/server/Dockerfile, target: "" }
+          - { name: zoekt, file: apps/zoekt/Dockerfile, target: "" }
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
@@ -310,38 +311,48 @@ jobs:
       - name: Wait for the images
         env:
           GH_TOKEN: ${{ github.token }}
-          IMAGES: "egress-proxy browser-plugin git-fetcher github-plugin server"
+          IMAGES: "egress-proxy browser-plugin git-fetcher github-plugin server zoekt"
         run: |
           # One failed API call is not a failed job: try again on the next pass, and give up only
           # after several in a row. Poll gently; the token's requests are shared by the repository.
           set -o pipefail
+          start=$SECONDS
           deadline=$((SECONDS + 600))
           errors=0
+          api_stderr="$RUNNER_TEMP/images-wait-api.err"
+          # One line per pass (elapsed seconds, jobs returned, each image's last-seen result), so a
+          # timeout says what the step saw; a failing API call prints its own status and message.
           while :; do
+            elapsed=$((SECONDS - start))
             # Every attempt's jobs: "Re-run failed jobs" does not re-run an `images` job that
             # succeeded, so its result is in an earlier attempt. The newest attempt of each wins.
-            if ! jobs="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?filter=all&per_page=100" --jq '.jobs[]' | jq -s '.')"; then
+            if ! jobs="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?filter=all&per_page=100" --jq '.jobs[]' 2>"$api_stderr" | jq -s '.')"; then
               errors=$((errors + 1))
-              [ "$errors" -lt 6 ] || { echo "ERROR: the jobs API failed $errors times in a row"; exit 1; }
-              [ "$SECONDS" -lt "$deadline" ] || { echo "ERROR: the images were not ready in 10 minutes"; exit 1; }
+              api_error="$(tr '\n' ' ' < "$api_stderr" | cut -c1-300)"
+              echo "[${elapsed}s] jobs API call failed ($errors in a row): ${api_error:-no message}"
+              [ "$errors" -lt 6 ] || { echo "ERROR: the jobs API failed $errors times in a row; last error: ${api_error:-no message}"; exit 1; }
+              [ "$SECONDS" -lt "$deadline" ] || { echo "ERROR: the jobs API kept failing for 10 minutes; last error: ${api_error:-no message}"; exit 1; }
               sleep 10
               continue
             fi
             errors=0
-            pending=0
+            pending=""
+            seen=""
             for name in $IMAGES; do
               result="$(echo "$jobs" | jq -r --arg n "images ($name)" '[.[] | select(.name == $n)] | sort_by(.run_attempt) | last | .conclusion // "pending"')"
+              seen="$seen $name=$result"
               case "$result" in
                 success) ;;
-                pending|null) pending=1 ;;
+                pending|null) pending="$pending $name" ;;
                 *) echo "ERROR: images ($name) finished as $result"; exit 1 ;;
               esac
             done
-            [ "$pending" -eq 0 ] && break
-            [ "$SECONDS" -lt "$deadline" ] || { echo "ERROR: the images were not ready in 10 minutes"; exit 1; }
+            echo "[${elapsed}s] jobs returned: $(echo "$jobs" | jq length);$seen"
+            [ -z "$pending" ] && break
+            [ "$SECONDS" -lt "$deadline" ] || { echo "ERROR: images still pending after 10 minutes:$pending"; exit 1; }
             sleep 10
           done
-          echo "images ready after ${SECONDS}s of this step"
+          echo "images ready after $((SECONDS - start))s of this step"
       - uses: actions/download-artifact@v4
         with:
           pattern: image-*
@@ -350,7 +361,7 @@ jobs:
       - name: Load the test images
         env:
           GH_TOKEN: ${{ github.token }}
-          IMAGES: "egress-proxy browser-plugin git-fetcher github-plugin server"
+          IMAGES: "egress-proxy browser-plugin git-fetcher github-plugin server zoekt"
         run: |
           # Each image must have the ID it had where it was built: the tags are the ones the tests
           # use, and the content must be too.
@@ -481,33 +492,43 @@ jobs:
           # One failed API call is not a failed job: try again on the next pass, and give up only
           # after several in a row. Poll gently; the token's requests are shared by the repository.
           set -o pipefail
+          start=$SECONDS
           deadline=$((SECONDS + 600))
           errors=0
+          api_stderr="$RUNNER_TEMP/images-wait-api.err"
+          # One line per pass (elapsed seconds, jobs returned, each image's last-seen result), so a
+          # timeout says what the step saw; a failing API call prints its own status and message.
           while :; do
+            elapsed=$((SECONDS - start))
             # Every attempt's jobs: "Re-run failed jobs" does not re-run an `images` job that
             # succeeded, so its result is in an earlier attempt. The newest attempt of each wins.
-            if ! jobs="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?filter=all&per_page=100" --jq '.jobs[]' | jq -s '.')"; then
+            if ! jobs="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?filter=all&per_page=100" --jq '.jobs[]' 2>"$api_stderr" | jq -s '.')"; then
               errors=$((errors + 1))
-              [ "$errors" -lt 6 ] || { echo "ERROR: the jobs API failed $errors times in a row"; exit 1; }
-              [ "$SECONDS" -lt "$deadline" ] || { echo "ERROR: the images were not ready in 10 minutes"; exit 1; }
+              api_error="$(tr '\n' ' ' < "$api_stderr" | cut -c1-300)"
+              echo "[${elapsed}s] jobs API call failed ($errors in a row): ${api_error:-no message}"
+              [ "$errors" -lt 6 ] || { echo "ERROR: the jobs API failed $errors times in a row; last error: ${api_error:-no message}"; exit 1; }
+              [ "$SECONDS" -lt "$deadline" ] || { echo "ERROR: the jobs API kept failing for 10 minutes; last error: ${api_error:-no message}"; exit 1; }
               sleep 10
               continue
             fi
             errors=0
-            pending=0
+            pending=""
+            seen=""
             for name in $IMAGES; do
               result="$(echo "$jobs" | jq -r --arg n "images ($name)" '[.[] | select(.name == $n)] | sort_by(.run_attempt) | last | .conclusion // "pending"')"
+              seen="$seen $name=$result"
               case "$result" in
                 success) ;;
-                pending|null) pending=1 ;;
+                pending|null) pending="$pending $name" ;;
                 *) echo "ERROR: images ($name) finished as $result"; exit 1 ;;
               esac
             done
-            [ "$pending" -eq 0 ] && break
-            [ "$SECONDS" -lt "$deadline" ] || { echo "ERROR: the images were not ready in 10 minutes"; exit 1; }
+            echo "[${elapsed}s] jobs returned: $(echo "$jobs" | jq length);$seen"
+            [ -z "$pending" ] && break
+            [ "$SECONDS" -lt "$deadline" ] || { echo "ERROR: images still pending after 10 minutes:$pending"; exit 1; }
             sleep 10
           done
-          echo "images ready after ${SECONDS}s of this step"
+          echo "images ready after $((SECONDS - start))s of this step"
       - uses: actions/download-artifact@v4
         with:
           pattern: image-git-fetcher
