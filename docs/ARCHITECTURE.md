@@ -610,6 +610,8 @@ Limits: ≤ 500 operations and ≤ 25 MB of text per ChangeSet.
 5. Merge
      if base_revision == head:      fast-forward, result = C
      else:                          git merge-tree --write-tree base_commit head_commit C
+5b Structured merge (optional): if every conflicted file is a content conflict that a
+   registered driver resolves, the merge becomes clean; otherwise Git's result stands unchanged.
 6. Classify
      clean merge                    → step 7
      content or structural conflict → status CONFLICT, create Conflict (§11), stop
@@ -636,6 +638,7 @@ The merge uses Git's diff3 semantics at hunk level:
   - any concurrent modification of a binary path.
 
 Renames are explicit operations, so rename detection never relies on heuristics.
+When enabled, the optional structured merge in step 5b applies only to eligible content conflicts.
 
 ---
 
