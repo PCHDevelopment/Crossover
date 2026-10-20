@@ -1038,6 +1038,7 @@ SANDBOX
 
 MEMORY
   memory.list / memory.get / memory.history
+  memory.search           query, prefix?, limit?
   memory.put               expected_revision
   memory.delete            expected_revision
 
@@ -1250,6 +1251,7 @@ MemoryEntry
 - Writes are explicit; entries are revisioned.
 - The blackboard is authoritative for shared knowledge; embeddings and vector search (Phase 2) are derived indexes and never authoritative.
 - Embeddings live in `memory_embeddings`, keyed by model; an indexer outside the room actor keeps them current from `memory_entries`, and they can be dropped and rebuilt at any time (T1579).
+- `memory.search` ranks entries by embedding similarity; it applies the same room scope and `memory.read` capability as `memory.get`, and only returns entries whose current revision is indexed (T1580).
 - Private agent memory, chat history and canonical room state remain separate.
 
 ---

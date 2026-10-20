@@ -112,6 +112,7 @@ export const METHODS = {
   "memory.list": { mutating: false },
   "memory.get": { mutating: false },
   "memory.history": { mutating: false },
+  "memory.search": { mutating: false },
   "memory.put": { mutating: true },
   "memory.delete": { mutating: true },
 

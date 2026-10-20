@@ -17,6 +17,9 @@ export const SYSTEM_MEMORY_AUTHOR = "system";
 
 const SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
+/** `LIKE` patterns treat `%` and `_` as wildcards; prefixes are literal text. */
+export const likePrefix = (prefix: string) => `${prefix.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+
 /**
  * A memory key is a path: 1 to 8 segments joined by `/`, each starting with a letter or digit
  * (so no `.` or `..`), 200 characters at most, no empty segment and no leading or trailing `/`.

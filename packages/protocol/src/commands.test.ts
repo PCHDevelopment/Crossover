@@ -73,7 +73,7 @@ const CATALOG = `
   sandbox.sync / sandbox.reset
   changes.submit / changes.diff
 
-  memory.list / memory.get / memory.history
+  memory.list / memory.get / memory.history / memory.search
   memory.put
   memory.delete
 
@@ -135,6 +135,7 @@ const READ_ONLY = [
   "memory.list",
   "memory.get",
   "memory.history",
+  "memory.search",
   "decisions.list",
   "decisions.get",
   "tools.list",
@@ -162,7 +163,7 @@ const valid = (extra: Record<string, unknown> = {}) => ({
 
 describe("METHODS", () => {
   it("contains every §16.1 method plus room.create, and nothing else", () => {
-    expect(catalog).toHaveLength(121);
+    expect(catalog).toHaveLength(122);
     expect([...METHOD_NAMES].sort()).toEqual([...catalog].sort());
   });
 
