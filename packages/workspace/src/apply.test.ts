@@ -34,6 +34,13 @@ function deferred<T = void>() {
   return { promise, resolve };
 }
 
+function objectKeys(value: unknown): string[] {
+  if (value === null || typeof value !== "object") {
+    throw new Error("Expected a non-null object response");
+  }
+  return Object.keys(value);
+}
+
 beforeAll(async () => {
   db = await createTestDatabase();
 });
@@ -904,7 +911,7 @@ describe("workspace.apply_changeset", () => {
     expect(result.events).toMatchObject([
       { type: "workspace.changeset.applied", payload: { applied_revision: 3 } },
     ]);
-    expect(Object.keys(result.response).sort()).toEqual([
+    expect(objectKeys(result.response).sort()).toEqual([
       "applied_revision",
       "changeset_id",
       "status",
@@ -951,8 +958,8 @@ describe("workspace.apply_changeset", () => {
     const baseline = await setup(false);
     const refused = await setup(true);
     expect(refused.response.response).toMatchObject({ status: "CONFLICT" });
-    expect(Object.keys(refused.response.response).sort()).toEqual(
-      Object.keys(baseline.response.response).sort(),
+    expect(objectKeys(refused.response.response).sort()).toEqual(
+      objectKeys(baseline.response.response).sort(),
     );
     expect(
       refused.response.events.map((event) => [event.type, Object.keys(event.payload).sort()]),
