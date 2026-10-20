@@ -151,7 +151,7 @@ it("sorts matches, removes symlinks and reports sink truncation", async () => {
 });
 
 it("strips a standalone carriage return and honors the reported match limit", async () => {
-  const result = found([{ path: "a.txt", lines: ["needle\r"] }]);
+  const result = found([{ path: "a.txt", lines: ["needle\r", "needle\r\r\n"] }]);
   result.Result.MatchCount = 10_000;
   const matches: SearchMatch[] = [];
   expect(
@@ -163,7 +163,10 @@ it("strips a standalone carriage return and honors the reported match limit", as
       },
     ),
   ).toEqual({ truncated: true });
-  expect(matches).toEqual([{ path: "a.txt", line: 1, text: "needle" }]);
+  expect(matches).toEqual([
+    { path: "a.txt", line: 1, text: "needle" },
+    { path: "a.txt", line: 2, text: "needle\r" },
+  ]);
 });
 
 it("emits available matches if Zoekt returns more than its match limit", async () => {

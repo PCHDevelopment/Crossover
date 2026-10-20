@@ -187,8 +187,7 @@ export function zoektBackend(options: ZoektBackendOptions): SearchBackend {
               line: line.LineNumber,
               text: Buffer.from(line.Line, "base64")
                 .toString("utf8")
-                .replace(/\r?\n$/, "")
-                .replace(/\r$/, ""),
+                .replace(/\r?\n$|\r$/, ""),
             });
           }
         }
