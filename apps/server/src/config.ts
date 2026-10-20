@@ -61,6 +61,10 @@ const envSchema = z.object({
   ALLOW_UNSANDBOXED_DEV: z.literal("1").optional(),
   /** Public origin used for exact OAuth callback URLs; required with OAuth credentials. */
   OAUTH_PUBLIC_BASE_URL: z.string().url().optional(),
+  /** Serve the room A2A endpoint and Agent Card (T1623, §15.5). Off by default. */
+  A2A_INBOUND_ENABLED: flag,
+  /** The origin A2A cards advertise; defaults to OAUTH_PUBLIC_BASE_URL. */
+  A2A_PUBLIC_BASE_URL: z.string().url().optional(),
   GITHUB_OAUTH_CLIENT_ID: z.string().trim().min(1).max(200).optional(),
   GITHUB_OAUTH_CLIENT_SECRET: z.string().min(1).max(4096).optional(),
   GOOGLE_OAUTH_CLIENT_ID: z.string().trim().min(1).max(200).optional(),
@@ -193,6 +197,8 @@ export interface ServerConfig {
   refreshPerMinute?: number;
   /** Milliseconds between conflict-rate reports (T1586); 0 turns them off. Default one day. */
   conflictReportIntervalMs?: number;
+  /** The inbound A2A endpoint (T1623): present only when enabled. */
+  a2aInbound?: { publicBaseUrl: string };
   /** Directory of the built web app, served next to the API. */
   webRoot?: string;
   /** Operator allowlist for room-selected health container images. */
@@ -295,6 +301,22 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     if ((env.NODE_ENV === "production" || !localHttp) && base.protocol !== "https:") {
       invalidConfig("OAUTH_PUBLIC_BASE_URL must use HTTPS except for localhost development");
     }
+  }
+  let a2aInbound: { publicBaseUrl: string } | undefined;
+  if (e.A2A_INBOUND_ENABLED) {
+    const text = e.A2A_PUBLIC_BASE_URL ?? e.OAUTH_PUBLIC_BASE_URL;
+    if (!text)
+      invalidConfig("A2A_INBOUND_ENABLED needs A2A_PUBLIC_BASE_URL or OAUTH_PUBLIC_BASE_URL");
+    const base = new URL(text!);
+    if (base.pathname !== "/" || base.search || base.hash || base.username || base.password) {
+      invalidConfig("A2A_PUBLIC_BASE_URL must be an origin without a path, query or fragment");
+    }
+    const localHttp =
+      base.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(base.hostname);
+    if ((env.NODE_ENV === "production" || !localHttp) && base.protocol !== "https:") {
+      invalidConfig("A2A_PUBLIC_BASE_URL must use HTTPS except for localhost development");
+    }
+    a2aInbound = { publicBaseUrl: base.origin };
   }
   const sandboxDiskEnforcement =
     e.SANDBOX_DISK_ENFORCEMENT ?? (env.NODE_ENV === "production" ? "hard" : "soft");
@@ -418,6 +440,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     trustProxy: e.TRUST_PROXY,
     refreshPerMinute: e.REFRESH_PER_MINUTE,
     conflictReportIntervalMs: e.CONFLICT_REPORT_INTERVAL_MS,
+    ...(a2aInbound ? { a2aInbound } : {}),
     ...(e.WEB_ROOT ? { webRoot: resolve(e.WEB_ROOT) } : {}),
     healthImages: e.HEALTH_IMAGES,
     sandboxDiskEnforcement,

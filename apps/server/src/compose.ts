@@ -14,6 +14,7 @@ import {
 } from "@crossover/gateway";
 import { MCP_TOOLS, registerMcp } from "@crossover/mcp";
 import { buildInternalGitServer } from "./internal-git.js";
+import { registerA2aInbound } from "./a2a-inbound.js";
 import { purgeRoomWorkspace } from "./purge-workspace.js";
 import { githubOAuthProvider } from "./github-oauth.js";
 import { googleOAuthProvider } from "./google-oauth.js";
@@ -710,6 +711,17 @@ export async function composeServer(
           command_id: context.command_id,
         }),
     });
+
+    // The room A2A endpoint (T1623), only when enabled; off, /a2a/* is a plain 404.
+    if (config.a2aInbound) {
+      registerA2aInbound(app, {
+        dispatcher,
+        pool,
+        publicBaseUrl: config.a2aInbound.publicBaseUrl,
+        // The error and the route pattern only: no method, room or participant ids (T1623).
+        onInternalError: (error) => logInternalError(error, { route: "/a2a/rooms/:roomId" }),
+      });
+    }
 
     let closing: Promise<void> | undefined;
     const close = () =>
