@@ -57,7 +57,7 @@ export function zoektQuery(
   const glob = request.glob === undefined ? undefined : globToRegExpSource(request.glob);
   if (glob === null) return null;
   // RE2 and ripgrep's Rust regex disagree on these extensions; use ripgrep's error path.
-  if (request.regex && /\\[1-9]|\(\?(?:[=!]|<[=!])/.test(request.query)) return null;
+  if (request.regex && /\\[1-9wWdDsSbB]|\(\?(?:[=!]|<[=!])/.test(request.query)) return null;
   const content = request.regex
     ? request.query
     : request.query.replace(/[\\.+*?()|[\]{}^$]/g, "\\$&");
@@ -137,6 +137,7 @@ export function zoektBackend(options: ZoektBackendOptions): SearchBackend {
           body: JSON.stringify(body),
           signal: controller.signal,
         });
+      let emit: { matches: SearchMatch[]; modes: Map<string, string>; truncated: boolean };
       try {
         const listed = await post("api/list", { Q: `repo:^${request.room_id}$` });
         if (listed.status !== 200) return decline(request.room_id, "list_status");
@@ -191,17 +192,18 @@ export function zoektBackend(options: ZoektBackendOptions): SearchBackend {
         matches.sort(
           (a, b) => Buffer.compare(Buffer.from(a.path), Buffer.from(b.path)) || a.line - b.line,
         );
-        for (const match of matches) {
-          if (["120000", "160000"].includes(modes.get(match.path)!)) continue;
-          if (!(await sink(match))) return { truncated: true };
-        }
-        return { truncated: MatchCount >= MAX_MATCHES };
+        emit = { matches, modes, truncated: MatchCount >= MAX_MATCHES };
       } catch (error) {
         if (error instanceof CrossoverError) throw error;
         return decline(request.room_id, "unavailable");
       } finally {
         clearTimeout(timer);
       }
+      for (const match of emit.matches) {
+        if (["120000", "160000"].includes(emit.modes.get(match.path)!)) continue;
+        if (!(await sink(match))) return { truncated: true };
+      }
+      return { truncated: emit.truncated };
     },
   };
 }

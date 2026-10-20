@@ -185,7 +185,6 @@ describe.skipIf(!imageAvailable && !process.env["CI"])("Zoekt search parity", ()
         { query: "needle", regex: false, case_sensitive: true },
         { query: "a.b(c)", regex: false, case_sensitive: true },
         { query: 'a"b', regex: false, case_sensitive: true },
-        { query: "^needle\\d+$", regex: true, case_sensitive: true },
         { query: "fo+bar", regex: true, case_sensitive: true },
         { query: "NEEDLE", regex: false, case_sensitive: false },
         { query: "needle", regex: false, case_sensitive: true, glob: "*.md" },
@@ -221,6 +220,21 @@ describe.skipIf(!imageAvailable && !process.env["CI"])("Zoekt search parity", ()
         const order = (a: SearchMatch, b: SearchMatch) =>
           a.path.localeCompare(b.path) || a.line - b.line;
         expect(indexed.sort(order), JSON.stringify(params)).toEqual(scanned.sort(order));
+      }
+      for (const query of ["^needle\\d+$", "^\\w+$"]) {
+        const incompatible = { ...baseRequest, query, regex: true };
+        expect(await zoekt.search(incompatible, async () => true)).toBeNull();
+        const scanned: SearchMatch[] = [];
+        expect(
+          await ripgrepBackend.search(incompatible, async (match) => {
+            scanned.push(match);
+            return true;
+          }),
+        ).not.toBeNull();
+        expect(scanned.length).toBeGreaterThan(0);
+        if (query === "^\\w+$") {
+          expect(scanned).toContainEqual({ path: "src/a.txt", line: 6, text: "café" });
+        }
       }
       for (const query of ["(a)\\1", "a(?=b)"]) {
         const incompatible = { ...baseRequest, query, regex: true };

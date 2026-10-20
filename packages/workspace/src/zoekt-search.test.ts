@@ -108,6 +108,9 @@ it("builds escaped, room-scoped queries and declines incompatible regex syntax",
   expect(zoektQuery(request({ glob: "{a,b}" }))).toBeNull();
   expect(zoektQuery(request({ regex: true, query: "a(?=b)" }))).toBeNull();
   expect(zoektQuery(request({ regex: true, query: "(a)\\1" }))).toBeNull();
+  for (const cls of ["w", "W", "d", "D", "s", "S", "b", "B"]) {
+    expect(zoektQuery(request({ regex: true, query: `\\${cls}` }))).toBeNull();
+  }
 });
 
 it("declines a stale or malformed index before emitting any matches", async () => {
@@ -145,6 +148,22 @@ it("sorts matches, removes symlinks and reports sink truncation", async () => {
     { path: "z.txt", line: 1, text: "needle" },
   ]);
   expect(fetch).toHaveBeenCalledTimes(2);
+});
+
+it("propagates a sink failure after emitting a match", async () => {
+  const backend = zoektBackend({
+    url: "http://127.0.0.1/",
+    fetch: fakeFetch(listed(), found([{ path: "a.txt" }, { path: "z.txt" }])),
+  });
+  const seen: string[] = [];
+  await expect(
+    backend.search(request(), async (match) => {
+      seen.push(match.path);
+      if (seen.length === 2) throw new Error("authorization failed");
+      return true;
+    }),
+  ).rejects.toThrow("authorization failed");
+  expect(seen).toEqual(["a.txt", "z.txt"]);
 });
 
 it("falls back on skipped files and bounds oversized responses", async () => {
