@@ -47,3 +47,15 @@ pnpm --filter @crossover/workspace conflict-report -- --since 2026-09-20 --until
 ```
 
 `--since` defaults to 28 days ago, `--until` to now, `--room <id>` (repeatable) limits it to rooms, and `--format json` prints the full report. It counts only: no paths, room ids, participant ids or content. A ChangeSet is contended when a real merge ran (it conflicted, or it applied more than one revision after its base); the conflict rate is conflicted divided by contended.
+
+### Structured-merge outcomes (T1592, `report_version` 2)
+
+The report gains a `structured` block, read from what T1587 records on each ChangeSet: `structured_merges` on an APPLIED one (files a driver resolved) and `structured_merge_refusals` on a CONFLICT one (files a driver declined, with the reason).
+
+- `resolved_changesets`: by participant kind, APPLIED ChangeSets with at least one file resolved by a driver. A structurally resolved ChangeSet is contended and not conflicted, so `conflict_rate` keeps its meaning.
+- `resolved_files`: extension, then driver, then the number of files.
+- `refusals`: by kind, then reason, one count per refused file record. `refusals_by_extension`: the same by extension.
+- `saved_rate`: by kind, `resolved_changesets / (resolved_changesets + conflicted)` to four decimals; `null` when both are 0.
+- `malformed`: stored values or entries not in the recorded shape. They are skipped and counted here, because the payload is history and is not trusted.
+
+Rows from before T1587 have neither field and count as zero. Driver names and reasons come from fixed sets in the code; any other stored string is counted as `other` and never echoed. The `md` format adds a "Structured merge" table (resolved, conflicted and saved rate per kind) and a "Top refusal reasons" table (the 10 largest reason and kind pairs).
