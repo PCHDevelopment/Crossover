@@ -13,6 +13,7 @@ import { parseConflicts } from "./parse-check.js";
 import {
   apply as applyChangeset,
   registerWorkspaceCommands,
+  type ApplyResponse,
   type ApplyExtras,
   type WorkspaceCommandDeps,
 } from "./apply.js";
@@ -958,14 +959,29 @@ describe("workspace.apply_changeset", () => {
     const baseline = await setup(false);
     const refused = await setup(true);
     expect(refused.response.response).toMatchObject({ status: "CONFLICT" });
-    expect(objectKeys(refused.response.response).sort()).toEqual(
-      objectKeys(baseline.response.response).sort(),
-    );
-    expect(
-      refused.response.events.map((event) => [event.type, Object.keys(event.payload).sort()]),
-    ).toEqual(
-      baseline.response.events.map((event) => [event.type, Object.keys(event.payload).sort()]),
-    );
+    const stableResult = (result: typeof baseline.response) => {
+      const response = result.response as Extract<ApplyResponse, { status: "CONFLICT" }>;
+      return {
+        response: {
+          ...response,
+          changeset_id: "<generated>",
+          conflict_id: "<generated>",
+          counterparty_changesets: response.counterparty_changesets.map(() => "<generated>"),
+        },
+        events: result.events.map((event) => ({
+          type: event.type,
+          sequence: event.sequence,
+          schema_version: event.schema_version,
+          payload: {
+            ...event.payload,
+            conflict_id: "<generated>",
+            changeset_id: "<generated>",
+            submitter_id: "<generated>",
+          },
+        })),
+      };
+    };
+    expect(stableResult(refused.response)).toEqual(stableResult(baseline.response));
     expect(refused.payload?.conflicts).toEqual(baseline.payload?.conflicts);
     expect(refused.payload?.structured_merge_refusals).toEqual([
       { path: "file.txt", driver: "test", reason: "unsupported" },
