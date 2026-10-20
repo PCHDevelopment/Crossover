@@ -33,7 +33,7 @@ export async function queueForApproval(
 ): Promise<
   { error: CrossoverError; replay?: undefined } | { replay: DispatchResult; error?: undefined }
 > {
-  if (def.returnsOneTime || def.notApprovable) {
+  if (def.returnsOneTime || def.notApprovable || def.spawnsRoom) {
     return {
       error: new CrossoverError("VALIDATION", `${envelope.method} can't wait for approval`, {
         details: { reason: "not_approvable", method: envelope.method },

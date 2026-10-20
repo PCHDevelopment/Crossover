@@ -1,10 +1,15 @@
 import { withTransaction } from "@crossover/db";
 import { appendEvents, hashRequest, withIdempotency, type NewEvent } from "@crossover/ledger";
-import { commandEnvelopeSchema, CrossoverError, type CommandEnvelope } from "@crossover/protocol";
+import {
+  commandEnvelopeSchema,
+  CrossoverError,
+  type CommandEnvelope,
+  type RoomEvent,
+} from "@crossover/protocol";
 import type { z } from "zod";
 import type { Principal } from "../principal.js";
 import type { DispatcherCore } from "./core.js";
-import { afterCommitWork } from "./delivery.js";
+import { afterCommitWork, publish } from "./delivery.js";
 import { gateLifted, queueForApproval } from "./approvals.js";
 import { errorFromBody, validation } from "./errors.js";
 import { enforceBudgets, isReplay, requestHashOf } from "./budget-gate.js";
@@ -265,6 +270,11 @@ export async function mayPrepare(
   }
 }
 
+/**
+ * Execute one room command in its actor and transaction. A command marked `spawnsRoom` may
+ * insert one child room here: both ledgers commit together, and the child's lease is adopted
+ * only after commit. An idempotent replay does not append or publish child events.
+ */
 export function runMutatingIn(
   core: DispatcherCore,
   principal: Principal,
@@ -293,6 +303,7 @@ export function runMutatingIn(
     const lifted = await gateLifted(core, principal, envelope, def);
     const afterCommit: (() => void | Promise<void>)[] = [];
     let oneTime: unknown;
+    let spawned: { room_id: string; token: number; events: RoomEvent[] } | undefined;
     let result: DispatchResultWithCommittedError;
     try {
       result = await withTransaction(core.pool, async (client) => {
@@ -375,6 +386,35 @@ export function runMutatingIn(
               ...(e.schema_version !== undefined ? { schema_version: e.schema_version } : {}),
             }));
             const events = await appendEvents(client, room_id, emitted, token);
+            if (out.spawnRoom) {
+              if (!def.spawnsRoom) {
+                throw new Error(`${envelope.method} returned spawnRoom without spawnsRoom`);
+              }
+              const child = out.spawnRoom;
+              if (child.room_id === room_id) {
+                throw new Error(`${envelope.method} cannot spawn its own room`);
+              }
+              const childEvents: NewEvent[] = child.events.map((event) => {
+                if (event.actor_id === undefined) {
+                  throw new Error(`${envelope.method}: spawned room events need an actor_id`);
+                }
+                return {
+                  type: event.type,
+                  actor_id: event.actor_id,
+                  causation_id: envelope.id,
+                  ...(event.payload !== undefined ? { payload: event.payload } : {}),
+                  ...(event.schema_version !== undefined
+                    ? { schema_version: event.schema_version }
+                    : {}),
+                };
+              });
+              const childToken = await core.leases.acquireFor(client, child.room_id);
+              spawned = {
+                room_id: child.room_id,
+                token: childToken,
+                events: await appendEvents(client, child.room_id, childEvents, childToken),
+              };
+            }
             return {
               response: out.response,
               events,
@@ -418,6 +458,12 @@ export function runMutatingIn(
     }
 
     await afterCommitWork(core, room_id, envelope, afterCommit, result);
+    if (!result.replayed && spawned) {
+      core.leases.adopt(spawned.room_id, spawned.token);
+      if (core.publisher) {
+        await publish(core, core.publisher, spawned.room_id, envelope, spawned.events);
+      }
+    }
     const committedError = result.committed_error;
     if (committedError) throw errorFromBody(committedError);
     // The one-time secret rides back to this caller only; it is not part of `stored`.
