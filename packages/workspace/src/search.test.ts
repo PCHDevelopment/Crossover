@@ -135,6 +135,33 @@ it("authorizes distinct matched paths once and silently excludes forbidden paths
   });
 });
 
+it("keeps indexed backend matches behind per-path authorization", async () => {
+  const f = await fixture(
+    async (_principal, action, resource) => {
+      if (action === "workspace.read" && resource?.path === "private")
+        throw new CrossoverError("FORBIDDEN", "Denied");
+    },
+    {
+      searchHeadBackends: [
+        {
+          name: "zoekt",
+          search: async (_request, sink) => {
+            await sink({ path: "private", line: 1, text: "secret needle" });
+            await sink({ path: "public", line: 1, text: "public needle" });
+            return { truncated: false };
+          },
+        },
+        ripgrepBackend,
+      ],
+    },
+  );
+  expect((await f.dispatch("workspace.search", { query: "needle" })).response).toEqual({
+    workspace_revision: 0,
+    matches: [{ path: "public", line: 1, text: "public needle" }],
+    truncated: false,
+  });
+});
+
 it("searches a past revision with git grep, honouring regex, case and glob", async () => {
   const backends: string[] = [];
   const f = await fixture(allowAll, { searchOnBackend: (name) => backends.push(name) });

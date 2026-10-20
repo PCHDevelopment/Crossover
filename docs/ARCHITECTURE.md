@@ -503,7 +503,7 @@ The Git CLI (≥ 2.38) runs on the workspace node. `git merge-tree --write-tree`
 
 ## 9.5 Search
 
-The workspace node maintains a checked-out working tree of the canonical head (updated after every commit). `workspace.search` runs ripgrep against it. Past revisions are searched with `git grep` against the stored commit (no index); globs for past revisions support `*`, `?` and `**` only. With `SEARCH_BACKEND=zoekt`, the server builds canonical-head shards off the room actor and a read-only Zoekt sidecar serves them; search routing to that sidecar follows in T1582.
+The workspace node maintains a checked-out working tree of the canonical head (updated after every commit). `workspace.search` runs ripgrep against it. Past revisions are searched with `git grep` against the stored commit (no index); globs for past revisions support `*`, `?` and `**` only. With `SEARCH_BACKEND=zoekt`, the server builds canonical-head shards off the room actor and a read-only Zoekt sidecar serves them. Head searches use the index when it is at the DB head and fall back to ripgrep otherwise, so results always reflect the head (T1582).
 
 ## 9.6 File operations (read side)
 
